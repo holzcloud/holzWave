@@ -1,6 +1,6 @@
 // Renders the PNGs of docs/design from docs/design/haarlinie-voll.html, and checks that the page still draws.
 //
-//   node docs/design/render.cjs --view <data-v> [--os mac|win|lin] --out <png>   one view, the element #stage
+//   node docs/design/render.cjs --view <data-v> [--os mac|win|lin|web] --out <png>   one view, the element #stage
 //   node docs/design/render.cjs --phones <element id> --out <png>                 one row of phones, that element
 //   node docs/design/render.cjs --check                                           every view and every phones row
 //   node docs/design/render.cjs --dump <data-v|phones id|all>                     the SHA-256 of the markup of one view or row, or a
@@ -55,7 +55,7 @@ function fontCss() {
 }
 
 const usage = () => {
-  console.error('usage: node docs/design/render.cjs --view <data-v> [--os mac|win|lin] --out <png>');
+  console.error('usage: node docs/design/render.cjs --view <data-v> [--os mac|win|lin|web] --out <png>');
   console.error('       node docs/design/render.cjs --phones <element id> --out <png>');
   console.error('       node docs/design/render.cjs --check');
   console.error('       node docs/design/render.cjs --dump <data-v|phones id|all>');
@@ -77,7 +77,7 @@ function parse(argv) {
   const modes = [out.check, out.view, out.phones, out.dump].filter((m) => m !== undefined).length;
   if (modes !== 1) usage();
   if ((out.view || out.phones) && !out.out) usage();
-  if (out.os && !['mac', 'win', 'lin'].includes(out.os)) usage();
+  if (out.os && !['mac', 'win', 'lin', 'web'].includes(out.os)) usage();
   if (out.os && !out.view) usage();
   return out;
 }

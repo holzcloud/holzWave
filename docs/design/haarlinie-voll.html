@@ -390,6 +390,79 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .ln-btns{display:flex;flex:1 0 100%;flex-wrap:wrap;gap:6px 8px;margin:0 0 4px}
 .ln-btn{display:inline-flex;flex:none;align-items:center;white-space:nowrap;min-height:24px;padding:0 10px;border:1px solid var(--edge);border-radius:5px;color:var(--ink2);font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase}
 .ln-line{min-height:17px;margin:0;color:var(--ink3);font:400 10.5px/1.35 var(--mono)}
+/* The screens of the browser build (docs/design.md 6.28 to 6.30). The page before a person is signed in is a ground with one box; the box is the dialog box of the Settings
+   (hairline, 8 px radius, the one shadow). The web platform has no window buttons and no drag region, so the bar starts at the left edge. Errors are danger, underlined and marked !,
+   a disabled button is dim with its reason in words, and nothing moves. */
+.m.web .wc,[data-os=web] .wc{display:none}
+.m.web .titlebar,[data-os=web] .titlebar{padding-left:10px}
+.wb-page{flex:1;display:flex;align-items:flex-start;justify-content:center;gap:2rem;padding:3.5rem 1rem 1rem;background:var(--ground)}
+.wb-cell{display:flex;flex-direction:column;gap:.4rem}
+.wb-cell .cap{margin:0}
+.wb-box{position:static;width:26rem;padding:1.25rem 1.5rem 1.1rem;border-radius:8px;display:flex;flex-direction:column;font:400 12px/1.45 var(--mono)}
+.wb-box.narrow{width:24rem}
+.wb-brand{display:flex;align-items:baseline;gap:.75rem;margin:0 0 1rem}
+.wb-mark{font-size:1.35em;font-weight:700;letter-spacing:.02em}
+.wb-host{margin-left:auto}
+.wb-title{font-size:1.2em;font-weight:700;margin:0 0 .35rem;display:flex;align-items:center;gap:.6rem}
+.wb-lead{margin:0 0 .8rem;color:var(--ink3)}
+.wb-box .btn{display:flex;align-items:center;justify-content:center;min-height:1.75rem;white-space:nowrap}
+.wb-box .btn.full{width:100%;margin:0 0 .5rem}
+.wb-box .btn.off{color:var(--ink3)}
+.wb-box .btn.fo,.wb-in.fo{outline:2px solid var(--rose);outline-offset:1px}
+.wb-or{display:flex;align-items:center;gap:.75rem;margin:.35rem 0 .75rem;color:var(--ink3)}
+.wb-or::before,.wb-or::after{content:"";flex:1;border-top:1px solid var(--edge)}
+.wb-f{display:flex;flex-direction:column;gap:.25rem;margin:0 0 .65rem}
+.wb-f .lbl{color:var(--ink3)}
+.wb-in{min-height:1.75rem;display:flex;align-items:center;gap:.5rem;padding:0 .6rem;border:1px solid var(--edge);border-radius:6px;background:var(--ground);white-space:nowrap;overflow:hidden}
+.wb-in.bad{border-color:var(--danger)}
+.wb-in .tx{overflow:hidden;text-overflow:ellipsis;flex:1}
+.wb-h{color:var(--ink3);font-size:.9em;line-height:1.35}
+.wb-err{color:var(--danger);text-decoration:underline;min-height:1.3rem;margin:.1rem 0 0;line-height:1.35}
+.wb-err::before{content:"! ";font-weight:700}
+.wb-note{color:var(--ink2);min-height:1.3rem;margin:.1rem 0 0;line-height:1.35}
+.wb-err:empty,.wb-note:empty{visibility:hidden}
+.wb-err:empty::before{content:"."}
+.wb-radio{display:flex;flex-direction:column;gap:.15rem;margin:0 0 .65rem}
+.wb-radio span{display:flex;gap:.6rem;min-height:1.5rem;align-items:center}
+.wb-radio .on{color:var(--ink)}
+.wb-radio .off{color:var(--ink2)}
+.wb-tb{display:inline-flex;align-items:center;min-height:1.75rem;color:var(--ink2);text-decoration:underline;white-space:nowrap}
+.wb-groups{display:flex;gap:.25rem;flex-wrap:wrap;align-items:baseline;font-weight:700;letter-spacing:.06em}
+.wb-secret{display:flex;flex-wrap:wrap;gap:.2rem .9rem;padding:.55rem .7rem;border:1px solid var(--edge);border-radius:6px;background:var(--ground);font-weight:500;letter-spacing:.08em;color:var(--ink)}
+.wb-code{font-size:1.15em;letter-spacing:.12em}
+.wb-row2{display:flex;align-items:center;gap:.6rem;margin:0 0 .65rem}
+.wb-row2 .wb-in,.wb-row2 .wb-secret{flex:1;margin:0}
+.wb-row2 .btn{flex:none}
+.wb-chk{display:flex;align-items:center;gap:.6rem;min-height:1.75rem;margin:0 0 .6rem;color:var(--ink)}
+.wb-box.sheet{width:40rem;padding:1rem 1.25rem .9rem}
+.wb-r{display:flex;align-items:center;gap:.6rem;min-height:1.5rem}
+.wb-r .nm{color:var(--ink)}.wb-r .mt{color:var(--ink3)}.wb-r .st{margin-left:auto;color:var(--ink3)}
+.wb-r .st.ok{color:var(--ok)}
+.wb-r .btn{min-height:1.5rem;padding:0 .6rem;font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase}
+.wb-r .cur-s{color:var(--ink)}
+.wb-r .cur-s::before{content:"\25CF  "}
+.wb-acts{display:flex;justify-content:flex-end;gap:.5rem;margin:.6rem 0 0}
+.wb-acts .btn{min-width:5rem}
+.wb-tbl{width:100%;border:1px solid var(--edge);border-radius:6px;overflow:hidden;background:transparent;border-collapse:collapse;margin:.4rem 0 0}
+.wb-tbl th{padding:.35rem .75rem}
+.wb-tbl td{padding:.35rem .75rem;vertical-align:middle;white-space:nowrap}
+.wb-tbl tr.on td{background:var(--wash)}
+.wb-tbl .un{color:var(--ink3);margin-left:.5rem}
+.wb-st{color:var(--ink2)}
+.wb-st.ok{color:var(--ok)}.wb-st.wa{color:var(--warn);text-decoration:underline}.wb-st.wa::before{content:"! ";font-weight:700}.wb-st.dm{color:var(--ink3)}
+.wb-menu{position:absolute;z-index:7;width:12rem;padding:.3rem 0;border-radius:8px}
+.wb-menu .it{padding:.3rem .9rem;min-height:1.75rem;align-items:center}
+.wb-menu .it.rule{border-top:1px solid var(--edge);margin-top:.2rem;padding-top:.5rem}
+.wb-menu .it.dg{color:var(--danger)}
+.wb-kebab{display:inline-flex;align-items:center;justify-content:center;min-width:1.75rem;min-height:1.75rem;border:1px solid var(--edge);border-radius:6px;color:var(--ink2)}
+.wb-kebab.on{background:var(--wash);border-color:var(--rose)}
+.wb-drop{position:absolute;inset:6px;z-index:5;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.25rem;border:1px dashed var(--rose);background:var(--wash);color:var(--ink)}
+.wb-drop b{letter-spacing:.1em;text-transform:uppercase;font-size:.9em}
+.wb-lock{display:inline-block;position:relative;width:.7em;height:.5em;margin:0 .2em 0 0;border:1.5px solid currentColor;border-radius:2px;vertical-align:-.05em}
+.wb-lock::before{content:"";position:absolute;left:.1em;bottom:100%;width:.3em;height:.28em;border:1.5px solid currentColor;border-bottom:0;border-radius:.2em .2em 0 0}
+.wb-un{font-weight:700;text-decoration:underline;color:var(--ink)}
+.wb-notif{position:absolute;z-index:6;right:12px;bottom:34px;width:23rem;padding:.7rem .9rem;border-radius:8px;display:flex;flex-direction:column;gap:.5rem}
+.wb-notif .ap{padding:0}
 /* The monitor of another computer (docs/design.md 6.5, On another computer). `kimon` is the monitor of a Linux host beside its shell; `kimonstates` is the ground only: the
    line above the bars while the pane connects, when the host does not answer (the last numbers stay, dimmed), when it is not Linux and when its key is not known yet.
    The warn line has the words, an underline and the mark ! besides its colour; rose is only the focus line of the focused pane. */
@@ -698,6 +771,7 @@ const tree=`<div class="term pre"><span class="dim">sftp://talos-1</span> <span 
 function previewArea(){return `<div class="area">${P('','▦','files','sftp · talos-1',tree,{f:1})}${P('in','▣','mockup.png','image',img)}${P('in','▤','sync.pdf','pdf · page 3',pdf)}${P('in','▶','demo.mp4','video',vid)}</div>`}
 
 function base(v){
+  if(wbViews[v])return wbViews[v]();
   const searchBar=v==='search'?`<div class="ov float row" style="left:150px;top:125px;padding:4px 8px;gap:8px;border-radius:8px"><span class="ro">⌕</span><span>layout<span class="cur"></span></span><span class="dim">3/12</span><span class="kbd">Aa</span><span class="kbd">.*</span><span class="kbd">ab</span><span class="dim">▲ ▼ ✕</span></div>`:'';
   const copyBar=v==='copy'?`<div class="ov row" style="left:0;right:0;bottom:0;height:22px;background:var(--rose-deep);color:#fff;padding:0 10px;gap:14px;font-weight:700;letter-spacing:.06em"><span>COPY MODE</span><span style="font-weight:400">v select · y yank · / search · f hints · q quit</span></div>`:'';
   return `<div class="titlebar row">${wcL}
@@ -955,6 +1029,32 @@ const lnStates=()=>`<div class="ad-grid">${[
  ['Not known',lnFrame(lnRow('unknown','plain','not known','holzWave could not tell. macOS may still be waiting for your answer. Choose Check again.',['Open System Settings','Check again'],'Asked. Answer the macOS question, then choose Check again.'))]
 ].map(([cap,frame])=>`<div class="ad-cell"><div class="cap">${cap}</div>${frame}</div>`).join('')}</div>`;
 
+/* The screens of the browser build (docs/design.md 6.28 to 6.30). The page before sign-in is a ground with one box, with no window around it. */
+const wbHead='<div class="wb-brand"><b class="wb-mark">holzWave</b><span class="wb-host dim" title="The server">holz.example.net</span></div>';
+const wbIn=(label,val,o={})=>`<div class="wb-f"><span class="lbl">${label}</span><div class="wb-in${o.fo?' fo':''}${o.bad?' bad':''}"${o.bad?' aria-invalid="true"':''}>${val}</div>${o.hint?`<div class="wb-h">${o.hint}</div>`:''}${o.err?`<div class="wb-err" role="alert">${o.err}</div>`:''}</div>`;
+const wbDots=n=>'•'.repeat(n);
+const wbBox=(label,inner,cls='',role='group')=>`<div class="float wb-box ${cls}" role="${role}" aria-label="${label}">${inner}</div>`;
+const wbCell=(cap,body)=>`<div class="wb-cell"><div class="cap">${cap}</div>${body}</div>`;
+const wbPage=cells=>`<div class="wb-page">${cells.map(([c,b])=>wbCell(c,b)).join('')}</div>`;
+const wbGeneric='Sign-in failed. Check your details or ask an admin.';
+const wbSignIn=(over={})=>wbBox('Sign in',`${wbHead}
+ <div class="btn p full${over.passkeyFo?' fo':''}">Sign in with a passkey</div>
+ <div class="btn full">Continue with Keycloak</div>
+ <div class="btn full">Continue with Entra ID</div>
+ <div class="wb-or lbl">or</div>
+ ${wbIn('Username','holz'+(over.cur?'<span class="cur"></span>':''),{fo:over.cur})}
+ ${wbIn('Password',wbDots(10))}
+ <div class="btn full">Continue</div>
+ <div class="wb-note" role="status" aria-live="polite">${over.note||''}</div>`);
+const wbCode=(err)=>wbBox('Sign in',`${wbHead}
+ <div class="wb-lead" style="margin:0 0 .5rem">Signing in as <b style="color:var(--ink)">holz</b>. Enter the six-digit code of your authenticator app.</div>
+ ${wbIn('Code','482913',{bad:1,fo:0})}
+ <div class="btn p full">Sign in</div>
+ <div class="wb-err" role="alert">${err}</div>
+ <div><span class="wb-tb">Back</span></div>`);
+const wbViews={};
+wbViews['web-signin']=()=>wbPage([['Password, step 1',wbSignIn({cur:1})],['Authenticator code, after a wrong code',wbCode(wbGeneric)]]);
+
 const ovl={
  history:`<div class="scrim"></div><div class="ov float" style="left:300px;top:70px;width:560px;border-radius:16px"><div class="row" style="padding:10px 14px;border-bottom:1px solid var(--edge);gap:8px"><span class="ro">⌕</span>kgp<span class="cur"></span><span class="kbd" style="margin-left:auto">esc</span></div>
   <div class="it on"><span><span class="ro">k</span>ubectl <span class="ro">g</span>et <span class="ro">p</span>ods -n kube-system</span><span class="dim">~/infra · 2 h ago · ×14</span></div>
@@ -1182,12 +1282,13 @@ const views=[
  ['kiwsh','wsh ai asks','A program in a terminal asked the model a question: the pane that asked says it waits, and the card at the top right asks the person. Nothing leaves the computer until you press Send once in the window; the card never takes the keyboard, so typing in the terminal goes on. It shows the prompt in full, the piped text by counts and findings (never as text), and where it goes with the place chip: cloud in the warn colour with the words leaves this computer.'],
  ['kiwshstates','wsh ai request states','The card in four states: asking for a model in the cloud, asking for a model on this computer (no warn colour, nothing piped in), after Send once (the foot says Sending and both buttons are disabled), and after a refusal from holzWave with a second request waiting (the fault line has the mark ! and is underlined, and the head counts 1 of 2). Every state has words besides its colour. The four cards are drawn a little narrower than the 24 rem of the app so that they fit side by side.'],
  ['attn','Attention marks','A pane that is out of view and needs you marks its tab and the pill of its workspace: ? waits for you, ▲ rang the bell, ! command failed, ✓ command finished, each in its status colour and never rose. Every kind that is present shows, side by side, in that order, with no count: holzkube holds all four. A pill shows the kinds of all its tabs together, once each, so infra shows ! ✓ (a failed command and a finished one) and docs shows ✓. The shown tab and the shown workspace carry no mark. The tab and the pill keep their shapes (square and numbered, round with a diamond); the title and the accessible name list the kinds in words. Nothing sounds and nothing notifies.'],
+ ['web-signin','Web: sign in','The page of the browser build before a person is signed in: the wordmark, the name of the server, then the methods the server has turned on (a solid passkey button, one hairline button for each single sign-on provider, a hairline marked or, the password form). The first field has the focus. Left, the first step; right, the second step after a wrong code: one sentence for every failure, with the mark ! and an underline, that does not say which detail was wrong.'],
  ['drag','Drag','Reorder panes by drag and drop, drop them as a tab, drag them out into a new window. On Wayland use the palette.']
 ];
 const vb=$('#views');let cur='alltag';
 function render(){
   const st=$('#stage');
-  st.innerHTML=`<div class="m">${base(cur)}${(cur==='keys'?keysModal($('#root').dataset.os):cur==='kiactions'?aiPalette($('#root').dataset.os):ovl[cur==='kint'||cur==='kintstates'||cur==='kintctx'||cur==='kiwsh'||cur==='kiwshstates'||cur==='kidevice'||cur==='kidevicestates'||cur==='lanstates'||cur==='kiexplain'||cur==='kidescribe'||cur==='alltag'||cur==='search'||cur==='copy'||cur==='ki'||cur==='kichats'||cur==='kisidecards'||cur==='kipane'||cur==='kistates'||cur==='kiask'||cur==='kioffer'||cur==='kiapprove'||cur==='kiapprovestates'||cur==='kiwrite'||cur==='kiwritestates'||cur==='kicommand'||cur==='kicommandstates'||cur==='preview'?'':cur]||'')}</div>`;
+  st.innerHTML=`<div class="m${cur.startsWith('web-')?' web':''}">${base(cur)}${(cur==='keys'?keysModal($('#root').dataset.os):cur==='kiactions'?aiPalette($('#root').dataset.os):ovl[cur==='kint'||cur==='kintstates'||cur==='kintctx'||cur==='kiwsh'||cur==='kiwshstates'||cur==='kidevice'||cur==='kidevicestates'||cur==='lanstates'||cur==='kiexplain'||cur==='kidescribe'||cur==='alltag'||cur==='search'||cur==='copy'||cur==='ki'||cur==='kichats'||cur==='kisidecards'||cur==='kipane'||cur==='kistates'||cur==='kiask'||cur==='kioffer'||cur==='kiapprove'||cur==='kiapprovestates'||cur==='kiwrite'||cur==='kiwritestates'||cur==='kicommand'||cur==='kicommandstates'||cur==='preview'?'':cur]||'')}</div>`;
   $('#note').textContent=views.find(v=>v[0]===cur)[2];
   vb.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.v===cur));
 }

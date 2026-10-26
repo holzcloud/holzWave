@@ -2095,3 +2095,92 @@ environment rows wrap: the name above, the field and the buttons below. On a des
 is `role="status"`; the list and the tools are radio groups. Nothing moves, so `motion-reduce` has nothing to remove. Every
 hairline is `--hw-line`, so `contrast-high` holds. Under forced colours the chosen row and the armed buttons get a system-colour
 outline.
+
+### 6.28 Signing in
+
+The browser build (6.30) has a page that a person sees before they are signed in, with no window around it: the ground
+(`--hw-ground`) and one box in the middle. The box is the dialog box of the Settings (a floating layer: hairline, 8 px
+radius, the one shadow), 26 rem wide, centred. Four screens use it: signing in, setting up the first administrator, an
+invitation and unlocking the saved passwords. This section is binding for the page: the screens, their words, their keys and
+the rules below. The server answers with a status and a code and never with a sentence; the page chooses the words from the
+table at the end of this section.
+
+**The rules.** They hold for every screen of this section.
+
+1. **One sentence for a failed sign-in.** A wrong password, an unknown account, a wrong code and a wrong passkey all show
+   `Sign-in failed. Check your details or ask an admin.` The same words in the same place with the same look: the text and the
+   timing of the page give no hint whether the account exists or which detail was wrong. The page adds no delay of its own
+   and shows no count of failures.
+2. **A throttled sign-in says how long to wait and nothing else:** `Too many attempts. Try again in 12 minutes.` The time is
+   the server's `retry_seconds` rounded up to whole minutes (`Try again in 1 minute.`); under a minute it is in seconds
+   (`Try again in 40 seconds.`). The line names no cause, no account and no address, and it does not tick down.
+3. **Tokens stay out of the URL path and query.** The token of an invitation and the setup token of the first administrator
+   arrive in the URL fragment (`#invite=…`, `#setup=…`), which a browser sends to no server and no `Referer`. The page reads
+   the fragment once, clears it with `history.replaceState` at once, keeps the token in memory until the step ends and sends it
+   in the body of a request. It is never in a query string, in the path, in the page title, in `localStorage`,
+   `sessionStorage` or a cookie.
+4. **Secrets are shown once.** The authenticator secret, its `otpauth://` link and the recovery code are on the page only while
+   their step is shown. They are never put into the URL, the title, a status line or a history entry; they are removed from
+   the page when the step ends; and the recovery step cannot be left until the person confirms that the code was saved (Escape
+   and a click outside do nothing there, and the page asks the browser to confirm before a reload or a close).
+5. **A field that holds a secret is never echoed.** A password, a passphrase, a code or a token is not copied into a status
+   line, a title, an error line, an accessible name or a live region. Password fields are masked and have no show toggle. After a
+   refusal the page empties the secret fields and keeps the username.
+6. **Every field names what it is to the browser:** `Username` has `autocomplete="username"`; the password of a sign-in
+   `current-password`; a new password or passphrase `new-password`; `Code` `one-time-code` with `inputmode="numeric"`; the
+   setup token, the recovery code and the unlock passphrase `off`, so that a password manager never offers the wrong entry.
+7. **A refused new password or passphrase** shows `Use at least 12 characters. Not your username, not one repeated character.`
+   under the field, with the error mark and underline of the failed state below. The server decides; the page does not
+   count characters before it asks.
+8. **A provider that did not sign the person in** (any failure after the single sign-on redirect) shows the same sentence as
+   rule 1. The page removes `?error=oidc` from the address at once.
+
+**Signing in.** The box, top to bottom. Only the methods that the server offers (`GET /api/session` answers which are on) are
+drawn; nothing is drawn for a method that is off.
+
+1. The wordmark `holzWave` in bold mono, and at the right the name of the server in mono and dim (a label, not a link).
+2. The passkey button `Sign in with a passkey`, solid (`--hw-rose-deep` with `--hw-on-accent`), only when the server offers
+   passkeys. It is the one solid button of the box: with no passkey, `Continue` is the solid one.
+3. One hairline button for each single sign-on provider, `Continue with NAME`, in the order and with the names the server
+   sends. A press leaves the page for the provider.
+4. A hairline with the label `or` in the middle, an uppercase tracked `.label`, drawn only when a button above it and the
+   password form below it are both there.
+5. The password form: `Username`, `Password` (labels above the fields, `.label` style) and the hairline button `Continue`.
+6. The line under the form: one place for the sentence of the current state (below). It is a `role="status"` region while
+   idle and a `role="alert"` while it holds an error.
+
+**The code step.** `Continue` sends the username and the password. When they are accepted the box shows the second step in
+place of the first: the wordmark and the server, the sentence `Signing in as NAME. Enter the six-digit code of your authenticator
+app.` with the name in bold, the field `Code`, the solid button `Sign in`, the error line and a text button `Back`. `Back`
+returns to the first step with the username kept and the password empty. The code step is only for an account that has an
+authenticator; an account that signs in with a passkey or a provider never sees it.
+
+**States.** The second cue is never colour alone.
+
+| State | Words | Second cue |
+|---|---|---|
+| idle | none | the 2 px focus ring on the first field |
+| working | the pressed button keeps its label and adds `…` (`Continue…`, `Sign in…`); the fields are read-only | `aria-busy="true"` on the box and the `…`; nothing moves |
+| failed | `Sign-in failed. Check your details or ask an admin.` | `!` before the line, the line underlined, `role="alert"`, the field that has the focus has `aria-invalid="true"` |
+| throttled | `Too many attempts. Try again in 12 minutes.` | the same mark, underline and `role="alert"`; the box is the same box |
+| session ended | `Your session ended. Sign in again.` | the words; plain ink and no mark, because nothing failed |
+| server not reachable | `Could not reach the server. Try again.` | the error mark and underline |
+| a passkey prompt that the person cancelled | none | the box returns to idle; a cancelled prompt is not a failure |
+
+**Keys.** On load the first field has the focus: `Username`, or `Password`, `Code` or the passkey button when the form has no
+earlier control. `Tab` order is the order on the screen: passkey, providers, username, password, `Continue`; `Shift+Tab` goes
+back. `Enter` in a field presses the solid button of the step (the button of the form, `Continue` or `Sign in`). The focus
+ring is 2 px. After a refusal the focus goes to the first field that was emptied, and the line is read out by its live region.
+In the code step the focus starts in `Code`.
+
+**Accessibility.** The box is the `main` landmark of the page (nothing is behind it, so it is not a modal dialog) and the
+wordmark is its `h1`. Hairlines use `--hw-line` and dim text `--hw-ink-2` under `contrast-high`; under `forced-colors` the
+box, the fields and the buttons keep their borders and the solid button gets a system-colour outline; the busy state shows
+`…` instead of motion, so `motion-reduce` has nothing to remove. Every size is in `rem`; buttons and fields are at least 28
+px high. The page is for a computer with a keyboard; a mobile layout of it is not drawn.
+
+![Signing in](design/web-signin.png)
+
+**Not drawn.** A show toggle for a password that is on by default, a `remember me` box, a language picker, a link that mails a
+password or a code, a link that creates an account (an account exists only through an invitation or the first-administrator
+screen), a challenge to prove a person is not a program, and a count of failed attempts.
