@@ -684,8 +684,10 @@ fn only_the_window_can_approve_and_nothing_of_it_is_on_the_socket() {
     let mut sources = Vec::new();
     source::files(&root.join("core/src"), Some("rs"), &mut sources);
     source::files(&root.join("app/src-tauri/src"), Some("rs"), &mut sources);
+    source::files(&root.join("host/src"), Some("rs"), &mut sources);
     assert!(sources.iter().any(|(path, _)| path == ticket_path), "the scan reads the ticket module");
     assert!(sources.iter().any(|(path, _)| path.starts_with("app/src-tauri/src/")), "the scan reads the shell");
+    assert!(sources.iter().any(|(path, _)| path.starts_with("host/src/")), "the scan reads the host crate");
     let mut literal_sites = Vec::new();
     for (path, text) in &sources {
         for (number, line) in text.lines().enumerate() {

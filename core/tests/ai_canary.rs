@@ -647,7 +647,7 @@ const PRINTS: [&str; 12] = [
 /// The print sites that were read and may stay: the file, the exact line and why. A line that changes, and a print anywhere
 /// else, fails the guard; a row without a hit fails it too.
 const PRINT_SITES: [(&str, &str, &str); 1] = [(
-    "app/src-tauri/src/ai_host.rs",
+    "host/src/ai_host.rs",
     "eprintln!(\"holzwave: {left} assistant turn(s) did not end within the shutdown bound\");",
     "a fixed sentence and a count of turns at shutdown: it names no key, no text of a chat and no path",
 )];
@@ -655,13 +655,16 @@ const PRINT_SITES: [(&str, &str, &str); 1] = [(
 #[test]
 fn first_party_ai_code_prints_and_logs_nothing() {
     let mut files = source_files(&["core/src/ai", "core/src/exec.rs", "core/src/textread.rs", "ipc/src/stream.rs", "wsh/src/ai.rs", "wsh/src/clean.rs"]);
-    files.extend(
-        fs::read_dir(repo().join("app/src-tauri/src"))
-            .expect("the shell sources")
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("ai_"))),
-    );
+    // The AI modules of the application logic moved from the app crate into the host crate; the macOS device source stayed.
+    for shell in ["app/src-tauri/src", "host/src"] {
+        files.extend(
+            fs::read_dir(repo().join(shell))
+                .expect("the shell sources")
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("ai_"))),
+        );
+    }
     assert!(files.len() >= 20, "the scan finds {} files", files.len());
     let mut offenders = Vec::new();
     let mut reviewed_found: BTreeSet<&str> = BTreeSet::new();
@@ -715,7 +718,7 @@ const KEY_SITES: [(&str, &str); 2] = [
 
 #[test]
 fn key_text_is_exposed_in_the_reviewed_places_only() {
-    let mut roots = vec!["core/src", "app/src-tauri/src", "ipc/src", "wsh/src"];
+    let mut roots = vec!["core/src", "app/src-tauri/src", "host/src", "ipc/src", "wsh/src"];
     let plugins = fs::read_dir(repo().join("plugins")).expect("the plugins folder");
     let plugin_sources: Vec<String> = plugins.flatten().map(|entry| format!("plugins/{}/src", entry.file_name().to_string_lossy())).collect();
     roots.extend(plugin_sources.iter().map(String::as_str));

@@ -382,7 +382,7 @@ fn the_single_run_path_and_the_single_constructor() {
     // confirmed card (the only one that takes an argument list from an approval).
     let mut scanned = 0;
     let mut calls: Vec<(String, String)> = Vec::new();
-    for dir in ["core/src", "app/src-tauri/src", "ipc/src", "wsh/src"] {
+    for dir in ["core/src", "app/src-tauri/src", "host/src", "ipc/src", "wsh/src"] {
         for (path, text) in files_below(dir, "rs") {
             scanned += 1;
             for (line, content) in code_lines(&text) {
@@ -415,7 +415,7 @@ fn the_single_run_path_and_the_single_constructor() {
     // `Approved` is built in the ticket module, in one private function, and that function is called once, from confirm.
     // A literal is `Approved {` that is not the head of the type or of an impl (`struct Approved {`, `for Approved {`).
     let mut built: Vec<(String, usize, String)> = Vec::new();
-    for dir in ["core/src", "app/src-tauri/src", "ipc/src", "wsh/src"] {
+    for dir in ["core/src", "app/src-tauri/src", "host/src", "ipc/src", "wsh/src"] {
         for (path, text) in files_below(dir, "rs") {
             // The gate of the AI chat has a type of the same name (its own approval of a model's tool call); it is not this one.
             if path.starts_with("core/src/ai/") {
@@ -450,7 +450,7 @@ fn the_single_run_path_and_the_single_constructor() {
 
     // No program name as a literal below the integrations, and the shell of the app starts nothing for them.
     let mut spawn_hits = Vec::new();
-    for (path, text) in files_below("core/src/integrate", "rs").into_iter().chain([("app/src-tauri/src/integrate_host.rs".to_owned(), file("app/src-tauri/src/integrate_host.rs"))]) {
+    for (path, text) in files_below("core/src/integrate", "rs").into_iter().chain([("host/src/integrate_host.rs".to_owned(), file("host/src/integrate_host.rs"))]) {
         for (line, content) in code_lines(&text) {
             if content.contains("Command::new(\"") || content.contains("Command::new(&\"") || content.contains("Command::new(String") {
                 spawn_hits.push(format!("{path}:{line}"));
@@ -461,7 +461,7 @@ fn the_single_run_path_and_the_single_constructor() {
     let new_command = code_hits("core/src/integrate", "Command::new(");
     assert_eq!(new_command.len(), 1, "one place builds a command: {new_command:?}");
     assert_eq!((new_command[0].0.as_str(), new_command[0].2.as_str()), ("core/src/integrate/run.rs", "run"), "and it is the runner's own run function");
-    let host = file("app/src-tauri/src/integrate_host.rs");
+    let host = file("host/src/integrate_host.rs");
     for word in ["Command::new", "process::Command", "tokio::process", ".spawn(", "spawn(&"] {
         assert!(!code_lines(&host).iter().any(|(_, l)| l.contains(word)), "integrate_host.rs names {word}");
     }
@@ -499,7 +499,7 @@ fn the_single_run_path_and_the_single_constructor() {
         .collect();
     assert_eq!(granted, reviewed, "the capability grants the reviewed commands and no other");
     // One command confirms; the shell calls the service's confirm from one function, and the page calls the command from one file.
-    let confirms: Vec<_> = ["app/src-tauri/src/integrate_host.rs", "app/src-tauri/src/state.rs", "app/src-tauri/src/commands.rs"]
+    let confirms: Vec<_> = ["host/src/integrate_host.rs", "host/src/state.rs", "app/src-tauri/src/commands.rs"]
         .iter()
         .flat_map(|path| {
             let text = file(path);
@@ -552,19 +552,21 @@ fn nothing_under_the_ai_modules_names_the_integrations() {
             assert!(!content.contains("crate::integrate") && !content.contains("holzwave_core::integrate"), "{path}:{line}");
         }
     }
+    // The AI modules of the shell are in the host crate (the application logic) and in the app crate (the device source).
     let mut shell_files = Vec::new();
-    let src_tauri = root().join("app/src-tauri/src");
-    for entry in std::fs::read_dir(&src_tauri).expect("the shell's source").flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with("ai_") && name.ends_with(".rs") {
-            shell_files.push(name);
+    for dir in ["app/src-tauri/src", "host/src"] {
+        for entry in std::fs::read_dir(root().join(dir)).expect("the shell's source").flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("ai_") && name.ends_with(".rs") {
+                shell_files.push(format!("{dir}/{name}"));
+            }
         }
     }
     shell_files.sort();
     assert!(shell_files.len() >= 6, "the shell has its ai_*.rs files: {shell_files:?}");
     for name in &shell_files {
-        let text = std::fs::read_to_string(src_tauri.join(name)).expect("a file");
-        assert!(!text.to_ascii_lowercase().contains("integrat"), "app/src-tauri/src/{name} names the integrations");
+        let text = std::fs::read_to_string(root().join(name)).expect("a file");
+        assert!(!text.to_ascii_lowercase().contains("integrat"), "{name} names the integrations");
     }
 
     // 2. The closed list of the AI chat's tools holds no integration tool, read from the source and from the type.
@@ -620,7 +622,7 @@ fn nothing_under_the_ai_modules_names_the_integrations() {
     // 4. The contexts the chat is offered for a pane. A pane that shows a block of the integrations has the contexts of a
     //    monitor pane, none: the shell's rule has no arm for the integration kind. It reads a block pane's kinds only when
     //    the block is a preview, refuses every other block for a terminal read, and the file tools have no target for it.
-    let host = file("app/src-tauri/src/ai_host.rs");
+    let host = file("host/src/ai_host.rs");
     let kinds = host.find("fn kinds(&self, pane: PaneId)").map(|at| &host[at..at + 900]).expect("the rule for the kinds of a pane");
     assert!(
         kinds.contains("if block.kind != BlockKind::Preview") && kinds.contains("return Vec::new();"),
@@ -630,7 +632,7 @@ fn nothing_under_the_ai_modules_names_the_integrations() {
     assert!(terminal.contains("core.context_block(pane).is_some()") && terminal.contains("ReadRefusal::Unsupported"), "a block pane is no terminal");
     let block_read = host.find("fn read_block(").map(|at| &host[at..at + 500]).expect("the block read");
     assert!(block_read.contains("block.kind != BlockKind::Preview") && block_read.contains("ReadRefusal::Unsupported"), "only a preview is read");
-    let state = file("app/src-tauri/src/state.rs");
+    let state = file("host/src/state.rs");
     assert!(
         state.contains("BlockKind::Monitor | BlockKind::Chat | BlockKind::Integration => return None"),
         "the file tools have no target for an integration pane, as for a monitor"
