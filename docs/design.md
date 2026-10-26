@@ -2181,6 +2181,115 @@ px high. The page is for a computer with a keyboard; a mobile layout of it is no
 
 ![Signing in](design/web-signin.png)
 
-**Not drawn.** A show toggle for a password that is on by default, a `remember me` box, a language picker, a link that mails a
+**Not drawn on the sign-in screen.** A show toggle for a password that is on by default, a `remember me` box, a language picker, a link that mails a
 password or a code, a link that creates an account (an account exists only through an invitation or the first-administrator
 screen), a challenge to prove a person is not a program, and a count of failed attempts.
+
+**First administrator.** Shown instead of the sign-in, and only while the server has no administrator (`GET /api/session`
+says `bootstrap`); once the first account exists the screen cannot be reached again. The box, top to bottom:
+
+1. The wordmark and the name of the server, as in the sign-in.
+2. The title `Set up this server` and the lead `There is no administrator yet. The account you make here becomes the first one.`
+3. `Setup token`: a masked field with the hint `The token the server printed when you started it.` The operator prints the token
+   with the server's command. When the address has `#setup=…` the page fills the field from it and clears the fragment at
+   once (rule 3); otherwise the person types or pastes it.
+4. `Username` and `Display name`.
+5. `Sign-in method`, a radio group in this order: `Passkey`, `Password and authenticator app`. The invitation uses the same
+   words in the same order. The choice of a password adds the field `Password` (`new-password`) under the group.
+6. The solid button `Continue`.
+
+`Continue` sends the first step. A passkey goes to the prompt of the browser; a password goes to the authenticator step of
+the invitation below. Both end in the recovery step, and then the person is signed in as an administrator.
+
+**Invitation.** An administrator gives a person a link whose fragment holds the token (`#invite=…`). The page peeks at the
+token before it draws anything, so a link that is no longer good never shows a form. The steps are one box each, with the
+wordmark and the server above:
+
+1. **Details.** The title `You were invited` and the role as a label (`administrator` or `member`, an uppercase tracked chip
+   in the title row). `Username` is a field, or a fixed mono line when the administrator chose it; `Display name` (kept when
+   the administrator preset it); the radio group `Sign-in method` as in the first-administrator screen; `Password` for the
+   second choice; the solid button `Continue`.
+2. **Authenticator** (password only). The lead `Add this key to your authenticator app, then enter the code it shows.` The
+   label `Key` over the secret in mono groups of four characters with the button `Copy`; the label `Link` over the
+   `otpauth://` link on one line, cut with an ellipsis, with the button `Copy link` (the whole link is copied); the field
+   `Code` and the solid button `Continue`. There is no QR code. `Copy` puts the key without its spaces on the clipboard and says
+   `Copied.` in the line below the box, and nothing else.
+3. **Recovery code** (always, as the last step). The title `Save your recovery code` and the lead `If you forget how you
+   unlock your saved passwords, this code unlocks them. It is shown once and cannot be shown again.` The code in mono in
+   groups of four joined by hyphens, in one bordered block, with the button `Copy`; the checkbox `I have saved this code`; the
+   button `Continue`, which is disabled while the box is not ticked, with the line `Tick the box to continue.` under it. The
+   step cannot be left: `Escape`, a click outside and the browser's back action do nothing, and a reload or a close asks the
+   browser to confirm (rule 4). A person who lost the code in spite of that makes a new one in the account dialog (6.29).
+   When `Continue` is pressed the code is removed from the page, not hidden.
+
+A link that is unknown, expired or used shows the box with the title and one line instead of the form:
+`This link has expired or was used. Ask an admin for a new one.` The first-administrator screen shows
+`This token has expired or was used. Ask the person who runs this server for a new one.` in the same way, because there is no
+admin to ask. Both lines have the error mark and the underline.
+
+**Unlock.** The saved passwords of a person (the passwords and keys of connections, the keys of providers) are kept in a store
+that a sign-in opens by itself: a password sign-in, and a passkey whose authenticator supports the PRF extension, unlock it
+at the same moment and never show this dialog. A person who signed in through a single sign-on provider, or with a passkey
+without the extension, unlocks it with their passphrase. Until then the window works (panes run, the layout is kept) and
+the status line shows the mark `secrets locked` with a text button `Unlock` (6.30).
+
+The dialog is the box of the Settings over the window with the backdrop of the other dialogs, 24 rem wide, and is a real
+modal (`role="dialog"`, `aria-modal`, the focus stays inside). It opens by itself once when the window loads in the locked state, and
+again when the person presses `Unlock` or when a command that needs a saved secret is answered with `locked`. Top to bottom:
+the title `Your saved passwords are locked`; the lead `Enter your passphrase to use your saved passwords and keys.`; the field
+`Passphrase`; the error line; the buttons `Not now` (hairline) and `Unlock` (solid); the text button `Use recovery code`; and,
+in the dim style, `If you lost both, an admin can reset your secrets. That deletes your saved passwords and keys, and keeps
+your account, layout and history.` The text button swaps the field for `Recovery code` (the lead changes with it) and
+becomes `Use passphrase`. A wrong passphrase and a wrong recovery code say the same: `That did not unlock your secrets.` A
+throttled try says the sentence of rule 2. `Not now` and `Escape` close the dialog and leave the mark in the status line.
+
+**States of the setup, the invitation and the unlock.**
+
+| State | Words | Second cue |
+|---|---|---|
+| token not good | the expired-link line of the screen | `!`, underline, `role="alert"`; no field is drawn |
+| username taken | `That username is taken. Choose another.` | `!`, underline, `aria-invalid` on `Username`, focus on it |
+| new password refused | the sentence of rule 7 | `!`, underline, `aria-invalid` on the field, focus on it |
+| wrong code in the authenticator step | `That code did not match. Try again.` | `!`, underline, `aria-invalid` on `Code`, the field emptied |
+| passkey not saved | `That passkey was not saved. Try again.` | `!`, underline; a prompt that was cancelled shows nothing |
+| recovery step, not ticked | `Tick the box to continue.` | the box `☐`, `Continue` dim and `disabled` |
+| recovery step, ticked | none | the box `☑`, `Continue` solid |
+| unlock failed | `That did not unlock your secrets.` | `!`, underline, `aria-invalid`, the field emptied, focus on it |
+| unlock working | the button reads `Unlock…` | `aria-busy`, the field read-only |
+
+**Keys.** First focus: the first field of a step (`Setup token`, `Username`, `Passphrase`); on the authenticator step and the
+recovery step the button `Copy`, because the person copies first. `Tab` order is the order on the screen: for the setup and
+the invitation `Setup token`, `Username`, `Display name`, the radio group (one stop, arrows move), `Password`, `Continue`; for
+the authenticator step `Copy`, `Copy link`, `Code`, `Continue`; for the recovery step `Copy`, the checkbox, `Continue` (not a stop
+while disabled); for the unlock `Passphrase`, `Not now`, `Unlock`, `Use recovery code`. `Enter` presses the solid button of the
+step. The focus ring is 2 px. `Escape` closes the unlock dialog and does nothing on the other three screens.
+
+![First administrator](design/web-first-admin.png)
+![Invitation](design/web-invite.png)
+![Unlock](design/web-unlock.png)
+
+**Sentences.** The page chooses every word from the code of the answer; the server sends none.
+
+| Where | Answer | Sentence |
+|---|---|---|
+| sign-in | 401 `invalid` | Sign-in failed. Check your details or ask an admin. |
+| any step | 429 `throttled` | Too many attempts. Try again in 12 minutes. |
+| any step | 503 `busy` | The server is busy. Try again in a moment. |
+| any step | no answer | Could not reach the server. Try again. |
+| after an expired session | none | Your session ended. Sign in again. |
+| invitation | 410 `gone` | This link has expired or was used. Ask an admin for a new one. |
+| first administrator | 410 `gone` | This token has expired or was used. Ask the person who runs this server for a new one. |
+| username | 409 `conflict` on `username` | That username is taken. Choose another. |
+| new password or passphrase | 400 `bad_request` on the field | Use at least 12 characters. Not your username, not one repeated character. |
+| authenticator step | 401 `invalid` | That code did not match. Try again. |
+| unlock | 401 `invalid` | That did not unlock your secrets. |
+| recovery step | none | Tick the box to continue. |
+
+**Accessibility.** The same as the sign-in: hairlines `--hw-line`, dim text `--hw-ink-2` under `contrast-high`, the box and the
+fields keep their borders under `forced-colors` and the solid button gets a system-colour outline, nothing moves, every size
+is in `rem` and every target is at least 28 px high. Each error line is a `role="alert"` and the field it concerns is
+`aria-invalid` and `aria-describedby` the line. The key and the recovery code are plain text that a screen reader reads
+character by character in their groups.
+
+**Not drawn.** A QR code, a download of the recovery code as a file, a print button, a choice of several recovery codes,
+and a way to skip the recovery step.

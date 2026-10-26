@@ -400,6 +400,7 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .wb-cell .cap{margin:0}
 .wb-box{position:static;width:26rem;padding:1.25rem 1.5rem 1.1rem;border-radius:8px;display:flex;flex-direction:column;font:400 12px/1.45 var(--mono)}
 .wb-box.narrow{width:24rem}
+.wb-box.ov{position:absolute}
 .wb-brand{display:flex;align-items:baseline;gap:.75rem;margin:0 0 1rem}
 .wb-mark{font-size:1.35em;font-weight:700;letter-spacing:.02em}
 .wb-host{margin-left:auto}
@@ -429,7 +430,7 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .wb-tb{display:inline-flex;align-items:center;min-height:1.75rem;color:var(--ink2);text-decoration:underline;white-space:nowrap}
 .wb-groups{display:flex;gap:.25rem;flex-wrap:wrap;align-items:baseline;font-weight:700;letter-spacing:.06em}
 .wb-secret{display:flex;flex-wrap:wrap;gap:.2rem .9rem;padding:.55rem .7rem;border:1px solid var(--edge);border-radius:6px;background:var(--ground);font-weight:500;letter-spacing:.08em;color:var(--ink)}
-.wb-code{font-size:1.15em;letter-spacing:.12em}
+.wb-code{font-size:1em;letter-spacing:.05em;flex-wrap:nowrap;white-space:nowrap}
 .wb-row2{display:flex;align-items:center;gap:.6rem;margin:0 0 .65rem}
 .wb-row2 .wb-in,.wb-row2 .wb-secret{flex:1;margin:0}
 .wb-row2 .btn{flex:none}
@@ -777,8 +778,8 @@ function base(v){
   return `<div class="titlebar row">${wcL}
     <div class="ws on">◆ main <span class="n">5</span></div><div class="ws">◇ infra <span class="n">3</span>${v==='attn'?mks(['fail','done']):''}</div><div class="ws">◇ docs <span class="n">1</span>${v==='attn'?mks(['done']):''}</div><div class="ws plus">＋</div>
     <span class="fill"></span>
-    <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='kiexplain'||v==='kidescribe'||v==='ki'||v==='kichats'||v==='kisidecards'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?'on':''}">✦ AI${v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kicommand'||v==='kisidecards'?' <span class="ax-n">· 1</span>':''}</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'||v==='kiactions'?'on':''}">⌘K</div>${wcR}</div>
-  <div class="tabrow row">${v==='attn'?tabs(0,{1:['ask','bell','fail','done'],2:['bell'],3:['fail'],4:['done']}):tabs(v==='blocks'?1:v==='kimon'||v==='kimonstates'?4:v==='kint'||v==='kintstates'||v==='kintconfirm'||v==='kintconfirmstates'?5:0)}<span class="fill"></span><span class="dim" style="padding-right:12px">⌘1–9 tab · click a pill to switch workspace</span></div>
+    <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='kiexplain'||v==='kidescribe'||v==='ki'||v==='kichats'||v==='kisidecards'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?'on':''}">✦ AI${v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kicommand'||v==='kisidecards'?' <span class="ax-n">· 1</span>':''}</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'||v==='kiactions'?'on':''}">${v.startsWith('web-')?'Ctrl+Shift+P':'⌘K'}</div>${wcR}</div>
+  <div class="tabrow row">${v==='attn'?tabs(0,{1:['ask','bell','fail','done'],2:['bell'],3:['fail'],4:['done']}):tabs(v==='blocks'?1:v==='kimon'||v==='kimonstates'?4:v==='kint'||v==='kintstates'||v==='kintconfirm'||v==='kintconfirmstates'?5:0)}<span class="fill"></span><span class="dim" style="padding-right:12px">${v.startsWith('web-')?'Alt+Shift+1–9':'⌘1–9'} tab · click a pill to switch workspace</span></div>
   <div class="body">${v==='preview'?previewArea():v==='kimon'?monitorArea():v==='kimonstates'?moStates():v==='kint'?igArea():v==='kintstates'?igStates():v==='kintconfirm'?icArea():v==='kintconfirmstates'?icStates():v==='kintctx'?cxArea():v==='kiwsh'?awArea():v==='kiwshstates'?awStates():v==='kidevicestates'?adStates():v==='lanstates'?lnStates():v==='kiexplain'||v==='kidescribe'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?chatArea(v):`<div class="area">
     ${P('','❯','shell','pane 1 · ~/holzWave',shell(v==='search'?'search':v==='copy'?'copy':''),{f:1,s:'grid-row:1/2',chip:phChip('⎈ talos-prod')})}
     ${P('wa','⌁','holzkube','ssh · talos-2',ssh(1))}
@@ -1053,9 +1054,45 @@ const wbCode=(err)=>wbBox('Sign in',`${wbHead}
  <div class="wb-err" role="alert">${err}</div>
  <div><span class="wb-tb">Back</span></div>`);
 const wbViews={};
+const wbPolicy='Use at least 12 characters. Not your username, not one repeated character.';
+const wbRadio=(label,items)=>`<div class="wb-f" role="radiogroup" aria-label="${label}"><span class="lbl">${label}</span><div class="wb-radio">${items.map(([on,t])=>`<span class="${on?'on':'off'}"><span>${on?'●':'○'}</span>${t}</span>`).join('')}</div></div>`;
+const wbSetup=(method,err)=>wbBox('Set up this server',`${wbHead}
+ <div class="wb-title">Set up this server</div>
+ <div class="wb-lead">There is no administrator yet. The account you make here becomes the first one.</div>
+ ${wbIn('Setup token',wbDots(16),{hint:'The token the server printed when you started it.'})}
+ ${wbIn('Username','anna')}
+ ${wbIn('Display name','Anna Keller')}
+ ${wbRadio('Sign-in method',[[method==='passkey','Passkey'],[method==='password','Password and authenticator app']])}
+ ${method==='password'?wbIn('Password',wbDots(8),{bad:err?1:0,fo:err?1:0,err:err||'',hint:err?'':''}):''}
+ <div class="btn p full">Continue</div>`);
+const wbSecret='JBSW Y3DP EHPK 3PXQ 5NMF UWYZ 2LQA 7TBC'.split(' ');
+const wbInviteKey=()=>wbBox('You were invited',`${wbHead}
+ <div class="wb-title">You were invited <span class="chip lbl">member</span></div>
+ <div class="wb-lead">Add this key to your authenticator app, then enter the code it shows.</div>
+ <div class="wb-f"><span class="lbl">Key</span><div class="wb-row2" style="margin:0"><div class="wb-secret">${wbSecret.map(g=>`<span>${g}</span>`).join('')}</div><span class="btn">Copy</span></div></div>
+ <div class="wb-f"><span class="lbl">Link</span><div class="wb-row2" style="margin:0"><div class="wb-in"><span class="tx">otpauth://totp/holzWave:holz?secret=JBSWY3DPEHPK3PXQ5NMFUWYZ2LQA7TBC&amp;issuer=holzWave</span></div><span class="btn">Copy link</span></div></div>
+ ${wbIn('Code','<span class="dim">6 digits</span>',{fo:1})}
+ <div class="btn p full">Continue</div>`);
+const wbInviteRecovery=()=>wbBox('Save your recovery code',`${wbHead}
+ <div class="wb-title">Save your recovery code</div>
+ <div class="wb-lead">If you forget how you unlock your saved passwords, this code unlocks them. It is shown once and cannot be shown again.</div>
+ <div class="wb-row2"><div class="wb-secret wb-code" aria-label="Recovery code">Q7K2-M9XD-T4WP-H8NB-C3FZ-6VRA</div><span class="btn">Copy</span></div>
+ <div class="wb-chk"><span>☐</span><span>I have saved this code</span></div>
+ <div class="btn full off" aria-disabled="true">Continue</div>
+ <div class="wb-note">Tick the box to continue.</div>`);
+const wbUnlock=(field,err,alt,over)=>`<div class="ov float wb-box narrow" role="dialog" aria-modal="true" aria-label="Your saved passwords are locked" style="${over}">
+ <div class="wb-title">Your saved passwords are locked</div>
+ <div class="wb-lead">${field==='Passphrase'?'Enter your passphrase to use your saved passwords and keys.':'Enter your recovery code to use your saved passwords and keys.'}</div>
+ ${wbIn(field,field==='Passphrase'?wbDots(9):'<span class="dim">XXXX-XXXX-XXXX-XXXX-XXXX-XXXX</span>',{bad:err?1:0,fo:1,err:err||''})}
+ <div class="wb-acts" style="margin:0 0 .5rem"><span class="btn">Not now</span><span class="btn p">Unlock</span></div>
+ <div><span class="wb-tb">${alt}</span></div>
+ <div class="wb-h" style="margin:.5rem 0 0">If you lost both, an admin can reset your secrets. That deletes your saved passwords and keys, and keeps your account, layout and history.</div></div>`;
+wbViews['web-first-admin']=()=>wbPage([['Password chosen, new password refused',wbSetup('password',wbPolicy)],['Passkey chosen',wbSetup('passkey','')]]);
+wbViews['web-invite']=()=>wbPage([['Authenticator step',wbInviteKey()],['Recovery step',wbInviteRecovery()]]);
 wbViews['web-signin']=()=>wbPage([['Password, step 1',wbSignIn({cur:1})],['Authenticator code, after a wrong code',wbCode(wbGeneric)]]);
 
 const ovl={
+ 'web-unlock':`<div class="scrim"></div>${wbUnlock('Passphrase','That did not unlock your secrets.','Use recovery code','left:100px;top:130px')}${wbUnlock('Recovery code','','Use passphrase','left:596px;top:130px')}`,
  history:`<div class="scrim"></div><div class="ov float" style="left:300px;top:70px;width:560px;border-radius:16px"><div class="row" style="padding:10px 14px;border-bottom:1px solid var(--edge);gap:8px"><span class="ro">⌕</span>kgp<span class="cur"></span><span class="kbd" style="margin-left:auto">esc</span></div>
   <div class="it on"><span><span class="ro">k</span>ubectl <span class="ro">g</span>et <span class="ro">p</span>ods -n kube-system</span><span class="dim">~/infra · 2 h ago · ×14</span></div>
   <div class="it"><span><span class="ro">k</span>ubectl <span class="ro">g</span>et <span class="ro">p</span>ods -A</span><span class="dim">~/infra · 3 d ago · ×6</span></div>
@@ -1283,7 +1320,10 @@ const views=[
  ['kiwshstates','wsh ai request states','The card in four states: asking for a model in the cloud, asking for a model on this computer (no warn colour, nothing piped in), after Send once (the foot says Sending and both buttons are disabled), and after a refusal from holzWave with a second request waiting (the fault line has the mark ! and is underlined, and the head counts 1 of 2). Every state has words besides its colour. The four cards are drawn a little narrower than the 24 rem of the app so that they fit side by side.'],
  ['attn','Attention marks','A pane that is out of view and needs you marks its tab and the pill of its workspace: ? waits for you, ▲ rang the bell, ! command failed, ✓ command finished, each in its status colour and never rose. Every kind that is present shows, side by side, in that order, with no count: holzkube holds all four. A pill shows the kinds of all its tabs together, once each, so infra shows ! ✓ (a failed command and a finished one) and docs shows ✓. The shown tab and the shown workspace carry no mark. The tab and the pill keep their shapes (square and numbered, round with a diamond); the title and the accessible name list the kinds in words. Nothing sounds and nothing notifies.'],
  ['web-signin','Web: sign in','The page of the browser build before a person is signed in: the wordmark, the name of the server, then the methods the server has turned on (a solid passkey button, one hairline button for each single sign-on provider, a hairline marked or, the password form). The first field has the focus. Left, the first step; right, the second step after a wrong code: one sentence for every failure, with the mark ! and an underline, that does not say which detail was wrong.'],
- ['drag','Drag','Reorder panes by drag and drop, drop them as a tab, drag them out into a new window. On Wayland use the palette.']
+['web-first-admin','Web: first administrator','Shown instead of the sign-in only while the server has no administrator: Set up this server, the setup token (masked, read from the address fragment and cleared at once), the username and the display name, then the first sign-in method in the words and the order of the invitation. Left, the password choice with the server\u2019s refusal of a weak password (the mark !, an underline and the sentence); right, the passkey choice.'],
+ ['web-invite','Web: invitation','An invitation link opens this page: You were invited and the role as a label. Left, the authenticator step: the secret in groups of four characters with Copy, the otpauth link with Copy link and the field Code, no QR code. Right, the recovery code, shown once in groups with Copy; Continue stays disabled, and says why in words, until I have saved this code is ticked, and the step cannot be left by Escape or a click outside.'],
+ ['web-unlock','Web: unlock','The dialog over the window when the saved passwords are locked: the passphrase field with the sentence for a wrong one (the mark ! and an underline), Not now and Unlock, a text button for the recovery code, and the dim sentence that an admin can reset the secrets, which deletes the saved passwords and keys and keeps the account, the layout and the history. Right, the same dialog with the recovery code field.'],
+  ['drag','Drag','Reorder panes by drag and drop, drop them as a tab, drag them out into a new window. On Wayland use the palette.']
 ];
 const vb=$('#views');let cur='alltag';
 function render(){
