@@ -9,7 +9,7 @@ use holzwave_core::ai::provider::Provider;
 use holzwave_host::ai_device::DeviceSource;
 #[cfg(target_os = "macos")]
 use holzwave_host::ai_device::DeviceState;
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 use holzwave_host::ai_device::{AVAILABLE, DEVICE_ID, DEVICE_MODEL};
 
 /// The source of this platform: over the bridge crate on macOS, none elsewhere (there is no model and nothing is drawn).
@@ -57,7 +57,7 @@ impl DeviceSource for AppleDevice {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 
