@@ -3,9 +3,11 @@
 // @tauri-apps/api, the global is enough) or, in a browser without it, one socket to the server of the page's own host.
 import type { View } from "./types.js";
 import { createTransport, socketUrl } from "./webtransport.js";
+import { createHttp, HttpError } from "./webhttp.js";
 import type { ConnectionInfo, SessionInfo, SocketLike } from "./webtransport.js";
 
 export type { ConnectionInfo, ConnectionState, SessionInfo } from "./webtransport.js";
+export { HttpError };
 
 /** The options of `listen` that the page uses: `target` names the window whose events are wanted. */
 interface ListenOptions {
@@ -43,6 +45,12 @@ const web = createTransport({
   setTimer: (fn, ms) => setTimeout(fn, ms),
   clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
   random: () => Math.random(),
+});
+
+const webHttp = createHttp({
+  // The one request function of the page: same-origin paths only (see webhttp.ts), and the desktop build never calls it.
+  send: (url, init) => fetch(url, init as RequestInit),
+  origin: location.origin,
 });
 
 /** The listeners the Tauri backend holds, by event name: the same diagnostics the web transport gives. */
@@ -84,3 +92,12 @@ export const onSession = (cb: (info: SessionInfo) => void): (() => void) => (tau
 
 /** How many listeners an event has right now: diagnostics and the browser tests. */
 export const listenerCount = (name: string): number => (tauri ? (tauriListeners.get(name) ?? 0) : web.listenerCount(name));
+
+/**
+ * Ask the page's own server over HTTP: `http("POST", "/api/login", { name, password })`. Only a path on the page's origin
+ * is accepted; JSON in, parsed JSON out, `HttpError` for a failed answer. The desktop has no server, so there it fails.
+ */
+export const http = async (method: string, path: string, body?: unknown): Promise<unknown> => {
+  if (tauri) throw new Error("http is for the web backend");
+  return webHttp(method, path, body);
+};

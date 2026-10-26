@@ -499,6 +499,20 @@ const PERMITTED_HITS: &[(&str, &str, &str)] = &[
         "https://",
         "the example address shown inside the endpoint field of the sync form, not a request",
     ),
+    (
+        "app/src/bridge.ts",
+        "fetch(",
+        "the one same-origin request function of the page (`http`): the path is checked against the page's own origin before \
+         anything is sent (webhttp.ts), the request carries no credentials of another site and follows no redirect, and the \
+         desktop build never calls it (it has no server)",
+    ),
+    (
+        "app/src/bridge.ts",
+        "WebSocket",
+        "the one socket of the page, to `/ws` of the page's own host: the address is built from `location` only (socketUrl in \
+         webtransport.ts, `wss` for an https page), the socket is opened at the first command or listener of a browser page \
+         and the desktop build never opens it",
+    ),
 ];
 
 /// Remote origins the CSP may list: `(directive, source, reason)`. Everything else that names an origin fails
