@@ -1,0 +1,6 @@
+fail
+frame traffic saved: met: typing 91.2%, listing 88.2%, redraw 93.5% (needs at least 30% each)
+large text saved: met: cat-large 79.1% (needs at least 50% each)
+bomb refused within the memory bound: met: single: closed with status 1009 , peak 9480520 bytes of 16777216 allowed, 0 panics; fragments: closed with status 1009 , peak 12645110 bytes of 16777216 allowed, 0 panics
+no failed Autobahn case: NOT MET: 513 cases, 0 with behaviour FAILED, 18 outside OK, NON-STRICT and INFORMATIONAL; behaviours {"OK":488,"UNIMPLEMENTED":18,"NON-STRICT":4,"INFORMATIONAL":3}; those cases: 13.7.1: UNIMPLEMENTED, 13.7.10: UNIMPLEMENTED, 13.7.11: UNIMPLEMENTED and 15 more
+both browsers negotiate and round-trip: met: chromium extensions "permessage-deflate", identical true; webkit extensions "permessage-deflate", identical true

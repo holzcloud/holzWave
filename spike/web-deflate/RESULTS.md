@@ -1,9 +1,19 @@
 # permessage-deflate: what it saves and whether the library is safe to turn on
 
-Measured on one machine, in one run, by the tests in this folder. The numbers below are copied from that run; no test
-asserts a number that was not measured here. Thresholds for a pass are in `VERDICT`'s rule (see the end).
+Measured on one machine by the tests and scripts in this folder. The numbers below are copied from the final run of
+each; no test asserts a number that was not measured here (the thresholds are the only fixed numbers, and they are
+the rule in the last section).
 
 Machine: Apple M1 Max (arm64), macOS 27.0.1, loopback only. Date: 2026-10-26.
+
+Versions: `yawc` 0.5.0 (`axum` feature only, `flate2` 1.1.10 with its default `miniz_oxide` 0.9.1 backend; the `zlib`
+feature was tried and changes no result), axum 0.8.9, tokio 1.53.2, Rust 1.99.0. Autobahn test suite
+`crossbario/autobahn-testsuite:25.10.1` at digest
+`sha256:519915fb568b04c9383f70a1c405ae3ff44ab9e35835b085239c258b6fac3074` (amd64, run under emulation). Browsers:
+Chromium 156.0.8078.4 and WebKit 27.2 from the Playwright 1.64.0 that `app/package.json` pins.
+
+Verdict: **fail**, and only because of the Autobahn rule (see "Autobahn"). The savings, the bomb tests and the two
+browsers all passed. The default of the transport therefore stays off. The exact lines are in `VERDICT`.
 
 ## Corpus
 
@@ -16,22 +26,114 @@ not committed:
 | Workload | What runs | Messages | Raw bytes |
 |---|---|---:|---:|
 | typing | a 400-character command line typed into `sh`, one key every 20 ms | 402 | 166 429 |
-| listing | `ls -lR core` | 3 | 12 837 |
-| cat-large | `cat` of 2.5 MiB made of the repository's tracked Markdown files | 5 | 23 390 |
-| redraw | a loop that clears the screen and prints 40 lines of changing numbers, twenty times | 40 | 153 793 |
+| listing | `ls -lR core` | 3 | 12 997 |
+| cat-large | `cat` of 2.5 MiB made of the repository's tracked Markdown files | 5 | 23 600 |
+| redraw | a loop that clears the screen and prints 40 lines of changing numbers, twenty times | 40 | 153 229 |
 
 Raw bytes are the message payloads. A fast program produces few frames because the pane sends the rows that differ
 between two screens, not the output stream: `cat` of 2.5 MiB is five frames. That is a property of the protocol and is
-why the frame traffic of a large output is small even without compression.
+why the frame traffic of a large output is small even without compression. The sizes of `listing`, `cat-large` and
+`redraw` differ by a few hundred bytes between two recordings (timing decides how many screens are caught), `typing`
+does not; the tables below are all from one recording.
 
-## Baseline: WebSocket without compression
+## Wire bytes: baseline against permessage-deflate
 
-The server is axum 0.8.9 `ws` behind a listener whose sockets count the bytes they write. Wire bytes are what the
-server's socket sent after the handshake (the 101 response, 166 bytes, is counted apart), so framing is included.
+Both servers run in one test, one after the other, on the same corpus. The baseline is axum `ws` without compression.
+The candidate is `yawc` with balanced compression (flate2 default level), UTF-8 validation, and the same 8 MiB message
+cap. A counting wrapper around every accepted TCP socket counts the bytes the server writes; the handshake response
+(166 bytes without the extension) is counted apart, so the figures are the messages only, framing included. The
+candidate's client is `yawc`'s own client; every line it received was compared with the corpus line.
 
-| Workload | Messages | Raw bytes | Wire bytes |
-|---|---:|---:|---:|
-| typing | 402 | 166 429 | 168 039 |
-| listing | 3 | 12 837 | 12 851 |
-| cat-large | 5 | 23 390 | 23 412 |
-| redraw | 40 | 153 793 | 153 955 |
+| Workload | Messages | Raw bytes | Baseline wire bytes | permessage-deflate wire bytes | Saved |
+|---|---:|---:|---:|---:|---:|
+| typing | 402 | 166 429 | 168 039 | 14 723 | 91.2 % |
+| listing | 3 | 12 997 | 13 011 | 1 533 | 88.2 % |
+| cat-large | 5 | 23 600 | 23 622 | 4 932 | 79.1 % |
+| redraw | 40 | 153 229 | 153 391 | 9 937 | 93.5 % |
+
+Negotiated parameters. A browser offers `permessage-deflate; client_max_window_bits`; the candidate answers
+`permessage-deflate` with no parameter: context takeover stays on in both directions (the compressor keeps its window
+across messages, which is what makes the repeated rows cheap) and the window is the default of 15 bits. The small
+`listing` and `cat-large` runs are 3 and 5 messages, so their percentages rest on few frames; the larger runs show the
+same order of saving.
+
+## Compression bombs
+
+The candidate is an echo endpoint with `Options::with_limits(8 MiB, 8 MiB)` (one frame, and one reassembled message)
+and UTF-8 validation. The bombs are built by deflating zeros in a stream (the gigabyte is never held). A control
+message, 64 KiB of text compressed to well under a tenth of that, is sent through the same hand-made frames first and
+comes back inflated and identical, so a refusal below is the library's decision and not a framing mistake. The peak is
+the most the process held above what it held when the attempt started, measured by a counting global allocator; the
+client and the server run in the same process, so the figure includes the attacker's own buffers. The bound is twice
+the cap, 16 777 216 bytes.
+
+| Case | On the wire | Inflates to | Outcome | Peak heap | Bound | Panics |
+|---|---:|---:|---|---:|---:|---:|
+| one message | 1 042 913 B | 1 073 741 824 B (1 GiB) | close, status 1009 | 9 480 520 B | 16 777 216 B | 0 |
+| 16 fragments of one message, 4 096 B each (the largest inflates to 4 227 072 B, under the cap; together 64 MiB) | 65 193 B | 67 108 864 B | close, status 1009 | 12 645 110 B | 16 777 216 B | 0 |
+
+Both are refused. With the cap raised to 4 GiB on purpose the same test fails (the bomb is accepted and the process
+holds 2 GiB), so the test does tell a refusal from an acceptance. The cap is what protects the process: `max_payload_read`
+is documented to apply to the inflated size, and the reassembly buffer limit bounds fragmented messages. Facts about
+the integration found on the way, which a server using the library has to handle:
+
+- The library writes what it owes the peer (a pong, the reply to a close, and the close frame for an oversize message
+  or a protocol error) only on the next read poll. A loop that ends at the first error, or `while let Some(frame) =
+  ws.next().await`, drops the connection without that close frame. The echo endpoint polls once more after an error.
+- Invalid UTF-8 is reported as an error without a close frame; the application has to send status 1007.
+- A frame with a reserved opcode is closed with status 1003 where the Autobahn suite expects 1002.
+
+## Autobahn
+
+The suite ran against the candidate through Docker's host alias, over the base protocol cases 1 to 7 and 10, the limit
+cases 9 (without 9.1.5, 9.1.6, 9.2.5 and 9.2.6, which send messages of 8 and 16 MiB and so are above the 8 MiB cap by
+design) and the permessage-deflate cases 12 and 13: 513 cases in all, 216 of them in groups 12 and 13.
+
+| Behaviour | Cases |
+|---|---:|
+| OK | 488 |
+| NON-STRICT | 4 |
+| INFORMATIONAL | 3 |
+| FAILED | 0 |
+| UNIMPLEMENTED | 18 |
+
+The rule is that every case must be OK, NON-STRICT or INFORMATIONAL. No case is FAILED, but 18 are UNIMPLEMENTED, all of
+group 13.7 (late and early client offers with several parameter sets). In each of them the client sends three offers
+in one header; the first asks for `server_max_window_bits=9`, which the library cannot meet. The library does not try
+the second or third offer; it answers `101` with no extension, and the connection runs uncompressed. Browsers send one
+plain offer, so this does not affect them, but the rule is not met and the criterion is recorded as not met.
+
+How the connections were closed (behaviorClose), listed apart and not part of the rule: 498 OK, 3 INFORMATIONAL, 10 WRONG
+CODE (the reserved opcodes of groups 4.1 and 4.2 are closed with 1003 instead of 1002), 1 FAILED (5.18, two text
+fragments: the connection is not closed by the server), 1 FAILED BY CLIENT (7.3.6: the server leaves the TCP close to
+the client).
+
+## Browsers
+
+Each browser opens a blank page that the candidate serves from loopback, connects to the echo endpoint, reads
+`WebSocket.extensions`, and sends ten text messages of 1 MiB, comparing every reply with what it sent. (Chromium refuses
+a WebSocket to a local address from `about:blank` and from a page whose response the script made up; the page has to
+come from loopback.)
+
+| Engine | Version | `WebSocket.extensions` | Round trips | Identical | Time |
+|---|---|---|---:|---|---:|
+| Chromium | 156.0.8078.4 | `permessage-deflate` | 10 of 1 MiB | yes | 879 ms |
+| WebKit | 27.2 | `permessage-deflate` | 10 of 1 MiB | yes | 1 016 ms |
+
+## The rule behind `VERDICT`
+
+The first line is `pass` only if all of these were measured and held, and `fail` otherwise; a criterion that could not
+be run counts as not met and is named. The thresholds are a proposal and were not tuned after seeing the numbers.
+
+| Criterion | Rule | Result |
+|---|---|---|
+| frame traffic saved | at least 30 % fewer bytes on typing, listing and redraw | met (91.2, 88.2, 93.5) |
+| large text saved | at least 50 % fewer bytes on cat-large | met (79.1) |
+| bomb refused within the memory bound | both bombs refused, peak at most twice the cap, no panic | met |
+| no failed Autobahn case | every case OK, NON-STRICT or INFORMATIONAL | not met (18 UNIMPLEMENTED, 0 FAILED) |
+| both browsers negotiate and round-trip | `extensions` names the extension, ten identical round trips | met |
+
+To run it again: record the four workloads (the command above), then `cargo test --manifest-path
+spike/web-deflate/Cargo.toml`, `sh spike/web-deflate/autobahn/run.sh`, `node spike/web-deflate/browser-check.mjs` and
+`cargo run --manifest-path spike/web-deflate/Cargo.toml --bin verdict`. The Autobahn run and the browser check need
+Docker and the Playwright browsers; without them the criterion is recorded as not run and the verdict is `fail`.

@@ -1,0 +1,7 @@
+{
+  "outdir": "/reports/out",
+  "servers": [{ "agent": "yawc", "url": "ws://host.docker.internal:@PORT@" }],
+  "cases": ["1.*", "2.*", "3.*", "4.*", "5.*", "6.*", "7.*", "9.*", "10.*", "12.*", "13.*"],
+  "exclude-cases": ["9.1.5", "9.1.6", "9.2.5", "9.2.6"],
+  "exclude-agent-cases": {}
+}

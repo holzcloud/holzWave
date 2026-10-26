@@ -18,7 +18,16 @@ tokio = { version = "=1.53.2", features = ["rt-multi-thread", "macros", "net", "
 futures-util = { version = "=0.3.34", default-features = false, features = ["sink", "std"] }
 # Results file and the check that a recorded line is exactly what serde_json writes (key order kept).
 serde_json = { version = "=1.0.151", features = ["preserve_order"] }
+# The candidate, pinned to the exact release the owner approved. TLS and the client features are off: the spike runs on
+# plain loopback sockets. MPL-2.0; it lives in this project's own lock only.
+yawc = { version = "=0.5.0", default-features = false, features = ["axum"] }
 
 [dev-dependencies]
 # The client of the baseline measurement. `handshake` only: the test connects over a plain TCP stream.
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
+# Builds the compression bomb: a gigabyte of zeros deflated in a stream, the way a hostile peer would.
+flate2 = { version = "=1.1.10" }
+
+# The tests inflate and deflate gigabytes; the dependencies run optimised so that this takes seconds, not minutes.
+[profile.dev.package."*"]
+opt-level = 3
