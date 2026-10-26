@@ -3,10 +3,10 @@
 //! Exit statuses: 0 for success, 1 for a refusal or a failure (one sentence on standard error), 2 for a call the server
 //! does not understand.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::ExitCode;
 
+use crate::config::{ENV_KEY_FILE, Env};
 use crate::keyfile;
 
 /// What the server prints when it is called without a known subcommand.
@@ -22,12 +22,6 @@ const USAGE_STATUS: u8 = 2;
 
 /// The exit status for a refusal or a failure.
 const FAILURE_STATUS: u8 = 1;
-
-/// The environment variable that names the server key file.
-pub const ENV_KEY_FILE: &str = "HOLZWAVE_SERVER_KEY_FILE";
-
-/// The variables of the process environment the server reads, by name.
-pub type Env = BTreeMap<String, String>;
 
 /// Prints a problem with the call and the usage, and returns the usage status.
 fn usage_error(problem: &str) -> u8 {

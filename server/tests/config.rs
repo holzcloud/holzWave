@@ -320,3 +320,327 @@ fn key_derive_works_on_a_key_read_from_a_file() {
     let direct = ServerKey::from_bytes([1; 32]).expect("key");
     assert_eq!(*loaded.derive(Purpose::Sealed), *direct.derive(Purpose::Sealed));
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The configuration: the typed file, the defaults and the strictness
+// ---------------------------------------------------------------------------------------------------------------------
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use holzwave_server::config::{
+    self, Compression, Env, Probe, Refusal, RealProbe, TlsSetup, prepare,
+};
+use holzwave_server::limits;
+use serde_json::{Value, json};
+
+/// The path the fake probe serves the configuration text under.
+const CONFIG_PATH: &str = "/etc/test/server.json";
+
+/// A probe that serves one configuration text, a list of readable files and a fixed user id. The key is read from the real
+/// file system, because the strict reader is what the key tests above already cover.
+struct FakeProbe {
+    config: Option<String>,
+    readable: Vec<PathBuf>,
+    uid: u32,
+}
+
+impl Probe for FakeProbe {
+    fn read_config(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        match (&self.config, path == Path::new(CONFIG_PATH)) {
+            (Some(text), true) => Ok(text.clone().into_bytes()),
+            _ => Err(std::io::ErrorKind::NotFound.into()),
+        }
+    }
+
+    fn readable(&self, path: &Path) -> bool {
+        self.readable.iter().any(|p| p == path)
+    }
+
+    fn own_uid(&self) -> u32 {
+        self.uid
+    }
+
+    fn load_key(&self, path: &Path) -> Result<ServerKey, Refusal> {
+        RealProbe.load_key(path)
+    }
+}
+
+/// A scratch directory with a good key file, and the environment that points at it.
+struct Setup {
+    _dir: Scratch,
+    key_path: PathBuf,
+    env: Env,
+}
+
+fn setup() -> Setup {
+    let dir = Scratch::new("config");
+    let key_path = dir.write_file("server.key", key_line([4; 32]).as_bytes(), 0o600);
+    let mut env = Env::new();
+    env.insert("HOLZWAVE_SERVER_KEY_FILE".to_owned(), key_path.to_str().expect("utf-8 path").to_owned());
+    env.insert("HOLZWAVE_SERVER_CONFIG".to_owned(), CONFIG_PATH.to_owned());
+    Setup { _dir: dir, key_path, env }
+}
+
+fn probe_for(json: &Value) -> FakeProbe {
+    FakeProbe {
+        config: Some(json.to_string()),
+        readable: ["/certs/cert.pem", "/certs/key.pem", "/certs/ca.pem", "/secrets/oidc"].map(PathBuf::from).to_vec(),
+        uid: 10_001,
+    }
+}
+
+/// A valid file for the TLS mode `files`: the smallest that is accepted.
+fn base() -> Value {
+    json!({
+        "public_url": "https://hw.example.test",
+        "tls": {"mode": "files", "cert_file": "/certs/cert.pem", "key_file": "/certs/key.pem"},
+        "auth": {"passkey": true}
+    })
+}
+
+fn prepare_json(setup: &Setup, json: &Value) -> Result<config::Prepared, Refusal> {
+    prepare(&setup.env, &probe_for(json))
+}
+
+/// Sets the value at a dotted path, making the objects on the way.
+fn set(value: &mut Value, path: &str, new: Value) {
+    let mut at = value;
+    let mut parts = path.split('.').peekable();
+    while let Some(part) = parts.next() {
+        if parts.peek().is_none() {
+            at[part] = new;
+            return;
+        }
+        if at.get(part).is_none() {
+            at[part] = json!({});
+        }
+        at = &mut at[part];
+    }
+}
+
+#[test]
+fn config_a_valid_file_for_each_tls_mode_is_prepared() {
+    let s = setup();
+
+    let files = prepare_json(&s, &base()).expect("files mode");
+    assert_eq!(files.origin.as_str(), "https://hw.example.test");
+    assert!(matches!(files.tls, TlsSetup::Files { .. }));
+    assert_eq!(files.config_path, PathBuf::from(CONFIG_PATH));
+    assert!(files.auth.passkey && !files.auth.password_totp && files.auth.oidc.is_empty());
+
+    let mut acme = base();
+    set(&mut acme, "tls", json!({"mode": "acme", "contact": "mailto:admin@example.test",
+        "domains": ["hw.example.test", "www.example.test"], "ca_file": "/certs/ca.pem",
+        "directory_url": "https://ca.example.test/directory"}));
+    let acme = prepare_json(&s, &acme).expect("acme mode");
+    match acme.tls {
+        TlsSetup::Acme { directory_url, contact, domains, ca_file } => {
+            assert_eq!(directory_url, "https://ca.example.test/directory");
+            assert_eq!(contact, "mailto:admin@example.test");
+            assert_eq!(domains, ["hw.example.test", "www.example.test"]);
+            assert_eq!(ca_file, Some(PathBuf::from("/certs/ca.pem")));
+        }
+        other => panic!("{other:?}"),
+    }
+    let mut acme_default = base();
+    set(&mut acme_default, "tls", json!({"mode": "acme", "contact": "admin@example.test", "domains": ["hw.example.test"]}));
+    match prepare_json(&s, &acme_default).expect("acme mode with defaults").tls {
+        TlsSetup::Acme { directory_url, .. } => assert_eq!(directory_url, config::DEFAULT_ACME_DIRECTORY),
+        other => panic!("{other:?}"),
+    }
+
+    let mut proxy = base();
+    set(&mut proxy, "tls", json!({"mode": "proxy", "trusted_proxies": ["10.0.0.0/8", "fd00::1"]}));
+    set(&mut proxy, "listen", json!("127.0.0.1:8080"));
+    let proxy = prepare_json(&s, &proxy).expect("proxy mode");
+    assert_eq!(proxy.listen, "127.0.0.1:8080".parse().expect("address"));
+    match proxy.tls {
+        TlsSetup::Proxy { trusted_proxies } => assert_eq!(trusted_proxies.len(), 2),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn config_the_defaults_are_those_of_the_contract_and_sit_inside_their_bounds() {
+    let s = setup();
+    let p = prepare_json(&s, &base()).expect("minimal file");
+    assert_eq!(p.listen, "0.0.0.0:8443".parse().expect("address"));
+    assert_eq!((p.data_dir.as_path(), p.runtime_dir.as_path()), (Path::new("/data"), Path::new("/run/holzwave")));
+    assert_eq!(p.sessions.idle, Duration::from_secs(30 * 60));
+    assert_eq!(p.sessions.absolute, Duration::from_secs(24 * 3600));
+    assert_eq!(p.sessions.step_up, Duration::from_secs(5 * 60));
+    assert_eq!((p.workers.uid_min, p.workers.uid_max), (20_000, 29_999));
+    assert_eq!(p.workers.idle_timeout, Duration::from_secs(24 * 3600));
+    assert_eq!((p.workers.max_panes, p.workers.max_scrollback_lines), (64, 10_000));
+    assert_eq!(p.upload.max_bytes, 256 * 1024 * 1024);
+    assert_eq!(p.upload.dir, PathBuf::from("uploads"));
+    assert_eq!(p.transport.compression, Compression::Off);
+    assert_eq!(p.limits, limits::Limits::DEFAULT);
+    assert!(!p.auth.password_totp && p.auth.oidc.is_empty(), "no method turns itself on");
+
+    println!("Defaults:");
+    println!("  listen = {}, data_dir = {}, runtime_dir = {}", p.listen, p.data_dir.display(), p.runtime_dir.display());
+    println!("  workers.uid_min..uid_max = {}..{}, helper_path = {}", p.workers.uid_min, p.workers.uid_max, p.workers.helper_path.display());
+    println!("  workers.worker_path = {}, upload.dir = {}, transport.compression = off", p.workers.worker_path.display(), p.upload.dir.display());
+    println!("  {:<40} {:>10} {:>10} {:>10}", "key", "default", "min", "max");
+    for row in limits::all_rows() {
+        println!("  {:<40} {:>10} {:>10} {:>10}", row.key, row.default, row.min, row.max);
+    }
+}
+
+#[test]
+fn config_every_key_of_the_file_is_accepted() {
+    let s = setup();
+    let mut full = json!({
+        "public_url": "https://hw.example.test:8443/",
+        "listen": "[::]:9443",
+        "data_dir": "/srv/data",
+        "runtime_dir": "/run/hw",
+        "tls": {"mode": "files", "cert_file": "/certs/cert.pem", "key_file": "/certs/key.pem"},
+        "auth": {
+            "passkey": true,
+            "password_totp": true,
+            "oidc": [{
+                "id": "corp", "name": "Corp", "issuer": "https://login.example.test", "client_id": "abc",
+                "client_secret_file": "/secrets/oidc", "allowed_domains": ["example.test"],
+                "allowed_groups": ["staff"], "groups_claim": "roles"
+            }]
+        },
+        "sessions": {"idle": "20m", "absolute": "12h", "step_up": "2m"},
+        "limits": {
+            "handshake_timeout": "5s", "header_timeout": "5s", "max_connections": 500, "max_connections_per_address": 30,
+            "api_body_bytes": 32768, "ws_message_bytes": 4194304, "ws_command_bytes": 32768, "ws_small_command_bytes": 2048,
+            "ws_queue_bytes": 2097152, "sockets_per_person": 4, "commands_per_second": 200, "command_burst": 400,
+            "ping_interval": "20s", "session_recheck": "15s", "argon2_concurrency": 1,
+            "password_attempts_per_account": 4, "password_attempts_per_address": 10, "attempt_window": "10m",
+            "lock_duration": "20m", "pending_signin": "3m"
+        },
+        "workers": {
+            "uid_min": 30000, "uid_max": 30999, "idle_timeout": "12h", "max_panes": 32, "max_scrollback_lines": 5000,
+            "nproc": 512, "nofile": 2048, "helper_path": "/opt/hw/helper", "worker_path": "/opt/hw/server"
+        },
+        "upload": {"dir": "incoming/files", "max_bytes": 1048576},
+        "transport": {"compression": "deflate"}
+    });
+    let p = prepare_json(&s, &full).expect("a file with every key");
+    assert_eq!(p.origin.as_str(), "https://hw.example.test:8443");
+    assert_eq!(p.listen, "[::]:9443".parse().expect("address"));
+    assert_eq!(p.sessions.idle, Duration::from_secs(1200));
+    assert_eq!(p.limits.max_connections, 500);
+    assert_eq!(p.limits.ping_interval, Duration::from_secs(20));
+    assert_eq!(p.workers.uid_min, 30_000);
+    assert_eq!(p.upload.dir, PathBuf::from("incoming/files"));
+    assert_eq!(p.transport.compression, Compression::Deflate);
+    assert_eq!(p.auth.oidc[0].groups_claim.as_deref(), Some("roles"));
+
+    // A variable replaces data_dir.
+    let mut env = s.env.clone();
+    env.insert("HOLZWAVE_DATA_DIR".to_owned(), "/mnt/hw".to_owned());
+    set(&mut full, "data_dir", json!("/srv/data"));
+    let p = prepare(&env, &probe_for(&full)).expect("with the data directory variable");
+    assert_eq!(p.data_dir, PathBuf::from("/mnt/hw"));
+}
+
+#[test]
+fn config_an_unknown_key_is_refused_at_every_level() {
+    let s = setup();
+    let mut full = base();
+    set(&mut full, "auth.oidc", json!([{
+        "id": "corp", "name": "Corp", "issuer": "https://login.example.test", "client_id": "abc",
+        "client_secret_file": "/secrets/oidc"
+    }]));
+    for level in ["", "tls", "auth", "auth.oidc.0", "sessions", "limits", "workers", "upload", "transport"] {
+        let mut edited = full.clone();
+        if level.is_empty() {
+            edited["zzz"] = json!(1);
+        } else if let Some(index) = level.strip_suffix(".0") {
+            let mut at = &mut edited;
+            for part in index.split('.') {
+                at = &mut at[part];
+            }
+            at[0]["zzz"] = json!(1);
+        } else {
+            set(&mut edited, &format!("{level}.zzz"), json!(1));
+        }
+        let error = prepare_json(&s, &edited).expect_err(level);
+        assert!(error.sentence().contains("unknown field `zzz`"), "{level:?}: {error}");
+        assert!(error.sentence().contains("is not valid"), "{level:?}: {error}");
+    }
+    // The base without edits is fine.
+    prepare_json(&s, &full).expect("the unedited file");
+}
+
+#[cfg(not(feature = "in-process-workers"))]
+#[test]
+fn config_the_in_process_workers_key_does_not_exist_in_a_release_build() {
+    let s = setup();
+    let mut edited = base();
+    set(&mut edited, "workers.mode", json!("in_process"));
+    let error = prepare_json(&s, &edited).expect_err("no such key");
+    assert!(error.sentence().contains("unknown field `mode`"), "{error}");
+}
+
+#[cfg(feature = "in-process-workers")]
+#[test]
+fn config_the_in_process_workers_key_exists_with_the_feature() {
+    let s = setup();
+    let mut edited = base();
+    set(&mut edited, "workers.mode", json!("in_process"));
+    let p = prepare_json(&s, &edited).expect("the feature adds the key");
+    assert_eq!(p.workers.mode, config::WorkersMode::InProcess);
+    set(&mut edited, "workers.mode", json!("elsewhere"));
+    assert!(prepare_json(&s, &edited).is_err());
+}
+
+#[test]
+fn config_a_wrong_type_or_a_bad_duration_does_not_parse() {
+    let s = setup();
+    for (path, value) in [
+        ("sessions.idle", json!(1800)),
+        ("sessions.idle", json!("30")),
+        ("sessions.idle", json!("-1m")),
+        ("sessions.idle", json!("999999999999d")),
+        ("limits.max_connections", json!("many")),
+        ("auth.passkey", json!("yes")),
+        ("listen", json!(8443)),
+        ("transport.compression", json!("gzip")),
+        ("workers.uid_min", json!(-5)),
+    ] {
+        let mut edited = base();
+        set(&mut edited, path, value.clone());
+        let error = prepare_json(&s, &edited).expect_err(path);
+        assert!(error.sentence().contains("is not valid"), "{path} = {value}: {error}");
+    }
+    // Not JSON at all, not UTF-8, too large.
+    let probe = FakeProbe { config: Some("[1, 2".to_owned()), readable: vec![], uid: 1 };
+    assert!(prepare(&s.env, &probe).expect_err("broken JSON").sentence().contains("is not valid"));
+    let probe = FakeProbe { config: Some("x".repeat(config::MAX_CONFIG_BYTES + 1)), readable: vec![], uid: 1 };
+    assert!(prepare(&s.env, &probe).expect_err("too large").sentence().contains("larger than"));
+}
+
+#[test]
+fn config_the_environment_and_the_file_must_be_there() {
+    let s = setup();
+    let probe = probe_for(&base());
+
+    let mut env = s.env.clone();
+    env.remove("HOLZWAVE_SERVER_KEY_FILE");
+    let error = prepare(&env, &probe).expect_err("no key variable");
+    assert!(error.sentence().contains("HOLZWAVE_SERVER_KEY_FILE is not set"), "{error}");
+    env.insert("HOLZWAVE_SERVER_KEY_FILE".to_owned(), String::new());
+    assert!(prepare(&env, &probe).is_err(), "an empty variable is not a file name");
+
+    // A configuration file that cannot be read names the variable that chooses it.
+    let mut env = s.env.clone();
+    env.insert("HOLZWAVE_SERVER_CONFIG".to_owned(), "/etc/test/other.json".to_owned());
+    let error = prepare(&env, &probe).expect_err("no such file");
+    assert!(error.sentence().contains("/etc/test/other.json") && error.sentence().contains("HOLZWAVE_SERVER_CONFIG"), "{error}");
+
+    // Without the variable the default path is used.
+    let mut env = BTreeMap::new();
+    env.insert("HOLZWAVE_SERVER_KEY_FILE".to_owned(), s.key_path.to_str().expect("utf-8 path").to_owned());
+    let error = prepare(&env, &probe).expect_err("default path is not served");
+    assert!(error.sentence().contains(config::DEFAULT_CONFIG_PATH), "{error}");
+}
