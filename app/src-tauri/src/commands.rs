@@ -852,7 +852,7 @@ pub fn file_save(
 
 /// The state of the sync.
 #[tauri::command(async, rename_all = "snake_case")]
-pub fn sync_status(core: State<Arc<AppCore>>) -> crate::sync::SyncView {
+pub fn sync_status(core: State<Arc<AppCore>>) -> holzwave_host::sync::SyncView {
     core.sync_status()
 }
 
@@ -864,19 +864,19 @@ pub fn sync_save(
     user: String,
     password: String,
     passphrase: String,
-) -> Result<crate::sync::SyncView, String> {
+) -> Result<holzwave_host::sync::SyncView, String> {
     core.sync_save(&endpoint, &user, &password, &passphrase)
 }
 
 /// Run the sync now.
 #[tauri::command(async, rename_all = "snake_case")]
-pub fn sync_now(core: State<Arc<AppCore>>) -> Result<crate::sync::SyncView, String> {
+pub fn sync_now(core: State<Arc<AppCore>>) -> Result<holzwave_host::sync::SyncView, String> {
     core.sync_now()
 }
 
 /// Turn the sync off and forget the account.
 #[tauri::command(async, rename_all = "snake_case")]
-pub fn sync_off(core: State<Arc<AppCore>>) -> crate::sync::SyncView {
+pub fn sync_off(core: State<Arc<AppCore>>) -> holzwave_host::sync::SyncView {
     core.sync_off()
 }
 
@@ -884,7 +884,7 @@ pub fn sync_off(core: State<Arc<AppCore>>) -> crate::sync::SyncView {
 /// setting (Windows, Linux, macOS below 15) `supported` is false and nothing is read. With the choice `requested` it
 /// browses the local network for a moment and may answer `denied`; otherwise it touches nothing. Async: it waits.
 #[tauri::command(async, rename_all = "snake_case")]
-pub fn local_network_status(core: State<Arc<AppCore>>) -> crate::local_network::LocalNetworkView {
+pub fn local_network_status(core: State<Arc<AppCore>>) -> holzwave_host::local_network::LocalNetworkView {
     core.local_network().view()
 }
 
@@ -892,7 +892,7 @@ pub fn local_network_status(core: State<Arc<AppCore>>) -> crate::local_network::
 /// stores the choice and makes the app touch the network once, which makes macOS show its own question; false stores
 /// `Not now`. Async: it waits.
 #[tauri::command(async, rename_all = "snake_case")]
-pub fn local_network_answer(core: State<Arc<AppCore>>, allow: bool) -> Result<crate::local_network::LocalNetworkView, String> {
+pub fn local_network_answer(core: State<Arc<AppCore>>, allow: bool) -> Result<holzwave_host::local_network::LocalNetworkView, String> {
     core.local_network().answer(allow)
 }
 

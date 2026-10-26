@@ -39,7 +39,6 @@ mod local_network;
 mod login_prompt;
 mod menu;
 mod state;
-mod sync;
 mod textscale;
 mod wsh_tunnel;
 

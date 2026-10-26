@@ -902,11 +902,11 @@ pub struct AppCore {
     /// and dropped when the last monitor pane of the connection closes.
     remote_monitors: holzwave_core::monitor::RemoteMonitors,
     /// The encrypted sync: its account, its runs and what the page shows of them.
-    sync: crate::sync::SyncRuntime,
+    sync: holzwave_host::sync::SyncRuntime,
     /// The AI chat service and the calls the commands make on it. It owns its threads and takes no lock of the core.
     ai: AiHost,
     /// The Local Network permission of macOS: the person's stored choice and the probe of the system. Inert elsewhere.
-    local_network: crate::local_network::LocalNetworkHost,
+    local_network: holzwave_host::local_network::LocalNetworkHost,
     /// The exec primitive of each saved connection a command ran on, kept for the life of the connection list.
     remote_execs: RemoteExecs<SshExec>,
     /// The questions of keyboard-interactive logins that wait for the person (see [`crate::login_prompt`]). Also the
@@ -1122,9 +1122,9 @@ impl AppCore {
             eprintln!("holzwave: no history file ({e}); the history is kept in memory");
             holzwave_core::history::History::in_memory().expect("in-memory history")
         });
-        let sync = crate::sync::SyncRuntime::new(dir.clone(), default_secrets());
+        let sync = holzwave_host::sync::SyncRuntime::new(dir.clone(), default_secrets());
         let host = AiHost::new(&dir, sink.clone(), ai);
-        let local_network = crate::local_network::LocalNetworkHost::new(&dir, crate::local_network::system());
+        let local_network = holzwave_host::local_network::LocalNetworkHost::new(&dir, crate::local_network::system());
         let integrations = {
             let parts = integration.unwrap_or_else(|| {
                 let configured = lock(&config).settings.shell.clone();
@@ -1383,7 +1383,7 @@ impl AppCore {
     }
 
     /// The Local Network permission of macOS: the stored choice and the probe.
-    pub fn local_network(&self) -> &crate::local_network::LocalNetworkHost {
+    pub fn local_network(&self) -> &holzwave_host::local_network::LocalNetworkHost {
         &self.local_network
     }
 
@@ -1742,21 +1742,21 @@ impl AppCore {
     }
 
     /// The state of the sync, for the page.
-    pub fn sync_status(&self) -> crate::sync::SyncView {
+    pub fn sync_status(&self) -> holzwave_host::sync::SyncView {
         self.sync.view()
     }
 
     /// Set up the sync for an account and run it once. Blocks on the network: not on the main thread.
-    pub fn sync_save(&self, endpoint: &str, user: &str, password: &str, passphrase: &str) -> Result<crate::sync::SyncView, String> {
+    pub fn sync_save(&self, endpoint: &str, user: &str, password: &str, passphrase: &str) -> Result<holzwave_host::sync::SyncView, String> {
         self.sync.save(endpoint, user, password, passphrase)
     }
 
     /// Run the sync now. Blocks on the network.
-    pub fn sync_now(&self) -> Result<crate::sync::SyncView, String> {
+    pub fn sync_now(&self) -> Result<holzwave_host::sync::SyncView, String> {
         self.sync.run()
     }
 
-    pub fn sync_off(&self) -> crate::sync::SyncView {
+    pub fn sync_off(&self) -> holzwave_host::sync::SyncView {
         self.sync.off()
     }
 
@@ -9891,7 +9891,7 @@ mod protocol {
     use serde_json::{Value, json};
 
     use crate::ai_device::{DeviceState, DeviceView};
-    use crate::local_network::LocalNetworkView;
+    use holzwave_host::local_network::LocalNetworkView;
     use holzwave_core::local_network::State as LnState;
     use crate::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, RemovalView, TicketView};
     use crate::commands::{
