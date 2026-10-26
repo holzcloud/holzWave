@@ -984,7 +984,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use crate::state::ShellSpec;
-    use crate::windows::{CursorSpot, Place};
+    use holzwave_host::windows::{CursorSpot, Place};
 
     /// The text a user types in these tests; it appears in test code only, so a hit anywhere else is a leak.
     const TEXT_CANARY: &str = "zq-host-text-8d3b27f1c4";

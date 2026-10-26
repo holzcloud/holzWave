@@ -46,7 +46,7 @@ use crate::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, Rem
 use crate::clipboard;
 use crate::integrate_host::{ConfirmAnswer, ContextAnswer, IntegrationFault, LaunchAnswer};
 use crate::state::{AppCore, AppInfo, Released, SettingsView, View};
-use crate::windows::DropKind;
+use holzwave_host::windows::DropKind;
 
 // ---- wire types ------------------------------------------------------------------------------------------------
 

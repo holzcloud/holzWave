@@ -41,7 +41,6 @@ mod menu;
 mod state;
 mod sync;
 mod textscale;
-mod windows;
 mod wsh_tunnel;
 
 use std::sync::Arc;
@@ -54,7 +53,7 @@ use tauri::{
 use holzwave_core::session::{DEFAULT_SIZE, MonitorRect, Placement, WindowState};
 use ai_host::AiParts;
 use state::{AppCore, Out, ShellSpec, Sink, Target};
-use windows::{
+use holzwave_host::windows::{
     CursorSpot, Frame, Normal, Place, WindowTracker, physical_pixels, pointer_is_global, position_beside,
     position_under_cursor, shared_divisor, units_per_point, window_under,
 };

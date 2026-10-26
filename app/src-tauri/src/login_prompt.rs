@@ -163,7 +163,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::windows::{CursorSpot, Place};
+    use holzwave_host::windows::{CursorSpot, Place};
     use holzwave_core::ssh::PromptLine;
 
     /// Records what is sent.

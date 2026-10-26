@@ -265,8 +265,7 @@ impl Drops {
         }
     }
 
-    /// Whether anything is in flight, for tests.
-    #[cfg(test)]
+    /// Whether anything is in flight (the tests of the app crate use it too).
     pub fn is_empty(&self) -> bool {
         self.0.is_none()
     }
@@ -313,7 +312,6 @@ impl Hovers {
     }
 
     /// The window the drag is over, for tests.
-    #[cfg(test)]
     pub fn over(&self) -> Option<&str> {
         self.0.as_ref().map(|h| h.over.as_str())
     }

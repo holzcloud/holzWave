@@ -523,7 +523,7 @@ mod tests {
 
     use crate::ai_host::AiParts;
     use crate::state::{AppCore, Out, ShellSpec, Sink, Target};
-    use crate::windows::{CursorSpot, Place};
+    use holzwave_host::windows::{CursorSpot, Place};
 
     #[cfg(unix)]
     use super::fake_cli;

@@ -51,7 +51,7 @@ use crate::integrate_host::{
     ConfirmAnswer, ConfirmKind, ContextAnswer, IntegrationEvent, IntegrationFault, IntegrationHost, IntegrationParts,
     LaunchAnswer, LaunchNote,
 };
-use crate::windows::{CursorSpot, DropKind, Drops, Hovers, Place};
+use holzwave_host::windows::{CursorSpot, DropKind, Drops, Hovers, Place};
 
 /// A layout file larger than this is not read: a real layout is a few KiB.
 const MAX_LAYOUT_BYTES: u64 = 1 << 20;
@@ -8639,7 +8639,7 @@ mod tests {
         let (core, rec, _dir, a, b, c, w) = three_panes("sleep 30");
 
         // Too old.
-        let long_ago = Instant::now().checked_sub(crate::windows::DROP_TTL * 2).expect("the clock has run that long");
+        let long_ago = Instant::now().checked_sub(holzwave_host::windows::DROP_TTL * 2).expect("the clock has run that long");
         lock(&core.drops).begin(DropKind::Pane, b, MAIN_WINDOW, long_ago);
         core.attach_pane_in(&w, b, Some(c), Some(Edge::Left), None).expect("answers");
         assert_eq!(panes_in(&core, MAIN_WINDOW), vec![a, b], "an expired drop moves nothing");

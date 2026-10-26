@@ -125,7 +125,7 @@ mod tests {
 
     use crate::ai_host::AiParts;
     use crate::state::ShellSpec;
-    use crate::windows::{CursorSpot, Place};
+    use holzwave_host::windows::{CursorSpot, Place};
 
     /// A scratch data directory, removed at the end of the test.
     struct Scratch(PathBuf);
