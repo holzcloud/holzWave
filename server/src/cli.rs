@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use crate::config::{ENV_KEY_FILE, Env};
+use crate::config::{self, ENV_KEY_FILE, Env, RealProbe};
 use crate::keyfile;
 
 /// What the server prints when it is called without a known subcommand.
@@ -15,6 +15,7 @@ usage: holzwave-server <subcommand> [options]
 
 subcommands:
   keygen [--out FILE]   create the server key file (FILE, or the file named by HOLZWAVE_SERVER_KEY_FILE)
+  check-config          check the configuration file and the key file, then exit
 ";
 
 /// The exit status for a call the server does not understand.
@@ -35,6 +36,7 @@ fn usage_error(problem: &str) -> u8 {
 fn run(args: &[String], env: &Env) -> u8 {
     match args.first().map(String::as_str) {
         Some("keygen") => keygen(&args[1..], env),
+        Some("check-config") => check_config(&args[1..], env),
         Some(name) => usage_error(&format!("unknown subcommand {name:?}")),
         None => {
             eprint!("{USAGE}");
@@ -69,6 +71,24 @@ fn keygen(args: &[String], env: &Env) -> u8 {
     match keyfile::generate(Path::new(&path)) {
         Ok(()) => {
             println!("wrote {}", keyfile::shown(Path::new(&path)));
+            0
+        }
+        Err(refusal) => {
+            eprintln!("holzwave-server: {refusal}");
+            FAILURE_STATUS
+        }
+    }
+}
+
+/// `check-config`: runs the same check as `serve` does before it opens a socket. Prints `configuration ok` and exits 0, or
+/// prints the one sentence of the refusal on standard error and exits 1.
+fn check_config(args: &[String], env: &Env) -> u8 {
+    if let Some(arg) = args.first() {
+        return usage_error(&format!("check-config takes no arguments, got {arg:?}"));
+    }
+    match config::prepare(env, &RealProbe) {
+        Ok(_) => {
+            println!("configuration ok");
             0
         }
         Err(refusal) => {

@@ -644,3 +644,526 @@ fn config_the_environment_and_the_file_must_be_there() {
     let error = prepare(&env, &probe).expect_err("default path is not served");
     assert!(error.sentence().contains(config::DEFAULT_CONFIG_PATH), "{error}");
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The refusal matrix: a valid file changed in one place, one distinctive word of the sentence
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Removes the key at a dotted path.
+fn remove(value: &mut Value, path: &str) {
+    let (parent, key) = path.rsplit_once('.').map_or((None, path), |(p, k)| (Some(p), k));
+    let mut at = value;
+    if let Some(parent) = parent {
+        for part in parent.split('.') {
+            at = &mut at[part];
+        }
+    }
+    at.as_object_mut().expect("an object").remove(key);
+}
+
+/// One change to a valid file.
+enum Edit {
+    Set(&'static str, Value),
+    Remove(&'static str),
+}
+
+fn apply(value: &mut Value, edit: &Edit) {
+    match edit {
+        Edit::Set(path, new) => set(value, path, new.clone()),
+        Edit::Remove(path) => remove(value, path),
+    }
+}
+
+/// The valid file for the mode `acme`.
+fn acme_base() -> Value {
+    let mut v = base();
+    set(
+        &mut v,
+        "tls",
+        json!({"mode": "acme", "contact": "mailto:admin@example.test", "domains": ["hw.example.test"]}),
+    );
+    v
+}
+
+/// The valid file for the mode `proxy`.
+fn proxy_base() -> Value {
+    let mut v = base();
+    set(&mut v, "tls", json!({"mode": "proxy", "trusted_proxies": ["10.0.0.0/8"]}));
+    v
+}
+
+/// Runs every row against `start` and checks that each is refused with a sentence that holds its word and fits on one line.
+/// Prints one `Matrix:` line per row for the record.
+fn matrix(group: &str, start: &Value, rows: Vec<(&str, Vec<Edit>, &str)>) {
+    let s = setup();
+    prepare_json(&s, start).unwrap_or_else(|e| panic!("{group}: the unedited file must be valid: {e}"));
+    for (name, edits, word) in rows {
+        let mut file = start.clone();
+        for edit in &edits {
+            apply(&mut file, edit);
+        }
+        let error = prepare_json(&s, &file).err().unwrap_or_else(|| panic!("{group}/{name}: must be refused"));
+        let sentence = error.sentence();
+        assert!(sentence.contains(word), "{group}/{name}: {sentence:?} lacks {word:?}");
+        assert!(!sentence.contains('\n') && !sentence.is_empty(), "{group}/{name}");
+        println!("Matrix: {group}/{name}: {sentence}");
+    }
+}
+
+#[test]
+fn matrix_the_public_url() {
+    matrix(
+        "public_url",
+        &base(),
+        vec![
+            ("missing", vec![Edit::Remove("public_url")], "public_url is not set"),
+            ("empty", vec![Edit::Set("public_url", json!(""))], "public_url is not set"),
+            ("http", vec![Edit::Set("public_url", json!("http://hw.example.test"))], "must start with https://"),
+            ("no scheme", vec![Edit::Set("public_url", json!("hw.example.test"))], "must start with https://"),
+            ("path", vec![Edit::Set("public_url", json!("https://hw.example.test/app"))], "must not have a path"),
+            ("query", vec![Edit::Set("public_url", json!("https://hw.example.test/?a=1"))], "must not have a query"),
+            ("fragment", vec![Edit::Set("public_url", json!("https://hw.example.test/#top"))], "must not have a fragment"),
+            ("user information", vec![Edit::Set("public_url", json!("https://me@hw.example.test"))], "user information"),
+            ("bad port", vec![Edit::Set("public_url", json!("https://hw.example.test:99999"))], "port"),
+            ("bad host", vec![Edit::Set("public_url", json!("https://hw_example.test"))], "not a valid name"),
+            ("ip address with passkeys", vec![Edit::Set("public_url", json!("https://192.0.2.7"))], "IP address"),
+            ("ipv6 address with passkeys", vec![Edit::Set("public_url", json!("https://[2001:db8::1]"))], "IP address"),
+        ],
+    );
+}
+
+#[test]
+fn matrix_an_ip_address_is_allowed_when_passkeys_are_off() {
+    let s = setup();
+    let mut file = base();
+    set(&mut file, "public_url", json!("https://192.0.2.7:8443"));
+    set(&mut file, "auth", json!({"passkey": false, "password_totp": true}));
+    let p = prepare_json(&s, &file).expect("an IP host without passkeys");
+    assert!(p.origin.host_is_ip());
+}
+
+#[test]
+fn matrix_the_tls_section() {
+    matrix(
+        "tls files",
+        &base(),
+        vec![
+            ("no tls section", vec![Edit::Remove("tls")], "no tls section"),
+            ("no mode", vec![Edit::Remove("tls.mode")], "is not valid"),
+            ("unknown mode", vec![Edit::Set("tls.mode", json!("self-signed"))], "unknown variant `self-signed`"),
+            ("no certificate key in the file", vec![Edit::Remove("tls.cert_file")], "needs cert_file and key_file"),
+            ("no key key in the file", vec![Edit::Remove("tls.key_file")], "needs cert_file and key_file"),
+            ("unreadable certificate", vec![Edit::Set("tls.cert_file", json!("/certs/missing.pem"))], "certificate file /certs/missing.pem"),
+            ("unreadable key", vec![Edit::Set("tls.key_file", json!("/certs/missing.key"))], "certificate key file /certs/missing.key"),
+        ],
+    );
+    matrix(
+        "tls acme",
+        &acme_base(),
+        vec![
+            ("no domains", vec![Edit::Remove("tls.domains")], "tls.domains"),
+            ("empty domains", vec![Edit::Set("tls.domains", json!([]))], "tls.domains"),
+            ("a bad domain", vec![Edit::Set("tls.domains", json!(["Not A Name"]))], "not a host name"),
+            ("an upper-case domain", vec![Edit::Set("tls.domains", json!(["HW.example.test"]))], "not a host name"),
+            ("no contact", vec![Edit::Remove("tls.contact")], "tls.contact"),
+            ("blank contact", vec![Edit::Set("tls.contact", json!("  "))], "tls.contact"),
+            ("contact is no address", vec![Edit::Set("tls.contact", json!("mailto:admin"))], "email address"),
+            ("directory over http", vec![Edit::Set("tls.directory_url", json!("http://ca.example.test/dir"))], "https address"),
+            ("unreadable root", vec![Edit::Set("tls.ca_file", json!("/certs/nothing.pem"))], "ACME root file"),
+        ],
+    );
+}
+
+#[test]
+fn matrix_the_proxy_mode_needs_proxies_it_can_trust() {
+    matrix(
+        "tls proxy",
+        &proxy_base(),
+        vec![
+            ("empty list", vec![Edit::Set("tls.trusted_proxies", json!([]))], "trusted_proxies"),
+            ("no list", vec![Edit::Remove("tls.trusted_proxies")], "trusted_proxies"),
+            ("not an address", vec![Edit::Set("tls.trusted_proxies", json!(["proxy.example.test"]))], "not an address"),
+            ("prefix over 32", vec![Edit::Set("tls.trusted_proxies", json!(["10.0.0.0/33"]))], "longer than 32"),
+            ("prefix over 128", vec![Edit::Set("tls.trusted_proxies", json!(["fd00::/129"]))], "longer than 128"),
+            ("everything", vec![Edit::Set("tls.trusted_proxies", json!(["0.0.0.0/0"]))], "every address"),
+            ("one bad entry among good ones", vec![Edit::Set("tls.trusted_proxies", json!(["10.0.0.0/8", "nope"]))], "nope"),
+        ],
+    );
+    let s = setup();
+    for good in [json!(["10.0.0.0/8"]), json!(["192.0.2.1"]), json!(["::1", "fd00::/8", "172.16.0.0/12"])] {
+        let mut file = proxy_base();
+        set(&mut file, "tls.trusted_proxies", good.clone());
+        prepare_json(&s, &file).unwrap_or_else(|e| panic!("{good} must be accepted: {e}"));
+    }
+}
+
+#[test]
+fn matrix_a_sign_in_method_is_required_and_a_provider_must_be_complete() {
+    let oidc = json!([{"id": "corp", "name": "Corp", "issuer": "https://login.example.test", "client_id": "abc",
+        "client_secret_file": "/secrets/oidc"}]);
+    let mut with_oidc = base();
+    set(&mut with_oidc, "auth", json!({"oidc": oidc}));
+    matrix(
+        "auth",
+        &base(),
+        vec![
+            ("all off", vec![Edit::Set("auth", json!({"passkey": false, "password_totp": false, "oidc": []}))], "no sign-in method"),
+            ("no auth section", vec![Edit::Remove("auth")], "no sign-in method"),
+            ("empty auth section", vec![Edit::Set("auth", json!({}))], "no sign-in method"),
+        ],
+    );
+    matrix(
+        "oidc",
+        &with_oidc,
+        vec![
+            ("unreadable secret file", vec![Edit::Set("auth.oidc", json!([{"id": "corp", "name": "Corp", "issuer": "https://login.example.test",
+                "client_id": "abc", "client_secret_file": "/secrets/none"}]))], "client secret file"),
+            ("issuer over http", vec![Edit::Set("auth.oidc", json!([{"id": "corp", "name": "Corp", "issuer": "http://login.example.test",
+                "client_id": "abc", "client_secret_file": "/secrets/oidc"}]))], "issuer must be an https"),
+            ("bad id", vec![Edit::Set("auth.oidc", json!([{"id": "Corp!", "name": "Corp", "issuer": "https://login.example.test",
+                "client_id": "abc", "client_secret_file": "/secrets/oidc"}]))], "lower-case"),
+            ("no client id", vec![Edit::Set("auth.oidc", json!([{"id": "corp", "name": "Corp", "issuer": "https://login.example.test",
+                "client_id": " ", "client_secret_file": "/secrets/oidc"}]))], "client_id"),
+            ("no secret in the file", vec![Edit::Set("auth.oidc", json!([{"id": "corp", "name": "Corp", "issuer": "https://login.example.test",
+                "client_id": "abc"}]))], "client_secret_file"),
+            ("twice", vec![Edit::Set("auth.oidc", json!([
+                {"id": "corp", "name": "Corp", "issuer": "https://login.example.test", "client_id": "abc", "client_secret_file": "/secrets/oidc"},
+                {"id": "corp", "name": "Other", "issuer": "https://other.example.test", "client_id": "def", "client_secret_file": "/secrets/oidc"}]))], "used twice"),
+        ],
+    );
+}
+
+#[test]
+fn matrix_the_worker_user_range() {
+    matrix(
+        "workers",
+        &base(),
+        vec![
+            ("below 1000", vec![Edit::Set("workers.uid_min", json!(999)), Edit::Set("workers.uid_max", json!(1500))], "below 1000"),
+            ("root", vec![Edit::Set("workers.uid_min", json!(0))], "below 1000"),
+            ("reversed", vec![Edit::Set("workers.uid_min", json!(30_000)), Edit::Set("workers.uid_max", json!(20_000))], "reversed"),
+            ("contains the server's own id", vec![Edit::Set("workers.uid_min", json!(10_000)), Edit::Set("workers.uid_max", json!(10_002))], "itself"),
+            ("ends at the largest id", vec![Edit::Set("workers.uid_max", json!(u32::MAX))], "reserves"),
+            ("relative helper", vec![Edit::Set("workers.helper_path", json!("helper"))], "absolute"),
+            ("relative worker", vec![Edit::Set("workers.worker_path", json!("bin/server"))], "absolute"),
+        ],
+    );
+}
+
+#[test]
+fn matrix_a_duration_or_a_limit_outside_its_bounds() {
+    matrix(
+        "bounds",
+        &base(),
+        vec![
+            ("idle zero", vec![Edit::Set("sessions.idle", json!("0s"))], "sessions.idle is 0s"),
+            ("absolute too long", vec![Edit::Set("sessions.absolute", json!("200d"))], "sessions.absolute is 200d"),
+            ("idle above absolute", vec![Edit::Set("sessions.idle", json!("2d"))], "longer than sessions.absolute"),
+            ("step up too long", vec![Edit::Set("sessions.step_up", json!("5h"))], "sessions.step_up"),
+            ("handshake too long", vec![Edit::Set("limits.handshake_timeout", json!("2h"))], "limits.handshake_timeout is 2h"),
+            ("no connections", vec![Edit::Set("limits.max_connections", json!(0))], "limits.max_connections is 0"),
+            ("too many connections", vec![Edit::Set("limits.max_connections", json!(10_000_000))], "limits.max_connections"),
+            ("per address above total", vec![Edit::Set("limits.max_connections", json!(10)), Edit::Set("limits.max_connections_per_address", json!(20))], "must not be larger"),
+            ("body too small", vec![Edit::Set("limits.api_body_bytes", json!(10))], "limits.api_body_bytes"),
+            ("lock for a week", vec![Edit::Set("limits.lock_duration", json!("7d"))], "limits.lock_duration"),
+            ("no panes", vec![Edit::Set("workers.max_panes", json!(0))], "workers.max_panes"),
+            ("too many panes", vec![Edit::Set("workers.max_panes", json!(100_000))], "workers.max_panes"),
+            ("scrollback", vec![Edit::Set("workers.max_scrollback_lines", json!(1))], "workers.max_scrollback_lines"),
+            ("process limit", vec![Edit::Set("workers.nproc", json!(1))], "workers.nproc"),
+            ("file limit", vec![Edit::Set("workers.nofile", json!(5))], "workers.nofile"),
+            ("worker idle", vec![Edit::Set("workers.idle_timeout", json!("10s"))], "workers.idle_timeout"),
+            ("upload zero", vec![Edit::Set("upload.max_bytes", json!(0))], "upload.max_bytes"),
+            ("upload huge", vec![Edit::Set("upload.max_bytes", json!(u64::MAX))], "upload.max_bytes"),
+            ("upload outside the home", vec![Edit::Set("upload.dir", json!("../elsewhere"))], "upload.dir"),
+            ("upload absolute", vec![Edit::Set("upload.dir", json!("/tmp"))], "upload.dir"),
+            ("upload empty", vec![Edit::Set("upload.dir", json!(""))], "upload.dir"),
+            ("listen", vec![Edit::Set("listen", json!("everywhere"))], "listen"),
+            ("relative data dir", vec![Edit::Set("data_dir", json!("data"))], "data_dir"),
+            ("relative runtime dir", vec![Edit::Set("runtime_dir", json!("run"))], "runtime_dir"),
+        ],
+    );
+}
+
+#[test]
+fn matrix_the_key_file() {
+    let s = setup();
+    let file = base();
+    let probe = probe_for(&file);
+    let dir = Scratch::new("matrix-key");
+    let run = |key_path: &Path| {
+        let mut env = s.env.clone();
+        env.insert("HOLZWAVE_SERVER_KEY_FILE".to_owned(), key_path.to_str().expect("utf-8 path").to_owned());
+        prepare(&env, &probe)
+    };
+    run(&s.key_path).expect("the good key file");
+
+    let missing = dir.join("missing.key");
+    let loose = dir.write_file("loose.key", key_line([4; 32]).as_bytes(), 0o644);
+    let malformed = dir.write_file("malformed.key", CANARY.as_bytes(), 0o600);
+    let zero = dir.write_file("zero.key", key_line([0; 32]).as_bytes(), 0o600);
+    let group_read = dir.write_file("mounted.key", key_line([4; 32]).as_bytes(), 0o440);
+    let link = dir.join("link.key");
+    symlink(&s.key_path, &link).expect("make a link");
+    for (name, path, word) in [
+        ("missing", &missing, "does not exist"),
+        ("loose", &loose, "too open"),
+        ("malformed", &malformed, "not a key made by"),
+        ("all zero", &zero, "all-zero"),
+        ("link", &link, "is a link"),
+    ] {
+        let error = run(path).err().unwrap_or_else(|| panic!("{name}: must be refused"));
+        assert!(error.sentence().contains(word), "{name}: {error}");
+        assert!(error.sentence().contains(path.to_str().expect("utf-8 path")), "{name}: names the file: {error}");
+        assert!(!error.sentence().contains(CANARY), "{name}: {error}");
+        println!("Matrix: key/{name}: {}", error.sentence().replacen(dir.path().to_str().expect("utf-8 path"), "<dir>", 1));
+    }
+    run(&group_read).expect("a mounted secret with the group read bit is accepted");
+    run(&dir.write_file("0400.key", key_line([4; 32]).as_bytes(), 0o400)).expect("a read-only key file");
+
+    // The variable itself.
+    let mut env = s.env.clone();
+    env.remove("HOLZWAVE_SERVER_KEY_FILE");
+    let error = prepare(&env, &probe).expect_err("no variable");
+    println!("Matrix: key/no variable: {error}");
+}
+
+#[test]
+fn matrix_a_file_that_is_valid_apart_from_the_key_still_loads_the_key_last() {
+    // The cheap and informative refusals come first: a broken file is reported even when the key file is also bad.
+    let s = setup();
+    let mut env = s.env.clone();
+    env.insert("HOLZWAVE_SERVER_KEY_FILE".to_owned(), "/nonexistent/key".to_owned());
+    let mut file = base();
+    remove(&mut file, "public_url");
+    let error = prepare(&env, &probe_for(&file)).expect_err("two problems");
+    assert!(error.sentence().contains("public_url"), "{error}");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The prohibitions: no mode without sign-in, no default administrator, no plain public listener
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[test]
+fn prohibited_no_configuration_serves_without_sign_in() {
+    let s = setup();
+    let cases: Vec<(&str, Value, &str)> = {
+        let mut off = base();
+        set(&mut off, "auth", json!({"passkey": false, "password_totp": false, "oidc": []}));
+        let mut disabled = base();
+        set(&mut disabled, "auth.disabled", json!(true));
+        let mut admin = base();
+        set(&mut admin, "admin_password", json!("x"));
+        let mut none = base();
+        set(&mut none, "tls", json!({"mode": "none"}));
+        let mut insecure = base();
+        set(&mut insecure, "insecure", json!(true));
+        vec![
+            ("auth all off", off, "no sign-in method"),
+            ("auth.disabled", disabled, "unknown field `disabled`"),
+            ("admin_password", admin, "unknown field `admin_password`"),
+            ("tls.mode none", none, "unknown variant `none`"),
+            ("insecure", insecure, "unknown field `insecure`"),
+        ]
+    };
+    for (name, file, word) in cases {
+        let error = prepare_json(&s, &file).err().unwrap_or_else(|| panic!("{name}: must be refused"));
+        assert!(error.sentence().contains(word), "{name}: {error}");
+        println!("Prohibitions: {name}: {error}");
+    }
+}
+
+#[test]
+fn prohibited_other_spellings_of_the_same_things_are_unknown_too() {
+    let s = setup();
+    for (path, value) in [
+        ("auth.enabled", json!(false)),
+        ("auth.none", json!(true)),
+        ("auth.anonymous", json!(true)),
+        ("auth.required", json!(false)),
+        ("admin", json!({"user": "admin", "password": "admin"})),
+        ("admin_user", json!("admin")),
+        ("password", json!("secret")),
+        ("default_admin", json!(true)),
+        ("bootstrap_password", json!("x")),
+        ("no_auth", json!(true)),
+        ("tls.insecure", json!(true)),
+        ("tls.plain", json!(true)),
+        ("tls.disabled", json!(true)),
+        ("http", json!({"listen": "0.0.0.0:80"})),
+        ("listen_plain", json!("0.0.0.0:80")),
+    ] {
+        let mut file = base();
+        set(&mut file, path, value);
+        let error = prepare_json(&s, &file).err().unwrap_or_else(|| panic!("{path}: must be refused"));
+        assert!(error.sentence().contains("unknown field"), "{path}: {error}");
+    }
+    for mode in ["none", "http", "plain", "off", "disabled", ""] {
+        let mut file = base();
+        set(&mut file, "tls", json!({"mode": mode}));
+        assert!(prepare_json(&s, &file).is_err(), "tls.mode {mode:?} must be refused");
+    }
+}
+
+#[test]
+fn prohibited_nothing_defaults_open() {
+    let s = setup();
+    // The auth section starts with every method off.
+    let auth = config::Auth::default();
+    assert!(!auth.passkey && !auth.password_totp && auth.oidc.is_empty());
+    // An empty file, a file without TLS and a file without a method are refused, each for its own missing piece.
+    let probe = |v: Value| FakeProbe { config: Some(v.to_string()), readable: vec![], uid: 1 };
+    let word_of = |v: Value| prepare(&s.env, &probe(v)).expect_err("refused").sentence().to_owned();
+    assert!(word_of(json!({})).contains("public_url is not set"));
+    assert!(word_of(json!({"public_url": "https://hw.example.test"})).contains("no tls section"));
+    assert!(
+        word_of(json!({"public_url": "https://hw.example.test", "tls": {"mode": "proxy", "trusted_proxies": ["10.0.0.0/8"]}}))
+            .contains("no sign-in method")
+    );
+    // A proxy-mode file with sign-in, a public URL and a proxy list is the only way to a plain listener.
+    prepare(
+        &s.env,
+        &probe(json!({"public_url": "https://hw.example.test", "auth": {"password_totp": true},
+            "tls": {"mode": "proxy", "trusted_proxies": ["10.0.0.0/8"]}})),
+    )
+    .expect("the one plain-text mode, with its list");
+}
+
+#[test]
+fn prohibited_the_key_never_reaches_a_sentence_or_an_output() {
+    let dir = Scratch::new("canary");
+    let key = dir.write_file("canary.key", format!("{CANARY}\n").as_bytes(), 0o600);
+    let good_key = dir.join("good.key");
+    keyfile::generate(&good_key).expect("generate");
+    let good_line = std::fs::read_to_string(&good_key).expect("read the key");
+    let secret = good_line.trim_end().strip_prefix("hws1:").expect("prefix").to_owned();
+
+    // 1. The refusal sentence of a malformed file holds none of its content.
+    let sentence = ServerKey::load(&key).expect_err("malformed").to_string();
+    assert!(!sentence.contains(CANARY));
+
+    // 2. The commands print no key: check-config with the canary file, and with the good file.
+    let cert = dir.write_file("cert.pem", b"cert", 0o644);
+    let cert_key = dir.write_file("cert.key", b"key", 0o600);
+    let config = dir.write_file(
+        "server.json",
+        json!({"public_url": "https://hw.example.test", "auth": {"passkey": true},
+            "tls": {"mode": "files", "cert_file": cert, "key_file": cert_key}})
+        .to_string()
+        .as_bytes(),
+        0o644,
+    );
+    for (key_path, expect_ok) in [(&key, false), (&good_key, true)] {
+        let out = server(
+            &["check-config"],
+            &[
+                ("HOLZWAVE_SERVER_CONFIG", config.to_str().expect("utf-8 path")),
+                ("HOLZWAVE_SERVER_KEY_FILE", key_path.to_str().expect("utf-8 path")),
+            ],
+        );
+        let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+        assert_eq!(out.status.success(), expect_ok, "stdout: {stdout} stderr: {stderr}");
+        for seen in [&stdout, &stderr] {
+            assert!(!seen.contains(CANARY) && !seen.contains(&secret), "output holds key material: {seen}");
+        }
+    }
+
+    // 3. A key that is derived is not the key, and a derived key is not in the key's Debug text.
+    let loaded = ServerKey::load(&good_key).expect("load");
+    assert!(!format!("{loaded:?}").contains(&secret));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The command line
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// A scratch directory that holds a valid configuration (mode `files`) and a key file made by `keygen`.
+struct Installed {
+    dir: Scratch,
+    config: PathBuf,
+    key: PathBuf,
+}
+
+fn installed(config: &Value) -> Installed {
+    let dir = Scratch::new("cli");
+    let cert = dir.write_file("cert.pem", b"-----BEGIN CERTIFICATE-----", 0o644);
+    let cert_key = dir.write_file("cert.key", b"-----BEGIN PRIVATE KEY-----", 0o600);
+    let mut config = config.clone();
+    set(&mut config, "tls", json!({"mode": "files", "cert_file": cert, "key_file": cert_key}));
+    let config_path = dir.write_file("server.json", config.to_string().as_bytes(), 0o644);
+    let key = dir.join("server.key");
+    assert_eq!(server(&["keygen", "--out", key.to_str().expect("utf-8 path")], &[]).status.code(), Some(0));
+    Installed { dir, config: config_path, key }
+}
+
+fn check_config(setup: &Installed) -> Output {
+    server(
+        &["check-config"],
+        &[
+            ("HOLZWAVE_SERVER_CONFIG", setup.config.to_str().expect("utf-8 path")),
+            ("HOLZWAVE_SERVER_KEY_FILE", setup.key.to_str().expect("utf-8 path")),
+        ],
+    )
+}
+
+#[test]
+fn cli_check_config_says_ok_for_a_valid_setup() {
+    let setup = installed(&base());
+    let out = check_config(&setup);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "configuration ok\n");
+    assert!(out.stderr.is_empty());
+    let _ = &setup.dir;
+}
+
+#[test]
+fn cli_check_config_refuses_an_invalid_setup_with_one_sentence_on_stderr() {
+    let mut file = base();
+    set(&mut file, "auth", json!({"passkey": false}));
+    let setup = installed(&file);
+    let out = check_config(&setup);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty(), "nothing on stdout: {}", text(&out.stdout));
+    let err = text(&out.stderr);
+    assert!(err.contains("no sign-in method"), "{err}");
+    assert_eq!(err.lines().count(), 1, "one sentence: {err}");
+
+    // A loose key file, with the sentence naming it.
+    let setup = installed(&base());
+    std::fs::set_permissions(&setup.key, std::fs::Permissions::from_mode(0o666)).expect("loosen the key file");
+    let out = check_config(&setup);
+    assert_eq!(out.status.code(), Some(1));
+    let err = text(&out.stderr);
+    assert!(err.contains(setup.key.to_str().expect("utf-8 path")) && err.contains("too open"), "{err}");
+
+    // An unknown key in the real file.
+    let setup = installed(&json!({"public_url": "https://hw.example.test", "auth": {"passkey": true}, "insecure": true}));
+    let out = check_config(&setup);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("unknown field `insecure`"), "{}", text(&out.stderr));
+}
+
+#[test]
+fn cli_check_config_with_no_environment_names_the_missing_variable() {
+    let out = server(&["check-config"], &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert!(text(&out.stderr).contains("HOLZWAVE_SERVER_KEY_FILE"), "{}", text(&out.stderr));
+
+    // With the key variable and no file at the default place, the file is what is missing, and the sentence says how to name it.
+    let dir = Scratch::new("cli-env");
+    let key = dir.join("k");
+    server(&["keygen", "--out", key.to_str().expect("utf-8 path")], &[]);
+    let out = server(&["check-config"], &[("HOLZWAVE_SERVER_KEY_FILE", key.to_str().expect("utf-8 path"))]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("HOLZWAVE_SERVER_CONFIG"), "{}", text(&out.stderr));
+}
+
+#[test]
+fn cli_the_usage_lists_both_commands_and_a_bad_call_is_status_two() {
+    let out = server(&[], &[]);
+    assert_eq!(out.status.code(), Some(2));
+    let usage = text(&out.stderr);
+    assert!(usage.contains("keygen") && usage.contains("check-config"), "{usage}");
+    assert_eq!(server(&["check-config", "extra"], &[]).status.code(), Some(2));
+    assert_eq!(server(&["serve"], &[]).status.code(), Some(2), "a command that does not exist yet is not run");
+}
