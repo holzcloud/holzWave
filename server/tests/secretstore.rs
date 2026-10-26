@@ -4,6 +4,7 @@
 mod scratch;
 
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 
 use holzwave_core::secrets::SecretStore;
 use holzwave_server::unlock::{
@@ -446,4 +447,603 @@ fn recovery_a_wrong_code_unwraps_nothing_and_the_right_one_opens_the_store() {
     let right = parse_recovery_code(&text.to_lowercase()).unwrap();
     fresh.unlock(SlotKind::Recovery, &kek_from_recovery(&right, &salt).unwrap()).unwrap();
     assert_eq!(fresh.get("ssh:a").unwrap().as_deref(), Some("hunter2"));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The format as documented, tampering, limits, two writers, a crash and redaction.
+
+const HEADER: usize = 7;
+const SLOT: usize = 89;
+
+/// A store file written by hand from the documented format, with the cipher used directly. This is the second
+/// implementation that keeps the format honest, and it makes files the public API cannot (4097 entries).
+fn hand_built(dek: &[u8; 32], slots: &[(u8, [u8; 16], [u8; 32])], entries: &[(String, String)]) -> Vec<u8> {
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+    use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+
+    let seal = |key: &[u8; 32], nonce: [u8; 24], aad: &[u8], plain: &[u8]| {
+        XChaCha20Poly1305::new(key.into()).encrypt(&XNonce::from(nonce), Payload { msg: plain, aad }).unwrap()
+    };
+    let mut file = b"HWSS".to_vec();
+    file.extend_from_slice(&1u16.to_be_bytes());
+    file.push(u8::try_from(slots.len()).unwrap());
+    for (n, (kind, slot_id, kek)) in slots.iter().enumerate() {
+        let nonce = [0x40 + u8::try_from(n).unwrap(); 24];
+        let mut aad = b"HWSS".to_vec();
+        aad.extend_from_slice(&1u16.to_be_bytes());
+        aad.push(*kind);
+        aad.extend_from_slice(slot_id);
+        file.push(*kind);
+        file.extend_from_slice(slot_id);
+        file.extend_from_slice(&nonce);
+        file.extend_from_slice(&seal(kek, nonce, &aad, dek));
+    }
+    let map: serde_json::Map<String, serde_json::Value> =
+        entries.iter().map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone()))).collect();
+    let body_nonce = [0x77u8; 24];
+    let mut aad = b"HWSS".to_vec();
+    aad.extend_from_slice(&1u16.to_be_bytes());
+    file.extend_from_slice(&body_nonce);
+    file.extend_from_slice(&seal(dek, body_nonce, &aad, &serde_json::to_vec(&map).unwrap()));
+    file
+}
+
+fn write_file(path: &std::path::Path, bytes: &[u8]) {
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn format_a_file_written_by_hand_from_the_documentation_opens() {
+    let dir = Scratch::new("store-hand");
+    let path = dir.join("secrets.store");
+    let bytes = hand_built(
+        &[0x11; 32],
+        &[(1, id(1), [1; 32]), (3, id(2), [2; 32])],
+        &[("ssh:a".into(), "hunter2".into()), ("b".into(), "two".into())],
+    );
+    write_file(&path, &bytes);
+    for (kind, n) in [(SlotKind::Password, 1u8), (SlotKind::Prf, 2)] {
+        let store = EncryptedFileStore::open(&path).unwrap();
+        store.unlock(kind, &kek(n)).unwrap();
+        assert_eq!(store.get("ssh:a").unwrap().as_deref(), Some("hunter2"));
+        assert_eq!(store.get("b").unwrap().as_deref(), Some("two"));
+    }
+    // A write by the store keeps the slots and the data key.
+    let store = EncryptedFileStore::open(&path).unwrap();
+    store.unlock(SlotKind::Prf, &kek(2)).unwrap();
+    store.set("c", "three").unwrap();
+    let again = EncryptedFileStore::open(&path).unwrap();
+    again.unlock(SlotKind::Password, &kek(1)).unwrap();
+    assert_eq!(again.get("c").unwrap().as_deref(), Some("three"));
+    assert_eq!(again.slots().unwrap(), vec![(SlotKind::Password, id(1)), (SlotKind::Prf, id(2))]);
+}
+
+/// A store with two slots (password key 1, passphrase key 2) and three entries, and its bytes.
+fn two_slot_store(dir: &Scratch) -> (std::path::PathBuf, Vec<u8>) {
+    let (store, path) = new_store(dir);
+    store.add_slot(SlotKind::Passphrase, id(2), &kek(2)).unwrap();
+    store.set("ssh:a", "hunter2").unwrap();
+    store.set("ssh:b", "swordfish").unwrap();
+    store.set("ai:key", "sk-test-0001").unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    (path, bytes)
+}
+
+const ORIGINAL: [(&str, &str); 3] = [("ssh:a", "hunter2"), ("ssh:b", "swordfish"), ("ai:key", "sk-test-0001")];
+
+/// What one damaged file does: the class of the first refusal of `open`, or of each of the two unlocks.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]
+enum Outcome {
+    FormatOnOpen,
+    LimitOnOpen,
+    Locked,
+    Unlocked,
+}
+
+/// Open the file at `path` and try both keys. An unlock that succeeds must read the original values and nothing else.
+fn try_both(path: &std::path::Path) -> [Outcome; 2] {
+    let store = match EncryptedFileStore::open(path) {
+        Ok(store) => store,
+        Err(StoreError::Format(_)) => return [Outcome::FormatOnOpen; 2],
+        Err(StoreError::Limit(_)) => return [Outcome::LimitOnOpen; 2],
+        Err(other) => panic!("a damaged file gave {other:?}, which is neither a format error nor locked"),
+    };
+    let mut out = [Outcome::Locked; 2];
+    for (n, (kind, key)) in [(SlotKind::Password, 1u8), (SlotKind::Passphrase, 2)].into_iter().enumerate() {
+        match store.unlock(kind, &kek(key)) {
+            Ok(()) => {
+                for (account, value) in ORIGINAL {
+                    assert_eq!(store.get(account).unwrap().as_deref(), Some(value), "an unlock gave a changed value");
+                }
+                store.lock();
+                out[n] = Outcome::Unlocked;
+            }
+            Err(StoreError::Locked) => {}
+            Err(StoreError::Format(_)) => out[n] = Outcome::FormatOnOpen,
+            Err(other) => panic!("an unlock of a damaged file gave {other:?}"),
+        }
+    }
+    out
+}
+
+#[test]
+fn tampering_any_region_fails_closed() {
+    let dir = Scratch::new("store-tamper");
+    let (path, original) = two_slot_store(&dir);
+    assert_eq!(try_both(&path), [Outcome::Unlocked; 2], "the unflipped file unlocks");
+    let slots_end = HEADER + 2 * SLOT;
+    let mut classes = std::collections::BTreeMap::<String, usize>::new();
+    // A flip in one slot leaves the other slot's key working, unless the flip makes the slot table unreadable (an unknown kind
+    // byte), which refuses the whole file at open. Either way the flipped slot itself stays closed.
+    let other_slot = |position_in_slot: usize, outcome: Outcome| {
+        if position_in_slot == 0 {
+            assert!(matches!(outcome, Outcome::Unlocked | Outcome::FormatOnOpen), "{outcome:?}");
+        } else {
+            assert_eq!(outcome, Outcome::Unlocked, "a flip at {position_in_slot} of a slot closed the other slot");
+        }
+    };
+    for mask in [0x01u8, 0x80, 0xff] {
+        for offset in 0..original.len() {
+            let mut bytes = original.clone();
+            bytes[offset] ^= mask;
+            write_file(&path, &bytes);
+            let outcome = try_both(&path);
+            // The slot a flip is in is the only way in that it can close; a flip in the header or the body closes both.
+            let region = if offset < HEADER {
+                "header"
+            } else if offset < slots_end {
+                if (offset - HEADER) / SLOT == 0 { "slot 0" } else { "slot 1" }
+            } else if offset < slots_end + 24 {
+                "body nonce"
+            } else {
+                "body ciphertext and tag"
+            };
+            match region {
+                "slot 0" => {
+                    assert_ne!(outcome[0], Outcome::Unlocked, "offset {offset} mask {mask:#x}: the flipped slot still opens");
+                    other_slot(offset - HEADER, outcome[1]);
+                }
+                "slot 1" => {
+                    assert_ne!(outcome[1], Outcome::Unlocked, "offset {offset} mask {mask:#x}: the flipped slot still opens");
+                    other_slot(offset - HEADER - SLOT, outcome[0]);
+                }
+                _ => {
+                    assert!(
+                        outcome.iter().all(|o| *o != Outcome::Unlocked),
+                        "offset {offset} mask {mask:#x} in {region}: a changed file unlocks ({outcome:?})"
+                    );
+                }
+            }
+            for o in outcome {
+                *classes.entry(format!("{region}: {o:?}")).or_default() += 1;
+            }
+        }
+    }
+    let total: usize = classes.values().sum();
+    eprintln!("Tamper classes ({} flips, {total} outcomes): {classes:?}", original.len() * 3);
+    write_file(&path, &original);
+    assert_eq!(try_both(&path), [Outcome::Unlocked; 2]);
+}
+
+#[test]
+fn tampering_under_an_unlocked_store_fails_closed_and_is_not_overwritten() {
+    let dir = Scratch::new("store-tamper-open");
+    let (store, path) = new_store(&dir);
+    store.set("a", "one").unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x01;
+    write_file(&path, &bytes);
+    assert_eq!(store.get("a").unwrap_err().to_string(), LOCKED);
+    assert_eq!(store.set("a", "two").unwrap_err().to_string(), LOCKED);
+    assert_eq!(store.delete("a").unwrap_err().to_string(), LOCKED);
+    assert!(matches!(store.add_slot(SlotKind::Prf, id(5), &kek(5)).unwrap_err(), StoreError::Locked));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes, "a failed write must leave the damaged file as it was");
+}
+
+#[test]
+fn truncation_and_appending_fail_closed() {
+    let dir = Scratch::new("store-truncate");
+    let (path, original) = two_slot_store(&dir);
+    let mut classes = std::collections::BTreeMap::<String, usize>::new();
+    for length in 0..original.len() {
+        write_file(&path, &original[..length]);
+        let outcome = try_both(&path);
+        assert!(outcome.iter().all(|o| *o != Outcome::Unlocked), "a prefix of {length} bytes unlocks");
+        *classes.entry(format!("{:?}", outcome[0])).or_default() += 1;
+    }
+    let mut longer = original.clone();
+    longer.push(0);
+    write_file(&path, &longer);
+    let outcome = try_both(&path);
+    assert!(outcome.iter().all(|o| *o != Outcome::Unlocked), "an appended byte unlocks");
+    eprintln!("Truncation classes ({} prefixes): {classes:?}; appended byte: {outcome:?}", original.len());
+    write_file(&path, &original);
+    assert_eq!(try_both(&path), [Outcome::Unlocked; 2]);
+}
+
+#[test]
+fn swapping_two_slots_fails_closed() {
+    let dir = Scratch::new("store-swap");
+    let (path, original) = two_slot_store(&dir);
+    let a = HEADER;
+    let b = HEADER + SLOT;
+    // Parts of slot 0 and slot 1: kind and id (0..17), the nonce (17..41), the wrapped key and tag (41..89).
+    for (name, from, to) in [("kind and id", 0, 17), ("nonce", 17, 41), ("wrapped key", 41, 89), ("nonce and wrapped key", 17, 89)] {
+        let mut bytes = original.clone();
+        let (first, second) = (bytes[a + from..a + to].to_vec(), bytes[b + from..b + to].to_vec());
+        bytes[a + from..a + to].copy_from_slice(&second);
+        bytes[b + from..b + to].copy_from_slice(&first);
+        write_file(&path, &bytes);
+        let outcome = try_both(&path);
+        assert!(outcome.iter().all(|o| *o != Outcome::Unlocked), "swapping the {name} of two slots still unlocks: {outcome:?}");
+    }
+    // The two slots exchanged as whole records stay what they were: a slot is bound to its own kind and id, not to a place.
+    let mut bytes = original.clone();
+    let (first, second) = (bytes[a..a + SLOT].to_vec(), bytes[b..b + SLOT].to_vec());
+    bytes[a..a + SLOT].copy_from_slice(&second);
+    bytes[b..b + SLOT].copy_from_slice(&first);
+    write_file(&path, &bytes);
+    assert_eq!(try_both(&path), [Outcome::Unlocked; 2]);
+}
+
+#[test]
+fn a_wrong_key_is_the_same_failure_as_a_damaged_slot() {
+    let dir = Scratch::new("store-indistinct");
+    let (path, original) = two_slot_store(&dir);
+    let wrong = EncryptedFileStore::open(&path).unwrap().unlock(SlotKind::Password, &kek(99)).unwrap_err().to_string();
+    let no_such_kind = EncryptedFileStore::open(&path).unwrap().unlock(SlotKind::Recovery, &kek(1)).unwrap_err().to_string();
+    let mut bytes = original;
+    bytes[HEADER + 60] ^= 0x01;
+    write_file(&path, &bytes);
+    let damaged = EncryptedFileStore::open(&path).unwrap().unlock(SlotKind::Password, &kek(1)).unwrap_err().to_string();
+    assert_eq!(wrong, LOCKED);
+    assert_eq!(no_such_kind, LOCKED);
+    assert_eq!(damaged, LOCKED);
+}
+
+#[test]
+fn a_wrong_key_changes_nothing() {
+    let dir = Scratch::new("store-nothing");
+    let (store, path) = new_store(&dir);
+    store.set("a", "one").unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let dir_entries = |d: &Scratch| {
+        let mut names: Vec<_> = std::fs::read_dir(d.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        names.sort();
+        names
+    };
+    let listing = dir_entries(&dir);
+
+    let opened = EncryptedFileStore::open(&path).unwrap();
+    assert_eq!(opened.unlock(SlotKind::Password, &kek(2)).unwrap_err().to_string(), LOCKED);
+    assert_eq!(opened.set("a", "two").unwrap_err().to_string(), LOCKED);
+    assert_eq!(opened.delete("a").unwrap_err().to_string(), LOCKED);
+    assert_eq!(opened.get("a").unwrap_err().to_string(), LOCKED);
+    assert!(matches!(opened.add_slot(SlotKind::Prf, id(3), &kek(3)).unwrap_err(), StoreError::Locked));
+    store.lock();
+    assert!(store.set("a", "three").is_err());
+
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    assert_eq!(dir_entries(&dir), listing, "no file appeared or went");
+}
+
+#[test]
+fn limits_a_file_over_four_mib_is_refused() {
+    let dir = Scratch::new("store-limit-file");
+    let (path, original) = two_slot_store(&dir);
+    let mut huge = original.clone();
+    huge.resize(4 * 1024 * 1024 + 1, 0);
+    write_file(&path, &huge);
+    assert!(matches!(EncryptedFileStore::open(&path), Err(StoreError::Limit(_))));
+    // Exactly at the cap the size is no reason to refuse (the padding is a damaged body, which unlocks to nothing).
+    let mut at_cap = original.clone();
+    at_cap.resize(4 * 1024 * 1024, 0);
+    write_file(&path, &at_cap);
+    let store = EncryptedFileStore::open(&path).unwrap();
+    assert!(matches!(store.unlock(SlotKind::Password, &kek(1)).unwrap_err(), StoreError::Locked));
+    write_file(&path, &vec![0u8; 5 * 1024 * 1024]);
+    assert!(EncryptedFileStore::open(&path).is_err());
+}
+
+#[test]
+fn limits_4096_entries_are_the_most_and_4097_are_refused() {
+    let dir = Scratch::new("store-limit-entries");
+    let path = dir.join("secrets.store");
+    let entry = |n: usize| (format!("account:{n:05}"), "v".to_string());
+    let at_cap: Vec<_> = (0..4096).map(entry).collect();
+    write_file(&path, &hand_built(&[0x11; 32], &[(1, id(1), [1; 32])], &at_cap));
+    let store = EncryptedFileStore::open(&path).unwrap();
+    store.unlock(SlotKind::Password, &kek(1)).unwrap();
+    assert_eq!(store.get("account:04095").unwrap().as_deref(), Some("v"));
+    // A replacement is not a new entry; a new account is refused and the file stays as it was.
+    store.set("account:00000", "w").unwrap();
+    let before = std::fs::read(&path).unwrap();
+    assert!(matches!(store.set("one-more", "x").unwrap_err().to_string().as_str(), s if s.contains("4096")));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    store.delete("account:00001").unwrap();
+    store.set("one-more", "x").unwrap();
+
+    let too_many: Vec<_> = (0..4097).map(entry).collect();
+    write_file(&path, &hand_built(&[0x11; 32], &[(1, id(1), [1; 32])], &too_many));
+    let store = EncryptedFileStore::open(&path).unwrap();
+    assert!(matches!(store.unlock(SlotKind::Password, &kek(1)).unwrap_err(), StoreError::Locked));
+}
+
+#[test]
+fn limits_a_write_that_would_pass_four_mib_is_refused_and_changes_nothing() {
+    let dir = Scratch::new("store-limit-write");
+    let path = dir.join("secrets.store");
+    let big = "x".repeat(4096);
+    // 1018 entries of 4096 bytes are 4 189 208 bytes in the file, so the second further entry passes the cap of 4 194 304.
+    let entries: Vec<_> = (0..1018).map(|n| (format!("account:{n:05}"), big.clone())).collect();
+    write_file(&path, &hand_built(&[0x11; 32], &[(1, id(1), [1; 32])], &entries));
+    let store = EncryptedFileStore::open(&path).unwrap();
+    store.unlock(SlotKind::Password, &kek(1)).unwrap();
+    let mut refused = false;
+    for n in 1018..1100 {
+        let before = std::fs::read(&path).unwrap();
+        assert!(before.len() <= 4 * 1024 * 1024);
+        match store.set(&format!("account:{n:05}"), &big) {
+            Ok(()) => {}
+            Err(e) => {
+                assert!(e.to_string().contains("4 MiB"), "{e}");
+                assert_eq!(std::fs::read(&path).unwrap(), before);
+                refused = true;
+                break;
+            }
+        }
+    }
+    assert!(refused, "the 4 MiB cap was never reached");
+    assert!(store.get("account:00000").unwrap().is_some());
+}
+
+#[test]
+fn limits_a_value_over_the_trait_limit_is_refused() {
+    let dir = Scratch::new("store-limit-value");
+    let (store, path) = new_store(&dir);
+    let before = std::fs::read(&path).unwrap();
+    assert!(store.set("a", &"x".repeat(4097)).is_err());
+    assert!(store.set(&"a".repeat(4097), "x").is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+fn unlocked(path: &std::path::Path) -> EncryptedFileStore {
+    let store = EncryptedFileStore::open(path).unwrap();
+    store.unlock(SlotKind::Password, &kek(1)).unwrap();
+    store
+}
+
+#[test]
+fn two_writers_threads() {
+    let dir = Scratch::new("store-threads");
+    let (_first, path) = new_store(&dir);
+    let (a, b) = (unlocked(&path), unlocked(&path));
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            for n in 0..100 {
+                a.set(&format!("a:{n:03}"), &format!("from a {n}")).unwrap();
+            }
+        });
+        scope.spawn(|| {
+            for n in 0..100 {
+                b.set(&format!("b:{n:03}"), &format!("from b {n}")).unwrap();
+            }
+        });
+    });
+    let reader = unlocked(&path);
+    let mut found = 0;
+    for n in 0..100 {
+        assert_eq!(reader.get(&format!("a:{n:03}")).unwrap().as_deref(), Some(format!("from a {n}").as_str()));
+        assert_eq!(reader.get(&format!("b:{n:03}")).unwrap().as_deref(), Some(format!("from b {n}").as_str()));
+        found += 2;
+    }
+    eprintln!("Two writers (threads): expected 200, found {found}");
+    assert_eq!(found, 200);
+}
+
+/// The role of a child process of `two_writers_processes`: with the environment variable set it writes its 100 entries
+/// and leaves a marker file; without it the test is a no-op.
+#[test]
+fn two_writers_child_role() {
+    let (Ok(role), Ok(path)) = (std::env::var("HW_STORE_TEST_ROLE"), std::env::var("HW_STORE_TEST_PATH")) else {
+        return;
+    };
+    let store = unlocked(Path::new(&path));
+    for n in 0..100 {
+        store.set(&format!("{role}:{n:03}"), &format!("from {role} {n}")).unwrap();
+    }
+    write_file(&Path::new(&path).with_file_name(format!("done-{role}")), b"done");
+}
+
+#[test]
+fn two_writers_processes() {
+    let dir = Scratch::new("store-processes");
+    let (_first, path) = new_store(&dir);
+    let exe = std::env::current_exe().unwrap();
+    let mut children: Vec<_> = ["p", "q"]
+        .into_iter()
+        .map(|role| {
+            std::process::Command::new(&exe)
+                .args(["two_writers_child_role", "--exact", "--test-threads=1", "--nocapture"])
+                .env("HW_STORE_TEST_ROLE", role)
+                .env("HW_STORE_TEST_PATH", &path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::inherit())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    for child in &mut children {
+        assert!(child.wait().unwrap().success(), "a writer process failed");
+    }
+    for role in ["p", "q"] {
+        assert!(dir.join(&format!("done-{role}")).exists(), "the writer {role} never ran its test");
+    }
+    let reader = unlocked(&path);
+    let mut found = 0;
+    for n in 0..100 {
+        for role in ["p", "q"] {
+            assert_eq!(reader.get(&format!("{role}:{n:03}")).unwrap().as_deref(), Some(format!("from {role} {n}").as_str()), "{role} {n}");
+            found += 1;
+        }
+    }
+    eprintln!("Two writers (processes): expected 200, found {found}");
+    assert_eq!(found, 200);
+}
+
+#[test]
+fn the_same_key_written_by_both_ends_with_one_of_the_values() {
+    let dir = Scratch::new("store-same-key");
+    let (_first, path) = new_store(&dir);
+    let (a, b) = (unlocked(&path), unlocked(&path));
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            for n in 0..25 {
+                a.set("shared", "value from a").unwrap();
+                a.set(&format!("a:{n}"), "a").unwrap();
+            }
+        });
+        scope.spawn(|| {
+            for n in 0..25 {
+                b.set("shared", "value from b").unwrap();
+                b.set(&format!("b:{n}"), "b").unwrap();
+            }
+        });
+    });
+    let reader = unlocked(&path);
+    let shared = reader.get("shared").unwrap().unwrap();
+    assert!(shared == "value from a" || shared == "value from b", "{shared}");
+    for n in 0..25 {
+        assert_eq!(reader.get(&format!("a:{n}")).unwrap().as_deref(), Some("a"));
+        assert_eq!(reader.get(&format!("b:{n}")).unwrap().as_deref(), Some("b"));
+    }
+}
+
+#[test]
+fn a_slot_added_through_one_object_survives_the_writes_of_another() {
+    let dir = Scratch::new("store-slot-concurrent");
+    let (_first, path) = new_store(&dir);
+    let (a, b) = (unlocked(&path), unlocked(&path));
+    a.add_slot(SlotKind::Passphrase, id(2), &kek(2)).unwrap();
+    b.set("after", "the slot").unwrap();
+    let fresh = EncryptedFileStore::open(&path).unwrap();
+    fresh.unlock(SlotKind::Passphrase, &kek(2)).unwrap();
+    assert_eq!(fresh.get("after").unwrap().as_deref(), Some("the slot"));
+}
+
+#[test]
+fn a_crash_between_write_and_rename_leaves_the_old_store() {
+    let dir = Scratch::new("store-crash");
+    let (store, path) = new_store(&dir);
+    store.set("a", "one").unwrap();
+    drop(store);
+    let before = std::fs::read(&path).unwrap();
+    // What a crash leaves: temporary files of the store, one of them half written; and files that are not the store's.
+    let stray = dir.write_file("secrets.store.tmp-0123456789abcdef", &before[..before.len() / 2], 0o600);
+    let stray_empty = dir.write_file("secrets.store.tmp-ffffffffffffffff", b"", 0o600);
+    let other = dir.write_file("other.store.tmp-0123456789abcdef", b"not ours", 0o600);
+    let similar = dir.write_file("secrets.store.bak", b"not ours either", 0o600);
+
+    let reopened = EncryptedFileStore::open(&path).unwrap();
+    assert!(!stray.exists() && !stray_empty.exists(), "a stray temporary file survived the open");
+    assert!(other.exists() && similar.exists(), "a file that is not the store's was removed");
+    assert_eq!(std::fs::read(&path).unwrap(), before, "the open changed the store");
+    reopened.unlock(SlotKind::Password, &kek(1)).unwrap();
+    assert_eq!(reopened.get("a").unwrap().as_deref(), Some("one"));
+    // A completed write leaves no temporary file behind.
+    reopened.set("b", "two").unwrap();
+    let names: Vec<String> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert!(!names.iter().any(|n| n.starts_with("secrets.store.tmp-")), "{names:?}");
+}
+
+#[test]
+fn a_link_in_place_of_the_store_is_refused_and_a_missing_file_is_an_error() {
+    let dir = Scratch::new("store-link");
+    let (_store, path) = new_store(&dir);
+    let link = dir.join("link.store");
+    std::os::unix::fs::symlink(&path, &link).unwrap();
+    assert!(EncryptedFileStore::open(&link).is_err());
+    assert!(EncryptedFileStore::create(&link, SlotKind::Password, id(1), &kek(1)).is_err());
+    assert!(EncryptedFileStore::open(&dir.join("missing.store")).is_err());
+    write_file(&dir.join("junk.store"), b"this is not a secret store at all, only text");
+    assert!(matches!(EncryptedFileStore::open(&dir.join("junk.store")), Err(StoreError::Format(_))));
+}
+
+#[test]
+fn deleting_a_missing_entry_does_not_rewrite_the_file() {
+    let dir = Scratch::new("store-delete-missing");
+    let (store, path) = new_store(&dir);
+    store.set("a", "one").unwrap();
+    let before = std::fs::read(&path).unwrap();
+    store.delete("missing").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn nonce_is_fresh_per_write() {
+    let dir = Scratch::new("store-nonce");
+    let (store, path) = new_store(&dir);
+    let nonce_of = |bytes: &[u8]| {
+        let at = HEADER + usize::from(bytes[6]) * SLOT;
+        bytes[at..at + 24].to_vec()
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut ciphertexts = std::collections::HashSet::new();
+    seen.insert(nonce_of(&std::fs::read(&path).unwrap()));
+    for _ in 0..30 {
+        // The same value written again must not repeat a nonce or a ciphertext.
+        store.set("a", "same value").unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(seen.insert(nonce_of(&bytes)), "a body nonce was used twice");
+        assert!(ciphertexts.insert(bytes[HEADER + SLOT + 24..].to_vec()), "a ciphertext repeated");
+    }
+    // A slot is wrapped under a fresh nonce each time too.
+    store.add_slot(SlotKind::Prf, id(2), &kek(2)).unwrap();
+    let first = std::fs::read(&path).unwrap()[HEADER + SLOT + 17..HEADER + SLOT + 41].to_vec();
+    store.replace_slot(SlotKind::Prf, id(2), &kek(2)).unwrap();
+    let second = std::fs::read(&path).unwrap()[HEADER + SLOT + 17..HEADER + SLOT + 41].to_vec();
+    assert_ne!(first, second);
+}
+
+#[test]
+fn debug_never_prints_key_bytes() {
+    use holzwave_server::worker::secretstore::Dek;
+
+    let kek = Kek::from_bytes(&[0xAB; 32]);
+    let dek = Dek::from_bytes(&[0xCD; 32]);
+    let text = "0123-4567-89AB-CDEF-GHJK-MNPQ-RSTV-WXYZ";
+    let code = parse_recovery_code(text).unwrap();
+    let dir = Scratch::new("store-debug");
+    let (store, _) = new_store(&dir);
+    store.set("ssh:account-name", "secret-value-123").unwrap();
+
+    let shown = [
+        format!("{kek:?}"),
+        format!("{kek:#?}"),
+        format!("{dek:?}"),
+        format!("{dek:#?}"),
+        format!("{code:?}"),
+        format!("{code:#?}"),
+        format!("{store:?}"),
+        format!("{store:#?}"),
+        format!("{:?}", Some(&kek)),
+        format!("{:#?}", vec![&dek]),
+        format!("{:?}", Kek::from_bytes(&[0xAB; 32])),
+        format!("{:?}", Ok::<_, StoreError>(&dek)),
+    ];
+    for s in &shown {
+        for forbidden in ["171", "205", "0xab", "0xAB", "ab, ab", "AB, AB", "abab", "ABAB", "cdcd", "0123", "WXYZ", "secret-value", "account-name"] {
+            assert!(!s.contains(forbidden), "{s:?} contains {forbidden:?}");
+        }
+    }
+    assert_eq!(format!("{kek:?}"), "Kek(..)");
+    assert_eq!(format!("{dek:?}"), "Dek(..)");
+    assert_eq!(format!("{code:?}"), "RecoveryCode(..)");
+    // The text of a refusal holds no input either.
+    for error in [parse_recovery_code("abc secret-ish text").unwrap_err().to_string(), store.set("", "secret-value-123").unwrap_err().to_string()] {
+        assert!(!error.contains("secret-ish") && !error.contains("secret-value"), "{error}");
+    }
 }
