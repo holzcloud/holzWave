@@ -185,17 +185,132 @@ const WORKSPACE_ALLOWLIST: &[(&str, &[Dependency])] = &[
     (
         "holzwave-server",
         &[
+            (
+                "argon2",
+                "the password verifier and the key-encryption key from one Argon2id pass (auth/password.rs), the same crate \
+                 the sync uses",
+            ),
+            (
+                "axum",
+                "routing and the WebSocket upgrade (http/router.rs, http/ws.rs), with HTTP/2, forms and tracing off; the \
+                 accept loop under it is the server's own, so every connection has a known peer",
+            ),
+            ("base64", "the encodings of tokens, cookies and the secret-store envelope (auth/session.rs, sealed.rs)"),
+            (
+                "chacha20poly1305",
+                "authenticated encryption of the secret store and of the sealed server secrets (sealed.rs, \
+                 worker/secretstore.rs), the AEAD the sync uses",
+            ),
+            ("cookie", "builds every Set-Cookie header with its flags instead of formatting strings (http/cookies.rs)"),
+            ("getrandom", "operating-system randomness for session tokens, salts and nonces (auth/session.rs, sealed.rs)"),
+            ("hkdf", "separate keys for sealing, cookies and the secret store from one source key (sealed.rs, keyfile.rs)"),
             ("holzwave-core", "the terminal engine, panes, files and settings that every worker runs for its person"),
             (
                 "holzwave-host",
                 "the command table and the plain command functions that the worker dispatches; the server never turns on \
                  the keyring feature",
             ),
+            ("http", "the request and response types shared by the router and the accept loop (http/app.rs)"),
+            ("http-body-util", "reads request bodies with a hard size cap and builds response bodies (http/app.rs)"),
+            (
+                "hyper",
+                "the HTTP/1 server connection of the accept loop, with upgrades for the WebSocket (http/transport.rs); \
+                 the dev entry adds the client and HTTP/2 so the tests can speak both versions to the server",
+            ),
+            (
+                "hyper-util",
+                "the runtime adapter and the tower service adapter of the accept loop (http/transport.rs); a named parent of \
+                 hyper-util in reqwest_parents_are_the_documented_set",
+            ),
+            (
+                "instant-acme",
+                "the ACME client for the server's own certificate (acme.rs), ring provider only; its hyper-rustls connector \
+                 makes it a parent of hyper-util and hyper-rustls, named in reqwest_parents_are_the_documented_set",
+            ),
+            (
+                "openidconnect",
+                "the OIDC client: discovery, code flow with PKCE, ID token and key set checks (auth/oidc.rs); its `rsa` \
+                 dependency is the second generation of the RustCrypto stack beside the one the SSH client pulls, documented \
+                 here because the lock now holds both; default features off, the exchange runs through auth/oidc_http.rs",
+            ),
+            (
+                "rcgen",
+                "the certificate request and the challenge certificate of the ACME TLS-ALPN-01 flow (acme.rs), ring \
+                 provider and PEM only",
+            ),
+            (
+                "reqwest",
+                "the outgoing HTTP client of the OIDC exchange (auth/oidc_http.rs), built with the core's feature set: \
+                 rustls with the ring provider and the platform verifier; a named parent in EXCEPTIONS",
+            ),
+            (
+                "ring",
+                "dev dependency only: signs the test ID tokens of the OIDC tests; it is the provider rustls already uses",
+            ),
+            ("rusqlite", "the SQLite store of accounts, sessions and credentials (store.rs), bundled as in the core"),
+            (
+                "rust-embed",
+                "embeds the built page in the binary and gives each file an ETag (http/embed.rs); the repository moved \
+                 off GitHub, confirmed on the crates.io page",
+            ),
+            (
+                "rustix",
+                "the safe wrappers for descriptors, process groups, signals and the worker self-check (worker/runtime.rs, \
+                 supervisor/launcher.rs), instead of variadic libc calls",
+            ),
+            (
+                "rustls",
+                "the TLS of the listener (tls.rs): the ring provider is passed explicitly and no process default is \
+                 installed; the one stack the lock holds",
+            ),
+            ("rustls-pki-types", "certificate and key types read from PEM files for the listener (tls.rs)"),
             ("serde", "the configuration, the wire between the page and the server and the frames between server processes"),
             ("serde_json", "JSON of the configuration, the wire and the frames"),
+            ("sha2", "SHA-256 of session tokens before they are stored, and of ACME key authorizations (auth/session.rs)"),
+            ("subtle", "constant-time comparison of tokens and codes (auth/session.rs, auth/totp.rs)"),
+            ("time", "formatting of timestamps in the audit log and the file names of its days (audit.rs, clock.rs)"),
+            (
+                "tokio",
+                "the runtime of the supervisor, the accept loop and the workers; the core's feature set plus signals, files \
+                 and child processes",
+            ),
+            (
+                "tokio-rustls",
+                "the TLS acceptor of the accept loop (tls.rs); its default features select aws-lc-rs, so they are off and \
+                 ring is named",
+            ),
+            (
+                "tokio-tungstenite",
+                "dev dependency only: the WebSocket client of the tests, over a stream the test opens itself; axum brings \
+                 its own version for the server",
+            ),
+            ("tokio-util", "the length-delimited codec of the frames between supervisor and worker (supervisor/socket.rs)"),
+            (
+                "totp-rs",
+                "time-based one-time codes (auth/totp.rs); the QR feature is off because it pulls an image stack",
+            ),
+            ("tower", "the service traits and the oneshot helper that join the router and the accept loop (http/router.rs)"),
+            (
+                "webauthn-authenticator-rs",
+                "dev dependency only: the software passkey that drives the registration and sign-in ceremonies in the \
+                 tests (auth/passkey.rs); same project as webauthn-rs, softpasskey feature only",
+            ),
+            (
+                "webauthn-rs",
+                "passkey registration and sign-in with challenge state and counters (auth/passkey.rs); the pre-release line \
+                 is the only one without OpenSSL (the stable 0.5 line needs it), pinned exactly",
+            ),
+            ("zeroize", "wipes passwords, keys and decrypted secrets from memory (auth/password.rs, worker/secretstore.rs)"),
         ],
     ),
-    ("holzwave-spawn-helper", &[]),
+    (
+        "holzwave-spawn-helper",
+        &[
+            ("rustix", "the capability, uid and signal calls of the helper as safe wrappers (main.rs); nothing else is linked"),
+            ("serde", "the request and answer frames on the helper's socket"),
+            ("serde_json", "the request and answer frames on the helper's socket"),
+        ],
+    ),
     (
         "holzwave-apple-ai",
         &[
@@ -300,14 +415,16 @@ type Exception = (&'static str, &'static [&'static str], &'static str);
 const EXCEPTIONS: &[Exception] = &[
     (
         "reqwest",
-        &["holzwave-core", "tauri"],
-        "two uses: tauri's dev-server proxy, which is not instantiated on desktop and has no devUrl; and the HTTP client \
-         of the AI chat in core/src/ai/http.rs, rustls with the ring provider and the platform verifier, no redirects",
+        &["holzwave-core", "holzwave-server", "tauri"],
+        "three uses: tauri's dev-server proxy, which is not instantiated on desktop and has no devUrl; the HTTP client \
+         of the AI chat in core/src/ai/http.rs, rustls with the ring provider and the platform verifier, no redirects; and \
+         the OIDC exchange of the server, which is not in the closure of the desktop (see desktop_closure_problems)",
     ),
     (
         "hyper-util",
-        &["hyper-rustls", "reqwest"],
-        "the HTTP client below reqwest and its rustls connector, reachable through them only",
+        &["axum", "holzwave-server", "hyper-rustls", "instant-acme", "reqwest"],
+        "the HTTP client below reqwest and its rustls connector; the other parents are the server and its libraries, which \
+         the desktop closure guard keeps out of the desktop",
     ),
     (
         "ureq",
@@ -1086,24 +1203,28 @@ fn app_closure_contains_no_telemetry_or_network_client_crates() {
 
 #[test]
 fn reqwest_parents_are_the_documented_set() {
-    // tauri links reqwest for its dev-server proxy and holzwave-core for the HTTP client of the AI chat (see
-    // EXCEPTIONS). The set of crates that depend on it must stay exactly these two: a third parent means another crate
-    // brought an HTTP client in.
+    // tauri links reqwest for its dev-server proxy, holzwave-core for the HTTP client of the AI chat and holzwave-server
+    // for the OIDC exchange (see EXCEPTIONS). The set of crates that depend on it must stay exactly these three: a
+    // fourth parent means another crate brought an HTTP client in.
     let graph = lock_graph();
     let parents = parents_of(&graph, "reqwest");
     if !graph.contains_key("reqwest") {
         assert!(parents.is_empty(), "reqwest is absent from the lock but listed as a dependency of {parents:?}");
         return;
     }
-    assert_eq!(parents, set(&["holzwave-core", "tauri"]), "the parents of reqwest changed");
+    assert_eq!(parents, set(&["holzwave-core", "holzwave-server", "tauri"]), "the parents of reqwest changed");
     // hyper-util is the HTTP client below reqwest and its rustls connector: nothing else may reach it.
     assert_eq!(
         parents_of(&graph, "hyper-util"),
-        set(&["hyper-rustls", "reqwest"]),
-        "hyper-util has a parent besides hyper-rustls and reqwest"
+        set(&["axum", "holzwave-server", "hyper-rustls", "instant-acme", "reqwest"]),
+        "hyper-util has a parent besides the connector, reqwest, axum, instant-acme and the server"
     );
-    // hyper-rustls is the connector of reqwest: nothing else may use it.
-    assert_eq!(parents_of(&graph, "hyper-rustls"), set(&["reqwest"]), "hyper-rustls has a parent besides reqwest");
+    // hyper-rustls is the connector of reqwest and of the ACME client: nothing else may use it.
+    assert_eq!(
+        parents_of(&graph, "hyper-rustls"),
+        set(&["instant-acme", "reqwest"]),
+        "hyper-rustls has a parent besides reqwest and instant-acme"
+    );
 }
 
 /// Whether `version` is an exact pin: it starts with an ASCII digit, holds only ASCII letters, digits, `.`, `-` and

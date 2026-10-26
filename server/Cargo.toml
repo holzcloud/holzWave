@@ -25,3 +25,51 @@ holzwave-core = { path = "../core" }
 holzwave-host = { path = "../host" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Runtime and HTTP. The accept loop is the server's own (hyper over a tokio-rustls acceptor), so the peer address of every
+# connection is known to the trusted-proxy rule; axum supplies the routing and the WebSocket upgrade without its default
+# features (no HTTP/2, no form or multipart parser, no tracing).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal", "fs", "process"] }
+tokio-util = { version = "=0.7.20", features = ["codec"] }
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "tokio", "json", "query", "ws"] }
+hyper = { version = "=1.12.0", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "=0.1.21", default-features = false, features = ["tokio", "server", "http1", "service"] }
+http = "=1.5.0"
+http-body-util = "=0.1.5"
+tower = { version = "=0.5.3", default-features = false, features = ["util"] }
+cookie = { version = "=0.18.2", default-features = false }
+rust-embed = "=8.13.0"
+
+# TLS: rustls with the ring provider only, as in the core. The default features of tokio-rustls, instant-acme and rcgen
+# select aws-lc-rs, which the policy test forbids, so they are off and the ring feature is named.
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = "=1.15.1"
+instant-acme = { version = "=0.8.5", default-features = false, features = ["ring", "hyper-rustls"] }
+rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "pem"] }
+
+# Sign-in. The default features of openidconnect select reqwest 0.12 with aws-lc-rs, so they are off and the HTTP exchange
+# goes through an adapter over the reqwest of the core's spelling (ring provider, platform verifier).
+webauthn-rs = "=0.6.1-dev"
+openidconnect = { version = "=4.0.1", default-features = false }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "stream", "system-proxy"] }
+totp-rs = { version = "=6.0.0", features = ["otpauth", "zeroize", "gen_secret"] }
+
+# Crypto and storage.
+argon2 = { version = "0.6", default-features = false, features = ["alloc", "password-hash"] }
+chacha20poly1305 = "0.11"
+hkdf = "=0.13.0"
+sha2 = "0.11"
+zeroize = "1"
+getrandom = "0.4"
+subtle = "=2.6.1"
+base64 = "=0.23.1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+time = { version = "=0.3.55", default-features = false, features = ["formatting", "std"] }
+rustix = { version = "=1.1.5", features = ["fs", "process", "thread", "net", "event", "system"] }
+
+[dev-dependencies]
+webauthn-authenticator-rs = { version = "=0.6.1-dev", default-features = false, features = ["softpasskey"] }
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
+ring = "=0.17.14"
+hyper = { version = "=1.12.0", default-features = false, features = ["http1", "http2", "client", "server"] }
