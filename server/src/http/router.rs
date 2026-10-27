@@ -8,9 +8,10 @@ use std::fmt;
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::request::Parts;
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -20,10 +21,12 @@ use serde_json::json;
 
 use crate::auth::session::SessionError;
 use crate::config::Sessions;
+use crate::proxy::Mode;
 use crate::store::{Account, Session};
 
 use super::app::{App, StoreState};
 use super::cookies;
+use super::csrf::{self, BodyKind};
 use super::headers::{self, SecurityHeaders};
 
 /// The address of the peer of the connection, put into every request by the accept loop.
@@ -78,6 +81,9 @@ pub enum ApiError {
     NotFound,
     /// 405: the method is not served here. The code is `bad_request`, because the vocabulary has no 405.
     MethodNotAllowed,
+    /// 421: the request came to a name that is not the public one. The code is `bad_request`, because the vocabulary has no
+    /// 421.
+    Misdirected,
     /// 409 `conflict`, with the field when one field is at fault.
     Conflict {
         /// The field.
@@ -105,6 +111,7 @@ impl ApiError {
             ApiError::Forbidden { .. } => StatusCode::FORBIDDEN,
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
+            ApiError::Misdirected => StatusCode::MISDIRECTED_REQUEST,
             ApiError::Conflict { .. } => StatusCode::CONFLICT,
             ApiError::Gone => StatusCode::GONE,
             ApiError::Locked => StatusCode::from_u16(423).unwrap_or(StatusCode::FORBIDDEN),
@@ -116,7 +123,7 @@ impl ApiError {
     /// The `code` member.
     pub fn code(self) -> &'static str {
         match self {
-            ApiError::BadRequest { .. } | ApiError::MethodNotAllowed => "bad_request",
+            ApiError::BadRequest { .. } | ApiError::MethodNotAllowed | ApiError::Misdirected => "bad_request",
             ApiError::Invalid => "invalid",
             ApiError::Forbidden { .. } => "forbidden",
             ApiError::NotFound => "not_found",
@@ -267,21 +274,55 @@ struct Guard {
     access: Access,
 }
 
-/// The checks of an access kind, in front of every route of a part.
+/// The body cap of a JSON route in bytes.
+fn body_cap(app: &App) -> usize {
+    usize::try_from(app.limits.api_body_bytes).unwrap_or(usize::MAX)
+}
+
+/// The checks of an access kind, in front of every route of a part, in this order: the Origin and the content type of a
+/// change, the declared size, the session, the anti-forgery token, the body.
 async fn guard(State(guard): State<Guard>, mut request: Request, next: Next) -> Response {
+    let app = &guard.app;
+    let access = guard.access;
+    let changing = csrf::is_state_changing(request.method());
+    let cap = body_cap(app);
+
+    if changing && access != Access::Socket {
+        if !csrf::change_origin_ok(&app.origin, request.headers()) {
+            return ApiError::Forbidden { step_up: false }.into_response();
+        }
+        let kind = if access == Access::Upload { BodyKind::Octet } else { BodyKind::Json };
+        if !csrf::content_type_ok(request.headers(), kind) {
+            return ApiError::BadRequest { field: None }.into_response();
+        }
+        if access != Access::Upload {
+            match csrf::declared_length(request.headers()) {
+                Ok(Some(length)) if length > cap as u64 => return ApiError::BadRequest { field: None }.into_response(),
+                Err(_) => return ApiError::BadRequest { field: None }.into_response(),
+                _ => {}
+            }
+        }
+    }
+
     let outcome = match cookies::read_session(request.headers()) {
         None => Outcome::Anonymous,
         Some(value) => {
             let client = request.extensions().get::<ClientAddr>().map_or(IpAddr::from([0u8; 4]), |c| c.0);
-            resolve_value(guard.app.clone(), value, client).await
+            resolve_value(app.clone(), value, client).await
         }
     };
     match outcome {
         Outcome::Busy => return ApiError::Busy.into_response(),
         Outcome::Live(authed) => {
+            if changing
+                && matches!(access, Access::Session | Access::SessionFresh | Access::Upload)
+                && !csrf::token_header_ok(request.headers(), &authed.csrf)
+            {
+                return ApiError::Forbidden { step_up: false }.into_response();
+            }
             request.extensions_mut().insert(*authed);
         }
-        Outcome::Stale => match guard.access {
+        Outcome::Stale => match access {
             Access::Public | Access::Socket => {
                 request.extensions_mut().insert(StaleCookie);
             }
@@ -292,12 +333,55 @@ async fn guard(State(guard): State<Guard>, mut request: Request, next: Next) -> 
             }
         },
         Outcome::Anonymous => {
-            if !matches!(guard.access, Access::Public | Access::Socket) {
+            if !matches!(access, Access::Public | Access::Socket) {
                 return ApiError::Invalid.into_response();
             }
         }
     }
+
+    if changing && access != Access::Socket && access != Access::Upload {
+        // The whole body is read here, up to the cap, so that a streamed body over the cap is refused whether or not the
+        // handler would have read it, and a declared length that lies is refused too.
+        let declared = csrf::declared_length(request.headers()).ok().flatten();
+        let (parts, body) = request.into_parts();
+        let Ok(bytes) = axum::body::to_bytes(body, cap).await else {
+            return ApiError::BadRequest { field: None }.into_response();
+        };
+        if declared.is_some_and(|length| length != bytes.len() as u64) {
+            return ApiError::BadRequest { field: None }.into_response();
+        }
+        request = Request::from_parts(parts, Body::from(bytes));
+    }
     next.run(request).await
+}
+
+/// What a request has to pass before any part sees it, in every mode: the proxy rule, the Host, the method.
+async fn edge(State(app): State<Arc<App>>, mut request: Request, next: Next) -> Response {
+    let peer = request.extensions().get::<PeerAddr>().map_or(IpAddr::from([0u8; 4]), |p| p.0);
+    let client = match client_address(&app, peer, request.headers()) {
+        Ok(ip) => ip,
+        Err(()) => return ApiError::BadRequest { field: None }.into_response(),
+    };
+    if !csrf::host_ok(&app.origin, request.headers(), request.uri()) {
+        return ApiError::Misdirected.into_response();
+    }
+    if matches!(*request.method(), Method::OPTIONS | Method::TRACE | Method::CONNECT) {
+        return ApiError::MethodNotAllowed.into_response();
+    }
+    request.extensions_mut().insert(ClientAddr(client));
+    next.run(request).await
+}
+
+/// The address of the client by the proxy rule: forwarded headers count only in the proxy mode and only from a trusted
+/// proxy. A forwarded value that is not plain text is the same as a wrong one.
+fn client_address(app: &App, peer: IpAddr, headers: &axum::http::HeaderMap) -> Result<IpAddr, ()> {
+    if app.mode != Mode::Proxy {
+        return Ok(peer.to_canonical());
+    }
+    let lines = |name: &str| -> Vec<&str> {
+        headers.get_all(name).iter().map(|value| value.to_str().unwrap_or("\u{fffd}")).collect()
+    };
+    app.proxies.client_address(app.mode, peer, &lines("x-forwarded-for"), &lines("x-forwarded-proto")).map_err(|_| ())
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -398,11 +482,14 @@ async fn not_found() -> ApiError {
     ApiError::NotFound
 }
 
-/// Gives a bare 405 from a route (which has no body) the plain JSON error: no `Allow` list, no detail.
+/// Gives every 405 the plain JSON error and no `Allow` list: the router does not describe itself.
 async fn plain_errors(request: Request, next: Next) -> Response {
-    let response = next.run(request).await;
-    if response.status() == StatusCode::METHOD_NOT_ALLOWED && !response.headers().contains_key(header::CONTENT_TYPE) {
-        return ApiError::MethodNotAllowed.into_response();
+    let mut response = next.run(request).await;
+    if response.status() == StatusCode::METHOD_NOT_ALLOWED {
+        if !response.headers().contains_key(header::CONTENT_TYPE) {
+            return ApiError::MethodNotAllowed.into_response();
+        }
+        response.headers_mut().remove(header::ALLOW);
     }
     response
 }
@@ -420,8 +507,12 @@ pub fn build(app: Arc<App>, parts: Vec<Part>) -> Router {
         let state = Guard { app: app.clone(), access: part.access };
         root = root.merge(part.router.route_layer(middleware::from_fn_with_state(state, guard)));
     }
-    root.fallback(not_found)
+    // The routes are the fallback of an outer router, so that the layers below see the final answer of every route, after the
+    // method router has added what it adds (for example the `Allow` list of a 405).
+    Router::new()
+        .fallback_service(root.fallback(not_found))
         .layer(Extension(app.clone()))
+        .layer(middleware::from_fn_with_state(app.clone(), edge))
         .layer(middleware::from_fn(plain_errors))
         .layer(middleware::from_fn_with_state(Arc::new(SecurityHeaders::new(&app.origin)), headers::layer))
 }

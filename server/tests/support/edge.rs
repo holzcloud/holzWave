@@ -12,8 +12,13 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use axum::Router;
-use axum::body::Body;
+use std::collections::VecDeque;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use axum::body::{Body, Bytes};
+use axum::routing::{MethodRouter, get};
+use axum::{Extension, Json, Router};
 use axum::http::header::{HeaderName, HeaderValue};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use holzwave_server::audit::Audit;
@@ -21,7 +26,7 @@ use holzwave_server::auth::session::{Method as SignInMethod, SessionManager};
 use holzwave_server::clock::{Clock, ManualClock};
 use holzwave_server::config::{Auth, Cidr, Oidc, Sessions};
 use holzwave_server::http::app::{App, AppInit, PublicOrigin, StoreState, StoreView};
-use holzwave_server::http::router::{self, Part, PeerAddr};
+use holzwave_server::http::router::{self, Access, ClientAddr, MaybeAuthed, Part, PeerAddr};
 use holzwave_server::keyfile::ServerKey;
 use holzwave_server::limits::Limits;
 use holzwave_server::proxy::{Mode, TrustedProxies};
@@ -241,13 +246,29 @@ pub struct Req {
     uri: String,
     headers: Vec<(HeaderName, HeaderValue)>,
     body: Vec<u8>,
+    chunks: Option<Vec<Vec<u8>>>,
     peer: Option<IpAddr>,
+}
+
+/// A body that arrives in several frames and says nothing about its length.
+struct Chunks(VecDeque<Bytes>);
+
+impl hyper::body::Body for Chunks {
+    type Data = Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Bytes>, Self::Error>>> {
+        Poll::Ready(self.0.pop_front().map(|bytes| Ok(hyper::body::Frame::data(bytes))))
+    }
 }
 
 impl Req {
     /// A request with no header at all.
     pub fn new(method: Method, uri: &str) -> Req {
-        Req { method, uri: uri.to_owned(), headers: Vec::new(), body: Vec::new(), peer: None }
+        Req { method, uri: uri.to_owned(), headers: Vec::new(), body: Vec::new(), chunks: None, peer: None }
     }
 
     /// Adds a header line (an earlier line of the same name stays).
@@ -287,6 +308,12 @@ impl Req {
         self
     }
 
+    /// Sets the body to several frames, with no declared length.
+    pub fn chunks(mut self, chunks: Vec<Vec<u8>>) -> Req {
+        self.chunks = Some(chunks);
+        self
+    }
+
     /// Sets the body to a JSON value.
     pub fn json(self, value: &serde_json::Value) -> Req {
         self.bytes(serde_json::to_vec(value).expect("json"))
@@ -318,7 +345,11 @@ impl Req {
         for (name, value) in self.headers {
             builder = builder.header(name, value);
         }
-        let mut request = builder.body(Body::from(self.body)).expect("a request");
+        let body = match self.chunks {
+            Some(chunks) => Body::new(Chunks(chunks.into_iter().map(Bytes::from).collect())),
+            None => Body::from(self.body),
+        };
+        let mut request = builder.body(body).expect("a request");
         if let Some(ip) = self.peer {
             request.extensions_mut().insert(PeerAddr(ip));
         }
@@ -361,4 +392,41 @@ impl Resp {
         names.dedup();
         names
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Routes to test the access kinds with
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// What a probe route saw: the person (if any), the client address and the size of the body.
+async fn probe(MaybeAuthed(who): MaybeAuthed, Extension(client): Extension<ClientAddr>, body: Bytes) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "ok": true,
+        "user": who.map(|a| a.account.username),
+        "client": client.0.to_string(),
+        "bytes": body.len(),
+    }))
+}
+
+async fn sets_sharing_headers() -> ([(&'static str, &'static str); 2], &'static str) {
+    ([("access-control-allow-origin", "*"), ("access-control-allow-credentials", "true")], "ok")
+}
+
+fn every_method() -> MethodRouter {
+    get(probe).post(probe).put(probe).patch(probe).delete(probe)
+}
+
+/// One probe route per access kind: `/t/public`, `/t/session`, `/t/fresh`, `/t/socket` and `/t/upload`, each answering
+/// `GET`, `POST`, `PUT`, `PATCH` and `DELETE` with what the handler saw, and `/t/cors`, a public route that sets
+/// cross-origin sharing headers (the router must remove them).
+pub fn probe_parts() -> Vec<Part> {
+    let one = |access: Access, path: &str| Part { access, router: Router::new().route(path, every_method()) };
+    vec![
+        one(Access::Public, "/t/public"),
+        one(Access::Session, "/t/session"),
+        one(Access::SessionFresh, "/t/fresh"),
+        one(Access::Socket, "/t/socket"),
+        one(Access::Upload, "/t/upload"),
+        Part { access: Access::Public, router: Router::new().route("/t/cors", get(sets_sharing_headers)) },
+    ]
 }
