@@ -26,7 +26,7 @@ use holzwave_server::auth::session::{Method as SignInMethod, SessionManager};
 use holzwave_server::clock::{Clock, ManualClock};
 use holzwave_server::config::{Auth, Cidr, Oidc, Sessions};
 use holzwave_server::http::app::{App, AppInit, PublicOrigin, StoreState, StoreView};
-use holzwave_server::http::router::{self, Access, ClientAddr, MaybeAuthed, Part, PeerAddr};
+use holzwave_server::http::router::{self, Access, Admin, ApiJson, ClientAddr, Fresh, MaybeAuthed, Part, PeerAddr, SocketVerdict};
 use holzwave_server::keyfile::ServerKey;
 use holzwave_server::limits::Limits;
 use holzwave_server::proxy::{Mode, TrustedProxies};
@@ -398,14 +398,49 @@ impl Resp {
 // Routes to test the access kinds with
 // ---------------------------------------------------------------------------------------------------------------------
 
-/// What a probe route saw: the person (if any), the client address and the size of the body.
-async fn probe(MaybeAuthed(who): MaybeAuthed, Extension(client): Extension<ClientAddr>, body: Bytes) -> Json<serde_json::Value> {
+/// What a probe route saw: the person (if any), the client address, the verdict of a socket part and the size of the body.
+async fn probe(
+    MaybeAuthed(who): MaybeAuthed,
+    Extension(client): Extension<ClientAddr>,
+    verdict: Option<Extension<SocketVerdict>>,
+    body: Bytes,
+) -> Json<serde_json::Value> {
+    let debug = format!("{who:?}");
     Json(serde_json::json!({
         "ok": true,
-        "user": who.map(|a| a.account.username),
+        "user": who.as_ref().map(|a| a.account.username.clone()),
+        "role": who.as_ref().map(|a| a.account.role.as_str()),
+        "locked": who.as_ref().map(|a| a.locked),
         "client": client.0.to_string(),
         "bytes": body.len(),
+        "verdict": verdict.map(|Extension(v)| serde_json::json!({
+            "origin_ok": v.origin_ok, "host_ok": v.host_ok, "session": v.session, "allowed": v.allowed(),
+        })),
+        "debug": debug,
     }))
+}
+
+/// A body type that denies unknown members.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Strict {
+    name: String,
+}
+
+async fn strict(ApiJson(body): ApiJson<Strict>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "name": body.name }))
+}
+
+async fn anything(ApiJson(body): ApiJson<serde_json::Value>) -> Json<serde_json::Value> {
+    Json(body)
+}
+
+async fn admin_only(Admin(who): Admin) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "admin": who.account.username }))
+}
+
+async fn fresh_only(Fresh(who): Fresh) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "fresh": who.account.username }))
 }
 
 async fn sets_sharing_headers() -> ([(&'static str, &'static str); 2], &'static str) {
@@ -417,8 +452,10 @@ fn every_method() -> MethodRouter {
 }
 
 /// One probe route per access kind: `/t/public`, `/t/session`, `/t/fresh`, `/t/socket` and `/t/upload`, each answering
-/// `GET`, `POST`, `PUT`, `PATCH` and `DELETE` with what the handler saw, and `/t/cors`, a public route that sets
-/// cross-origin sharing headers (the router must remove them).
+/// `GET`, `POST`, `PUT`, `PATCH` and `DELETE` with what the handler saw; `/t/cors`, a public route that sets cross-origin
+/// sharing headers (the router must remove them); `/t/json` and `/t/value`, public `POST` routes that read their body with
+/// `ApiJson`; `/t/admin`, a session route that needs the `Admin` extractor; and `/t/stepup`, a session route that needs
+/// the `Fresh` extractor.
 pub fn probe_parts() -> Vec<Part> {
     let one = |access: Access, path: &str| Part { access, router: Router::new().route(path, every_method()) };
     vec![
@@ -428,5 +465,13 @@ pub fn probe_parts() -> Vec<Part> {
         one(Access::Socket, "/t/socket"),
         one(Access::Upload, "/t/upload"),
         Part { access: Access::Public, router: Router::new().route("/t/cors", get(sets_sharing_headers)) },
+        Part {
+            access: Access::Public,
+            router: Router::new()
+                .route("/t/json", axum::routing::post(strict))
+                .route("/t/value", axum::routing::post(anything)),
+        },
+        Part { access: Access::Session, router: Router::new().route("/t/admin", get(admin_only).post(admin_only)) },
+        Part { access: Access::Session, router: Router::new().route("/t/stepup", get(fresh_only).post(fresh_only)) },
     ]
 }

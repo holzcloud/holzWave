@@ -6,6 +6,7 @@ mod edge;
 
 use axum::http::{HeaderMap, HeaderValue, Method};
 use edge::{ABSOLUTE, HOST, IDLE, NOW, ORIGIN, Options, Req, STEP_UP, Signed, TestApp, probe_parts};
+use holzwave_server::clock::Clock as _;
 use holzwave_server::http::cookies;
 use holzwave_server::store::Role;
 use serde_json::{Value, json};
@@ -1000,4 +1001,562 @@ fn cookies_the_reader_is_bounded() {
     let half = format!("p={}", "x".repeat(4_500));
     assert_eq!(read(&[&half, &format!("{ok}; {half}")]), None);
     println!("Cookies: reader bounds = 64 pairs pass, 65 do not; 8192 bytes pass, 8193 do not");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Access kinds
+// ---------------------------------------------------------------------------------------------------------------------
+
+const GONE: &str = "__Host-hw_session=; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=0";
+
+/// A cookie value of the right shape that no session has.
+fn unknown_cookie() -> String {
+    "A".repeat(43)
+}
+
+#[tokio::test]
+async fn kind_public_answers_without_a_cookie_and_sees_a_live_session() {
+    let (app, alice) = probed();
+    let none = app.send(app.req(Method::GET, "/t/public")).await;
+    assert_eq!((none.status.as_u16(), none.json()["user"].clone()), (200, Value::Null));
+    let live = app.send(app.req(Method::GET, "/t/public").cookie(&alice.cookie)).await;
+    assert_eq!((live.status.as_u16(), live.json()["user"].clone()), (200, json!("alice")));
+    // An invalid cookie is no session, and no cookie is deleted on a public route.
+    for bad in [unknown_cookie(), "short".to_owned(), "A".repeat(44)] {
+        let answer = app.send(app.req(Method::GET, "/t/public").cookie(&bad)).await;
+        assert_eq!((answer.status.as_u16(), answer.json()["user"].clone()), (200, Value::Null), "{bad}");
+        assert!(answer.all("set-cookie").is_empty(), "{bad}");
+    }
+    println!("Access kinds: Public = no cookie 200 (None), live 200 (Some), invalid 200 (None, no Set-Cookie)");
+}
+
+#[tokio::test]
+async fn kind_the_session_api_deletes_an_invalid_cookie_and_answers_as_anonymous() {
+    let (app, _) = probed();
+    let answer = app.send(app.req(Method::GET, "/api/session").cookie(&unknown_cookie())).await;
+    assert_eq!(answer.status, 200);
+    assert_eq!(answer.json()["state"], json!("anonymous"));
+    assert_eq!(answer.all("set-cookie"), vec![GONE.to_owned()]);
+    let none = app.send(app.req(Method::GET, "/api/session")).await;
+    assert!(none.all("set-cookie").is_empty());
+}
+
+#[tokio::test]
+async fn kind_session_refuses_without_a_session_and_deletes_only_a_cookie_that_was_there() {
+    let (app, alice) = probed();
+    let none = app.send(app.req(Method::GET, "/t/session")).await;
+    assert_eq!((none.status.as_u16(), none.json()), (401, json!({ "code": "invalid" })));
+    assert!(none.all("set-cookie").is_empty());
+    let stale = app.send(app.req(Method::GET, "/t/session").cookie(&unknown_cookie())).await;
+    assert_eq!((stale.status.as_u16(), stale.json()), (401, json!({ "code": "invalid" })));
+    assert_eq!(stale.all("set-cookie"), vec![GONE.to_owned()]);
+    let live = app.send(app.req(Method::GET, "/t/session").cookie(&alice.cookie)).await;
+    assert_eq!((live.status.as_u16(), live.json()["user"].clone()), (200, json!("alice")));
+    let post = app.send(session_post(&app, &alice)).await;
+    assert_eq!(post.status, 200);
+    println!("Access kinds: Session = no cookie 401 (no Set-Cookie), stale 401 (+ delete), live GET 200, live POST with token 200");
+}
+
+#[tokio::test]
+async fn kind_session_fresh_lets_a_read_through_and_asks_for_a_new_sign_in_on_a_change() {
+    let (app, alice) = probed();
+    app.clock.advance(STEP_UP + 1);
+    let read = app.send(app.req(Method::GET, "/t/fresh").cookie(&alice.cookie)).await;
+    assert_eq!(read.status, 200);
+    for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+        let change = app.send(app.change_as(method.clone(), "/t/fresh", &alice)).await;
+        assert_eq!(change.status, 403, "{method}");
+        assert_eq!(change.json(), json!({ "code": "forbidden", "step_up": true }), "{method}");
+    }
+    println!("Access kinds: SessionFresh = stale sign-in GET 200, POST/PUT/PATCH/DELETE 403 step_up");
+}
+
+#[tokio::test]
+async fn kind_session_fresh_passes_again_inside_the_window_or_after_a_new_sign_in() {
+    let (app, alice) = probed();
+    app.clock.advance(STEP_UP + 1);
+    assert_eq!(code(&app, app.change_as(Method::POST, "/t/fresh", &alice)).await, 403);
+    // The clock set back inside the window.
+    app.clock.set(NOW + 100);
+    assert_eq!(code(&app, app.change_as(Method::POST, "/t/fresh", &alice)).await, 200);
+    // At the last second of the window, and one second later.
+    app.clock.set(NOW + STEP_UP);
+    assert_eq!(code(&app, app.change_as(Method::POST, "/t/fresh", &alice)).await, 200);
+    app.clock.set(NOW + STEP_UP + 1);
+    assert_eq!(code(&app, app.change_as(Method::POST, "/t/fresh", &alice)).await, 403);
+    // A new sign-in check opens the window again.
+    let mut session = alice.session.clone();
+    app.sessions.reauth(&mut session, app.clock.unix()).expect("reauth");
+    assert_eq!(code(&app, app.change_as(Method::POST, "/t/fresh", &alice)).await, 200);
+    println!("Lifecycle: step-up window = 300 s passes, 301 s asks (403 step_up), reauth passes again");
+}
+
+#[tokio::test]
+async fn kind_session_fresh_checks_the_token_before_the_step_up() {
+    let (app, alice) = probed();
+    app.clock.advance(STEP_UP + 1);
+    let no_token = app.send(app.change(Method::POST, "/t/fresh").cookie(&alice.cookie)).await;
+    assert_eq!((no_token.status.as_u16(), no_token.json()), (403, json!({ "code": "forbidden" })));
+    let stale_session = app.send(app.change(Method::POST, "/t/fresh")).await;
+    assert_eq!(stale_session.status, 401);
+}
+
+#[tokio::test]
+async fn kind_upload_needs_a_session_the_token_and_the_octet_stream() {
+    let (app, alice) = probed();
+    let put = |req: Req| req.set("content-type", "application/octet-stream").bytes(vec![9u8; 1_000]);
+    let rows = vec![
+        ("no session".to_owned(), put(app.change(Method::PUT, "/t/upload")), 401),
+        ("session, no token".to_owned(), put(app.change(Method::PUT, "/t/upload").cookie(&alice.cookie)), 403),
+        ("session and token".to_owned(), put(app.change_as(Method::PUT, "/t/upload", &alice)), 200),
+        ("a read of the upload route".to_owned(), app.req(Method::GET, "/t/upload").cookie(&alice.cookie), 200),
+    ];
+    table(&app, "Access kinds (Upload)", rows).await;
+}
+
+#[tokio::test]
+async fn kind_socket_never_refuses_and_gives_a_verdict() {
+    let (app, alice) = probed();
+    let verdict = |answer: &edge::Resp| answer.json()["verdict"].clone();
+    let socket = |app: &TestApp| app.req(Method::GET, "/t/socket").header("origin", ORIGIN);
+    let good = app.send(socket(&app).cookie(&alice.cookie)).await;
+    assert_eq!(good.status, 200);
+    assert_eq!(verdict(&good), json!({ "origin_ok": true, "host_ok": true, "session": true, "allowed": true }));
+
+    let foreign = app.send(socket(&app).set("origin", "https://evil.example").cookie(&alice.cookie)).await;
+    assert_eq!(foreign.status, 200);
+    assert_eq!(verdict(&foreign), json!({ "origin_ok": false, "host_ok": true, "session": true, "allowed": false }));
+
+    let no_origin = app.send(socket(&app).without("origin").cookie(&alice.cookie)).await;
+    assert_eq!(verdict(&no_origin)["origin_ok"], json!(false));
+    let no_origin_but_fetch = app.send(socket(&app).without("origin").header("sec-fetch-site", "same-origin").cookie(&alice.cookie)).await;
+    assert_eq!(verdict(&no_origin_but_fetch)["origin_ok"], json!(false), "the upgrade needs the Origin itself");
+    let twice = app.send(socket(&app).header("origin", ORIGIN).cookie(&alice.cookie)).await;
+    assert_eq!(verdict(&twice)["origin_ok"], json!(false));
+    let null = app.send(socket(&app).set("origin", "null").cookie(&alice.cookie)).await;
+    assert_eq!(verdict(&null)["origin_ok"], json!(false));
+
+    let anonymous = app.send(socket(&app)).await;
+    assert_eq!(anonymous.status, 200);
+    assert_eq!(verdict(&anonymous)["session"], json!(false));
+    let stale = app.send(socket(&app).cookie(&unknown_cookie())).await;
+    assert_eq!(stale.status, 200);
+    assert_eq!(verdict(&stale), json!({ "origin_ok": true, "host_ok": true, "session": false, "allowed": false }));
+    assert!(stale.all("set-cookie").is_empty());
+
+    // The router does not apply the change checks to a socket part, and the handler sees the same verdict.
+    let odd = app.send(app.req(Method::POST, "/t/socket").set("origin", "https://evil.example").cookie(&alice.cookie)).await;
+    assert_eq!(odd.status, 200);
+    assert_eq!(verdict(&odd)["origin_ok"], json!(false));
+
+    // A wrong Host is still refused before routing.
+    let wrong_host = app.send(socket(&app).set("host", "evil.example")).await;
+    assert_eq!(wrong_host.status, 421);
+    println!("Access kinds: Socket = never refuses (200 with a verdict): good, foreign Origin, no Origin, two Origins, null, no cookie, stale cookie; wrong Host 421");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Extractors
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn extractor_admin_lets_an_administrator_through_and_refuses_a_member_without_a_hint() {
+    let (app, alice) = probed();
+    app.create_account("root", Role::Admin);
+    let root = app.sign_in("root");
+    let member = app.send(app.req(Method::GET, "/t/admin").cookie(&alice.cookie)).await;
+    assert_eq!((member.status.as_u16(), member.json()), (403, json!({ "code": "forbidden" })));
+    let admin = app.send(app.req(Method::GET, "/t/admin").cookie(&root.cookie)).await;
+    assert_eq!((admin.status.as_u16(), admin.json()), (200, json!({ "admin": "root" })));
+    let anonymous = app.send(app.req(Method::GET, "/t/admin")).await;
+    assert_eq!(anonymous.status, 401);
+    let post = app.send(app.change_as(Method::POST, "/t/admin", &root)).await;
+    assert_eq!(post.status, 200);
+    let member_post = app.send(app.change_as(Method::POST, "/t/admin", &alice)).await;
+    assert_eq!(member_post.status, 403);
+}
+
+#[tokio::test]
+async fn extractor_authed_carries_the_locked_flag_of_the_store_view() {
+    let (app, alice) = probed();
+    let open = app.send(app.req(Method::GET, "/t/session").cookie(&alice.cookie)).await.json();
+    assert_eq!((open["locked"].clone(), open["role"].clone()), (json!(false), json!("member")));
+    app.view.set_locked(alice.account, true);
+    let locked = app.send(app.req(Method::GET, "/t/session").cookie(&alice.cookie)).await.json();
+    assert_eq!(locked["locked"], json!(true));
+    app.view.set_locked(alice.account, false);
+    let again = app.send(app.req(Method::GET, "/t/session").cookie(&alice.cookie)).await.json();
+    assert_eq!(again["locked"], json!(false));
+    assert_eq!(again["client"], json!("0.0.0.0"), "without a peer the client is the unspecified address");
+}
+
+#[tokio::test]
+async fn extractor_fresh_is_the_step_up_rule_for_one_handler() {
+    let (app, alice) = probed();
+    let get = |app: &TestApp| app.req(Method::GET, "/t/stepup").cookie(&alice.cookie);
+    assert_eq!(app.send(get(&app)).await.json(), json!({ "fresh": "alice" }));
+    app.clock.advance(STEP_UP + 1);
+    let stale = app.send(get(&app)).await;
+    assert_eq!((stale.status.as_u16(), stale.json()), (403, json!({ "code": "forbidden", "step_up": true })));
+    // The same session still reads the routes that do not ask.
+    assert_eq!(code(&app, app.req(Method::GET, "/t/session").cookie(&alice.cookie)).await, 200);
+    assert_eq!(code(&app, app.req(Method::GET, "/t/stepup")).await, 401);
+}
+
+#[tokio::test]
+async fn extractor_debug_prints_fixed_markers_only() {
+    let (app, alice) = probed();
+    let seen = app.send(app.req(Method::GET, "/t/session").cookie(&alice.cookie)).await.json();
+    assert_eq!(seen["debug"], json!("Some(Authed(..))"));
+    assert_eq!(format!("{:?}", app.app), "App(..)");
+    assert_eq!(format!("{:?}", cookies::session(VALUE).expect("a cookie")), "Sensitive");
+    assert_eq!(format!("{:?}", cookies::oidc("secret-value").expect("a cookie")), "Sensitive");
+    assert_eq!(format!("{:?}", cookies::pending("secret-value").expect("a cookie")), "Sensitive");
+    for text in [seen["debug"].to_string(), format!("{:?}", app.app)] {
+        assert!(!text.contains(&alice.cookie) && !text.contains(&alice.csrf) && !text.contains("alice"), "{text}");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The session lifecycle
+// ---------------------------------------------------------------------------------------------------------------------
+
+async fn session_status(app: &TestApp, alice: &Signed) -> (u16, Vec<String>) {
+    let answer = app.send(app.req(Method::GET, "/t/session").cookie(&alice.cookie)).await;
+    (answer.status.as_u16(), answer.all("set-cookie"))
+}
+
+#[tokio::test]
+async fn lifecycle_idle_ends_exactly_one_second_after_the_idle_time() {
+    let (app, alice) = probed();
+    app.clock.set(NOW + IDLE);
+    assert_eq!(session_status(&app, &alice).await, (200, vec![]));
+    let (app, alice) = probed();
+    app.clock.set(NOW + IDLE + 1);
+    assert_eq!(session_status(&app, &alice).await, (401, vec![GONE.to_owned()]));
+    // The row is gone; going back in time does not bring the session back.
+    app.clock.set(NOW);
+    assert_eq!(session_status(&app, &alice).await.0, 401);
+    println!("Lifecycle: idle 1800 s = 200, 1801 s = 401 + cookie deleted");
+}
+
+#[tokio::test]
+async fn lifecycle_activity_moves_the_idle_window() {
+    let (app, alice) = probed();
+    app.clock.set(NOW + 1_000);
+    assert_eq!(session_status(&app, &alice).await.0, 200);
+    app.clock.set(NOW + 1_000 + IDLE);
+    assert_eq!(session_status(&app, &alice).await.0, 200);
+    let (app, alice) = probed();
+    app.clock.set(NOW + 1_000);
+    assert_eq!(session_status(&app, &alice).await.0, 200);
+    app.clock.set(NOW + 1_000 + IDLE + 1);
+    assert_eq!(session_status(&app, &alice).await, (401, vec![GONE.to_owned()]));
+    println!("Lifecycle: touched at 1000 s, valid to 2800 s, refused at 2801 s");
+}
+
+async fn keep_alive_until(app: &TestApp, alice: &Signed, until: i64) {
+    let mut at = NOW;
+    while at + 1_000 < until {
+        at += 1_000;
+        app.clock.set(at);
+        assert_eq!(session_status(app, alice).await.0, 200, "alive at {at}");
+    }
+    app.clock.set(until);
+}
+
+#[tokio::test]
+async fn lifecycle_the_absolute_time_ends_the_session_however_fresh_the_touch() {
+    let (app, alice) = probed();
+    keep_alive_until(&app, &alice, NOW + ABSOLUTE).await;
+    assert_eq!(session_status(&app, &alice).await, (200, vec![]));
+    let (app, alice) = probed();
+    keep_alive_until(&app, &alice, NOW + ABSOLUTE - 1).await;
+    // The last touch was within 1000 s, so the idle time is nowhere near.
+    app.clock.set(NOW + ABSOLUTE + 1);
+    assert_eq!(session_status(&app, &alice).await, (401, vec![GONE.to_owned()]));
+    println!("Lifecycle: absolute 86400 s = 200, 86401 s = 401 + cookie deleted (touched every 1000 s)");
+}
+
+#[tokio::test]
+async fn lifecycle_a_request_touches_the_session_at_most_every_thirty_seconds() {
+    let (app, alice) = probed();
+    let last_seen = |app: &TestApp| {
+        app.store.read(|tx| tx.session_get(&alice.session.id_hash)).expect("read").expect("the row").last_seen
+    };
+    assert_eq!(last_seen(&app), NOW);
+    app.clock.set(NOW + 100);
+    session_status(&app, &alice).await;
+    assert_eq!(last_seen(&app), NOW + 100);
+    app.clock.set(NOW + 110);
+    session_status(&app, &alice).await;
+    assert_eq!(last_seen(&app), NOW + 100, "within 30 s no write");
+    app.clock.set(NOW + 130);
+    session_status(&app, &alice).await;
+    assert_eq!(last_seen(&app), NOW + 130);
+}
+
+#[tokio::test]
+async fn lifecycle_an_ended_session_is_refused_at_the_next_request() {
+    let (app, alice) = probed();
+    assert_eq!(session_status(&app, &alice).await.0, 200);
+    assert!(app.sessions.end(&alice.session).expect("end"));
+    assert_eq!(session_status(&app, &alice).await, (401, vec![GONE.to_owned()]));
+}
+
+#[tokio::test]
+async fn lifecycle_a_disabled_account_loses_its_session_row_at_the_next_request() {
+    let (app, alice) = probed();
+    app.create_account("root", Role::Admin);
+    assert_eq!(session_status(&app, &alice).await.0, 200);
+    app.set_state("alice", holzwave_server::store::AccountState::Disabled);
+    assert_eq!(session_status(&app, &alice).await, (401, vec![GONE.to_owned()]));
+    let row = app.store.read(|tx| tx.session_get(&alice.session.id_hash)).expect("read");
+    assert!(row.is_none(), "the session row is gone");
+    app.set_state("alice", holzwave_server::store::AccountState::Active);
+    assert_eq!(session_status(&app, &alice).await.0, 401, "enabling the account does not bring the session back");
+}
+
+#[tokio::test]
+async fn lifecycle_a_cookie_of_the_wrong_length_never_reaches_the_store() {
+    let (app, alice) = probed();
+    // A lookup that fails deletes the cookie; a value that never reached the store is simply no cookie.
+    let reached = app.send(app.req(Method::GET, "/t/session").cookie(&unknown_cookie())).await;
+    assert_eq!(reached.all("set-cookie"), vec![GONE.to_owned()]);
+    for bad in [alice.cookie[..42].to_owned(), format!("{}A", alice.cookie), format!("{}=", &alice.cookie[..42]), String::new()] {
+        let answer = app.send(app.req(Method::GET, "/t/session").cookie(&bad)).await;
+        assert_eq!(answer.status, 401, "{bad:?}");
+        assert!(answer.all("set-cookie").is_empty(), "{bad:?} reached the lookup");
+    }
+    assert_eq!(session_status(&app, &alice).await.0, 200, "the real session is untouched");
+}
+
+#[tokio::test]
+async fn lifecycle_the_same_cookie_twice_in_one_header_counts_as_no_cookie() {
+    let (app, alice) = probed();
+    let twice = format!("__Host-hw_session={0}; __Host-hw_session={0}", alice.cookie);
+    let answer = app.send(app.req(Method::GET, "/t/session").header("cookie", &twice)).await;
+    assert_eq!(answer.status, 401);
+    assert!(answer.all("set-cookie").is_empty());
+    let public = app.send(app.req(Method::GET, "/t/public").header("cookie", &twice)).await;
+    assert_eq!(public.json()["user"], Value::Null);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The error vocabulary and the JSON reader
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn api_error_renders_each_variant_with_its_status_and_plain_body() {
+    use axum::response::IntoResponse as _;
+    use holzwave_server::http::router::ApiError;
+    let rows: Vec<(ApiError, u16, Value)> = vec![
+        (ApiError::BadRequest { field: None }, 400, json!({ "code": "bad_request" })),
+        (ApiError::BadRequest { field: Some("username") }, 400, json!({ "code": "bad_request", "field": "username" })),
+        (ApiError::Invalid, 401, json!({ "code": "invalid" })),
+        (ApiError::Forbidden { step_up: false }, 403, json!({ "code": "forbidden" })),
+        (ApiError::Forbidden { step_up: true }, 403, json!({ "code": "forbidden", "step_up": true })),
+        (ApiError::NotFound, 404, json!({ "code": "not_found" })),
+        (ApiError::MethodNotAllowed, 405, json!({ "code": "bad_request" })),
+        (ApiError::Misdirected, 421, json!({ "code": "bad_request" })),
+        (ApiError::Conflict { field: None }, 409, json!({ "code": "conflict" })),
+        (ApiError::Conflict { field: Some("username") }, 409, json!({ "code": "conflict", "field": "username" })),
+        (ApiError::Gone, 410, json!({ "code": "gone" })),
+        (ApiError::Locked, 423, json!({ "code": "locked" })),
+        (ApiError::Throttled { retry_seconds: 17 }, 429, json!({ "code": "throttled", "retry_seconds": 17 })),
+        (ApiError::Busy, 503, json!({ "code": "busy" })),
+    ];
+    let mut seen = Vec::new();
+    for (error, status, body) in rows {
+        let response = error.into_response();
+        let (parts, bytes) = response.into_parts();
+        let bytes = axum::body::to_bytes(bytes, usize::MAX).await.expect("body");
+        assert_eq!(parts.status.as_u16(), status, "{error:?}");
+        assert_eq!(serde_json::from_slice::<Value>(&bytes).expect("json"), body, "{error:?}");
+        assert_eq!(parts.headers.get("content-type").map(HeaderValue::as_bytes), Some(&b"application/json"[..]), "{error:?}");
+        assert_eq!(parts.headers.get("cache-control").map(HeaderValue::as_bytes), Some(&b"no-store"[..]), "{error:?}");
+        // No variant carries a sentence: every text in the body is a lower-case code or a field name.
+        for text in body.as_object().expect("an object").values().filter_map(Value::as_str) {
+            assert!(text.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'), "{text}");
+        }
+        seen.push(format!("{status}"));
+    }
+    println!("Corpus: api errors = {}", seen.join(" "));
+}
+
+#[tokio::test]
+async fn api_json_every_failure_is_the_same_plain_bad_request() {
+    let (app, _) = probed();
+    let post = |body: Vec<u8>| app.change(Method::POST, "/t/json").bytes(body);
+    let deep = format!("{{\"name\":{}{}}}", "[".repeat(200), "]".repeat(200));
+    let bad: Vec<(&str, Vec<u8>)> = vec![
+        ("empty", Vec::new()),
+        ("truncated", br#"{"name":"al"#.to_vec()),
+        ("wrong type", br#"{"name":5}"#.to_vec()),
+        ("unknown member", br#"{"name":"a","admin":true}"#.to_vec()),
+        ("missing member", b"{}".to_vec()),
+        ("not an object", b"[1,2]".to_vec()),
+        ("nesting of 200 levels", deep.into_bytes()),
+        ("invalid UTF-8", b"{\"name\":\"\xff\xfe\"}".to_vec()),
+        ("trailing bytes", br#"{"name":"a"} x"#.to_vec()),
+        ("a null body", b"null".to_vec()),
+    ];
+    for (name, body) in bad {
+        let answer = app.send(post(body)).await;
+        assert_eq!(answer.status, 400, "{name}");
+        assert_eq!(answer.body, br#"{"code":"bad_request"}"#.to_vec(), "{name}");
+    }
+    let nested = format!("{}{}", "[".repeat(200), "]".repeat(200));
+    let answer = app.send(app.change(Method::POST, "/t/value").bytes(nested.into_bytes())).await;
+    assert_eq!((answer.status.as_u16(), answer.body), (400, br#"{"code":"bad_request"}"#.to_vec()));
+    println!("Corpus: ApiJson = 10 failures and a nesting of 200 levels, all 400 with the same body");
+}
+
+#[tokio::test]
+async fn api_json_a_valid_body_is_read() {
+    let (app, _) = probed();
+    let ok = app.send(app.change(Method::POST, "/t/json").bytes(br#"{"name":"alice"}"#.to_vec())).await;
+    assert_eq!((ok.status.as_u16(), ok.json()), (200, json!({ "name": "alice" })));
+    let shallow = format!("{}{}", "[".repeat(100), "]".repeat(100));
+    let ok = app.send(app.change(Method::POST, "/t/value").bytes(shallow.into_bytes())).await;
+    assert_eq!(ok.status, 200);
+}
+
+#[tokio::test]
+async fn a_refusal_carries_the_fixed_headers_and_no_cookie() {
+    let (app, alice) = probed();
+    let refusals = [
+        app.send(session_post(&app, &alice).set("origin", "https://evil.example")).await,
+        app.send(app.req(Method::GET, "/t/session").cookie(&unknown_cookie()).set("host", "evil.example")).await,
+        app.send(app.change(Method::POST, "/t/session").cookie(&alice.cookie)).await,
+        app.send(app.req(Method::OPTIONS, "/t/session")).await,
+    ];
+    for answer in &refusals {
+        assert!(answer.all("set-cookie").is_empty(), "{}", answer.status);
+        assert!(answer.header("content-security-policy").is_some() && answer.header("strict-transport-security").is_some());
+        assert_eq!(answer.header("cache-control").as_deref(), Some("no-store"));
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The hostile corpus and the canary
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn corpus_hostile_requests_end_in_a_plain_status_and_the_app_goes_on() {
+    let (app, alice) = probed();
+    let long_path = format!("/{}", "a".repeat(8 * 1024));
+    let many_headers = (0..200).fold(app.req(Method::GET, "/api/session"), |req, i| req.header(&format!("x-h{i}"), "v"));
+    let long_query = format!("/api/session?{}", "q=1&".repeat(2_000));
+    let big_cookie = format!("a={}; __Host-hw_session={}", "x".repeat(100 * 1024), alice.cookie);
+    let rows: Vec<(&str, Req, u16)> = vec![
+        ("a path of 8 KiB", app.req(Method::GET, &long_path), 404),
+        ("200 header fields", many_headers, 200),
+        ("a query of 8 KB", app.req(Method::GET, &long_query), 200),
+        ("dot segments in the path", app.req(Method::GET, "/t/../t/session").cookie(&alice.cookie), 404),
+        ("Host with high bytes", Req::new(Method::GET, "/t/public").header_bytes("host", b"hw.example.test\xff"), 421),
+        ("Host with a tab", Req::new(Method::GET, "/t/public").header_bytes("host", b"hw.example.test\t"), 421),
+        ("Host repeated", app.req(Method::GET, "/t/public").header("host", "hw.example.test"), 421),
+        (
+            "Origin with high bytes on a change",
+            app.change_as(Method::POST, "/t/session", &alice).set("origin", ORIGIN).header_bytes("origin", b"\xff"),
+            403,
+        ),
+        (
+            "Cookie with high bytes",
+            app.req(Method::GET, "/t/session").header_bytes("cookie", b"__Host-hw_session=\xff\xfe"),
+            401,
+        ),
+        (
+            "token with high bytes",
+            app.change(Method::POST, "/t/session").cookie(&alice.cookie).header_bytes("x-csrf-token", b"\xc3\x28"),
+            403,
+        ),
+        (
+            "content type with high bytes",
+            app.change_as(Method::POST, "/t/session", &alice).set("content-type", "application/json").header_bytes("content-type", b"\xff"),
+            400,
+        ),
+        ("Content-Length that disagrees", app.change_as(Method::POST, "/t/session", &alice).header("content-length", "9"), 400),
+        (
+            "chunked with a body above the cap",
+            app.change_as(Method::POST, "/t/session", &alice)
+                .header("transfer-encoding", "chunked")
+                .chunks(vec![vec![b'x'; 40_000], vec![b'x'; 40_000]]),
+            400,
+        ),
+        ("a body of 1 MiB", app.change_as(Method::POST, "/t/session", &alice).bytes(vec![b' '; 1 << 20]), 400),
+        ("a cookie header of 100 KiB on a session route", app.req(Method::GET, "/t/session").header("cookie", &big_cookie), 401),
+        ("a cookie header of 100 KiB on a public route", app.req(Method::GET, "/t/public").header("cookie", &big_cookie), 200),
+        (
+            "a forwarded list of 100 KiB without the proxy mode",
+            app.req(Method::GET, "/t/public").header("x-forwarded-for", &"1.1.1.1,".repeat(14_000)),
+            200,
+        ),
+    ];
+    let mut seen = Vec::new();
+    for (name, req, want) in rows {
+        let answer = app.send(req).await;
+        assert!(answer.status.as_u16() < 500 || answer.status.as_u16() == 503, "{name}: {}", answer.status);
+        assert_eq!(answer.status.as_u16(), want, "{name}: {}", answer.text());
+        seen.push(format!("{name}={}", answer.status.as_u16()));
+        let next = app.send(app.req(Method::GET, "/api/session").cookie(&alice.cookie)).await;
+        assert_eq!(next.status, 200, "the app serves the request after {name}");
+        assert_eq!(next.json()["state"], json!("signed_in"));
+    }
+    println!("Corpus: {}", seen.join(" | "));
+}
+
+const CANARY: &str = "CANARY-0xC0FFEE-7f3a";
+
+#[tokio::test]
+async fn canary_input_bytes_never_come_back() {
+    let (app, alice) = probed();
+    let shaped = format!("{}{}", CANARY.replace('-', ""), "x".repeat(43 - CANARY.replace('-', "").len()));
+    assert_eq!(shaped.len(), 43);
+    let canary_origin = format!("https://{CANARY}.example");
+    let canary_host = format!("{CANARY}.example");
+    let path = format!("/{CANARY}");
+    let requests: Vec<Req> = vec![
+        app.req(Method::GET, "/t/session").cookie(&shaped),
+        app.req(Method::GET, "/t/public").header("cookie", &format!("x={CANARY}; __Host-hw_session={shaped}")),
+        app.req(Method::GET, "/api/session").cookie(&shaped),
+        app.change(Method::POST, "/t/session").cookie(&alice.cookie).csrf(CANARY),
+        app.change_as(Method::POST, "/t/session", &alice).set("origin", &canary_origin),
+        app.change(Method::POST, "/t/public").set("origin", &canary_origin),
+        app.change_as(Method::POST, "/t/session", &alice).set("content-type", CANARY),
+        app.change(Method::POST, "/t/json").bytes(format!("{{\"name\":\"{CANARY}\",\"{CANARY}\":1}}").into_bytes()),
+        app.req(Method::GET, "/t/public").set("host", &canary_host),
+        app.req(Method::GET, &path),
+        app.req(Method::GET, &format!("{path}?{CANARY}={CANARY}")).cookie(&alice.cookie),
+        app.req(Method::OPTIONS, &path).header("origin", &canary_origin),
+        app.req(Method::GET, "/t/public").header("authorization", &format!("Bearer {CANARY}")).header("x-forwarded-for", CANARY),
+        app.change(Method::POST, "/t/socket").set("origin", &canary_origin),
+    ];
+    let mut checked = 0;
+    for req in requests {
+        let answer = app.send(req).await;
+        let mut everything = answer.text();
+        for (name, value) in &answer.headers {
+            // The policy names the public host, which is configuration and not input.
+            everything.push_str(name.as_str());
+            everything.push_str(&String::from_utf8_lossy(value.as_bytes()));
+        }
+        assert!(!everything.to_ascii_lowercase().contains(&CANARY.to_ascii_lowercase()), "{} came back: {everything}", answer.status);
+        assert!(!everything.contains("0xC0FFEE") && !everything.contains(&shaped));
+        checked += 1;
+    }
+    // The audit directory holds nothing of it either.
+    let mut files = 0;
+    for entry in std::fs::read_dir(&app.audit_dir).expect("the audit directory") {
+        let text = std::fs::read_to_string(entry.expect("an entry").path()).unwrap_or_default();
+        assert!(!text.contains("0xC0FFEE"));
+        files += 1;
+    }
+    // No line of the log can carry it: the HTTP layer does not write to the log at all.
+    for name in ["app", "router", "csrf", "cookies", "headers"] {
+        let source = std::fs::read_to_string(format!("{}/src/http/{name}.rs", env!("CARGO_MANIFEST_DIR"))).expect("source");
+        assert!(!source.contains("log::") && !source.contains("println!") && !source.contains("eprintln!"), "{name}.rs writes a log line");
+    }
+    println!("Corpus: canary in cookie, token, Origin, Host, path, query, body and Authorization on {checked} requests, {files} audit files: never came back");
 }

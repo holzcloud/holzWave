@@ -83,11 +83,18 @@ fn header_value(text: String) -> HeaderValue {
     HeaderValue::from_str(&text).unwrap_or_else(|_| HeaderValue::from_static(""))
 }
 
+/// A header value that holds a secret: its `Debug` text is the word `Sensitive`, and HTTP/2 does not index it.
+fn secret_header_value(text: String) -> HeaderValue {
+    let mut value = header_value(text);
+    value.set_sensitive(true);
+    value
+}
+
 /// The `Set-Cookie` value that sets the session cookie: `__Host-hw_session=<v>; Secure; HttpOnly; SameSite=Strict; Path=/`.
 /// `None` for a value that is not 43 characters of the base64url alphabet. No `Domain`, no `Max-Age`: the session ends when
 /// the server says so.
 pub fn session(value: &str) -> Option<HeaderValue> {
-    is_session_value(value).then(|| header_value(format!("{SESSION_COOKIE}={value}; Secure; HttpOnly; SameSite=Strict; Path=/")))
+    is_session_value(value).then(|| secret_header_value(format!("{SESSION_COOKIE}={value}; Secure; HttpOnly; SameSite=Strict; Path=/")))
 }
 
 /// The `Set-Cookie` value that deletes the session cookie.
@@ -99,7 +106,7 @@ pub fn delete_session() -> HeaderValue {
 /// It is `Lax` because the provider sends the browser back with a top-level navigation from another site.
 pub fn oidc(value: &str) -> Option<HeaderValue> {
     is_cookie_token(value)
-        .then(|| header_value(format!("{OIDC_COOKIE}={value}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age={OIDC_MAX_AGE}")))
+        .then(|| secret_header_value(format!("{OIDC_COOKIE}={value}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age={OIDC_MAX_AGE}")))
 }
 
 /// The `Set-Cookie` value that deletes the OpenID Connect transaction cookie.
@@ -110,7 +117,7 @@ pub fn delete_oidc() -> HeaderValue {
 /// The `Set-Cookie` value of the pending-step cookie: `Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=300`.
 pub fn pending(value: &str) -> Option<HeaderValue> {
     is_cookie_token(value).then(|| {
-        header_value(format!("{PENDING_COOKIE}={value}; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age={PENDING_MAX_AGE}"))
+        secret_header_value(format!("{PENDING_COOKIE}={value}; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age={PENDING_MAX_AGE}"))
     })
 }
 

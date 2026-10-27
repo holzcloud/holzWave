@@ -9,7 +9,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{FromRequestParts, Request, State};
+use axum::extract::{FromRequest, FromRequestParts, Request, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
@@ -17,12 +17,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Json, Router};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::json;
 
 use crate::auth::session::SessionError;
 use crate::config::Sessions;
 use crate::proxy::Mode;
-use crate::store::{Account, Session};
+use crate::store::{Account, Role, Session};
 
 use super::app::{App, StoreState};
 use super::cookies;
@@ -207,6 +208,78 @@ impl<S: Send + Sync> FromRequestParts<S> for MaybeAuthed {
     }
 }
 
+/// A request of an administrator: `Authed` with the role `admin`, otherwise 403 `forbidden` (no `step_up`).
+#[derive(Debug, Clone)]
+pub struct Admin(pub Authed);
+
+impl<S: Send + Sync> FromRequestParts<S> for Admin {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Admin, ApiError> {
+        let authed = parts.extensions.get::<Authed>().cloned().ok_or(ApiError::Invalid)?;
+        if authed.account.role != Role::Admin {
+            return Err(ApiError::Forbidden { step_up: false });
+        }
+        Ok(Admin(authed))
+    }
+}
+
+/// A request whose sign-in is no older than the step-up time, otherwise 403 `forbidden` with `step_up`. It is the explicit
+/// form of [`Access::SessionFresh`], for a handler that wants the rule on one method only.
+#[derive(Debug, Clone)]
+pub struct Fresh(pub Authed);
+
+impl<S: Send + Sync> FromRequestParts<S> for Fresh {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Fresh, ApiError> {
+        let authed = parts.extensions.get::<Authed>().cloned().ok_or(ApiError::Invalid)?;
+        if !authed.fresh {
+            return Err(ApiError::Forbidden { step_up: true });
+        }
+        Ok(Fresh(authed))
+    }
+}
+
+/// What the router found out about a request on a [`Access::Socket`] part. The router refuses nothing there; the handler
+/// turns the verdict into the close code the page understands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SocketVerdict {
+    /// The `Origin` is the public origin, exactly one header.
+    pub origin_ok: bool,
+    /// The `Host` is the public authority.
+    pub host_ok: bool,
+    /// The request has a live session.
+    pub session: bool,
+}
+
+impl SocketVerdict {
+    /// Whether the upgrade may go on: all three hold.
+    pub fn allowed(self) -> bool {
+        self.origin_ok && self.host_ok && self.session
+    }
+}
+
+/// A JSON body, read strictly: the type decides which members are allowed, and every failure (an empty body, a body that is
+/// cut off, a wrong type, an unknown member, nesting that is too deep, bytes that are not UTF-8, a body over the cap) is 400
+/// `bad_request` with the same plain body, without a word about what was wrong.
+#[derive(Debug, Clone)]
+pub struct ApiJson<T>(pub T);
+
+impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for ApiJson<T> {
+    type Rejection = ApiError;
+
+    async fn from_request(request: Request, _state: &S) -> Result<ApiJson<T>, ApiError> {
+        let cap = request
+            .extensions()
+            .get::<Arc<App>>()
+            .map_or(crate::limits::Limits::DEFAULT.api_body_bytes, |app| app.limits.api_body_bytes);
+        let cap = usize::try_from(cap).unwrap_or(usize::MAX);
+        let bytes = axum::body::to_bytes(request.into_body(), cap).await.map_err(|_| ApiError::BadRequest { field: None })?;
+        serde_json::from_slice(&bytes).map(ApiJson).map_err(|_| ApiError::BadRequest { field: None })
+    }
+}
+
 /// Seconds from `now` to the idle or the absolute end of `session`, whichever is first; never negative.
 pub fn seconds_left(session: &Session, lifetimes: &Sessions, now: i64) -> i64 {
     let idle = i64::try_from(lifetimes.idle.as_secs()).unwrap_or(i64::MAX);
@@ -320,6 +393,9 @@ async fn guard(State(guard): State<Guard>, mut request: Request, next: Next) -> 
             {
                 return ApiError::Forbidden { step_up: false }.into_response();
             }
+            if changing && access == Access::SessionFresh && !authed.fresh {
+                return ApiError::Forbidden { step_up: true }.into_response();
+            }
             request.extensions_mut().insert(*authed);
         }
         Outcome::Stale => match access {
@@ -337,6 +413,15 @@ async fn guard(State(guard): State<Guard>, mut request: Request, next: Next) -> 
                 return ApiError::Invalid.into_response();
             }
         }
+    }
+
+    if access == Access::Socket {
+        let verdict = SocketVerdict {
+            origin_ok: csrf::origin_exact(&app.origin, request.headers()),
+            host_ok: csrf::host_ok(&app.origin, request.headers(), request.uri()),
+            session: request.extensions().get::<Authed>().is_some(),
+        };
+        request.extensions_mut().insert(verdict);
     }
 
     if changing && access != Access::Socket && access != Access::Upload {
