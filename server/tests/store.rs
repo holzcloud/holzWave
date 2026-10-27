@@ -716,3 +716,266 @@ fn a_write_that_fails_changes_nothing() {
     assert!(matches!(refused, Err(StoreError::Storage(_))));
     make(&store, "alice", Role::Admin);
 }
+
+// ---- schema, versions, damaged files, links ----
+
+/// The schema of version 1 as a literal: table, then `(column, declared type)` sorted by column.
+const SCHEMA_V1: &[(&str, &[(&str, &str)])] = &[
+    (
+        "accounts",
+        &[
+            ("created_at", "INTEGER"),
+            ("display_name", "TEXT"),
+            ("handle", "BLOB"),
+            ("id", "INTEGER"),
+            ("role", "TEXT"),
+            ("state", "TEXT"),
+            ("uid", "INTEGER"),
+            ("username", "TEXT"),
+        ],
+    ),
+    ("bootstrap", &[("expires_at", "INTEGER"), ("redeemed_at", "INTEGER"), ("token_hash", "BLOB")]),
+    (
+        "invites",
+        &[
+            ("account_id", "INTEGER"),
+            ("created_by", "INTEGER"),
+            ("expires_at", "INTEGER"),
+            ("id", "INTEGER"),
+            ("redeemed_at", "INTEGER"),
+            ("role", "TEXT"),
+            ("token_hash", "BLOB"),
+        ],
+    ),
+    ("oidc_identities", &[("account_id", "INTEGER"), ("issuer", "TEXT"), ("sub", "TEXT")]),
+    (
+        "passkeys",
+        &[
+            ("account_id", "INTEGER"),
+            ("created_at", "INTEGER"),
+            ("credential_id", "BLOB"),
+            ("id", "INTEGER"),
+            ("passkey_json", "TEXT"),
+            ("prf_salt", "BLOB"),
+        ],
+    ),
+    (
+        "password_credentials",
+        &[
+            ("account_id", "INTEGER"),
+            ("changed_at", "INTEGER"),
+            ("params", "TEXT"),
+            ("salt", "BLOB"),
+            ("verifier", "BLOB"),
+        ],
+    ),
+    (
+        "sessions",
+        &[
+            ("absolute_expires", "INTEGER"),
+            ("account_id", "INTEGER"),
+            ("addr", "TEXT"),
+            ("created_at", "INTEGER"),
+            ("device", "TEXT"),
+            ("id_hash", "BLOB"),
+            ("last_auth", "INTEGER"),
+            ("last_seen", "INTEGER"),
+            ("method", "TEXT"),
+        ],
+    ),
+    (
+        "throttle",
+        &[("failures", "INTEGER"), ("key", "TEXT"), ("locked_until", "INTEGER"), ("window_start", "INTEGER")],
+    ),
+    ("totp", &[("account_id", "INTEGER"), ("last_step", "INTEGER"), ("sealed_secret", "BLOB")]),
+    (
+        "unlock_methods",
+        &[
+            ("account_id", "INTEGER"),
+            ("credential_id", "BLOB"),
+            ("kind", "TEXT"),
+            ("params", "TEXT"),
+            ("salt", "BLOB"),
+        ],
+    ),
+];
+
+#[test]
+fn schema_v1_is_pinned() {
+    let (_scratch, store) = open("store-schema");
+    let found = store.read(|tx| tx.schema()).expect("schema");
+    let found: Vec<(String, Vec<(String, String)>)> = found.into_iter().map(|t| (t.name, t.columns)).collect();
+    let expected: Vec<(String, Vec<(String, String)>)> = SCHEMA_V1
+        .iter()
+        .map(|(table, columns)| {
+            (table.to_string(), columns.iter().map(|(c, t)| (c.to_string(), t.to_string())).collect())
+        })
+        .collect();
+    assert_eq!(found, expected);
+    let columns: usize = SCHEMA_V1.iter().map(|(_, c)| c.len()).sum();
+    println!("Schema pin: {} tables, {columns} columns", SCHEMA_V1.len());
+}
+
+/// Makes `<dir>/server/server.sqlite3` by hand with `setup` and returns the data directory.
+fn hand_made(tag: &str, setup: impl FnOnce(&rusqlite::Connection)) -> Scratch {
+    let scratch = Scratch::new(tag);
+    let server = scratch.join("server");
+    std::fs::create_dir(&server).expect("server dir");
+    std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o700)).expect("mode");
+    let conn = rusqlite::Connection::open(server.join("server.sqlite3")).expect("create");
+    setup(&conn);
+    drop(conn);
+    scratch
+}
+
+fn db_bytes(scratch: &Scratch) -> Vec<u8> {
+    std::fs::read(scratch.join("server/server.sqlite3")).expect("read the database file")
+}
+
+fn siblings(scratch: &Scratch) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(scratch.join("server"))
+        .expect("read the server directory")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_database_with_a_newer_schema_is_refused_and_left_as_it_was() {
+    let scratch = hand_made("store-newer", |conn| {
+        conn.execute_batch("CREATE TABLE future (x INTEGER); INSERT INTO future VALUES (1);").expect("table");
+        conn.pragma_update(None, "application_id", holzwave_server::store::APPLICATION_ID).expect("id");
+        conn.pragma_update(None, "user_version", 2).expect("version");
+    });
+    let before = db_bytes(&scratch);
+    let refused = Store::open(scratch.path()).expect_err("must refuse");
+    assert_eq!(refused, StoreError::NewerSchema { found: 2, supported: 1 });
+    let sentence = refused.to_string();
+    println!("Newer schema sentence: {sentence}");
+    assert!(sentence.contains("version 2") && sentence.contains("up to 1"), "{sentence}");
+    assert_eq!(db_bytes(&scratch), before, "the bytes are unchanged");
+    assert_eq!(siblings(&scratch), ["server.sqlite3"], "no -wal or -shm file was left behind");
+}
+
+#[test]
+fn a_file_that_is_not_ours_is_refused_and_left_untouched() {
+    let random = {
+        let mut bytes = vec![0u8; 8192];
+        getrandom::fill(&mut bytes).expect("random");
+        bytes
+    };
+    let cases: Vec<(&str, Box<dyn FnOnce(&Scratch)>)> = vec![
+        ("random", Box::new(move |s| {
+            std::fs::write(s.join("server/server.sqlite3"), &random).expect("write");
+        })),
+        ("short", Box::new(|s| {
+            std::fs::write(s.join("server/server.sqlite3"), b"not a database").expect("write");
+        })),
+    ];
+    for (name, fill) in cases {
+        let scratch = Scratch::new(&format!("store-foreign-{name}"));
+        std::fs::create_dir(scratch.join("server")).expect("dir");
+        fill(&scratch);
+        std::fs::set_permissions(scratch.join("server/server.sqlite3"), std::fs::Permissions::from_mode(0o644))
+            .expect("mode");
+        let before = db_bytes(&scratch);
+        assert_eq!(Store::open(scratch.path()).expect_err(name), StoreError::NotOurDatabase, "{name}");
+        assert_eq!(db_bytes(&scratch), before, "{name}: the bytes are unchanged");
+        assert_eq!(mode_of(&scratch.join("server/server.sqlite3")), 0o644, "{name}: the mode is unchanged");
+    }
+    // A real SQLite database of something else, with and without an application id.
+    for (name, app_id) in [("other-app", 42i64), ("no-app", 0)] {
+        let scratch = hand_made(&format!("store-foreign-{name}"), |conn| {
+            conn.execute_batch("CREATE TABLE notes (t TEXT); INSERT INTO notes VALUES ('keep me');").expect("table");
+            conn.pragma_update(None, "application_id", app_id).expect("id");
+        });
+        let before = db_bytes(&scratch);
+        assert_eq!(Store::open(scratch.path()).expect_err(name), StoreError::NotOurDatabase, "{name}");
+        assert_eq!(db_bytes(&scratch), before, "{name}: the bytes are unchanged");
+        assert_eq!(siblings(&scratch), ["server.sqlite3"], "{name}");
+    }
+    assert_eq!(
+        StoreError::NotOurDatabase.to_string().lines().count(),
+        1,
+        "the refusal is one sentence"
+    );
+}
+
+#[test]
+fn an_empty_file_is_made_into_a_database_and_tightened() {
+    let scratch = Scratch::new("store-empty-file");
+    std::fs::create_dir(scratch.join("server")).expect("dir");
+    std::fs::set_permissions(scratch.join("server"), std::fs::Permissions::from_mode(0o755)).expect("mode");
+    let file = scratch.join("server/server.sqlite3");
+    std::fs::write(&file, b"").expect("empty file");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("mode");
+    let store = Store::open(scratch.path()).expect("an empty file is a new database");
+    make(&store, "alice", Role::Admin);
+    assert_eq!(mode_of(&file), 0o600);
+    assert_eq!(mode_of(&scratch.join("server")), 0o700, "a loose directory is tightened");
+}
+
+#[test]
+fn a_database_that_carries_our_id_but_no_version_is_migrated() {
+    let scratch = hand_made("store-v0", |conn| {
+        conn.pragma_update(None, "application_id", holzwave_server::store::APPLICATION_ID).expect("id");
+    });
+    let store = Store::open(scratch.path()).expect("open");
+    assert_eq!(store.read(|tx| tx.diagnostics()).expect("diagnostics").user_version, 1);
+    make(&store, "alice", Role::Admin);
+}
+
+#[test]
+fn two_stores_on_one_directory_see_each_others_writes_and_data_survives_a_reopen() {
+    let scratch = Scratch::new("store-two");
+    let first = Store::open(scratch.path()).expect("first");
+    let second = Store::open(scratch.path()).expect("second");
+    let alice = make(&first, "alice", Role::Admin);
+    assert_eq!(second.account_by_username("alice").expect("lookup"), Some(alice.clone()));
+    let bob = make(&second, "bob", Role::Member);
+    assert_eq!(bob.uid, alice.uid + 1, "the second store continues after the first");
+    assert_eq!(first.account_get(bob.id).expect("get"), Some(bob.clone()));
+    drop((first, second));
+    let again = Store::open(scratch.path()).expect("reopen");
+    assert_eq!(again.read(|tx| tx.account_list()).expect("list"), vec![alice, bob]);
+}
+
+#[test]
+fn a_link_in_place_of_the_database_or_its_directory_is_refused() {
+    let scratch = Scratch::new("store-links");
+    let elsewhere = scratch.write_file("elsewhere.sqlite3", b"", 0o600);
+    std::fs::create_dir(scratch.join("data")).expect("data dir");
+    std::fs::create_dir(scratch.join("data/server")).expect("server dir");
+    std::os::unix::fs::symlink(&elsewhere, scratch.join("data/server/server.sqlite3")).expect("link");
+    let refused = Store::open(&scratch.join("data"));
+    assert!(matches!(refused, Err(StoreError::Storage(_))), "a link at the database path: {refused:?}");
+    assert_eq!(std::fs::read(&elsewhere).expect("read"), b"", "the target was not touched");
+
+    let other = Scratch::new("store-links-dir");
+    std::fs::create_dir(other.join("real")).expect("real dir");
+    std::os::unix::fs::symlink(other.join("real"), other.join("server")).expect("link");
+    let refused = Store::open(other.path());
+    assert!(matches!(refused, Err(StoreError::Storage(_))), "a link at the server directory: {refused:?}");
+    assert!(std::fs::read_dir(other.join("real")).expect("read dir").next().is_none());
+}
+
+#[test]
+fn error_texts_carry_no_values_paths_or_sql() {
+    let (scratch, store) = open("store-text");
+    let secret_name = "canary-username-0123";
+    make(&store, secret_name, Role::Admin);
+    let conflict = store
+        .write(|tx| tx.account_create(&NewAccount::new(secret_name, Role::Member), RANGE, NOW))
+        .expect_err("conflict");
+    for text in [
+        conflict.to_string(),
+        format!("{conflict:?}"),
+        StoreError::from(rusqlite::Error::InvalidQuery).to_string(),
+        StoreError::NotFound.to_string(),
+    ] {
+        assert!(!text.contains(secret_name), "an error text must not hold a value: {text}");
+        assert!(!text.contains(scratch.path().to_str().expect("utf-8 path")), "nor a path: {text}");
+        assert!(!text.to_lowercase().contains("select ") && !text.to_lowercase().contains("insert "), "nor SQL: {text}");
+    }
+}
