@@ -12,8 +12,8 @@ const LINK = "https://holz.example.net/#invite=hwi_7Qk2mXe9aBcDeFgHiJkLmNoPqRsTu
 const TOKEN = "hwi_7Qk2mXe9aBcDeFgHiJkLmNoPqRsTuVwXyZ012345678";
 const STEP_PW = "step up password";
 
-const NOW = Date.now();
-const iso = (secondsAgo) => new Date(NOW - secondsAgo * 1000).toISOString();
+// A time relative to now, taken when the fixture is made: the files of a full run are loaded long before they run.
+const iso = (secondsAgo) => new Date(Date.now() - secondsAgo * 1000).toISOString();
 
 /** The accounts of the scripted server. Holz is the only active administrator; Dora is an administrator who is disabled. */
 export function people(over = {}) {
@@ -517,9 +517,8 @@ export async function second({ page, url }) {
     }
     assert.equal(await page.locator(".people [role=menu] .ppl-why").textContent(), ONLY, "the reason is text under the entries");
     assert.equal(await page.getByRole("menuitem", { name: "Reset secrets", exact: true }).getAttribute("aria-disabled"), null);
-    await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
-    await page.getByRole("menuitem", { name: "Make member", exact: true }).click();
-    await page.getByRole("menuitem", { name: "Disable", exact: true }).click({ force: true });
+    // Playwright counts aria-disabled as not enabled, so the press is forced.
+    for (const label of ["Delete", "Make member", "Disable"]) await page.getByRole("menuitem", { name: label, exact: true }).click({ force: true });
     assert.equal(await page.getByRole("dialog", { name: /^Delete / }).count(), 0, "no question for an entry that is held back");
     assert.equal(server.log.filter((l) => l.method !== "GET").length, 0, "no request for an entry that is held back");
     assert.equal(await menuOpen(page).count(), 1, "the menu stays open");
@@ -610,6 +609,11 @@ export async function second({ page, url }) {
     const seen = new Set();
     const take = async () => (await controlsOf(page)).forEach((c) => seen.add(c));
     await take();
+    for (const name of ["Dana Wu", "Dora Vos", "Holz"]) {
+      await more(page, name).click();
+      await take();
+      await page.keyboard.press("Escape");
+    }
     await more(page, "Chris Roy").click();
     await take();
     await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
@@ -643,7 +647,9 @@ export async function second({ page, url }) {
         "button:Reset secrets",
         "menuitem:Delete",
         "menuitem:Disable",
+        "menuitem:Enable",
         "menuitem:Make admin",
+        "menuitem:Make member",
         "menuitem:Reset secrets",
         "menuitem:Unlock sign-in",
         ...["1", "3", "7", "14", "30"].map((d) => `radio:${d}`),
@@ -652,7 +658,6 @@ export async function second({ page, url }) {
       ].sort(),
     );
     assert.equal(controls.filter((c) => /password|scrollback|command|layout|export|audit|impersonat|file|terminal|key/i.test(c.split(":")[1]) && !/^(button|menuitem):Reset secrets$/.test(c)).length, 0, "nothing in the dialog names another person's data");
-    assert.equal(await page.locator("table").count() >= 0, true);
     await page.keyboard.press("Escape");
     await clean(page, server, [], "the controls");
   }

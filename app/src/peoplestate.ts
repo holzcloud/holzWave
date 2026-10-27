@@ -1,6 +1,8 @@
 // The pure part of the people dialog (docs/design.md 6.29): the reading of what `GET /api/admin/accounts` answers, the state
 // words with their glyphs, the time words and the invitation. No DOM and no network here, so node tests it on the compiled file.
 // The server sends data and codes, never a sentence; every sentence the dialog says is here.
+import { CHANGE_FAILED } from "./accountstate.js";
+import { messageFor } from "./loginstate.js";
 
 /** The most accounts the page takes from the server, and the longest strings. */
 export const MAX_ACCOUNTS = 500;
@@ -136,11 +138,11 @@ export function readInvitation(raw: unknown): string | null {
 }
 
 /** The sentence when the server says that this person may not open the dialog (the role was taken away). */
-export const ADMIN_ONLY = "";
+export const ADMIN_ONLY = "Only administrators can open this.";
 /** The sentence when a change would leave no active administrator. */
-export const ONE_ADMIN = "";
+export const ONE_ADMIN = "There must be one active administrator.";
 /** The dim reason under the entries that the last active administrator cannot have. */
-export const ONLY_ADMIN = "";
+export const ONLY_ADMIN = "The only active administrator.";
 
 export type EntryId = "role" | "disable" | "enable" | "unlock" | "reset" | "delete";
 
@@ -152,8 +154,23 @@ export interface Entry {
   reason: string | null;
 }
 
-export function menuFor(_row: Row, _admins: number): Entry[] {
-  return [];
+/**
+ * The entries of the menu of a row, in the order of the dialog: the role, the state, `Unlock sign-in` while the person is locked
+ * out, then `Reset secrets` and `Delete`. The last active administrator keeps `Make member`, `Disable` and `Delete` in the list
+ * with a reason: `admins` is the count the server gave, and a disabled administrator is never the active one. A person who is
+ * locked out still counts as an active administrator, as the server's count of them does.
+ */
+export function menuFor(row: Row, admins: number): Entry[] {
+  const last = row.role === "admin" && row.state !== "disabled" && admins <= 1;
+  const held = last ? ONLY_ADMIN : null;
+  const entries: Entry[] = [
+    { id: "role", label: row.role === "admin" ? "Make member" : "Make admin", danger: false, reason: held },
+    row.state === "disabled" ? { id: "enable", label: "Enable", danger: false, reason: null } : { id: "disable", label: "Disable", danger: false, reason: held },
+  ];
+  if (row.state === "locked_out") entries.push({ id: "unlock", label: "Unlock sign-in", danger: false, reason: null });
+  entries.push({ id: "reset", label: "Reset secrets", danger: true, reason: null });
+  entries.push({ id: "delete", label: "Delete", danger: true, reason: held });
+  return entries;
 }
 
 /** The question of an entry that asks first. */
@@ -163,7 +180,18 @@ export interface Confirmation {
   button: string;
 }
 
-export function confirmFor(_entry: string, _name: string): Confirmation | null {
+/** The question for `Delete` and `Reset secrets`, naming the person; null for every other entry. */
+export function confirmFor(entry: string, name: string): Confirmation | null {
+  if (entry === "delete") {
+    return {
+      title: `Delete ${name}?`,
+      text: "They can no longer sign in and their terminals stop. Their files stay on the server, and nobody can open their saved passwords and keys again.",
+      button: "Delete",
+    };
+  }
+  if (entry === "reset") {
+    return { title: `Reset secrets of ${name}?`, text: "Their saved passwords and keys are deleted. Their account, layout and history stay.", button: "Reset secrets" };
+  }
   return null;
 }
 
@@ -174,13 +202,36 @@ export interface Request {
   body?: Record<string, unknown>;
 }
 
-export function requestFor(_entry: EntryId, _row: Row): Request {
-  return { method: "POST", path: "" };
+/** The request that an entry sends for a row; the id is encoded as a piece of the path. */
+export function requestFor(entry: EntryId, row: Row): Request {
+  const base = `/api/admin/accounts/${encodeURIComponent(row.id)}`;
+  switch (entry) {
+    case "role":
+      return { method: "POST", path: `${base}/role`, body: { role: row.role === "admin" ? "member" : "admin" } };
+    case "disable":
+      return { method: "POST", path: `${base}/disable`, body: {} };
+    case "enable":
+      return { method: "POST", path: `${base}/enable`, body: {} };
+    case "unlock":
+      return { method: "POST", path: `${base}/unlock-signin`, body: {} };
+    case "reset":
+      return { method: "POST", path: `${base}/reset-secrets`, body: {} };
+    case "delete":
+      return { method: "DELETE", path: base };
+  }
 }
 
 /** What a refused change means for the dialog: the person may not be here, the person is gone, or a sentence. */
 export type Outcome = { kind: "locked" } | { kind: "gone" } | { kind: "say"; text: string };
 
-export function outcomeOf(_status: number, _body?: Record<string, unknown>): Outcome {
-  return { kind: "say", text: "" };
+/**
+ * What a failed request means. A 403 that is no request for a recent sign-in means the role was taken away; one that is (a second
+ * refusal after the confirmation) is the change's own. `status` is 0 when nothing arrived.
+ */
+export function outcomeOf(status: number, body?: Record<string, unknown>): Outcome {
+  if (status === 403 && body?.step_up !== true) return { kind: "locked" };
+  if (status === 404) return { kind: "gone" };
+  if (status === 409 && body?.field === "role") return { kind: "say", text: ONE_ADMIN };
+  if (status === 0 || status === 429 || status === 503 || status >= 500) return { kind: "say", text: messageFor(status, body) };
+  return { kind: "say", text: CHANGE_FAILED };
 }

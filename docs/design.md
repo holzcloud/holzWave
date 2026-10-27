@@ -2381,8 +2381,8 @@ out and sign in again.` with `Cancel` only, and a layer that cannot read the acc
 **People.** The box is 41 rem wide and scrolls inside. The title `People` with the hairline button `Invite` at the right, the
 status line, then a table with the columns `Name`, `Role`, `State`, `Last sign-in` and an actions column, the sentence `This list
 shows names, roles and states only. It never shows anyone's secrets, terminals, commands or layout.` and `Close`. A row is the display name with the
-username in dim mono, the role (`admin` or `member`), the state, when the person last signed in (`today 09:12`, `yesterday`, `3
-weeks ago`, `never`) and a button `⋯` named `Actions for NAME` (`aria-haspopup="menu"`). The row of the open menu has the rose
+username in dim mono, the role (`admin` or `member`), the state, when the person last signed in (`just now`, `5 min ago`, `3 h ago`,
+`yesterday`, `3 weeks ago`, `never`) and a button `⋯` named `Actions for NAME` (`aria-haspopup="menu"`). The row of the open menu has the rose
 wash and the button the rose ring.
 
 | State | Shown as | Second cue |
@@ -2397,13 +2397,17 @@ confirmation of the same box (24 rem) that names the person: `Delete NAME?` says
 server, and nobody can open their saved passwords and keys again.`; `Reset secrets of NAME?` says `Their saved passwords and keys are
 deleted. Their account, layout and history stay.` The buttons are `Cancel` and the action's name in a hairline button with the
 danger border and text (armed, as in 6.27); rose is not used for a destructive action. An administrator cannot disable, delete or
-demote the last active administrator: those three entries are dim and `aria-disabled`, and the menu says why under them in the
-dim style, `Last active administrator. Make someone else an administrator first.` Every action also asks for a recent sign-in, with
-the layer above.
+demote the last active administrator: those three entries stay in the menu, dim and `aria-disabled`, and a press on one does nothing; the menu says
+why under them in the dim style, `The only active administrator.` If another administrator acts at the same moment and the server refuses a change for
+that reason, the status line says `There must be one active administrator.` and the list stays as it was. A person whose role was taken away while the
+dialog was open gets `Only administrators can open this.` from the first answer that says so, and the dialog then offers `Close` only. A person who
+is gone (the server answers that there is no such person) is not named in a sentence: the list is read again. Every action also asks for a recent sign-in,
+with the layer above; a request that was not made says nothing when the person cancelled that layer, and `Could not reach the server. Try again.` when
+the server did not answer. While a change is on its way its buttons are disabled, so a double press sends one request.
 
-`Invite` opens a small form in a layer of the same box: `Role` (a radio group, `Member` first, then `Administrator`), `Days` (1 to
-30, 7 at first) and `Username` (optional: when it is filled the account is made at once and the link enrols it; a taken name says
-`That username is taken. Choose another.`), `Cancel` and the solid `Create link`. The layer then shows the link once: the title `Invitation link`, the
+`Invite` opens a small form in a layer of the same box: `Role` (a radio group, `Member` first, then `Administrator`) and `Days` (a radio group of
+`1`, `3`, `7`, `14` and `30`, 7 at first; a list that drops down would be a `select`, which a page under a strict content security policy cannot draw in
+every engine), `Cancel` and the solid `Create link`; a refusal is said in the form, under the choices. The layer then shows the link once: the title `Invitation link`, the
 sentence `Shown once. Copy it now and send it to the person. It works for 7 days, as a member.` (with the real days and role), the link in
 a bordered block in mono cut with an ellipsis, `Copy link` and the solid `Done`. The link is never listed again, is not put into
 the status line or the title, and is removed from the page when `Done` is pressed or the layer closes.
@@ -2424,7 +2428,8 @@ to remove. Every size is in `rem`, every target at least 28 px high. The table h
 ![People](design/web-people.png)
 
 **Not drawn.** A password that an administrator sets for someone, impersonating a person, a view of anyone's data, groups, bulk actions,
-a search of the people, an audit viewer, API tokens, management of SSH keys and a list of shared panes.
+a search of the people, an audit viewer, API tokens, management of SSH keys, a list of shared panes, and a name that an administrator
+chooses for a new account in the invitation form (an invitation is for a person who chooses their own).
 
 ### 6.30 The web window
 

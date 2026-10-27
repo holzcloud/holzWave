@@ -3,7 +3,7 @@
    alone: `●` active in the ok colour, `○` disabled dim, `!` locked out in the warn colour with an underline. Rose marks focus only.
    Nothing moves. */
 .dlg.settings.people { width: min(41rem, calc(100vw - 4rem)); }
-.dlg.settings.people-invite { width: min(24rem, calc(100vw - 4rem)); }
+.dlg.settings.people-invite, .dlg.settings.people-ask { width: min(24rem, calc(100vw - 4rem)); }
 .dlg.people [hidden] { display: none !important; }
 .dlg.people .ppl-head { display: flex; align-items: center; gap: .667rem; margin: 0 0 .5rem; }
 .dlg.people .ppl-head .set-title { flex: 1 1 auto; margin: 0; }
@@ -24,6 +24,25 @@
 .dlg.people .ppl-state[data-tone="dim"] { color: var(--hw-dim); }
 .dlg.people .ppl-state[data-tone="warn"] { color: var(--hw-warn); }
 .dlg.people .ppl-state[data-tone="warn"] .ppl-word { text-decoration: underline; }
+.dlg.people .ppl-row.ppl-open { background: var(--hw-rose-wash); }
+.dlg.people .ppl-act { position: relative; width: 1%; text-align: right; }
+.dlg.people .ppl-more { box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; min-width: 2rem; min-height: 1.75rem; padding: 0 .5rem;
+                        font-size: 1rem; letter-spacing: 0; text-transform: none; color: var(--hw-ink-2); border: 1px solid var(--hw-line); border-radius: .5rem; }
+.dlg.people .ppl-more:hover { color: var(--hw-ink); background: var(--hw-rose-wash); }
+.dlg.people .ppl-more[aria-expanded="true"] { color: var(--hw-ink); border-color: var(--hw-rose); }
+.dlg.people .ppl-invite { box-sizing: border-box; display: inline-flex; align-items: center; min-height: 1.75rem; padding: 0 1rem; font-size: 1rem; letter-spacing: 0;
+                          text-transform: none; border-radius: .667rem; }
+/* The menu is a floating layer: the hairline, the radius and the one shadow. A held back entry is dim, and the reason is text under the entries. */
+.dlg.people .ppl-menu { position: absolute; z-index: 1; top: 100%; right: 0; box-sizing: border-box; min-width: 14rem; padding: .25rem 0; text-align: left;
+                        background: var(--hw-ground-2); border: 1px solid var(--hw-line); border-radius: .5rem; box-shadow: 0 .833rem 2.667rem rgb(0 0 0 / .5); }
+.dlg.people .ppl-item { box-sizing: border-box; display: block; width: 100%; min-height: 1.75rem; padding: .333rem .833rem; font-size: 1rem; letter-spacing: 0;
+                        text-transform: none; text-align: left; white-space: nowrap; color: var(--hw-ink); border: 0; border-radius: 0; }
+.dlg.people .ppl-item:hover, .dlg.people .ppl-item:focus-visible { background: var(--hw-rose-wash); }
+.dlg.people .ppl-item:focus-visible { outline: 2px solid var(--hw-rose); outline-offset: -2px; }
+.dlg.people .ppl-item[aria-disabled="true"] { color: var(--hw-dim); cursor: default; background: none; }
+.dlg.people .ppl-danger { color: var(--hw-danger); }
+.dlg.people .ppl-sep { margin: .25rem 0; border-top: 1px solid var(--hw-line); }
+.dlg.people .ppl-why { margin: 0; padding: .25rem .833rem .333rem; max-width: 16rem; color: var(--hw-dim); overflow-wrap: anywhere; }
 .dlg.people .ppl-note { margin: .833rem 0 0; color: var(--hw-ink-2); overflow-wrap: anywhere; }
 
 /* The invitation: the choices, then the link shown once in a bordered block of mono text, cut with an ellipsis. */
@@ -38,10 +57,20 @@
 .dlg.people-invite .ppl-link-box { box-sizing: border-box; display: flex; align-items: center; flex: 1 1 auto; min-width: 0; min-height: 2rem; padding: 0 .667rem;
                                    color: var(--hw-ink); background: var(--hw-ground); border: 1px solid var(--hw-line); border-radius: .333rem; }
 .dlg.people-invite .ppl-link-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: all; }
-.dlg.people-invite button { min-height: 1.75rem; }
+.dlg.people-invite button, .dlg.people-ask button { min-height: 1.75rem; }
+
+/* The question of Delete and Reset secrets: the words, then Cancel and the action in the danger style. Rose is not used. */
+.dlg.people-ask .ppl-ask-text { margin: 0 0 .833rem; color: var(--hw-ink-2); overflow-wrap: anywhere; }
+.dlg.people-ask .web-btn.ppl-go { color: var(--hw-danger); border-color: var(--hw-danger); }
+.dlg.people-ask .web-btn.ppl-go:hover { color: var(--hw-danger); background: none; }
+.dlg.people-ask .web-btn:disabled { color: var(--hw-dim); border-color: var(--hw-line); }
+.dlg.people-ask .web-btn:focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 2px; }
 .dlg.people-invite :is(.web-btn):focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 2px; }
 
 @media (forced-colors: active) {
   .dlg.people .ppl-table th, .dlg.people .ppl-row > td, .dlg.people-invite .ppl-link-box { border-color: CanvasText; }
+  .dlg.people .ppl-menu, .dlg.people .ppl-more { border-color: CanvasText; }
+  .dlg.people .ppl-row.ppl-open, .dlg.people .ppl-more[aria-expanded="true"] { outline: 2px solid Highlight; }
+  .dlg.people-ask .web-btn.ppl-go { outline: 2px solid Mark; }
   .dlg.people :is(button, input):focus-visible, .dlg.people-invite :is(button, input):focus-visible { outline-color: Highlight; }
 }
