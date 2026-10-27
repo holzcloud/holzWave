@@ -1,18 +1,55 @@
 //! The routes of sign-in, sign-out, passkey and single sign-on ceremonies.
+//!
+//! The services that verify a password and a code, a passkey assertion or a single sign-on response are built and tested
+//! elsewhere; this module puts them behind the routes of the contract. It decides what the browser sees and nothing else:
+//!
+//! - **No route makes a session.** A session value comes out of a service call that verified every factor; a value from a
+//!   request (a cookie, a body, a query) is never turned into a session.
+//! - **A failed step looks the same whatever the cause.** Every refusal of a sign-in step is the one `401 invalid` answer, with
+//!   no cookie and no `Retry-After`; a lock is a `429` with the seconds; an overloaded derivation gate is a `503`.
+//! - **A sign-in makes exactly one session.** The new value is set in the exact cookie of the cookie builder, the cookie of the
+//!   half-finished step is deleted, and a session the browser still held is ended.
+//! - **The secret store is told, not asked.** The key material of the method that was used goes to the [`UnlockGate`]; a
+//!   failure of the gate does not fail the sign-in, and the material is in no answer, log or audit line.
+//!
+//! This file writes no log line on purpose: the services and the gate own their log and audit lines, and a route that logged
+//! would be one more place a value could leak to.
 
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Bytes;
+use axum::extract::State;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::post;
+use axum::{Extension, Json, Router};
+use cookie::Cookie;
+use serde::de::value::MapAccessDeserializer;
+use serde::de::{Deserializer, MapAccess, Visitor};
+use serde::Deserialize;
+use zeroize::Zeroize;
 
-use crate::auth::oidc::{OidcCallback, OidcError, OidcGrant, OidcService, OidcStart};
 use crate::auth::oidc::Http;
-use crate::auth::passkey::Passkeys;
-use crate::auth::signin::SignIn;
+use crate::auth::oidc::{OidcCallback, OidcError, OidcGrant, OidcService, OidcStart};
+use crate::auth::passkey::{PasskeyError, Passkeys};
+use crate::auth::signin::{SignIn, SignInError};
 use crate::http::app::App;
-use crate::http::router::Part;
+use crate::http::router::{Access, ApiError, ApiJson, Authed, ClientAddr, MaybeAuthed, Part};
+use crate::store::AccountId;
 
-use super::routes_unlock::{GateFuture, UnlockGate};
+use super::cookies::{self, MAX_COOKIE_HEADER_BYTES, MAX_COOKIE_PAIRS, MAX_TOKEN_CHARS, PENDING_COOKIE};
+use super::routes_unlock::{GateFuture, Material, UnlockGate};
+
+/// How long a sign-in waits for the unlock gate before it goes on without it.
+const GATE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The longest `User-Agent` text that is looked at, in bytes. A real header is far shorter.
+const MAX_AGENT_BYTES: usize = 512;
+
+/// What a device is called when the header says nothing usable.
+const UNKNOWN_DEVICE: &str = "Browser";
 
 /// The single sign-on service as the routes use it, without its HTTP client type.
 pub trait OidcFlow: Send + Sync {
@@ -67,12 +104,268 @@ pub struct AuthServices {
     pub page: Arc<dyn LandingPage>,
 }
 
-/// The device summary for the text of a `User-Agent` header.
-pub fn device_of(_user_agent: &str) -> String {
-    String::new()
+type Shared = Arc<AuthServices>;
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The device summary
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The browser and the system in a `User-Agent` text, as `Firefox on Linux`, from a closed list of names. A text that names
+/// no browser, an empty text and a text longer than a real header are `Browser`. The header itself is never kept.
+pub fn device_of(user_agent: &str) -> String {
+    if user_agent.len() > MAX_AGENT_BYTES {
+        return UNKNOWN_DEVICE.to_owned();
+    }
+    let has = |needle: &str| user_agent.contains(needle);
+    let browser = if has("Edg/") || has("EdgA/") || has("EdgiOS/") || has("Edge/") {
+        Some("Edge")
+    } else if has("OPR/") || has("Opera") {
+        Some("Opera")
+    } else if has("Firefox/") || has("FxiOS/") {
+        Some("Firefox")
+    } else if has("Chrome/") || has("CriOS/") || has("Chromium/") {
+        Some("Chrome")
+    } else if has("Safari/") && has("Version/") {
+        Some("Safari")
+    } else {
+        None
+    };
+    // Android and iOS agents also name Linux and macOS, so they are asked first.
+    let system = if has("Android") {
+        Some("Android")
+    } else if has("iPhone") || has("iPad") || has("iPod") {
+        Some("iOS")
+    } else if has("Windows") {
+        Some("Windows")
+    } else if has("Macintosh") || has("Mac OS X") {
+        Some("macOS")
+    } else if has("CrOS") {
+        Some("ChromeOS")
+    } else if has("Linux") || has("X11") {
+        Some("Linux")
+    } else {
+        None
+    };
+    match (browser, system) {
+        (Some(browser), Some(system)) => format!("{browser} on {system}"),
+        (Some(browser), None) => browser.to_owned(),
+        (None, _) => UNKNOWN_DEVICE.to_owned(),
+    }
 }
 
-/// The sign-in, passkey, single sign-on, logout and step-up routes.
-pub fn parts(_services: Arc<AuthServices>) -> Vec<Part> {
-    Vec::new()
+/// The device summary of a request.
+fn device_of_request(headers: &HeaderMap) -> String {
+    let agent = headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok()).unwrap_or("");
+    device_of(agent)
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Answers
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// A refusal: the error vocabulary of the router, with the `Retry-After` header a lock needs.
+pub(super) struct Refusal(pub(super) ApiError);
+
+impl IntoResponse for Refusal {
+    fn into_response(self) -> Response {
+        let mut response = self.0.into_response();
+        if let ApiError::Throttled { retry_seconds } = self.0 {
+            response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from(retry_seconds));
+        }
+        response
+    }
+}
+
+impl From<ApiError> for Refusal {
+    fn from(error: ApiError) -> Refusal {
+        Refusal(error)
+    }
+}
+
+impl From<SignInError> for Refusal {
+    fn from(error: SignInError) -> Refusal {
+        Refusal(match error {
+            SignInError::Invalid => ApiError::Invalid,
+            SignInError::Throttled { retry_seconds } => ApiError::Throttled { retry_seconds },
+            SignInError::Busy | SignInError::Internal => ApiError::Busy,
+        })
+    }
+}
+
+impl From<PasskeyError> for Refusal {
+    fn from(error: PasskeyError) -> Refusal {
+        Refusal(match error {
+            PasskeyError::Invalid | PasskeyError::TooMany | PasskeyError::NotFound => ApiError::Invalid,
+            PasskeyError::Conflict => ApiError::Conflict { field: None },
+            PasskeyError::Internal => ApiError::Busy,
+        })
+    }
+}
+
+/// An answer with a JSON body, `no-store` and the given cookies.
+pub(super) fn answer(status: StatusCode, body: &serde_json::Value, cookies: Vec<HeaderValue>) -> Response {
+    let mut response = (status, Json(body)).into_response();
+    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    for cookie in cookies {
+        response.headers_mut().append(header::SET_COOKIE, cookie);
+    }
+    response
+}
+
+/// A body that must be a JSON object. A struct that derives `Deserialize` also reads a JSON array of its members in order;
+/// this wrapper refuses the array, so that `["alice","secret"]` is not a sign-in. Unknown members and a member named twice are
+/// refused by the struct itself.
+pub(super) struct Object<T>(pub(super) T);
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Object<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Object<T>, D::Error> {
+        struct Reader<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T: Deserialize<'de>> Visitor<'de> for Reader<T> {
+            type Value = T;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<T, A::Error> {
+                T::deserialize(MapAccessDeserializer::new(map))
+            }
+        }
+
+        deserializer.deserialize_map(Reader(std::marker::PhantomData)).map(Object)
+    }
+}
+
+/// Runs a blocking service call off the async threads.
+pub(super) async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, Refusal> {
+    tokio::task::spawn_blocking(work).await.map_err(|_| Refusal(ApiError::Busy))
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Cookies and the end of a sign-in
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The value of the cookie `name` of a request, read as strictly as the session cookie: nothing for a header that is too big,
+/// too many pairs, a pair that does not parse, the name twice, or a value that is not a plain token.
+fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+    let mut total = 0usize;
+    let mut pairs = 0usize;
+    let mut found: Option<String> = None;
+    for line in headers.get_all(header::COOKIE) {
+        total = total.saturating_add(line.len());
+        if total > MAX_COOKIE_HEADER_BYTES {
+            return None;
+        }
+        let text = line.to_str().ok()?;
+        for parsed in Cookie::split_parse(text) {
+            pairs += 1;
+            if pairs > MAX_COOKIE_PAIRS {
+                return None;
+            }
+            let cookie = parsed.ok()?;
+            if cookie.name() == name {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(cookie.value().to_owned());
+            }
+        }
+    }
+    found.filter(|value| {
+        !value.is_empty()
+            && value.len() <= MAX_TOKEN_CHARS
+            && value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~'))
+    })
+}
+
+/// The cookie of the half-finished step, or the empty text (which no service accepts, and which they count as a failure).
+fn pending_value(headers: &HeaderMap) -> String {
+    read_cookie(headers, PENDING_COOKIE).unwrap_or_default()
+}
+
+/// What follows a verified sign-in: the session the browser still held is ended, and the unlock gate is told which key
+/// material the method produced. A failure of either changes nothing for the person: the old session expires by itself, and
+/// a store that stays locked shows the unlock dialog.
+async fn after_sign_in(services: &Shared, held: Option<Authed>, account: AccountId, material: Material) {
+    if let Some(old) = held {
+        let sessions = services.app.session_manager.clone();
+        let _ = tokio::task::spawn_blocking(move || sessions.end(&old.session)).await;
+    }
+    let _ = tokio::time::timeout(GATE_TIMEOUT, services.gate.session_started(account, material)).await;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The password and the code
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PasswordBody {
+    username: String,
+    password: String,
+}
+
+impl Drop for PasswordBody {
+    fn drop(&mut self) {
+        self.username.zeroize();
+        self.password.zeroize();
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TotpBody {
+    code: String,
+}
+
+impl Drop for TotpBody {
+    fn drop(&mut self) {
+        self.code.zeroize();
+    }
+}
+
+/// `POST /auth/password`: the first step. A right name and password give the pending cookie and nothing else.
+async fn password_route(
+    State(services): State<Shared>,
+    Extension(client): Extension<ClientAddr>,
+    ApiJson(Object(body)): ApiJson<Object<PasswordBody>>,
+) -> Result<Response, Refusal> {
+    let token = services.signin.begin_password(&body.username, &body.password, client.0).await?;
+    let cookie = cookies::pending(token.expose()).ok_or(ApiError::Busy)?;
+    Ok(answer(StatusCode::OK, &serde_json::json!({ "next": "totp" }), vec![cookie]))
+}
+
+/// `POST /auth/totp`: the second step. The only place a password sign-in makes a session.
+async fn totp_route(
+    State(services): State<Shared>,
+    Extension(client): Extension<ClientAddr>,
+    MaybeAuthed(held): MaybeAuthed,
+    headers: HeaderMap,
+    ApiJson(Object(body)): ApiJson<Object<TotpBody>>,
+) -> Result<Response, Refusal> {
+    let token = pending_value(&headers);
+    let device = device_of_request(&headers);
+    let signin = services.signin.clone();
+    let addr = client.0;
+    let code = body.code.clone();
+    let grant = blocking(move || signin.finish_totp(&token, &code, addr, &device)).await??;
+    let cookie = cookies::session(grant.session.value.expose()).ok_or(ApiError::Busy)?;
+    let account = grant.session.session.account_id;
+    after_sign_in(&services, held, account, Material::Password(grant.unlock)).await;
+    Ok(answer(StatusCode::OK, &serde_json::json!({ "next": "done" }), vec![cookie, cookies::delete_pending()]))
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The parts
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The sign-in, passkey, single sign-on, logout and step-up routes, as parts for [`crate::http::router::build`]. A method
+/// that is off in the configuration of the application has no route: its paths answer like any unknown path.
+pub fn parts(services: Arc<AuthServices>) -> Vec<Part> {
+    let mut public: Router<Shared> = Router::new();
+    if services.app.auth.password_totp {
+        public = public.route("/auth/password", post(password_route)).route("/auth/totp", post(totp_route));
+    }
+    vec![Part { access: Access::Public, router: public.with_state(services) }]
 }

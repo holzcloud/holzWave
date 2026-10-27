@@ -205,6 +205,7 @@ async fn the_password_route_refuses_what_is_not_exactly_its_body() {
 async fn the_password_route_keeps_the_origin_and_content_type_checks() {
     let env = AuthEnv::all();
     env.person("alice").await;
+    let before = env.argon.derivations();
     let body = json!({"username": "alice", "password": PASSWORD});
     let no_origin = env.send(env.post("/auth/password", &body).without("origin")).await;
     assert_eq!(no_origin.status, 403);
@@ -213,7 +214,7 @@ async fn the_password_route_keeps_the_origin_and_content_type_checks() {
     let text = env.send(env.post("/auth/password", &body).set("content-type", "text/plain")).await;
     assert_eq!(text.status, 400);
     assert_eq!(env.gate.started().len(), 0);
-    assert_eq!(env.argon.derivations(), 0, "none of the three reached a derivation");
+    assert_eq!(env.argon.derivations(), before, "none of the three reached a derivation");
 }
 
 #[tokio::test]
