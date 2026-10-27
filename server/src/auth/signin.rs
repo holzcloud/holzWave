@@ -29,7 +29,7 @@ use crate::limits::Limits;
 use crate::log::{self, Level};
 use crate::auth::throttle::{Policy, Throttle, account_key, address_key};
 use crate::sealed::Sealer;
-use crate::store::{AccountId, AccountState, Role, Store, StoreError, TokenHash};
+use crate::store::{AccountId, AccountState, Role, Session, Store, StoreError, TokenHash};
 use crate::unlock::{Kek, random};
 
 /// The most half-signed-in states that exist at once. The one after them is [`SignInError::Busy`].
@@ -145,16 +145,18 @@ pub struct Grant {
 
 /// Which step of a flow an audit line is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Step {
+enum Stage {
     Password,
     Totp,
+    StepUp,
 }
 
-impl Step {
+impl Stage {
     fn as_str(self) -> &'static str {
         match self {
-            Step::Password => "password",
-            Step::Totp => "totp",
+            Stage::Password => "password",
+            Stage::Totp => "totp",
+            Stage::StepUp => "step_up",
         }
     }
 }
@@ -191,6 +193,7 @@ pub struct SignIn {
     sealer: Arc<Sealer>,
     limits: Limits,
     throttle: Throttle,
+    max_pending: usize,
     pending: Mutex<HashMap<TokenHash, Entry>>,
     wiped: Arc<AtomicU64>,
 }
@@ -221,6 +224,7 @@ impl SignIn {
             gate,
             sealer,
             limits,
+            max_pending: MAX_PENDING,
             pending: Mutex::new(HashMap::new()),
             wiped: Arc::new(AtomicU64::new(0)),
         }
@@ -231,6 +235,18 @@ impl SignIn {
         self.throttle = Throttle::new(self.store.clone(), Policy::from_limits(&limits));
         self.limits = limits;
         self
+    }
+
+    /// The same service with room for fewer half-signed-in states than [`MAX_PENDING`] (never more). For tests that fill the
+    /// room, because every state costs a real derivation.
+    pub fn with_max_pending(mut self, most: usize) -> SignIn {
+        self.max_pending = most.clamp(1, MAX_PENDING);
+        self
+    }
+
+    /// The most half-signed-in states this service keeps at once.
+    pub fn max_pending(&self) -> usize {
+        self.max_pending
     }
 
     /// How many half-signed-in states exist now.
@@ -263,7 +279,7 @@ impl SignIn {
     /// for a failure that is not about a name (a token that was never issued, a server too busy): that one counts under the
     /// address alone, so that nobody can lock an account by keeping the server busy. The step that reaches a limit writes
     /// `signin.locked` instead of `signin.fail`.
-    fn fail(&self, step: Step, target: Option<AccountId>, who: Who<'_>, now: i64, error: SignInError) -> SignInError {
+    fn fail(&self, step: Stage, target: Option<AccountId>, who: Who<'_>, now: i64, error: SignInError) -> SignInError {
         let account = if error == SignInError::Busy { None } else { who.account };
         let locked = match self.throttle.record_failure(account, who.address, now) {
             Ok(counted) => counted.started_lock,
@@ -274,7 +290,12 @@ impl SignIn {
         };
         let reason = if error == SignInError::Busy { "busy" } else { "invalid" };
         let action = if locked { Action::SigninLocked } else { Action::SigninFail };
-        let mut event = Event::new(action, Outcome::Fail, Actor::Anonymous, Some(who.addr))
+        // A step-up is made by someone who is signed in; the other steps are made by nobody yet.
+        let actor = match (step, target) {
+            (Stage::StepUp, Some(account)) => Actor::Account(account),
+            _ => Actor::Anonymous,
+        };
+        let mut event = Event::new(action, Outcome::Fail, actor, Some(who.addr))
             .detail(DetailKey::Step, DetailValue::Text(step.as_str()));
         if !locked {
             event = event.detail(DetailKey::Reason, DetailValue::Text(reason));
@@ -306,10 +327,10 @@ impl SignIn {
     /// Whether a new state fits now.
     fn has_room(&self, now: i64) -> bool {
         let mut map = self.lock();
-        if map.len() >= MAX_PENDING {
+        if map.len() >= self.max_pending {
             Self::sweep(&mut map, now, self.pending_secs());
         }
-        map.len() < MAX_PENDING
+        map.len() < self.max_pending
     }
 
     /// Takes the state of a token for a code check: it must exist, be within its time and not be checked right now.
@@ -376,10 +397,10 @@ impl SignIn {
             || password.is_empty()
             || password.len() > MAX_PASSWORD_BYTES
         {
-            return Err(self.fail(Step::Password, None, who, now, SignInError::Invalid));
+            return Err(self.fail(Stage::Password, None, who, now, SignInError::Invalid));
         }
         if !self.has_room(now) {
-            return Err(self.fail(Step::Password, None, who, now, SignInError::Busy));
+            return Err(self.fail(Stage::Password, None, who, now, SignInError::Busy));
         }
         let folded = username.to_lowercase();
         let (known, stored) = self.store.read(|tx| {
@@ -402,18 +423,18 @@ impl SignIn {
                     material: UnlockMaterial { kek: verified.kek, wiped: self.wiped.clone() },
                 };
                 let mut map = self.lock();
-                if map.len() >= MAX_PENDING {
+                if map.len() >= self.max_pending {
                     Self::sweep(&mut map, now, self.pending_secs());
                 }
-                if map.len() >= MAX_PENDING {
+                if map.len() >= self.max_pending {
                     drop(map);
-                    return Err(self.fail(Step::Password, None, who, now, SignInError::Busy));
+                    return Err(self.fail(Stage::Password, None, who, now, SignInError::Busy));
                 }
                 map.insert(hash, entry);
                 Ok(token)
             }
-            Err(PasswordError::InvalidCredentials) => Err(self.fail(Step::Password, known, who, now, SignInError::Invalid)),
-            Err(PasswordError::Busy) => Err(self.fail(Step::Password, None, who, now, SignInError::Busy)),
+            Err(PasswordError::InvalidCredentials) => Err(self.fail(Stage::Password, known, who, now, SignInError::Invalid)),
+            Err(PasswordError::Busy) => Err(self.fail(Stage::Password, None, who, now, SignInError::Busy)),
             Err(_) => Err(SignInError::Internal),
         }
     }
@@ -430,10 +451,10 @@ impl SignIn {
         self.locked(None, &address, now)?;
         let anonymous = Who { account: None, address: &address, addr };
         let Ok(hash) = parse_token(token) else {
-            return Err(self.fail(Step::Totp, None, anonymous, now, SignInError::Invalid));
+            return Err(self.fail(Stage::Totp, None, anonymous, now, SignInError::Invalid));
         };
         let Some((account, key)) = self.reserve(&hash, now) else {
-            return Err(self.fail(Step::Totp, None, anonymous, now, SignInError::Invalid));
+            return Err(self.fail(Stage::Totp, None, anonymous, now, SignInError::Invalid));
         };
         let who = Who { account: Some(&key), address: &address, addr };
         if let Err(locked) = self.locked(who.account, who.address, now) {
@@ -446,7 +467,7 @@ impl SignIn {
             Ok(Ok(())) => {}
             Ok(Err(TotpError::InvalidCode)) => {
                 self.spend_attempt(&hash);
-                return Err(self.fail(Step::Totp, Some(account), who, now, SignInError::Invalid));
+                return Err(self.fail(Stage::Totp, Some(account), who, now, SignInError::Invalid));
             }
             _ => {
                 self.release(&hash);
@@ -468,8 +489,54 @@ impl SignIn {
                 );
                 Ok(Grant { session, unlock: entry.material })
             }
-            Err(_) => Err(self.fail(Step::Totp, Some(account), who, now, SignInError::Invalid)),
+            Err(_) => Err(self.fail(Stage::Totp, Some(account), who, now, SignInError::Invalid)),
         }
+    }
+
+    // ---- step-up ----
+
+    /// Proves again, for a sensitive action, that the person at the keyboard knows the password of the session's own account:
+    /// the same gate, the same throttle and the same single answer as the first step. A right password moves the session's
+    /// `last_auth` to now and writes one `session.step_up` line; a wrong one writes `signin.fail` with step `step_up`, counts
+    /// under the name and the address and leaves the session as it was. A session that was not made with the password (a
+    /// passkey or single sign-on) is [`SignInError::Invalid`] before anything is derived or counted: it has nothing to prove
+    /// with here.
+    pub async fn step_up_password(&self, session: &mut Session, password: &str, addr: IpAddr) -> Result<(), SignInError> {
+        if session.method != PASSWORD_METHOD {
+            return Err(SignInError::Invalid);
+        }
+        let now = self.clock.unix();
+        let account = session.account_id;
+        let found = self.store.read(|tx| {
+            let Some(found) = tx.account_get(account)?.filter(|a| a.state == AccountState::Active) else {
+                return Ok(None);
+            };
+            Ok(Some((found.username.clone(), lookup_password(tx, &found.username)?)))
+        })?;
+        let Some((username, stored)) = found else {
+            return Err(SignInError::Invalid);
+        };
+        let key = account_key(&username);
+        let address = address_key(addr);
+        let who = Who { account: Some(&key), address: &address, addr };
+        self.locked(who.account, who.address, now)?;
+        if password.is_empty() || password.len() > MAX_PASSWORD_BYTES {
+            return Err(self.fail(Stage::StepUp, Some(account), who, now, SignInError::Invalid));
+        }
+        match verify_password(&self.gate, stored, password).await {
+            Ok(verified) if verified.account == account => {}
+            Ok(_) | Err(PasswordError::InvalidCredentials) => {
+                return Err(self.fail(Stage::StepUp, Some(account), who, now, SignInError::Invalid));
+            }
+            Err(PasswordError::Busy) => return Err(self.fail(Stage::StepUp, None, who, now, SignInError::Busy)),
+            Err(_) => return Err(SignInError::Internal),
+        }
+        self.sessions.reauth(session, now).map_err(|_| SignInError::Internal)?;
+        self.record(
+            &Event::new(Action::SessionStepUp, Outcome::Ok, Actor::Account(account), Some(addr))
+                .detail(DetailKey::Method, DetailValue::Text(PASSWORD_METHOD.as_str())),
+        );
+        Ok(())
     }
 
     // ---- locks ----

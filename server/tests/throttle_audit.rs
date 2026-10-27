@@ -9,9 +9,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use holzwave_server::audit::Audit;
-use holzwave_server::auth::password::{ArgonGate, enrol_password};
+use holzwave_server::auth::password::{ArgonGate, derive_split, enrol_password, parse_params};
 use holzwave_server::auth::session::{Method, SessionManager, generate_token};
-use holzwave_server::auth::signin::{SignIn, SignInError};
+use holzwave_server::auth::signin::{MAX_PENDING, SignIn, SignInError};
 use holzwave_server::auth::throttle::{account_key, address_key};
 use holzwave_server::auth::totp;
 use holzwave_server::clock::{Clock, ManualClock};
@@ -19,7 +19,7 @@ use holzwave_server::config::Sessions;
 use holzwave_server::keyfile::ServerKey;
 use holzwave_server::limits::Limits;
 use holzwave_server::sealed::Sealer;
-use holzwave_server::store::{AccountId, NewAccount, Role, Store};
+use holzwave_server::store::{AccountId, AccountState, NewAccount, Role, Session, Store};
 use holzwave_server::unlock::Kdf;
 use scratch::Scratch;
 use serde_json::Value;
@@ -49,6 +49,10 @@ fn fixture(tag: &str) -> Fixture {
 }
 
 fn fixture_with(tag: &str, limits: Limits) -> Fixture {
+    fixture_full(tag, limits, MAX_PENDING)
+}
+
+fn fixture_full(tag: &str, limits: Limits, max_pending: usize) -> Fixture {
     let scratch = Scratch::new(tag);
     let clock = Arc::new(ManualClock::new(NOW));
     let store = Arc::new(Store::open(scratch.path()).expect("open the store"));
@@ -57,7 +61,9 @@ fn fixture_with(tag: &str, limits: Limits) -> Fixture {
     let gate = ArgonGate::new(2, Kdf::lower_bound());
     let sealer = Arc::new(Sealer::new(&ServerKey::from_bytes([7u8; 32]).expect("a key that is not all zero")));
     let signin = Arc::new(
-        SignIn::new(store.clone(), clock.clone(), audit, sessions.clone(), gate.clone(), sealer.clone()).with_limits(limits),
+        SignIn::new(store.clone(), clock.clone(), audit, sessions.clone(), gate.clone(), sealer.clone())
+            .with_limits(limits)
+            .with_max_pending(max_pending),
     );
     Fixture { scratch, store, clock, sessions, gate, signin, secrets: Mutex::new(HashMap::new()), sealer }
 }
@@ -627,4 +633,379 @@ async fn throttle_purge_removes_old_pending_states_a_few_at_a_time() {
     assert_eq!(f.signin.purge(late, 2).expect("purge").pending, 1);
     assert_eq!(f.signin.pending_count(), 0);
     assert_eq!(f.signin.wiped_count(), 3, "every state let go of its material");
+}
+
+// ---- step-up ----
+
+/// A signed-in session of `name`, and the person's password session value.
+async fn signed_in(f: &Fixture, name: &str) -> Session {
+    let token = f.signin.begin_password(name, PASSWORD, ADDR).await.expect("first step");
+    let grant = f.signin.finish_totp(token.expose(), &f.code(name), ADDR, DEVICE).expect("second step");
+    grant.session.session.clone()
+}
+
+#[tokio::test]
+async fn throttle_a_step_up_with_the_password_makes_an_old_session_fresh() {
+    let f = fixture("th-stepup");
+    let alice = f.person("alice").await;
+    let mut session = signed_in(&f, "alice").await;
+    let signed_at = session.last_auth;
+    f.clock.advance(6 * 60);
+    assert!(!f.sessions.step_up_fresh(&session, f.clock.unix()), "older than the window");
+    let lines = f.lines().len();
+    f.signin.step_up_password(&mut session, PASSWORD, ADDR).await.expect("step-up");
+    assert!(f.sessions.step_up_fresh(&session, f.clock.unix()));
+    assert_eq!(session.last_auth, f.clock.unix());
+    assert!(session.last_auth > signed_at);
+    let stored = f.store.read(|tx| tx.session_get(&session.id_hash)).expect("read").expect("the row");
+    assert_eq!(stored.last_auth, f.clock.unix(), "the stored row moved too");
+    let new: Vec<Value> = f.lines()[lines..].to_vec();
+    assert_eq!(new.len(), 1);
+    println!("Step-up: {}", show(&new[0]));
+    assert_eq!(new[0]["action"], "session.step_up");
+    assert_eq!(new[0]["actor"], alice.get().to_string());
+    assert_eq!(new[0]["detail"]["method"], "password_totp");
+}
+
+#[tokio::test]
+async fn throttle_a_wrong_step_up_changes_nothing_and_counts_on_both_keys() {
+    let f = fixture("th-stepup-wrong");
+    let alice = f.person("alice").await;
+    let mut session = signed_in(&f, "alice").await;
+    f.clock.advance(6 * 60);
+    let before = session.clone();
+    let lines = f.lines().len();
+    let outcome = f.signin.step_up_password(&mut session, WRONG, ADDR).await;
+    assert_eq!(outcome.expect_err("wrong"), SignInError::Invalid);
+    assert_eq!(session, before, "the session is as it was");
+    assert!(!f.sessions.step_up_fresh(&session, f.clock.unix()));
+    assert_eq!((f.failures(&account_key("alice")), f.failures(&address_key(ADDR))), (1, 1));
+    let new: Vec<Value> = f.lines()[lines..].to_vec();
+    assert_eq!(new.len(), 1);
+    println!("Step-up: {}", show(&new[0]));
+    assert_eq!((new[0]["action"].as_str(), new[0]["detail"]["step"].as_str()), (Some("signin.fail"), Some("step_up")));
+    assert_eq!(new[0]["target"], alice.get().to_string());
+}
+
+#[tokio::test]
+async fn throttle_a_session_that_was_not_made_with_a_password_cannot_step_up_with_one() {
+    let f = fixture("th-stepup-method");
+    let alice = f.person("alice").await;
+    let lines = f.lines().len();
+    let derivations = f.gate.derivations();
+    for method in [Method::Passkey, Method::Oidc] {
+        let mut session = f.sessions.create(alice, method, f.clock.unix(), DEVICE, Some(ADDR)).expect("session").session;
+        let outcome = f.signin.step_up_password(&mut session, PASSWORD, ADDR).await;
+        assert_eq!(outcome.expect_err("not a password session"), SignInError::Invalid);
+    }
+    assert_eq!(f.gate.derivations(), derivations, "nothing was derived");
+    assert_eq!(f.lines().len(), lines);
+    assert_eq!(f.failures(&account_key("alice")), 0, "and nothing was counted");
+}
+
+#[tokio::test]
+async fn throttle_the_step_up_is_throttled_like_the_first_step() {
+    let f = fixture("th-stepup-lock");
+    f.person("alice").await;
+    let mut session = signed_in(&f, "alice").await;
+    for _ in 0..5 {
+        f.signin.step_up_password(&mut session, WRONG, ADDR).await.expect_err("wrong");
+    }
+    assert_eq!((f.count("signin.fail"), f.count("signin.locked")), (4, 1));
+    let derivations = f.gate.derivations();
+    let outcome = f.signin.step_up_password(&mut session, PASSWORD, ADDR).await;
+    assert!(matches!(outcome, Err(SignInError::Throttled { .. })), "{outcome:?}");
+    assert_eq!(f.gate.derivations(), derivations);
+    // The lock is the one of the name, so the first step is refused too.
+    assert!(matches!(f.signin.begin_password("alice", PASSWORD, ADDR).await, Err(SignInError::Throttled { .. })));
+}
+
+// ---- the pending state ----
+
+#[test]
+fn throttle_the_pending_bound_is_four_thousand_ninety_six_and_cannot_be_raised() {
+    // Every pending state costs a real derivation (about a tenth of a second in a test build), so the fill test below runs at
+    // a smaller bound. This one pins the number itself, and that no setting goes above it.
+    assert_eq!(MAX_PENDING, 4_096);
+    assert_eq!(fixture("th-cap-default").signin.max_pending(), 4_096);
+    assert_eq!(fixture_full("th-cap-const", Limits::DEFAULT, usize::MAX).signin.max_pending(), 4_096);
+}
+
+#[tokio::test]
+async fn throttle_the_pending_states_are_bounded_and_the_check_precedes_the_derivation() {
+    let f = fixture_full("th-cap", Limits::DEFAULT, 6);
+    f.person("alice").await;
+    let mut tokens = Vec::new();
+    for _ in 0..6 {
+        tokens.push(f.signin.begin_password("alice", PASSWORD, ADDR).await.expect("room for it"));
+    }
+    assert_eq!(f.signin.pending_count(), 6);
+    let derivations = f.gate.derivations();
+    let lines = f.lines().len();
+    let outcome = f.signin.begin_password("alice", PASSWORD, ADDR).await;
+    println!("Bounds: the first step beyond the cap = {outcome:?}, derivations after it +{}", f.gate.derivations() - derivations);
+    assert_eq!(outcome.expect_err("full"), SignInError::Busy);
+    assert_eq!(f.gate.derivations(), derivations, "the check precedes the derivation");
+    let new = &f.lines()[lines..];
+    assert_eq!(new.len(), 1);
+    assert_eq!((new[0]["detail"]["reason"].as_str(), new[0]["detail"]["step"].as_str()), (Some("busy"), Some("password")));
+    assert_eq!(f.failures(&account_key("alice")), 0, "a busy server is not the name's fault");
+    assert_eq!(f.failures(&address_key(ADDR)), 1, "but the address that keeps asking is counted");
+    // A state that ends makes room.
+    f.signin.finish_totp(tokens[0].expose(), &f.code("alice"), ADDR, DEVICE).expect("signed in");
+    f.signin.begin_password("alice", PASSWORD, ADDR).await.expect("room again");
+    // Expired states make room as well.
+    f.clock.advance(301);
+    f.signin.begin_password("alice", PASSWORD, ADDR).await.expect("expired states are swept");
+    assert_eq!(f.signin.pending_count(), 1);
+}
+
+#[tokio::test]
+async fn throttle_a_pending_state_is_valid_to_the_last_second_and_refused_one_second_later() {
+    let f = fixture("th-expiry");
+    f.person("alice").await;
+    f.person("bob").await;
+    let alice = f.signin.begin_password("alice", PASSWORD, ADDR).await.expect("first step");
+    let bob = f.signin.begin_password("bob", PASSWORD, ADDR).await.expect("first step");
+    f.clock.advance(300);
+    let grant = f.signin.finish_totp(alice.expose(), &f.code("alice"), ADDR, DEVICE);
+    println!("Bounds: at 300 s = {}, at 301 s = Invalid", if grant.is_ok() { "accepted" } else { "refused" });
+    assert!(grant.is_ok(), "accepted at the last second");
+    f.clock.advance(1);
+    let late = f.signin.finish_totp(bob.expose(), &f.code("bob"), ADDR, DEVICE);
+    assert_eq!(late.expect_err("expired"), SignInError::Invalid, "refused with the right code one second later");
+    assert_eq!(f.signin.pending_count(), 0, "and the state is gone");
+}
+
+#[tokio::test]
+async fn throttle_the_key_reaches_the_caller_and_is_wiped_when_every_state_ends() {
+    let f = fixture("th-material");
+    let alice = f.person("alice").await;
+    let expected = {
+        let row = f.store.read(|tx| tx.password_get(alice)).expect("read").expect("a row");
+        let salt: [u8; 16] = row.salt.as_slice().try_into().expect("salt");
+        derive_split(PASSWORD.as_bytes(), &salt, &parse_params(&row.params).expect("params")).expect("derive")
+    };
+    let token = f.signin.begin_password("alice", PASSWORD, ADDR).await.expect("first step");
+    let code = f.code("alice");
+    let grant = f.signin.finish_totp(token.expose(), &code, ADDR, DEVICE).expect("second step");
+    assert!(grant.unlock.kek().same_as(expected.kek()), "the key the password derived reached the caller");
+    assert_eq!(f.signin.wiped_count(), 0, "the caller holds it");
+
+    // Nothing printable holds a secret.
+    let key = *grant.unlock.kek().expose();
+    let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+    let list = format!("{key:?}");
+    let session_value = grant.session.value.expose().to_owned();
+    let printed = [
+        format!("{grant:?}"),
+        format!("{token:?}"),
+        format!("{:?}", grant.unlock),
+        format!("{:?}", f.signin),
+        format!("{:?}", SignInError::Throttled { retry_seconds: 9 }),
+        SignInError::Invalid.to_string(),
+        SignInError::Internal.to_string(),
+    ];
+    for text in &printed {
+        for secret in [PASSWORD, code.as_str(), token.expose(), session_value.as_str(), hex.as_str(), list.as_str()] {
+            assert!(!text.contains(secret), "a secret is in {text}");
+        }
+    }
+    drop(grant);
+    assert_eq!(f.signin.wiped_count(), 1, "the caller's drop wiped it");
+
+    // The other ends of a pending state: three wrong codes, a lock between the steps, expiry by purge, a missing authenticator.
+    let wrong_three = f.signin.begin_password("alice", PASSWORD, ADDR).await.expect("first step");
+    f.clock.advance(30);
+    for _ in 0..3 {
+        f.signin.finish_totp(wrong_three.expose(), &f.wrong_code("alice"), ADDR, DEVICE).expect_err("wrong");
+    }
+    assert_eq!((f.signin.pending_count(), f.signin.wiped_count()), (0, 2));
+    let old = f.signin.begin_password("alice", PASSWORD, ADDR).await.expect("first step");
+    f.clock.advance(301);
+    assert_eq!(f.signin.purge(f.clock.unix(), 10).expect("purge").pending, 1);
+    assert_eq!(f.signin.wiped_count(), 3);
+    drop(old);
+    let swept = f.signin.begin_password("alice", PASSWORD, ADDR).await.expect("first step");
+    f.clock.advance(301);
+    f.signin.finish_totp(swept.expose(), &f.code("alice"), ADDR, DEVICE).expect_err("expired");
+    assert_eq!((f.signin.pending_count(), f.signin.wiped_count()), (0, 4), "an expired state met by its own token goes at once");
+    assert_eq!(f.signin.purge(f.clock.unix(), 10).expect("purge").pending, 0);
+}
+
+// ---- uniformity ----
+
+#[tokio::test]
+async fn throttle_every_refusal_of_the_first_step_looks_the_same() {
+    let f = fixture("th-uniform");
+    f.person("alice").await;
+    // An account without a password (it has an authenticator), one without an authenticator, and a disabled one.
+    let carol = f.bare_account("carol");
+    f.authenticator("carol", carol);
+    let erin = f.bare_account("erin");
+    f.password(erin).await;
+    let dave = f.person("dave").await;
+    f.store.write(|tx| tx.account_set_state(dave, AccountState::Disabled)).expect("disable");
+    let _ = f.person("frank").await;
+
+    let mut rows: Vec<(String, String, u64, String)> = Vec::new();
+    for (case, name, password) in [
+        ("unknown name", "nobody", PASSWORD),
+        ("disabled account", "dave", PASSWORD),
+        ("no password", "carol", PASSWORD),
+        ("no authenticator", "erin", PASSWORD),
+        ("wrong password", "alice", WRONG),
+    ] {
+        let lines = f.lines().len();
+        let derivations = f.gate.derivations();
+        let outcome = f.signin.begin_password(name, password, ADDR).await;
+        let error = outcome.expect_err("no sign-in");
+        let shape = f.lines()[lines..]
+            .iter()
+            .map(|l| format!("{} {} {} {}", l["action"], l["result"], l["actor"], l["detail"]))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        rows.push((case.to_owned(), format!("{error:?} / {error}"), f.gate.derivations() - derivations, shape));
+    }
+    // The locked name: one that exists and one that does not, each after the same number of wrong passwords.
+    for name in ["frank", "ghost"] {
+        for n in 0..5 {
+            f.signin.begin_password(name, WRONG, IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10 + n))).await.expect_err("wrong");
+        }
+    }
+    for (case, name) in [("locked, known", "frank"), ("locked, unknown", "ghost")] {
+        let lines = f.lines().len();
+        let derivations = f.gate.derivations();
+        let error = f.signin.begin_password(name, PASSWORD, ADDR).await.expect_err("locked");
+        let shape = f.lines()[lines..].iter().map(|l| l.to_string()).collect::<Vec<_>>().join(" | ");
+        rows.push((case.to_owned(), format!("{error:?} / {error}"), f.gate.derivations() - derivations, shape));
+    }
+    for row in &rows {
+        println!("Uniformity: {:<17} -> {} | derivations {} | audit {}", row.0, row.1, row.2, if row.3.is_empty() { "-" } else { &row.3 });
+    }
+    for row in &rows[1..5] {
+        assert_eq!((&row.1, row.2, &row.3), (&rows[0].1, rows[0].2, &rows[0].3), "{} differs from the unknown name", row.0);
+    }
+    assert_eq!(rows[0].2, 1);
+    assert!(rows[0].1.starts_with("Invalid"));
+    assert_eq!((&rows[5].1, rows[5].2, &rows[5].3), (&rows[6].1, rows[6].2, &rows[6].3));
+    assert!(rows[5].1.starts_with("Throttled") && rows[5].2 == 0 && rows[5].3.is_empty());
+}
+
+#[tokio::test]
+async fn throttle_input_of_a_wrong_size_is_invalid_without_a_derivation_and_counts() {
+    let f = fixture("th-bounds");
+    f.person("alice").await;
+    let big = "p".repeat(1024 * 1024);
+    let long = "n".repeat(129);
+    let derivations = f.gate.derivations();
+    let mut counted = 0;
+    for (name, password) in [("", PASSWORD), (long.as_str(), PASSWORD), ("alice", ""), ("alice", big.as_str()), ("alice", &"q".repeat(257))] {
+        let outcome = f.signin.begin_password(name, password, ADDR).await;
+        assert_eq!(outcome.expect_err("bad size"), SignInError::Invalid);
+        counted += 1;
+        assert_eq!(f.failures(&address_key(ADDR)), counted, "counted on the address");
+    }
+    assert_eq!(f.gate.derivations(), derivations, "no derivation for any of them");
+    assert_eq!(f.failures(&account_key("alice")), 3, "the empty, the huge and the 257-byte password count on the name");
+    assert_eq!(f.failures(&account_key("")) + f.failures(&account_key(&long)), 2, "and the empty and the long name on theirs");
+    // A 128-byte name and a 256-byte password are the largest that are looked at.
+    let outcome = f.signin.begin_password(&"n".repeat(128), &"q".repeat(256), ADDR).await;
+    assert_eq!(outcome.expect_err("no such name"), SignInError::Invalid);
+    assert_eq!(f.gate.derivations(), derivations + 1, "at the limit a derivation is made");
+    println!("Bounds: name of 0 and 129 bytes, password of 0, 257 and 1048576 bytes are Invalid with no derivation and count");
+}
+
+#[tokio::test]
+async fn throttle_a_code_of_the_wrong_shape_is_invalid_and_counts() {
+    let f = fixture("th-code-shape");
+    f.person("bob").await;
+    let token = f.signin.begin_password("bob", PASSWORD, ADDR).await.expect("first step");
+    for (n, bad) in ["12345", "12345a", "1234567"].into_iter().enumerate() {
+        let outcome = f.signin.finish_totp(token.expose(), bad, ADDR, DEVICE);
+        assert_eq!(outcome.expect_err("bad code"), SignInError::Invalid);
+        let counted = i64::try_from(n + 1).expect("small");
+        assert_eq!((f.failures(&account_key("bob")), f.failures(&address_key(ADDR))), (counted, counted));
+    }
+    assert_eq!(f.signin.pending_count(), 0, "three tries, wrong shape or not");
+    println!("Bounds: codes of 5 digits, 7 digits and with a letter are Invalid and each counts as a failed try");
+}
+
+// ---- one line per action ----
+
+#[tokio::test]
+async fn throttle_every_audited_path_leaves_exactly_one_line_and_never_a_secret() {
+    const CANARY: &str = "canary-9f3a-hunter2";
+    let f = fixture("th-table");
+    let alice = f.person("alice").await;
+    let root = f.admin("root");
+    let mut table: Vec<(&str, usize, Value)> = Vec::new();
+    let mut take = |f: &Fixture, what: &'static str, expect: usize, from: usize| {
+        let new = f.lines()[from..].to_vec();
+        assert_eq!(new.len(), expect, "{what}: {new:?}");
+        if let Some(line) = new.first() {
+            table.push((what, new.len(), line.clone()));
+        }
+        f.lines().len()
+    };
+    let mut at = 0;
+
+    // signin.ok: both steps together leave one line.
+    let token = f.signin.begin_password("alice", PASSWORD, ADDR).await.expect("first step");
+    at = take(&f, "first step, right", 0, at);
+    let mut grant = f.signin.finish_totp(token.expose(), &f.code("alice"), ADDR, DEVICE).expect("second step");
+    at = take(&f, "signin.ok", 1, at);
+
+    // signin.fail: password, totp, step_up.
+    f.signin.begin_password("alice", WRONG, ADDR).await.expect_err("wrong");
+    at = take(&f, "signin.fail password", 1, at);
+    let token = f.signin.begin_password("alice", PASSWORD, ADDR).await.expect("first step");
+    f.signin.finish_totp(token.expose(), &f.wrong_code("alice"), ADDR, DEVICE).expect_err("wrong code");
+    at = take(&f, "signin.fail totp", 1, at);
+    f.clock.advance(6 * 60);
+    f.signin.step_up_password(&mut grant.session.session, WRONG, ADDR).await.expect_err("wrong");
+    at = take(&f, "signin.fail step_up", 1, at);
+
+    // session.step_up
+    f.signin.step_up_password(&mut grant.session.session, PASSWORD, ADDR).await.expect("step-up");
+    at = take(&f, "session.step_up", 1, at);
+
+    // The canary typed as a user name, and as a password.
+    f.signin.begin_password(CANARY, CANARY, ADDR).await.expect_err("unknown");
+    at = take(&f, "signin.fail (canary as the name)", 1, at);
+    f.signin.begin_password("alice", CANARY, ADDR).await.expect_err("wrong");
+    at = take(&f, "signin.fail (canary as the password)", 1, at);
+
+    // signin.locked: four failures are counted under the name by now (password, code, step-up, the canary as password), one
+    // more reaches five.
+    f.signin.begin_password("alice", WRONG, ADDR).await.expect_err("wrong");
+    at = take(&f, "signin.locked", 1, at);
+    // A refusal during the lock leaves nothing.
+    let refused = f.signin.begin_password("alice", PASSWORD, ADDR).await;
+    assert!(matches!(refused, Err(SignInError::Throttled { .. })));
+    at = take(&f, "refused during a lock", 0, at);
+
+    // account.unlock
+    f.signin.unlock_signin(root, Some(ADDR), alice).expect("unlock");
+    take(&f, "account.unlock", 1, at);
+
+    for (what, n, line) in &table {
+        println!("Audit table: {what:<40} lines {n} | {}", show(line));
+    }
+    let text = std::fs::read_to_string(f.scratch.path().join("server/audit/audit-2026-03-01.jsonl")).expect("file");
+    for secret in [CANARY, PASSWORD, WRONG, grant.session.value.expose()] {
+        assert!(!text.contains(secret), "a secret is in the audit file");
+    }
+    assert!(!format!("{:?}", f.signin).contains(CANARY));
+    let error = f.signin.begin_password(CANARY, CANARY, ADDR).await.expect_err("locked or unknown");
+    assert!(!format!("{error:?} {error}").contains(CANARY));
+    // Actor, address and target as specified.
+    let by = |what: &str| table.iter().find(|t| t.0 == what).map(|t| t.2.clone()).expect("a row");
+    assert_eq!((by("signin.ok")["actor"].as_str(), by("signin.ok")["target"].as_str()), (Some("1"), Some("")));
+    assert_eq!(by("signin.fail password")["actor"], "anonymous");
+    assert_eq!(by("signin.fail totp")["target"], "1");
+    assert_eq!(by("signin.fail step_up")["actor"], "1");
+    assert_eq!(by("signin.locked")["result"], "fail");
+    assert_eq!((by("account.unlock")["actor"].as_str(), by("account.unlock")["target"].as_str()), (Some("2"), Some("1")));
+    assert!(table.iter().all(|t| t.2["addr"] == "192.0.2.7"));
 }
