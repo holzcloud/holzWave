@@ -38,6 +38,7 @@ import { initSearch } from "./search-ui.js";
 import { change, watch as watchSettings } from "./settings.js";
 import { initSelection } from "./selection.js";
 import { renderStatus, showNotice } from "./status.js";
+import { initPeople } from "./people.js";
 import { initWebSession } from "./websession.js";
 import type { View } from "./types.js";
 
@@ -109,7 +110,8 @@ async function main() {
   });
   focusCanvas();
   // The browser build asks its server once what the session is and shows the marks of it in the status line; a no-op on the desktop.
-  void initWebSession(renderStatus);
+  // The palette entry of the people dialog follows, once the lookup has told whether the person is an administrator.
+  void initWebSession(renderStatus).then(initPeople);
   // Every window says so once it has drawn its first layout and listens: the shell shows a window it built hidden (a
   // torn off or restored one) now, and tells it the last title and directory of its panes. A no-op for a shown one.
   await call("window_ready").catch(() => {});

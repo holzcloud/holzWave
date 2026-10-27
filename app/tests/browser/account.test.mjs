@@ -23,7 +23,6 @@ export default async function ({ page, url, errors }) {
     const titles = await actionTitles(page);
     assert.ok(titles.includes("Account…"), "the palette lists Account…");
     assert.ok(titles.includes("Sign out"), "the palette lists Sign out");
-    assert.ok(!titles.includes("People…"), "no People… in this dialog's plan");
     assert.deepEqual(await legends(page), ["Password", "Authenticator", "Passkeys", "Unlock passphrase", "Recovery code", "Sessions"]);
     assert.deepEqual(await rowOf(page, "password"), { name: "Password", state: "set", button: "Change" });
     assert.deepEqual(await rowOf(page, "totp"), { name: "Authenticator app", state: "set", button: "Replace" });

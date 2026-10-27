@@ -2,7 +2,7 @@
 // words with their glyphs and the time words of the last sign-in.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MAX_ACCOUNTS, lastSigninText, readAccounts, stateWord } from "../../dist/peoplestate.js";
+import { DEFAULT_DAYS, INVITE_DAYS, LIST_NOTE, MAX_ACCOUNTS, inviteBody, inviteNote, lastSigninText, readAccounts, readInvitation, stateWord } from "../../dist/peoplestate.js";
 
 const NOW = Date.parse("2026-10-27T12:00:00Z");
 const iso = (secondsAgo) => new Date(NOW - secondsAgo * 1000).toISOString();
@@ -103,4 +103,24 @@ test("lastSigninText: never, just now, minutes, hours, days and weeks", () => {
   assert.equal(lastSigninText(NOW - 4 * 86_400_000, NOW), "4 days ago");
   assert.equal(lastSigninText(NOW - 21 * 86_400_000, NOW), "3 weeks ago");
   assert.equal(lastSigninText(Number.NaN, NOW), "never");
+});
+
+test("the invitation: five expiry choices with 7 at first, a body of role and days only, and the sentence over the link", () => {
+  assert.deepEqual([...INVITE_DAYS], [1, 3, 7, 14, 30]);
+  assert.equal(DEFAULT_DAYS, 7);
+  assert.deepEqual(inviteBody("admin", 3), { role: "admin", days: 3 });
+  assert.deepEqual(inviteBody("member", 7), { role: "member", days: 7 });
+  assert.deepEqual(inviteBody("member", 99), { role: "member", days: 7 }, "a number that is no choice is the first choice");
+  assert.equal(inviteNote(7, "member"), "Shown once. Copy it now and send it to the person. It works for 7 days, as a member.");
+  assert.equal(inviteNote(1, "admin"), "Shown once. Copy it now and send it to the person. It works for 1 day, as an administrator.");
+});
+
+test("readInvitation takes a link of one piece and bounded length, and nothing else", () => {
+  assert.equal(readInvitation({ link: "x/#invite=hwi_abc", expires_at: "2026-11-01T00:00:00Z" }), "x/#invite=hwi_abc");
+  for (const bad of [{}, { link: "" }, { link: 5 }, { link: "a b" }, { link: "a\nb" }, { link: "x".repeat(2049) }, null, "link", []]) assert.equal(readInvitation(bad), null, JSON.stringify(bad));
+  assert.equal(readInvitation({ link: "x".repeat(2048) }).length, 2048);
+});
+
+test("the sentence under the table says what the list never shows", () => {
+  assert.equal(LIST_NOTE, "This list shows names, roles and states only. It never shows anyone's secrets, terminals, commands or layout.");
 });

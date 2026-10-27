@@ -1,0 +1,47 @@
+/* The people dialog (people.ts, docs/design.md 6.29). Loaded after dialogs.css, settings.css and websession.css, whose box, fields
+   and buttons it uses. Every colour is a `--hw-*` token and every size is in rem. A state is a glyph and a word, never colour
+   alone: `●` active in the ok colour, `○` disabled dim, `!` locked out in the warn colour with an underline. Rose marks focus only.
+   Nothing moves. */
+.dlg.settings.people { width: min(41rem, calc(100vw - 4rem)); }
+.dlg.settings.people-invite { width: min(24rem, calc(100vw - 4rem)); }
+.dlg.people [hidden] { display: none !important; }
+.dlg.people .ppl-head { display: flex; align-items: center; gap: .667rem; margin: 0 0 .5rem; }
+.dlg.people .ppl-head .set-title { flex: 1 1 auto; margin: 0; }
+.dlg.people .set-status { min-height: 1.4em; color: var(--hw-ink-2); }
+.dlg.people button { min-height: 1.75rem; }
+.dlg.people button:disabled { color: var(--hw-dim); cursor: default; background: none; }
+.dlg.people :is(button, input):focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 2px; }
+
+.dlg.people .ppl-table { width: 100%; border-collapse: collapse; }
+.dlg.people .ppl-table th { padding: .5rem .667rem; text-align: left; font-weight: 400; color: var(--hw-dim); border-bottom: 1px solid var(--hw-line); }
+.dlg.people .ppl-row > td { padding: .5rem .667rem; vertical-align: middle; border-bottom: 1px solid var(--hw-line); }
+.dlg.people .ppl-name { font-weight: 700; overflow-wrap: anywhere; }
+.dlg.people .ppl-user { margin-left: .5rem; color: var(--hw-dim); overflow-wrap: anywhere; }
+.dlg.people .ppl-role, .dlg.people .ppl-last { color: var(--hw-ink-2); white-space: nowrap; }
+.dlg.people .ppl-state { white-space: nowrap; }
+.dlg.people .ppl-glyph { display: inline-block; min-width: 1rem; }
+.dlg.people .ppl-state[data-tone="ok"] { color: var(--hw-ok); }
+.dlg.people .ppl-state[data-tone="dim"] { color: var(--hw-dim); }
+.dlg.people .ppl-state[data-tone="warn"] { color: var(--hw-warn); }
+.dlg.people .ppl-state[data-tone="warn"] .ppl-word { text-decoration: underline; }
+.dlg.people .ppl-note { margin: .833rem 0 0; color: var(--hw-ink-2); overflow-wrap: anywhere; }
+
+/* The invitation: the choices, then the link shown once in a bordered block of mono text, cut with an ellipsis. */
+.dlg.people-invite .ppl-roles { min-width: 0; margin: 0 0 .667rem; padding: 0; border: 0; }
+.dlg.people-invite .ppl-option { display: flex; align-items: center; gap: .5rem; min-height: 2rem; cursor: pointer; color: var(--hw-ink); }
+.dlg.people-invite .ppl-option input { width: 1rem; height: 1rem; margin: 0; accent-color: var(--hw-rose); }
+.dlg.people-invite .ppl-options { display: flex; flex-wrap: wrap; gap: 0 1rem; }
+.dlg.people-invite input:focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 2px; }
+.dlg.people-invite .ppl-link-note { margin: 0 0 .833rem; color: var(--hw-ink-2); overflow-wrap: anywhere; }
+.dlg.people-invite .ppl-linkfield { display: flex; flex-direction: column; gap: .333rem; min-width: 0; margin: 0 0 .667rem; }
+.dlg.people-invite .ppl-linkrow { display: flex; align-items: center; gap: .667rem; min-width: 0; }
+.dlg.people-invite .ppl-link-box { box-sizing: border-box; display: flex; align-items: center; flex: 1 1 auto; min-width: 0; min-height: 2rem; padding: 0 .667rem;
+                                   color: var(--hw-ink); background: var(--hw-ground); border: 1px solid var(--hw-line); border-radius: .333rem; }
+.dlg.people-invite .ppl-link-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: all; }
+.dlg.people-invite button { min-height: 1.75rem; }
+.dlg.people-invite :is(.web-btn):focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 2px; }
+
+@media (forced-colors: active) {
+  .dlg.people .ppl-table th, .dlg.people .ppl-row > td, .dlg.people-invite .ppl-link-box { border-color: CanvasText; }
+  .dlg.people :is(button, input):focus-visible, .dlg.people-invite :is(button, input):focus-visible { outline-color: Highlight; }
+}
