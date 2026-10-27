@@ -837,3 +837,43 @@ async fn a_method_that_is_off_has_no_route() {
     }
     println!("Matrix:\n{}", rows.join("\n"));
 }
+
+#[tokio::test]
+async fn the_same_person_signing_in_twice_through_the_provider_is_one_account() {
+    let env = AuthEnv::all();
+    let first = env.oidc_sign_in().await;
+    let second = env.oidc_sign_in().await;
+    assert_eq!((first.status.as_u16(), second.status.as_u16()), (200, 200));
+    let (one, two) = (env.signed_from(&first), env.signed_from(&second));
+    assert_eq!(one.account, two.account, "the same identity is the same account");
+    assert_eq!(env.count("signin.ok"), 2);
+    assert_ne!(one.cookie, two.cookie);
+}
+
+#[tokio::test]
+async fn a_pending_cookie_named_twice_is_no_cookie() {
+    let env = AuthEnv::all();
+    env.person("alice").await;
+    let first = env.send(env.post("/auth/password", &json!({"username": "alice", "password": PASSWORD}))).await;
+    let pending = set_cookie_value(&first, PENDING).expect("pending");
+    let doubled = format!("{PENDING}={pending}; {PENDING}={pending}");
+    let response = env.send(env.post("/auth/totp", &json!({"code": env.code("alice")})).set("cookie", &doubled)).await;
+    assert_invalid(&response, "the pending cookie twice");
+    // Once, it works: the state was not used up by the refused request.
+    let once = env.send(env.post("/auth/totp", &json!({"code": env.code("alice")})).set_cookies(&[(PENDING, &pending)])).await;
+    assert_eq!(once.status, 200, "{}", once.text());
+}
+
+#[tokio::test]
+async fn a_dead_session_cookie_does_not_stop_a_sign_in() {
+    let env = AuthEnv::all();
+    env.person("alice").await;
+    let stale = "A".repeat(43);
+    let first = env.send(env.post("/auth/password", &json!({"username": "alice", "password": PASSWORD}))).await;
+    let pending = set_cookie_value(&first, PENDING).expect("pending");
+    let second = env
+        .send(env.post("/auth/totp", &json!({"code": env.code("alice")})).set_cookies(&[(SESSION, &stale), (PENDING, &pending)]))
+        .await;
+    assert_eq!(second.status, 200, "{}", second.text());
+    assert_ne!(set_cookie_value(&second, SESSION).as_deref(), Some(stale.as_str()), "a value from the request is never adopted");
+}

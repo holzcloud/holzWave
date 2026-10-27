@@ -20,10 +20,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::rejection::{PathRejection, QueryRejection};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use cookie::Cookie;
 use serde::de::value::MapAccessDeserializer;
@@ -39,7 +40,7 @@ use crate::http::app::App;
 use crate::http::router::{Access, ApiError, ApiJson, Authed, ClientAddr, MaybeAuthed, Part};
 use crate::store::AccountId;
 
-use super::cookies::{self, MAX_COOKIE_HEADER_BYTES, MAX_COOKIE_PAIRS, MAX_TOKEN_CHARS, PENDING_COOKIE};
+use super::cookies::{self, MAX_COOKIE_HEADER_BYTES, MAX_COOKIE_PAIRS, MAX_TOKEN_CHARS, OIDC_COOKIE, PENDING_COOKIE};
 use super::routes_unlock::{GateFuture, Material, UnlockGate};
 
 /// How long a sign-in waits for the unlock gate before it goes on without it.
@@ -47,6 +48,16 @@ const GATE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The longest `User-Agent` text that is looked at, in bytes. A real header is far shorter.
 const MAX_AGENT_BYTES: usize = 512;
+
+/// Where every failure of a single sign-on sends the browser. It is the only redirect target of this module besides the
+/// address the single sign-on service builds, and nothing of the request is put into it.
+const ERROR_LOCATION: &str = "/?error=oidc";
+
+/// The most characters of a single sign-on provider id.
+const MAX_PROVIDER_ID: usize = 32;
+
+/// The most characters of the `prf` member that are looked at; a longer value is no PRF output.
+const MAX_PRF_CHARS: usize = 64;
 
 /// What a device is called when the header says nothing usable.
 const UNKNOWN_DEVICE: &str = "Browser";
@@ -357,15 +368,173 @@ async fn totp_route(
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Passkeys
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// A body with no member: `{}`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Empty {}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PasskeyFinishBody {
+    /// The credential as the page read it from the browser. Any JSON value: what is not a credential is the service's `Invalid`.
+    credential: serde_json::Value,
+    /// The PRF output of the passkey, as 43 characters of unpadded base64url.
+    #[serde(default)]
+    prf: Option<String>,
+}
+
+/// `POST /auth/passkey/begin`: the request options for a username-less sign-in and the pending cookie of the challenge.
+async fn passkey_begin_route(
+    State(services): State<Shared>,
+    Extension(client): Extension<ClientAddr>,
+    ApiJson(Object(_)): ApiJson<Object<Empty>>,
+) -> Result<Response, Refusal> {
+    let passkeys = services.passkeys.clone();
+    let addr = client.0;
+    let (options, token) = blocking(move || passkeys.start_sign_in(addr)).await??;
+    let options: serde_json::Value = serde_json::from_str(&options).map_err(|_| ApiError::Busy)?;
+    let cookie = cookies::pending(token.expose()).ok_or(ApiError::Busy)?;
+    Ok(answer(StatusCode::OK, &serde_json::json!({ "options": options }), vec![cookie]))
+}
+
+/// `POST /auth/passkey/finish`: verifies the assertion against the challenge of the pending cookie. A session is made by the
+/// service and only after the assertion verified.
+async fn passkey_finish_route(
+    State(services): State<Shared>,
+    Extension(client): Extension<ClientAddr>,
+    MaybeAuthed(held): MaybeAuthed,
+    headers: HeaderMap,
+    ApiJson(Object(body)): ApiJson<Object<PasskeyFinishBody>>,
+) -> Result<Response, Refusal> {
+    let token = pending_value(&headers);
+    let device = device_of_request(&headers);
+    let passkeys = services.passkeys.clone();
+    let addr = client.0;
+    let credential = body.credential.to_string();
+    let mut prf = body.prf.filter(|text| text.len() <= MAX_PRF_CHARS);
+    let signed = blocking(move || {
+        let outcome = passkeys.finish_sign_in(&token, &credential, prf.as_deref(), addr, &device);
+        if let Some(text) = prf.as_mut() {
+            text.zeroize();
+        }
+        outcome
+    })
+    .await??;
+    let cookie = cookies::session(signed.session.value.expose()).ok_or(ApiError::Busy)?;
+    let material = signed.prf.map_or(Material::None, Material::Passkey);
+    after_sign_in(&services, held, signed.account, material).await;
+    Ok(answer(StatusCode::OK, &serde_json::json!({ "next": "done" }), vec![cookie, cookies::delete_pending()]))
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Single sign-on
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Whether `id` is the shape of a provider id and names a configured provider.
+fn provider_known(services: &AuthServices, id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_PROVIDER_ID
+        && id.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
+        && services.app.auth.oidc.iter().any(|provider| provider.id == id)
+}
+
+/// The fixed redirect of a failed single sign-on: no reason, no input, the transaction cookie deleted.
+fn oidc_failure() -> Response {
+    let mut response = StatusCode::FOUND.into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::LOCATION, HeaderValue::from_static(ERROR_LOCATION));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.append(header::SET_COOKIE, cookies::delete_oidc());
+    response
+}
+
+/// `GET /auth/oidc/{id}/start`: sends the browser to the provider and binds the transaction to it with the `Lax` cookie.
+async fn oidc_start_route(
+    State(services): State<Shared>,
+    Extension(client): Extension<ClientAddr>,
+    id: Result<Path<String>, PathRejection>,
+) -> Result<Response, Refusal> {
+    let Ok(Path(id)) = id else { return Err(ApiError::NotFound.into()) };
+    let Some(flow) = services.oidc.as_ref().filter(|_| provider_known(&services, &id)) else {
+        return Err(ApiError::NotFound.into());
+    };
+    let Ok(start) = flow.start(&id, client.0).await else { return Ok(oidc_failure()) };
+    let (Ok(location), Some(cookie)) = (HeaderValue::from_str(&start.url), cookies::oidc(start.transaction.expose())) else {
+        return Ok(oidc_failure());
+    };
+    let mut response = StatusCode::FOUND.into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::LOCATION, location);
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.append(header::SET_COOKIE, cookie);
+    Ok(response)
+}
+
+/// What the provider sent the browser back with. Unknown parameters are ignored; the service bounds every size.
+#[derive(Deserialize, Default)]
+struct CallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+    iss: Option<String>,
+}
+
+/// `GET /auth/oidc/callback`: the one GET that changes state. A success answers the login page itself, so that the page's own
+/// script moves to `/` from a same-site context and the `Strict` session cookie is sent; every failure is the fixed redirect.
+async fn oidc_callback_route(
+    State(services): State<Shared>,
+    Extension(client): Extension<ClientAddr>,
+    MaybeAuthed(held): MaybeAuthed,
+    headers: HeaderMap,
+    query: Result<Query<CallbackQuery>, QueryRejection>,
+) -> Response {
+    let Some(flow) = services.oidc.as_ref() else { return ApiError::NotFound.into_response() };
+    // A query that cannot be read is a callback with nothing in it: the transaction is used up all the same.
+    let query = query.map(|Query(query)| query).unwrap_or_default();
+    let callback = OidcCallback { code: query.code, state: query.state, error: query.error, iss: query.iss };
+    let transaction = read_cookie(&headers, OIDC_COOKIE).unwrap_or_default();
+    let device = device_of_request(&headers);
+    let Ok(grant) = flow.finish(&transaction, callback, client.0, &device).await else { return oidc_failure() };
+    let Some(cookie) = cookies::session(grant.session.value.expose()) else { return oidc_failure() };
+    after_sign_in(&services, held, grant.account, Material::None).await;
+    let mut response = (StatusCode::OK, services.page.login_page()).into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.append(header::SET_COOKIE, cookie);
+    headers.append(header::SET_COOKIE, cookies::delete_oidc());
+    response
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The parts
 // ---------------------------------------------------------------------------------------------------------------------
 
 /// The sign-in, passkey, single sign-on, logout and step-up routes, as parts for [`crate::http::router::build`]. A method
 /// that is off in the configuration of the application has no route: its paths answer like any unknown path.
 pub fn parts(services: Arc<AuthServices>) -> Vec<Part> {
+    let auth = &services.app.auth;
     let mut public: Router<Shared> = Router::new();
-    if services.app.auth.password_totp {
+    let mut public_routes = 0usize;
+    if auth.password_totp {
         public = public.route("/auth/password", post(password_route)).route("/auth/totp", post(totp_route));
+        public_routes += 2;
     }
-    vec![Part { access: Access::Public, router: public.with_state(services) }]
+    if auth.passkey {
+        public = public.route("/auth/passkey/begin", post(passkey_begin_route)).route("/auth/passkey/finish", post(passkey_finish_route));
+        public_routes += 2;
+    }
+    if !auth.oidc.is_empty() && services.oidc.is_some() {
+        public = public.route("/auth/oidc/{id}/start", get(oidc_start_route)).route("/auth/oidc/callback", get(oidc_callback_route));
+        public_routes += 2;
+    }
+    let mut parts = Vec::new();
+    // A part with no route would make the router builder panic, so only a part with a route is returned.
+    if public_routes > 0 {
+        parts.push(Part { access: Access::Public, router: public.with_state(services) });
+    }
+    parts
 }
