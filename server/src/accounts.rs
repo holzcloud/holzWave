@@ -18,6 +18,7 @@ use std::sync::Arc;
 use crate::audit::{Action, Actor, Audit, DetailKey, DetailValue, Event, Outcome};
 use crate::auth::session::{generate_token, parse_token};
 use crate::clock::Clock;
+use crate::config;
 use crate::log::{self, Level};
 use crate::store::{
     Account, AccountId, AccountState, HANDLE_BYTES, NewInvite, Role, Store, StoreError, TokenHash, Tx, hash_token,
@@ -446,6 +447,65 @@ impl Accounts {
         result
     }
 
+    // ---- single sign-on ----
+
+    /// The account of a person who signed in at an OpenID Connect provider, whose tokens the caller already verified.
+    ///
+    /// An identity that is linked is matched by issuer and subject only, never by e-mail or name, and gives its account when
+    /// that is active. An identity that is not linked becomes a new member account, with the identity linked in the same
+    /// transaction, only when the claims satisfy `rules`: a verified e-mail whose domain equals (ignoring case) one of
+    /// `allowed_domains`, or a group equal (exactly) to one of `allowed_groups`. With both lists empty no account is ever
+    /// made. Every refusal is the one value [`AccountError::Denied`]; nothing is made or kept then. The username is derived
+    /// with [`derive_username`].
+    pub fn oidc_sign_in(
+        &self,
+        claims: &OidcClaims,
+        rules: &ProviderRules,
+        addr: Option<IpAddr>,
+    ) -> Result<Account, AccountError> {
+        let now = self.clock.unix();
+        let mut linked = false;
+        let mut created = false;
+        let result = self.run(|tx| {
+            if !claims.well_formed() {
+                return Err(AccountError::Denied);
+            }
+            if let Some(id) = tx.oidc_find(&claims.issuer, &claims.subject)? {
+                linked = true;
+                return match tx.account_get(id)? {
+                    Some(account) if account.state == AccountState::Active => Ok(account),
+                    _ => Err(AccountError::Denied),
+                };
+            }
+            if !rules.allows(claims) {
+                return Err(AccountError::Denied);
+            }
+            let username = free_username(tx, &derive_username(claims.preferred_username.as_deref(), claims.email.as_deref()))?
+                .ok_or(AccountError::Denied)?;
+            let display_name = shown_name(claims.display_name.as_deref(), &username);
+            let new = crate::store::NewAccount { username: &username, display_name: &display_name, role: Role::Member, handle: None };
+            let account = tx.account_create(&new, self.uid_range.clone(), now)?;
+            tx.oidc_link(account.id, &claims.issuer, &claims.subject)?;
+            created = true;
+            Ok(account)
+        });
+        match &result {
+            Ok(account) if created => self.finish(
+                Action::OidcCreate,
+                Actor::Account(account.id),
+                addr,
+                Some(account.id),
+                &result,
+                &[(DetailKey::Role, DetailValue::Text(account.role.as_str()))],
+            ),
+            // A sign-in of a linked person is recorded by the sign-in flow, and so is a refusal of a linked identity.
+            Ok(_) => {}
+            Err(_) if linked => {}
+            Err(_) => self.finish(Action::OidcCreate, Actor::Anonymous, addr, None, &result, &[]),
+        }
+        result
+    }
+
     // ---- what an administrator does to an account ----
 
     /// Makes an account that has no credential, and one invitation for it that enrols the first one. The invitation token
@@ -594,4 +654,140 @@ fn require_admin(tx: &Tx<'_>, actor: AccountId) -> Result<(), AccountError> {
         Some(account) if account.state == AccountState::Active && account.role == Role::Admin => Ok(()),
         _ => Err(AccountError::NotAllowed),
     }
+}
+
+/// The most groups of one person that are looked at.
+const MAX_GROUPS: usize = 1_024;
+
+/// The longest issuer and subject that are accepted, as the store keeps them.
+const MAX_ISSUER: usize = 512;
+const MAX_SUBJECT: usize = 255;
+
+/// The longest e-mail address that is looked at, in bytes.
+const MAX_EMAIL: usize = 320;
+
+/// The longest username that is derived from a claim, in characters.
+const DERIVED_USERNAME_CHARS: usize = 32;
+
+/// The most numbered names tried when a derived username is taken: `name`, `name-2`, ... `name-99`.
+const MAX_USERNAME_TRIES: u32 = 99;
+
+/// What a provider said about a person. The caller verified the tokens; this module evaluates the statements against the
+/// operator's lists. The `Debug` text prints a marker, because every field is about a person.
+#[derive(Clone, Default)]
+pub struct OidcClaims {
+    /// The issuer URL of the provider.
+    pub issuer: String,
+    /// The subject at that issuer: the stable identity.
+    pub subject: String,
+    /// The e-mail address.
+    pub email: Option<String>,
+    /// Whether the provider says it verified the address.
+    pub email_verified: bool,
+    /// The `preferred_username` claim.
+    pub preferred_username: Option<String>,
+    /// The name to show.
+    pub display_name: Option<String>,
+    /// The groups, from the claim the provider's configuration names.
+    pub groups: Vec<String>,
+}
+
+impl fmt::Debug for OidcClaims {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("OidcClaims(..)")
+    }
+}
+
+impl OidcClaims {
+    /// Whether the identity can be stored: an issuer and a subject of a plausible size without control characters.
+    fn well_formed(&self) -> bool {
+        let plain = |s: &str, max: usize| !s.is_empty() && s.len() <= max && !s.chars().any(char::is_control);
+        plain(&self.issuer, MAX_ISSUER) && plain(&self.subject, MAX_SUBJECT)
+    }
+}
+
+/// The lists of a provider that decide who becomes an account.
+#[derive(Debug, Clone, Default)]
+pub struct ProviderRules {
+    /// E-mail domains, compared ignoring case and exactly (no sub-domains).
+    pub allowed_domains: Vec<String>,
+    /// Groups, compared exactly.
+    pub allowed_groups: Vec<String>,
+}
+
+impl From<&config::Oidc> for ProviderRules {
+    fn from(provider: &config::Oidc) -> ProviderRules {
+        ProviderRules {
+            allowed_domains: provider.allowed_domains.clone(),
+            allowed_groups: provider.allowed_groups.clone(),
+        }
+    }
+}
+
+impl ProviderRules {
+    /// Whether the claims satisfy a list. Both lists empty allows nobody.
+    fn allows(&self, claims: &OidcClaims) -> bool {
+        let by_domain = claims.email_verified
+            && claims
+                .email
+                .as_deref()
+                .and_then(email_domain)
+                .is_some_and(|domain| self.allowed_domains.iter().any(|allowed| allowed.eq_ignore_ascii_case(domain)));
+        let by_group = claims
+            .groups
+            .iter()
+            .take(MAX_GROUPS)
+            .any(|group| !group.is_empty() && self.allowed_groups.iter().any(|allowed| allowed == group));
+        by_domain || by_group
+    }
+}
+
+/// The part of an address after its last `@`, when there is a local part before it.
+fn email_domain(email: &str) -> Option<&str> {
+    if email.len() > MAX_EMAIL {
+        return None;
+    }
+    let (local, domain) = email.rsplit_once('@')?;
+    (!local.is_empty() && !domain.is_empty()).then_some(domain)
+}
+
+/// A claim made into a username candidate: lower case, every character outside `a-z 0-9 . _ -` replaced by `-`, no dot at
+/// the start or the end, at most 32 characters. A claim with no letter or digit in it gives `None`.
+fn normalise(claim: &str) -> Option<String> {
+    let mapped: String = claim
+        .to_lowercase()
+        .chars()
+        .map(|c| if matches!(c, 'a'..='z' | '0'..='9' | '.' | '_' | '-') { c } else { '-' })
+        .collect();
+    let cut: String = mapped.trim_matches('.').chars().take(DERIVED_USERNAME_CHARS).collect();
+    let name = cut.trim_matches('.');
+    name.bytes().any(|b| b.is_ascii_alphanumeric()).then(|| name.to_owned())
+}
+
+/// The username a just-in-time account starts from: the `preferred_username` claim, else the part of the e-mail address before
+/// its last `@`, else `user`, normalised so that a claim can never put anything but `a-z 0-9 . _ -` into a name (see
+/// [`normalise`]). A claim with no letter or digit counts as missing. A collision is handled by the caller with a suffix.
+pub fn derive_username(preferred: Option<&str>, email: Option<&str>) -> String {
+    preferred
+        .and_then(normalise)
+        .or_else(|| email.filter(|e| e.len() <= MAX_EMAIL).and_then(|e| e.rsplit_once('@')).and_then(|(local, _)| normalise(local)))
+        .unwrap_or_else(|| "user".to_owned())
+}
+
+/// `base`, or the first of `base-2` to `base-99` that no account (deleted ones included) has, or `None` when all are taken.
+fn free_username(tx: &Tx<'_>, base: &str) -> Result<Option<String>, AccountError> {
+    for n in 1..=MAX_USERNAME_TRIES {
+        let candidate = if n == 1 { base.to_owned() } else { format!("{base}-{n}") };
+        if tx.account_by_username(&candidate)?.is_none() {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+/// The name to show: the claim without control characters, cut to 128 characters, or the username when nothing is left.
+fn shown_name(claim: Option<&str>, username: &str) -> String {
+    let name: String = claim.unwrap_or("").chars().filter(|c| !c.is_control()).take(128).collect();
+    let name = name.trim();
+    if name.is_empty() { username.to_owned() } else { name.to_owned() }
 }

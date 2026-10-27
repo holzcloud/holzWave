@@ -6,9 +6,12 @@ mod scratch;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 use std::process::{Command, Output};
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
+use std::thread;
 
-use holzwave_server::accounts::{AccountError, AccountObserver, Accounts, Ending, NewAccount};
+use holzwave_server::accounts::{
+    AccountError, AccountObserver, Accounts, Ending, NewAccount, OidcClaims, ProviderRules, derive_username,
+};
 use holzwave_server::audit::Audit;
 use holzwave_server::clock::{Clock, ManualClock, SystemClock};
 use holzwave_server::store::{Account, AccountId, AccountState, NewSession, Role, SignInMethod, Store, StoreError, Tx, hash_token};
@@ -688,4 +691,459 @@ fn no_audit_line_holds_a_token_or_a_name() {
         assert!(!all.contains(secret), "the audit file holds {secret:?}");
     }
     assert!(all.lines().count() >= 6);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Single sign-on
+// ---------------------------------------------------------------------------------------------------------------------
+
+const ISSUER: &str = "https://idp.example.test";
+
+fn claims(issuer: &str, subject: &str, email: Option<&str>, verified: bool, groups: &[&str]) -> OidcClaims {
+    OidcClaims {
+        issuer: issuer.to_owned(),
+        subject: subject.to_owned(),
+        email: email.map(str::to_owned),
+        email_verified: verified,
+        preferred_username: None,
+        display_name: None,
+        groups: groups.iter().map(|g| (*g).to_owned()).collect(),
+    }
+}
+
+fn rules(domains: &[&str], groups: &[&str]) -> ProviderRules {
+    ProviderRules {
+        allowed_domains: domains.iter().map(|d| (*d).to_owned()).collect(),
+        allowed_groups: groups.iter().map(|g| (*g).to_owned()).collect(),
+    }
+}
+
+fn identities(f: &Fixture) -> usize {
+    f.store
+        .read(|tx| Ok(tx.account_list()?.iter().map(|a| tx.oidc_list(a.id).map(|l| l.len())).collect::<Result<Vec<_>, _>>()?.iter().sum()))
+        .expect("count")
+}
+
+fn account_count(f: &Fixture) -> i64 {
+    f.store.read(|tx| tx.account_count()).expect("count")
+}
+
+#[test]
+fn a_listed_domain_makes_a_member_and_the_identity_is_matched_by_issuer_and_subject() {
+    let f = fixture("accounts-oidc-domain");
+    let root = first_admin(&f);
+    let by_domain = rules(&["example.org"], &[]);
+
+    let first = f
+        .accounts
+        .oidc_sign_in(&claims(ISSUER, "subject-1", Some("a@Example.ORG"), true, &[]), &by_domain, Some(ADDR))
+        .expect("created");
+    assert_eq!((first.role, first.state, first.username.as_str()), (Role::Member, AccountState::Active, "a"));
+    assert_eq!(first.uid, root.uid + 1);
+    assert_eq!(identities(&f), 1);
+    let lines = audit_lines(f.scratch.path());
+    let created: Vec<_> = lines.iter().filter(|l| l["action"] == "oidc.create").collect();
+    assert_eq!(created.len(), 1);
+    assert_eq!((created[0]["result"].as_str(), created[0]["target"].as_str()), (Some("ok"), Some(first.id.to_string().as_str())));
+
+    let again = f
+        .accounts
+        .oidc_sign_in(&claims(ISSUER, "subject-1", Some("a@Example.ORG"), true, &[]), &by_domain, Some(ADDR))
+        .expect("found");
+    assert_eq!(again, first);
+    // The same subject with another e-mail, an unverified one, or after the lists were emptied is the same account.
+    let moved = f
+        .accounts
+        .oidc_sign_in(&claims(ISSUER, "subject-1", Some("a@other.org"), false, &[]), &rules(&[], &[]), None)
+        .expect("found by issuer and subject");
+    assert_eq!(moved, first);
+    assert_eq!(account_count(&f), 2);
+    assert_eq!(identities(&f), 1);
+    assert_eq!(audit_lines(f.scratch.path()).iter().filter(|l| l["action"] == "oidc.create").count(), 1);
+}
+
+#[test]
+fn an_account_is_never_taken_over_by_an_e_mail_or_a_name() {
+    let f = fixture("accounts-oidc-takeover");
+    let root = first_admin(&f);
+    // A local account called `a`, and another whose display name is the e-mail address.
+    let a = member(&f, &root, "a");
+    let by_domain = rules(&["example.org"], &[]);
+    let mut stranger = claims(ISSUER, "subject-2", Some("a@example.org"), true, &[]);
+    stranger.preferred_username = Some("root".to_owned());
+    stranger.display_name = Some("Root".to_owned());
+    let got = f.accounts.oidc_sign_in(&stranger, &by_domain, None).expect("a new account");
+    assert_ne!(got.id, a.id);
+    assert_ne!(got.id, root.id);
+    assert_eq!(got.role, Role::Member);
+    assert_eq!(got.username, "root-2", "the name is derived and made unique, never shared");
+    assert_eq!(account_of(&f, a.id), a);
+    assert_eq!(account_of(&f, root.id), root);
+    // The stranger is the only identity.
+    assert_eq!(f.store.read(|tx| tx.oidc_list(got.id)).expect("list").len(), 1);
+    assert_eq!(f.store.read(|tx| tx.oidc_list(a.id)).expect("list").len(), 0);
+}
+
+#[test]
+fn an_unverified_e_mail_or_an_unlisted_subject_makes_nothing() {
+    let f = fixture("accounts-oidc-denied");
+    first_admin(&f);
+    let by_both = rules(&["example.org"], &["staff"]);
+    let denied: Vec<(&str, OidcClaims)> = vec![
+        ("unverified", claims(ISSUER, "s1", Some("a@example.org"), false, &[])),
+        ("other domain", claims(ISSUER, "s2", Some("a@other.org"), true, &[])),
+        ("sub-domain", claims(ISSUER, "s3", Some("a@sub.example.org"), true, &[])),
+        ("suffix", claims(ISSUER, "s4", Some("a@evilexample.org"), true, &[])),
+        ("trailing", claims(ISSUER, "s5", Some("a@example.org.evil.test"), true, &[])),
+        ("no at sign", claims(ISSUER, "s6", Some("example.org"), true, &[])),
+        ("no local part", claims(ISSUER, "s7", Some("@example.org"), true, &[])),
+        ("no e-mail", claims(ISSUER, "s8", None, true, &["x"])),
+        ("group in another case", claims(ISSUER, "s9", None, false, &["Staff"])),
+        ("group as part", claims(ISSUER, "s10", None, false, &["staff-extra", "sta", "staff "])),
+        ("empty subject", claims(ISSUER, "", Some("a@example.org"), true, &[])),
+        ("empty issuer", claims("", "s11", Some("a@example.org"), true, &[])),
+        ("long subject", claims(ISSUER, &"s".repeat(256), Some("a@example.org"), true, &[])),
+        ("control in subject", claims(ISSUER, "s\n12", Some("a@example.org"), true, &[])),
+    ];
+    println!("OIDC table:");
+    for (name, c) in &denied {
+        let r = f.accounts.oidc_sign_in(c, &by_both, Some(ADDR));
+        println!("  {name}: denied = {}", r.as_ref().err() == Some(&AccountError::Denied));
+        assert_eq!(r.expect_err(name), AccountError::Denied, "{name}");
+    }
+    assert_eq!(account_count(&f), 1);
+    assert_eq!(identities(&f), 0);
+    let lines = audit_lines(f.scratch.path());
+    let fails = lines.iter().filter(|l| l["action"] == "oidc.create" && l["result"] == "fail").count();
+    assert_eq!(fails, denied.len(), "one failed line per refusal");
+    // No claim value is in the file.
+    let all = std::fs::read_dir(f.scratch.join("server/audit"))
+        .expect("dir")
+        .map(|e| std::fs::read_to_string(e.expect("entry").path()).expect("read"))
+        .collect::<String>();
+    assert!(!all.contains("example.org") && !all.contains("staff") && !all.contains(ISSUER));
+}
+
+#[test]
+fn a_listed_group_is_enough_and_groups_are_compared_exactly() {
+    let f = fixture("accounts-oidc-groups");
+    first_admin(&f);
+    let by_group = rules(&[], &["staff"]);
+    let mut c = claims(ISSUER, "g1", None, false, &["staff", "x"]);
+    c.preferred_username = Some("Gina".to_owned());
+    let gina = f.accounts.oidc_sign_in(&c, &by_group, None).expect("created");
+    assert_eq!((gina.username.as_str(), gina.role), ("gina", Role::Member));
+    let different_case = claims(ISSUER, "g2", None, false, &["Staff"]);
+    assert_eq!(f.accounts.oidc_sign_in(&different_case, &by_group, None).expect_err("case"), AccountError::Denied);
+    // A domain list does not let a group in, and a group list does not let a verified e-mail in.
+    let by_domain = rules(&["example.org"], &[]);
+    assert_eq!(f.accounts.oidc_sign_in(&claims(ISSUER, "g3", None, false, &["staff"]), &by_domain, None).expect_err("domain only"), AccountError::Denied);
+    assert_eq!(
+        f.accounts.oidc_sign_in(&claims(ISSUER, "g4", Some("a@example.org"), true, &[]), &by_group, None).expect_err("group only"),
+        AccountError::Denied
+    );
+    assert_eq!(account_count(&f), 2);
+}
+
+#[test]
+fn with_both_lists_empty_no_account_is_made_but_a_linked_identity_still_signs_in() {
+    let f = fixture("accounts-oidc-empty");
+    first_admin(&f);
+    let open = claims(ISSUER, "e1", Some("a@example.org"), true, &["staff"]);
+    assert_eq!(f.accounts.oidc_sign_in(&open, &rules(&[], &[]), None).expect_err("empty lists"), AccountError::Denied);
+    assert_eq!(account_count(&f), 1);
+    let made = f.accounts.oidc_sign_in(&open, &rules(&["example.org"], &[]), None).expect("created");
+    let back = f.accounts.oidc_sign_in(&open, &rules(&[], &[]), None).expect("linked identity");
+    assert_eq!(back, made);
+}
+
+#[test]
+fn the_same_subject_from_another_issuer_is_another_identity() {
+    let f = fixture("accounts-oidc-issuers");
+    first_admin(&f);
+    let by_domain = rules(&["example.org"], &[]);
+    let one = f.accounts.oidc_sign_in(&claims(ISSUER, "same", Some("a@example.org"), true, &[]), &by_domain, None).expect("one");
+    let two = f
+        .accounts
+        .oidc_sign_in(&claims("https://other-idp.example.test", "same", Some("a@example.org"), true, &[]), &by_domain, None)
+        .expect("two");
+    assert_ne!(one.id, two.id);
+    assert_eq!((one.username.as_str(), two.username.as_str()), ("a", "a-2"));
+    assert_eq!(account_of(&f, one.id), one, "the first is not touched");
+    assert_eq!(identities(&f), 2);
+    // Another issuer that is not allowed by the rules of this call still needs the rules.
+    assert_eq!(
+        f.accounts.oidc_sign_in(&claims("https://third.example.test", "same", Some("a@nowhere.test"), true, &[]), &by_domain, None).expect_err("denied"),
+        AccountError::Denied
+    );
+}
+
+#[test]
+fn the_identity_of_a_disabled_account_is_refused() {
+    let f = fixture("accounts-oidc-disabled");
+    let root = first_admin(&f);
+    let by_domain = rules(&["example.org"], &[]);
+    let c = claims(ISSUER, "d1", Some("a@example.org"), true, &[]);
+    let a = f.accounts.oidc_sign_in(&c, &by_domain, None).expect("created");
+    f.accounts.disable(root.id, None, a.id).expect("disable");
+    assert_eq!(f.accounts.oidc_sign_in(&c, &by_domain, None).expect_err("disabled"), AccountError::Denied);
+    // It makes no second account for the same subject either.
+    assert_eq!(account_count(&f), 2);
+    f.accounts.enable(root.id, None, a.id).expect("enable");
+    assert_eq!(f.accounts.oidc_sign_in(&c, &by_domain, None).expect("enabled again"), account_of(&f, a.id));
+    // A deleted account's identity is gone with it, and its name stays reserved.
+    f.accounts.delete(root.id, None, a.id).expect("delete");
+    let reborn = f.accounts.oidc_sign_in(&c, &by_domain, None).expect("a new account, because the link went with the old one");
+    assert_ne!(reborn.id, a.id);
+    assert_eq!(reborn.username, "a-2");
+}
+
+#[test]
+fn claims_print_nothing_about_a_person() {
+    let mut c = claims(ISSUER, "private-subject", Some("private@example.org"), true, &["private-group"]);
+    c.preferred_username = Some("private-name".to_owned());
+    let shown = format!("{c:?}");
+    for word in ["private", "example", "idp"] {
+        assert!(!shown.contains(word), "{shown}");
+    }
+}
+
+#[test]
+fn username_derivation_table() {
+    let long = "a".repeat(60);
+    let dotted_cut = format!("{}.bbb", "a".repeat(31));
+    let cases: Vec<(Option<&str>, Option<&str>, String)> = vec![
+        (Some("Alice.Smith"), None, "alice.smith".to_owned()),
+        (Some("a b@c"), None, "a-b-c".to_owned()),
+        (Some(""), Some("x@y.z"), "x".to_owned()),
+        (None, Some("X@y.z"), "x".to_owned()),
+        (Some(long.as_str()), None, "a".repeat(32)),
+        (Some(".hidden"), None, "hidden".to_owned()),
+        (Some("end."), None, "end".to_owned()),
+        (Some("..."), None, "user".to_owned()),
+        (Some(dotted_cut.as_str()), None, "a".repeat(31)),
+        (None, None, "user".to_owned()),
+        (Some(""), Some(""), "user".to_owned()),
+        (Some("Ünï Cödé"), None, "-n--c-d-".to_owned()),
+        (Some("\u{c4}\u{d6} \u{dc}"), Some("kim@y.z"), "kim".to_owned()),
+        (Some("../../etc/passwd"), None, "-..-etc-passwd".to_owned()),
+        (Some("admin\n"), None, "admin-".to_owned()),
+        (None, Some("first.last+tag@example.org"), "first.last-tag".to_owned()),
+        (None, Some("a@b@example.org"), "a-b".to_owned()),
+        (Some("UPPER_case-1"), None, "upper_case-1".to_owned()),
+    ];
+    println!("Usernames:");
+    for (preferred, email, expected) in cases {
+        let got = derive_username(preferred, email);
+        println!("  {preferred:?} + {email:?} -> {got:?}");
+        assert_eq!(got, expected, "{preferred:?} {email:?}");
+        assert!(holzwave_server::store::valid_username(&got), "{got:?} must be a username");
+        assert!(got.chars().count() <= 32);
+    }
+}
+
+#[test]
+fn a_collision_gets_a_number_up_to_ninety_nine_and_then_a_refusal() {
+    let f = fixture("accounts-oidc-collision");
+    let root = first_admin(&f);
+    let by_domain = rules(&["example.org"], &[]);
+    // `root` is taken: the first just-in-time `root` becomes `root-2`.
+    let mut c = claims(ISSUER, "c1", None, true, &[]);
+    c.email = Some("root@example.org".to_owned());
+    let two = f.accounts.oidc_sign_in(&c, &by_domain, None).expect("root-2");
+    assert_eq!(two.username, "root-2");
+    // Fill `root-3` .. `root-99` through an administrator, then the 99th collision is a refusal.
+    for n in 3..=99 {
+        f.accounts.create_account(root.id, None, &format!("root-{n}"), "x", Role::Member).expect("fill");
+    }
+    let before = (account_count(&f), identities(&f));
+    let mut next = claims(ISSUER, "c100", None, true, &[]);
+    next.email = Some("root@example.org".to_owned());
+    assert_eq!(f.accounts.oidc_sign_in(&next, &by_domain, None).expect_err("exhausted"), AccountError::Denied);
+    assert_eq!((account_count(&f), identities(&f)), before, "nothing was made");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Races and rules
+// ---------------------------------------------------------------------------------------------------------------------
+
+const THREADS: usize = 16;
+
+/// Runs `job(i)` on 16 threads released together and returns the results in thread order.
+fn together<T: Send + 'static>(job: impl Fn(usize) -> T + Send + Sync + 'static) -> Vec<T> {
+    let job = Arc::new(job);
+    let barrier = Arc::new(Barrier::new(THREADS));
+    let handles: Vec<_> = (0..THREADS)
+        .map(|i| {
+            let (job, barrier) = (job.clone(), barrier.clone());
+            thread::spawn(move || {
+                barrier.wait();
+                job(i)
+            })
+        })
+        .collect();
+    handles.into_iter().map(|h| h.join().expect("thread")).collect()
+}
+
+#[test]
+fn race_bootstrap() {
+    let f = fixture("accounts-race-bootstrap");
+    let token = f.accounts.bootstrap_issue().expect("issue").token.expose().to_owned();
+    let accounts = Arc::new(f.accounts);
+    let results = {
+        let accounts = accounts.clone();
+        together(move |i| {
+            let name = format!("user{i}");
+            accounts.redeem_bootstrap(&token, &person(&name, &name), None, ok)
+        })
+    };
+    let winners = results.iter().filter(|r| r.is_ok()).count();
+    let losers = results.iter().filter(|r| matches!(r, Err(AccountError::NotRedeemable))).count();
+    println!("Races: bootstrap threads {THREADS}, winners {winners}, common error {losers}");
+    assert_eq!((winners, losers), (1, THREADS - 1));
+    assert_eq!(f.store.read(|tx| tx.account_count()).expect("count"), 1);
+    let lines = audit_lines(f.scratch.path());
+    assert_eq!(lines.len(), THREADS);
+    assert_eq!(lines.iter().filter(|l| l["result"] == "ok").count(), 1);
+}
+
+#[test]
+fn race_invite() {
+    let f = fixture("accounts-race-invite");
+    let root = first_admin(&f);
+    let token = f.accounts.invite_create(root.id, None, None, Role::Member).expect("invite").token.expose().to_owned();
+    let accounts = Arc::new(f.accounts);
+    let results = {
+        let accounts = accounts.clone();
+        together(move |i| {
+            let name = format!("user{i}");
+            accounts.redeem_invite(&token, &person(&name, &name), None, ok)
+        })
+    };
+    let winners = results.iter().filter(|r| r.is_ok()).count();
+    let losers = results.iter().filter(|r| matches!(r, Err(AccountError::NotRedeemable))).count();
+    println!("Races: invite threads {THREADS}, winners {winners}, common error {losers}");
+    assert_eq!((winners, losers), (1, THREADS - 1));
+    assert_eq!(f.store.read(|tx| tx.account_count()).expect("count"), 2);
+}
+
+#[test]
+fn race_oidc_one_subject() {
+    let f = fixture("accounts-race-oidc");
+    first_admin(&f);
+    let accounts = Arc::new(f.accounts);
+    let results = {
+        let accounts = accounts.clone();
+        together(move |_| {
+            accounts.oidc_sign_in(&claims(ISSUER, "same", Some("a@example.org"), true, &[]), &rules(&["example.org"], &[]), None)
+        })
+    };
+    let ids: std::collections::HashSet<_> = results.iter().map(|r| r.as_ref().expect("signed in").id).collect();
+    println!("Races: oidc threads {THREADS}, accounts made {}", ids.len());
+    assert_eq!(ids.len(), 1);
+    assert_eq!(f.store.read(|tx| tx.account_count()).expect("count"), 2);
+    assert_eq!(audit_lines(f.scratch.path()).iter().filter(|l| l["action"] == "oidc.create").count(), 1);
+}
+
+#[test]
+fn same_username_twice() {
+    let f = fixture("accounts-same-username");
+    let root = first_admin(&f);
+    let one = f.accounts.invite_create(root.id, None, None, Role::Member).expect("invite one");
+    let two = f.accounts.invite_create(root.id, None, None, Role::Member).expect("invite two");
+    let accounts = Arc::new(f.accounts);
+    let tokens = Arc::new([one.token.expose().to_owned(), two.token.expose().to_owned()]);
+    let results = {
+        let (accounts, tokens) = (accounts.clone(), tokens.clone());
+        together(move |i| {
+            if i >= 2 {
+                return None;
+            }
+            Some(accounts.redeem_invite(&tokens[i], &person("sam", "Sam"), None, ok))
+        })
+    };
+    let results: Vec<_> = results.into_iter().flatten().collect();
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+    assert_eq!(results.iter().filter(|r| matches!(r, Err(AccountError::Conflict))).count(), 1);
+    assert_eq!(f.store.read(|tx| tx.account_count()).expect("count"), 2);
+    // The loser's invitation still works under another name.
+    let loser = if results[0].is_err() { &tokens[0] } else { &tokens[1] };
+    let other = accounts.redeem_invite(loser, &person("samantha", "Samantha"), None, ok).expect("another name");
+    assert_eq!(other.username, "samantha");
+}
+
+#[test]
+fn uid_not_reused() {
+    let f = fixture("accounts-uid");
+    let root = first_admin(&f);
+    let bob = member(&f, &root, "bob");
+    f.accounts.delete(root.id, None, bob.id).expect("delete");
+    let carol = member(&f, &root, "carol");
+    println!("Uids: root {}, bob {} (deleted), carol {}", root.uid, bob.uid, carol.uid);
+    assert_eq!((root.uid, bob.uid, carol.uid), (20000, 20001, 20002));
+}
+
+#[test]
+fn rollback_keeps_token() {
+    let f = fixture("accounts-rollback-bootstrap");
+    let token = f.accounts.bootstrap_issue().expect("issue").token.expose().to_owned();
+    let failed = f.accounts.redeem_bootstrap(&token, &person("alice", "Alice"), None, |tx: &Tx<'_>, a: &Account| {
+        tx.totp_set(a.id, b"sealed")?;
+        Err::<(), AccountError>(AccountError::Enrolment("the password was refused"))
+    });
+    assert_eq!(failed.expect_err("failed"), AccountError::Enrolment("the password was refused"));
+    assert_eq!(f.store.read(|tx| tx.account_count()).expect("count"), 0);
+    let lines = audit_lines(f.scratch.path());
+    assert_eq!((lines.len(), lines[0]["result"].as_str()), (1, Some("fail")));
+    let alice = f.accounts.redeem_bootstrap(&token, &person("alice", "Alice"), None, ok).expect("the token still works");
+    assert_eq!((alice.role, alice.uid), (Role::Admin, 20000));
+    // A panic inside the enrolment leaves nothing behind either.
+    let token = {
+        let g = fixture("accounts-panic-bootstrap");
+        let token = g.accounts.bootstrap_issue().expect("issue").token.expose().to_owned();
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = g.accounts.redeem_bootstrap(&token, &person("alice", "Alice"), None, |_: &Tx<'_>, _: &Account| -> Result<(), StoreError> {
+                panic!("the enrolment panicked")
+            });
+        }));
+        assert!(caught.is_err());
+        assert_eq!(g.store.read(|tx| tx.account_count()).expect("count"), 0);
+        g.accounts.redeem_bootstrap(&token, &person("alice", "Alice"), None, ok).expect("still valid after a panic");
+        token
+    };
+    assert!(token.starts_with("hwb_"));
+}
+
+#[test]
+fn no_default_admin() {
+    let f = fixture("accounts-no-default");
+    assert_eq!(f.store.read(|tx| tx.account_count()).expect("count"), 0);
+    assert_eq!(f.store.read(|tx| tx.admin_count_active()).expect("count"), 0);
+    // A token that was issued before an account appeared cannot make an administrator any more.
+    let late = f.accounts.bootstrap_issue().expect("issue").token.expose().to_owned();
+    f.store
+        .write(|tx| tx.account_create(&holzwave_server::store::NewAccount::new("early", Role::Member), RANGE, NOW))
+        .expect("an account");
+    assert_eq!(
+        f.accounts.redeem_bootstrap(&late, &person("late", "Late"), None, ok).expect_err("no longer allowed"),
+        AccountError::NotRedeemable
+    );
+    assert_eq!(f.accounts.bootstrap_issue().expect_err("an account exists"), AccountError::AlreadySetUp);
+    assert_eq!(f.store.read(|tx| tx.admin_count_active()).expect("count"), 0, "nobody became an administrator");
+    // The same after the first administrator.
+    let g = fixture("accounts-no-default-2");
+    first_admin(&g);
+    assert_eq!(g.accounts.bootstrap_issue().expect_err("an account exists"), AccountError::AlreadySetUp);
+}
+
+#[test]
+fn the_bootstrap_token_lives_one_hour() {
+    let f = fixture("accounts-bootstrap-ttl");
+    let issued = f.accounts.bootstrap_issue().expect("issue");
+    assert_eq!(issued.expires_at, NOW + 3_600);
+    let token = issued.token.expose().to_owned();
+    f.clock.set(NOW + 3_600);
+    assert_eq!(f.accounts.redeem_bootstrap(&token, &person("a", "A"), None, ok).expect_err("expired"), AccountError::NotRedeemable);
+    f.clock.set(NOW + 3_599);
+    f.accounts.redeem_bootstrap(&token, &person("a", "A"), None, ok).expect("one second before the end");
 }
