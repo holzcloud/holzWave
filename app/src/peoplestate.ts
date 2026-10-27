@@ -134,3 +134,53 @@ export function readInvitation(raw: unknown): string | null {
   if (typeof link !== "string" || link === "" || link.length > MAX_LINK) return null;
   return /^\S+$/u.test(link) ? link : null;
 }
+
+/** The sentence when the server says that this person may not open the dialog (the role was taken away). */
+export const ADMIN_ONLY = "";
+/** The sentence when a change would leave no active administrator. */
+export const ONE_ADMIN = "";
+/** The dim reason under the entries that the last active administrator cannot have. */
+export const ONLY_ADMIN = "";
+
+export type EntryId = "role" | "disable" | "enable" | "unlock" | "reset" | "delete";
+
+/** One entry of the menu of a row. `reason` is why it is not available, or null. */
+export interface Entry {
+  id: EntryId;
+  label: string;
+  danger: boolean;
+  reason: string | null;
+}
+
+export function menuFor(_row: Row, _admins: number): Entry[] {
+  return [];
+}
+
+/** The question of an entry that asks first. */
+export interface Confirmation {
+  title: string;
+  text: string;
+  button: string;
+}
+
+export function confirmFor(_entry: string, _name: string): Confirmation | null {
+  return null;
+}
+
+/** The request of an entry. */
+export interface Request {
+  method: "POST" | "DELETE";
+  path: string;
+  body?: Record<string, unknown>;
+}
+
+export function requestFor(_entry: EntryId, _row: Row): Request {
+  return { method: "POST", path: "" };
+}
+
+/** What a refused change means for the dialog: the person may not be here, the person is gone, or a sentence. */
+export type Outcome = { kind: "locked" } | { kind: "gone" } | { kind: "say"; text: string };
+
+export function outcomeOf(_status: number, _body?: Record<string, unknown>): Outcome {
+  return { kind: "say", text: "" };
+}

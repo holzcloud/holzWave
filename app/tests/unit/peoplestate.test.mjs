@@ -2,7 +2,25 @@
 // words with their glyphs and the time words of the last sign-in.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_DAYS, INVITE_DAYS, LIST_NOTE, MAX_ACCOUNTS, inviteBody, inviteNote, lastSigninText, readAccounts, readInvitation, stateWord } from "../../dist/peoplestate.js";
+import {
+  ADMIN_ONLY,
+  DEFAULT_DAYS,
+  INVITE_DAYS,
+  LIST_NOTE,
+  MAX_ACCOUNTS,
+  ONE_ADMIN,
+  ONLY_ADMIN,
+  confirmFor,
+  inviteBody,
+  inviteNote,
+  lastSigninText,
+  menuFor,
+  outcomeOf,
+  readAccounts,
+  readInvitation,
+  requestFor,
+  stateWord,
+} from "../../dist/peoplestate.js";
 
 const NOW = Date.parse("2026-10-27T12:00:00Z");
 const iso = (secondsAgo) => new Date(NOW - secondsAgo * 1000).toISOString();
@@ -123,4 +141,95 @@ test("readInvitation takes a link of one piece and bounded length, and nothing e
 
 test("the sentence under the table says what the list never shows", () => {
   assert.equal(LIST_NOTE, "This list shows names, roles and states only. It never shows anyone's secrets, terminals, commands or layout.");
+});
+
+// ---- the menu of a row, the questions and the refusals ------------------------------------------------------------------------
+
+const rowOf = (over = {}) => ({ id: "a1", username: "ben", displayName: "Ben Ito", role: "member", state: "active", lastSigninMs: null, ...over });
+const labels = (entries) => entries.map((e) => e.label);
+const reasons = (entries) => Object.fromEntries(entries.filter((e) => e.reason !== null).map((e) => [e.label, e.reason]));
+
+test("menuFor: an active member offers Make admin, Disable, Reset secrets and Delete, and none of them is held back", () => {
+  const entries = menuFor(rowOf(), 1);
+  assert.deepEqual(labels(entries), ["Make admin", "Disable", "Reset secrets", "Delete"]);
+  assert.deepEqual(entries.map((e) => e.id), ["role", "disable", "reset", "delete"]);
+  assert.deepEqual(reasons(entries), {});
+});
+
+test("menuFor: a disabled member offers Enable instead of Disable", () => {
+  assert.deepEqual(labels(menuFor(rowOf({ state: "disabled" }), 1)), ["Make admin", "Enable", "Reset secrets", "Delete"]);
+  assert.deepEqual(menuFor(rowOf({ state: "disabled" }), 1).map((e) => e.id), ["role", "enable", "reset", "delete"]);
+});
+
+test("menuFor: Unlock sign-in is there for a locked out person and for nobody else", () => {
+  const locked = menuFor(rowOf({ state: "locked_out" }), 1);
+  assert.deepEqual(labels(locked), ["Make admin", "Disable", "Unlock sign-in", "Reset secrets", "Delete"]);
+  for (const state of ["active", "disabled"]) assert.ok(!labels(menuFor(rowOf({ state }), 1)).includes("Unlock sign-in"), state);
+  for (const role of ["admin", "member"]) assert.equal(labels(menuFor(rowOf({ role, state: "locked_out" }), 2)).filter((l) => l === "Unlock sign-in").length, 1, role);
+});
+
+test("menuFor: an administrator offers Make member in the place of Make admin", () => {
+  const entries = menuFor(rowOf({ role: "admin" }), 2);
+  assert.deepEqual(labels(entries), ["Make member", "Disable", "Reset secrets", "Delete"]);
+  assert.deepEqual(reasons(entries), {}, "with another active administrator nothing is held back");
+});
+
+test("menuFor: the only active administrator keeps Make member, Disable and Delete in the list, dim, with the reason", () => {
+  const entries = menuFor(rowOf({ role: "admin" }), 1);
+  assert.deepEqual(labels(entries), ["Make member", "Disable", "Reset secrets", "Delete"]);
+  assert.deepEqual(reasons(entries), { "Make member": ONLY_ADMIN, Disable: ONLY_ADMIN, Delete: ONLY_ADMIN });
+  assert.equal(ONLY_ADMIN, "The only active administrator.");
+  assert.equal(entries.find((e) => e.id === "reset").reason, null, "Reset secrets of the only administrator is allowed");
+});
+
+test("menuFor: a disabled administrator is never the active one, and a member never is", () => {
+  assert.deepEqual(reasons(menuFor(rowOf({ role: "admin", state: "disabled" }), 1)), {});
+  assert.deepEqual(labels(menuFor(rowOf({ role: "admin", state: "disabled" }), 1)), ["Make member", "Enable", "Reset secrets", "Delete"]);
+  assert.deepEqual(reasons(menuFor(rowOf({ role: "member" }), 1)), {});
+  assert.deepEqual(reasons(menuFor(rowOf({ role: "admin" }), 0)), { "Make member": ONLY_ADMIN, Disable: ONLY_ADMIN, Delete: ONLY_ADMIN }, "a count of none is no cover");
+  assert.deepEqual(reasons(menuFor(rowOf({ role: "admin", state: "locked_out" }), 1)), { "Make member": ONLY_ADMIN, Disable: ONLY_ADMIN, Delete: ONLY_ADMIN }, "a locked out administrator is still the one the server counts");
+});
+
+test("menuFor: only Reset secrets and Delete are drawn in the danger style, and they come last", () => {
+  const entries = menuFor(rowOf({ state: "locked_out" }), 1);
+  assert.deepEqual(entries.filter((e) => e.danger).map((e) => e.id), ["reset", "delete"]);
+  assert.deepEqual(entries.slice(-2).map((e) => e.id), ["reset", "delete"]);
+});
+
+test("confirmFor: Delete and Reset secrets name the person and say what is lost; every other entry gives null", () => {
+  const del = confirmFor("delete", "Ben Ito");
+  assert.equal(del.title, "Delete Ben Ito?");
+  assert.equal(del.button, "Delete");
+  assert.equal(del.text, "They can no longer sign in and their terminals stop. Their files stay on the server, and nobody can open their saved passwords and keys again.");
+  const reset = confirmFor("reset", "Ben Ito");
+  assert.equal(reset.title, "Reset secrets of Ben Ito?");
+  assert.equal(reset.button, "Reset secrets");
+  assert.equal(reset.text, "Their saved passwords and keys are deleted. Their account, layout and history stay.");
+  for (const entry of ["role", "disable", "enable", "unlock", "", "constructor"]) assert.equal(confirmFor(entry, "Ben"), null, entry);
+  assert.equal(confirmFor("delete", "<img src=x>").title, "Delete <img src=x>?", "a name is text, whatever it holds");
+});
+
+test("requestFor: the path and the body of each entry, with an id that is a path piece", () => {
+  const row = rowOf({ id: "a/b c" });
+  assert.deepEqual(requestFor("role", row), { method: "POST", path: "/api/admin/accounts/a%2Fb%20c/role", body: { role: "admin" } });
+  assert.deepEqual(requestFor("role", rowOf({ role: "admin" })), { method: "POST", path: "/api/admin/accounts/a1/role", body: { role: "member" } });
+  for (const [entry, word] of [["disable", "disable"], ["enable", "enable"], ["unlock", "unlock-signin"], ["reset", "reset-secrets"]]) {
+    assert.deepEqual(requestFor(entry, rowOf()), { method: "POST", path: `/api/admin/accounts/a1/${word}`, body: {} }, entry);
+  }
+  assert.deepEqual(requestFor("delete", rowOf()), { method: "DELETE", path: "/api/admin/accounts/a1" });
+});
+
+test("outcomeOf: a 403 that is no step-up locks the dialog, a 409 on the role says why, a 404 reloads, the rest is a plain sentence", () => {
+  assert.deepEqual(outcomeOf(403, { code: "forbidden" }), { kind: "locked" });
+  assert.deepEqual(outcomeOf(403), { kind: "locked" });
+  assert.equal(ADMIN_ONLY, "Only administrators can open this.");
+  assert.deepEqual(outcomeOf(403, { code: "forbidden", step_up: true }), { kind: "say", text: "That change was not made. Try again." }, "a second refusal for a recent sign-in is the change's own");
+  assert.deepEqual(outcomeOf(409, { code: "conflict", field: "role" }), { kind: "say", text: ONE_ADMIN });
+  assert.equal(ONE_ADMIN, "There must be one active administrator.");
+  assert.deepEqual(outcomeOf(409, { code: "conflict" }), { kind: "say", text: "That change was not made. Try again." });
+  assert.deepEqual(outcomeOf(404, { code: "not_found" }), { kind: "gone" });
+  assert.deepEqual(outcomeOf(0), { kind: "say", text: "Could not reach the server. Try again." });
+  assert.deepEqual(outcomeOf(502), { kind: "say", text: "Could not reach the server. Try again." });
+  assert.equal(outcomeOf(429, { retry_seconds: 60 }).text.startsWith("Too many attempts."), true);
+  assert.deepEqual(outcomeOf(400, { code: "bad_request" }), { kind: "say", text: "That change was not made. Try again." });
 });
