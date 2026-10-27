@@ -1,0 +1,90 @@
+/* The login page (docs/design.md 6.28): the ground with one box, before a person has a session. It shares app.css for the
+   `--hw-*` tokens and for the faces. Every colour is a token, every size is in rem so the UI scale moves the page, and
+   nothing here moves, blurs or fades. Rose marks the focus ring and the one solid button, nothing else. A state is never
+   colour alone: an error has the mark `!` and an underline, a busy step has the `…` in its button. */
+
+/* The chrome sheet defines these two on the main page; the login page has no chrome, so it defines them itself. */
+:root { --hw-line: var(--hw-edge); --hw-dim: var(--hw-ink-3); }
+:root.contrast-high { --hw-line: var(--hw-ink-3); --hw-dim: var(--hw-ink-2); }
+@media (prefers-contrast: more) {
+  :root { --hw-line: var(--hw-ink-3); --hw-dim: var(--hw-ink-2); }
+}
+
+/* app.css pins the page to the window for the terminal; this page scrolls when the window is small. */
+html, body { height: auto; min-height: 100%; overflow: auto; }
+body { box-sizing: border-box; min-height: 100vh; padding: 2rem 1rem; display: flex; flex-direction: column;
+       align-items: center; justify-content: center; }
+[hidden] { display: none !important; }
+#login { width: 26rem; max-width: 100%; }
+
+.lg-box { box-sizing: border-box; width: 100%; padding: 1.667rem 2rem 1.5rem; background: var(--hw-ground-2);
+          border: 1px solid var(--hw-line); border-radius: .667rem; box-shadow: 0 .833rem 2.667rem rgb(0 0 0 / .5);
+          line-height: 1.45; }
+.lg-brand { display: flex; align-items: baseline; gap: 1rem; margin: 0 0 1.333rem; }
+.lg-mark { margin: 0; font-size: 1.35rem; font-weight: 700; letter-spacing: .02em; line-height: 1.2; }
+.lg-host { margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--hw-dim); }
+.lg-title { display: flex; align-items: center; gap: .8rem; margin: 0 0 .467rem; }
+.lg-h2, h2.lg-title { margin: 0; font-size: 1.2rem; font-weight: 700; line-height: 1.3; }
+h2.lg-title { margin: 0 0 .467rem; }
+.lg-chip { padding: 0 .667rem; border: 1px solid var(--hw-line); border-radius: 999px; color: var(--hw-ink-2); white-space: nowrap; }
+.lg-lead { margin: 0 0 1.067rem; color: var(--hw-dim); }
+.lg-name { color: var(--hw-ink); }
+.lg-form { margin: 0; }
+
+.lg-f { display: flex; flex-direction: column; gap: .333rem; min-width: 0; margin: 0 0 .867rem; padding: 0; border: 0; }
+.lg-label { padding: 0; color: var(--hw-dim); }
+.lg-in { box-sizing: border-box; display: flex; align-items: center; width: 100%; min-width: 0; min-height: 2.334rem;
+         margin: 0; padding: 0 .8rem; font: inherit; color: var(--hw-ink); background: var(--hw-ground);
+         border: 1px solid var(--hw-line); border-radius: .5rem; }
+.lg-in[readonly] { color: var(--hw-ink-2); }
+.lg-in[aria-invalid="true"] { border-color: var(--hw-danger); }
+.lg-tx { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lg-hint { color: var(--hw-dim); font-size: .9rem; line-height: 1.35; }
+
+/* An error: the mark `!` and the underline are the second cue. */
+.lg-err, .lg-line[data-tone="error"] { color: var(--hw-danger); text-decoration: underline; }
+.lg-err::before, .lg-line[data-tone="error"]::before { content: "! "; font-weight: 700; }
+.lg-err { margin: 0; line-height: 1.35; }
+.lg-line { min-height: 1.4rem; margin: .133rem 0 0; line-height: 1.35; color: var(--hw-ink-2); overflow-wrap: anywhere; }
+.lg-line:empty { visibility: hidden; }
+.lg-line:empty::before { content: "."; }
+.lg-below { min-height: 1.4rem; margin: .667rem 0 0; color: var(--hw-ink-2); }
+
+.lg-btn { box-sizing: border-box; display: flex; align-items: center; justify-content: center; min-height: 2.334rem; margin: 0;
+          padding: .25rem 1rem; font: inherit; color: var(--hw-ink-2); background: none; border: 1px solid var(--hw-line);
+          border-radius: .667rem; text-decoration: none; cursor: pointer; text-align: center; overflow-wrap: anywhere; }
+.lg-btn:hover { color: var(--hw-ink); background: var(--hw-rose-wash); }
+.lg-btn:disabled { color: var(--hw-dim); cursor: default; background: none; }
+.lg-full { width: 100%; margin: 0 0 .667rem; }
+.lg-small { flex: none; width: auto; margin: 0; padding: .25rem .8rem; }
+.lg-solid { color: var(--hw-on-accent); background: var(--hw-rose-deep); border-color: var(--hw-rose-deep); font-weight: 700; }
+.lg-solid:hover { color: var(--hw-on-accent); background: var(--hw-rose-deep); }
+.lg-tb { box-sizing: border-box; display: inline-flex; align-items: center; min-height: 2.334rem; padding: 0 .25rem; font: inherit;
+         color: var(--hw-ink-2); background: none; border: 0; text-decoration: underline; cursor: pointer; }
+.lg-tb:hover { color: var(--hw-ink); }
+.lg-or { display: flex; align-items: center; gap: 1rem; margin: .467rem 0 .8rem; color: var(--hw-dim); }
+.lg-or::before, .lg-or::after { content: ""; flex: 1; border-top: 1px solid var(--hw-line); }
+
+:is(.lg-btn, .lg-tb, .lg-in, .lg-option input, .lg-chk input):focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 1px; }
+
+.lg-radio { display: flex; flex-direction: column; gap: .2rem; }
+.lg-option, .lg-chk { display: flex; align-items: center; gap: .667rem; min-height: 2.334rem; cursor: pointer; color: var(--hw-ink); }
+.lg-option input, .lg-chk input { width: 1.1rem; height: 1.1rem; margin: 0; accent-color: var(--hw-rose); }
+.lg-chk { margin: 0 0 .5rem; }
+
+.lg-step { min-width: 0; }
+.lg-row2 { display: flex; align-items: center; gap: .8rem; min-width: 0; margin: 0 0 .867rem; }
+.lg-row2 > .lg-in, .lg-row2 > .lg-secret { flex: 1 1 auto; margin: 0; }
+.lg-secret { box-sizing: border-box; display: block; min-width: 0; padding: .7rem .9rem; font-weight: 500; letter-spacing: .08em;
+             color: var(--hw-ink); background: var(--hw-ground); border: 1px solid var(--hw-line); border-radius: .5rem;
+             overflow-wrap: anywhere; user-select: all; }
+.lg-code { letter-spacing: .05em; }
+.lg-step > .lg-f > .lg-row2 { margin: 0; }
+.lg-note { min-height: 1.4rem; margin: .133rem 0 0; color: var(--hw-ink-2); }
+
+@media (forced-colors: active) {
+  .lg-box, .lg-in, .lg-btn, .lg-secret { border-color: CanvasText; }
+  .lg-solid { outline: 1px solid ButtonText; }
+  .lg-in[aria-invalid="true"] { outline: 2px solid Mark; }
+  :is(.lg-btn, .lg-tb, .lg-in, .lg-option input, .lg-chk input):focus-visible { outline-color: Highlight; }
+}

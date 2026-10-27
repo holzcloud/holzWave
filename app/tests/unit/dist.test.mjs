@@ -1,4 +1,4 @@
-// What ships: app/dist is what Tauri's `frontendDist` serves, so it may hold only index.html, compiled modules,
+// What ships: app/dist is what Tauri's `frontendDist` serves, so it may hold only index.html and login.html, compiled modules,
 // stylesheets, fonts and the vendored libraries (scripts/copy-static.mjs: PDF.js, each with its licence). These tests run after `npm run build` (see `npm test`) and look at the real output; the
 // copy step is exercised by running the real scripts/copy-static.mjs in a scratch directory, never a mock.
 import test from "node:test";
@@ -48,9 +48,9 @@ function withScratch(files, body) {
   }
 }
 
-const ALLOWED = (f) => f === "index.html" || /^[^/]+\.js$/.test(f) || /^[^/]+\.css$/.test(f) || f.startsWith("fonts/") || /^vendor\/[a-z0-9-]+\//.test(f);
+const ALLOWED = (f) => f === "index.html" || f === "login.html" || /^[^/]+\.js$/.test(f) || /^[^/]+\.css$/.test(f) || f.startsWith("fonts/") || /^vendor\/[a-z0-9-]+\//.test(f);
 
-test("dist holds only index.html, js, css and fonts, and no benchmark, test or map file", () => {
+test("dist holds only index.html, login.html, js, css and fonts, and no benchmark, test or map file", () => {
   assert.ok(existsSync(DIST), "app/dist is missing: run `npm run build` first");
   const files = listFiles(DIST);
   const stray = files.filter((f) => !ALLOWED(f));
@@ -66,9 +66,10 @@ test("every vendored library ships with its licence", () => {
   for (const lib of libs) assert.ok(files.includes(`vendor/${lib}/LICENSE`), `vendor/${lib} has no LICENSE`);
 });
 
-test("dist has index.html and a compiled module for every source module", () => {
+test("dist has index.html, login.html and a compiled module for every source module", () => {
   const files = new Set(listFiles(DIST));
   assert.ok(files.has("index.html"), "index.html is missing from dist");
+  assert.ok(files.has("login.html"), "login.html is missing from dist");
   const modules = readdirSync(SRC).filter((f) => f.endsWith(".ts"));
   assert.ok(modules.length > 0, "src has no modules");
   for (const ts of modules) {
@@ -88,10 +89,11 @@ test("every stylesheet and font file in src is present in dist", () => {
   }
 });
 
-test("copy-static copies index.html, every stylesheet and the fonts directory, and nothing else", () => {
+test("copy-static copies index.html, login.html, every stylesheet and the fonts directory, and nothing else", () => {
   withScratch(
     {
       "src/index.html": "<!doctype html>",
+      "src/login.html": "<!doctype html>",
       "src/app.css": "body{}",
       "src/theme.css": ":root{}",
       "src/fonts/Mono-Regular.woff2": "r",
@@ -109,6 +111,7 @@ test("copy-static copies index.html, every stylesheet and the fonts directory, a
         "fonts/Mono-Regular.woff2",
         "fonts/extra/Mono-Italic.woff2",
         "index.html",
+        "login.html",
         "theme.css",
       ]);
     },
@@ -116,9 +119,9 @@ test("copy-static copies index.html, every stylesheet and the fonts directory, a
 });
 
 test("copy-static still succeeds when src has no stylesheet and no fonts directory", () => {
-  withScratch({ "src/index.html": "<!doctype html>" }, (root) => {
+  withScratch({ "src/index.html": "<!doctype html>", "src/login.html": "<!doctype html>" }, (root) => {
     runCopyStatic(root);
-    assert.deepEqual(listFiles(join(root, "dist")), ["index.html"]);
+    assert.deepEqual(listFiles(join(root, "dist")), ["index.html", "login.html"]);
     assert.ok(!existsSync(join(root, "dist", "fonts")), "an empty fonts directory must not be created");
   });
 });
