@@ -2130,7 +2130,9 @@ table at the end of this section.
    and shows no count of failures.
 2. **A throttled sign-in says how long to wait and nothing else:** `Too many attempts. Try again in 12 minutes.` The time is
    the server's `retry_seconds` rounded up to whole minutes (`Try again in 1 minute.`); under a minute it is in seconds
-   (`Try again in 40 seconds.`). The line names no cause, no account and no address, and it does not tick down.
+   (`Try again in 40 seconds.`, `Try again in 1 second.`); above 90 minutes it is in whole hours, rounded up (`Try again in
+   2 hours.`); a missing time or one of zero says `Try again in a moment.` The line names no cause, no account and no address,
+   and it does not tick down.
 3. **Tokens stay out of the URL path and query.** The token of an invitation and the setup token of the first administrator
    arrive in the URL fragment (`#invite=…`, `#setup=…`), which a browser sends to no server and no `Referer`. The page reads
    the fragment once, clears it with `history.replaceState` at once, keeps the token in memory until the step ends and sends it
