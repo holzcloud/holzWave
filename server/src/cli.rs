@@ -3,11 +3,17 @@
 //! Exit statuses: 0 for success, 1 for a refusal or a failure (one sentence on standard error), 2 for a call the server
 //! does not understand.
 
+use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
 
+use crate::accounts::{self, Accounts};
+use crate::audit::Audit;
+use crate::clock::{Clock, SystemClock};
 use crate::config::{self, ENV_KEY_FILE, Env, RealProbe};
 use crate::keyfile;
+use crate::store::Store;
 
 /// What the server prints when it is called without a known subcommand.
 pub const USAGE: &str = "\
@@ -16,6 +22,7 @@ usage: holzwave-server <subcommand> [options]
 subcommands:
   keygen [--out FILE]   create the server key file (FILE, or the file named by HOLZWAVE_SERVER_KEY_FILE)
   check-config          check the configuration file and the key file, then exit
+  bootstrap             print a one-time token that creates the first administrator (only while no account exists)
 ";
 
 /// The exit status for a call the server does not understand.
@@ -37,6 +44,7 @@ fn run(args: &[String], env: &Env) -> u8 {
     match args.first().map(String::as_str) {
         Some("keygen") => keygen(&args[1..], env),
         Some("check-config") => check_config(&args[1..], env),
+        Some("bootstrap") => bootstrap(&args[1..], env),
         Some(name) => usage_error(&format!("unknown subcommand {name:?}")),
         None => {
             eprint!("{USAGE}");
@@ -89,6 +97,52 @@ fn check_config(args: &[String], env: &Env) -> u8 {
     match config::prepare(env, &RealProbe) {
         Ok(_) => {
             println!("configuration ok");
+            0
+        }
+        Err(refusal) => {
+            eprintln!("holzwave-server: {refusal}");
+            FAILURE_STATUS
+        }
+    }
+}
+
+/// `bootstrap`: makes a new one-time token for the first administrator and prints the one line that announces it. The line is
+/// the only output on standard output and the token is nowhere else. While an account exists it refuses with a sentence on
+/// standard error and prints no token. An earlier token that was not used stops working.
+fn bootstrap(args: &[String], env: &Env) -> u8 {
+    if let Some(arg) = args.first() {
+        return usage_error(&format!("bootstrap takes no arguments, got {arg:?}"));
+    }
+    let prepared = match config::prepare(env, &RealProbe) {
+        Ok(prepared) => prepared,
+        Err(refusal) => {
+            eprintln!("holzwave-server: {refusal}");
+            return FAILURE_STATUS;
+        }
+    };
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let opened = Store::open(&prepared.data_dir).map_err(|e| e.to_string()).and_then(|store| {
+        let audit = Audit::open(&prepared.data_dir, clock.clone()).map_err(|e| e.to_string())?;
+        Ok(Accounts::new(
+            Arc::new(store),
+            clock.clone(),
+            Arc::new(audit),
+            prepared.workers.uid_min..=prepared.workers.uid_max,
+        ))
+    });
+    let accounts = match opened {
+        Ok(accounts) => accounts,
+        Err(sentence) => {
+            eprintln!("holzwave-server: {sentence}");
+            return FAILURE_STATUS;
+        }
+    };
+    match accounts.bootstrap_issue() {
+        Ok(issued) => {
+            let line = accounts::announcement(prepared.origin.as_str(), &issued);
+            if writeln!(std::io::stdout(), "{line}").is_err() {
+                return FAILURE_STATUS;
+            }
             0
         }
         Err(refusal) => {
