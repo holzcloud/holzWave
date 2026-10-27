@@ -26,8 +26,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use webauthn_rs::prelude::{
-    DiscoverableAuthentication, DiscoverableKey, Passkey, PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential,
-    Url, Uuid, Webauthn, WebauthnBuilder,
+    DiscoverableAuthentication, DiscoverableKey, Passkey, PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential,
+    RegisterPublicKeyCredential, Url, Uuid, Webauthn, WebauthnBuilder,
 };
 use zeroize::Zeroizing;
 
@@ -36,7 +36,9 @@ use crate::auth::session::{Created, Method, SessionManager};
 use crate::clock::Clock;
 use crate::config::{self, Refusal};
 use crate::log::{self, Level};
-use crate::store::{AccountId, AccountState, HANDLE_BYTES, Store, StoreError, TokenHash, Tx, hash_token};
+use crate::store::{
+    AccountId, AccountState, HANDLE_BYTES, MAX_PASSKEYS, Session, Store, StoreError, TokenHash, Tx, hash_token,
+};
 use crate::unlock::random;
 
 /// How long an open challenge lives, in seconds.
@@ -310,8 +312,8 @@ impl fmt::Debug for VerifiedPasskey {
     }
 }
 
-/// The facts of a row that was just stored.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The facts of a row that was just stored. The `Debug` text prints the row id and nothing else.
+#[derive(Clone, PartialEq, Eq)]
 pub struct StoredRow {
     /// The row id.
     pub id: i64,
@@ -321,8 +323,13 @@ pub struct StoredRow {
     pub prf_salt: Vec<u8>,
 }
 
-/// What a finished registration hands back.
-#[derive(Debug)]
+impl fmt::Debug for StoredRow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StoredRow").field("id", &self.id).finish_non_exhaustive()
+    }
+}
+
+/// What a finished registration hands back. The `Debug` text prints the row id and nothing else.
 pub struct Registered {
     /// The row id.
     pub id: i64,
@@ -332,6 +339,12 @@ pub struct Registered {
     pub prf_salt: Vec<u8>,
     /// The PRF output, when the browser sent a valid one.
     pub prf: Option<PrfOutput>,
+}
+
+impl fmt::Debug for Registered {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Registered").field("id", &self.id).finish_non_exhaustive()
+    }
 }
 
 /// What a finished sign-in hands back.
@@ -366,11 +379,13 @@ pub struct PasskeyInfo {
 enum Kind {
     Registration,
     SignIn,
+    StepUp,
 }
 
 enum Ceremony {
     Registration { state: PasskeyRegistration, account: Option<AccountId> },
     SignIn(DiscoverableAuthentication),
+    StepUp { state: PasskeyAuthentication, account: AccountId },
 }
 
 impl Ceremony {
@@ -378,6 +393,7 @@ impl Ceremony {
         match self {
             Ceremony::Registration { .. } => Kind::Registration,
             Ceremony::SignIn(_) => Kind::SignIn,
+            Ceremony::StepUp { .. } => Kind::StepUp,
         }
     }
 }
@@ -534,6 +550,9 @@ impl Passkeys {
             let ids = tx.passkey_list(found.id)?.into_iter().map(|row| row.credential_id).collect();
             Ok((Some(found.id), ids))
         })?;
+        if existing.len() >= MAX_PASSKEYS {
+            return Err(PasskeyError::TooMany);
+        }
         let exclude = (!existing.is_empty()).then_some(existing);
         let (options, state) = self
             .webauthn
@@ -796,6 +815,164 @@ impl Passkeys {
             })
             .collect())
     }
+
+    /// Removes one passkey of `account`. An id that is not the account's is [`PasskeyError::NotFound`] with no effect and no
+    /// line. The last way to sign in cannot be removed ([`PasskeyError::Conflict`], one failed line): an account keeps at
+    /// least one of a password with an authenticator, another passkey and a single sign-on identity. A removal writes one
+    /// `auth.passkey.remove` line.
+    pub fn remove(&self, account: AccountId, id: i64, addr: Option<IpAddr>) -> Result<(), PasskeyError> {
+        let outcome = self.store.write(|tx| {
+            let rows = tx.passkey_list(account)?;
+            if !rows.iter().any(|row| row.id == id) {
+                return Ok(Err(PasskeyError::NotFound));
+            }
+            let another_passkey = rows.iter().any(|row| row.id != id);
+            let password_with_authenticator = tx.password_get(account)?.is_some() && tx.totp_get(account)?.is_some();
+            let identity = !tx.oidc_list(account)?.is_empty();
+            if !(another_passkey || password_with_authenticator || identity) {
+                return Ok(Err(PasskeyError::Conflict));
+            }
+            tx.passkey_remove(account, id)?;
+            Ok(Ok(()))
+        })?;
+        match outcome {
+            Ok(()) => {
+                self.record(
+                    &Event::new(Action::AuthPasskeyRemove, Outcome::Ok, Actor::Account(account), addr).target(account),
+                );
+                Ok(())
+            }
+            Err(PasskeyError::Conflict) => {
+                self.record(
+                    &Event::new(Action::AuthPasskeyRemove, Outcome::Fail, Actor::Account(account), addr)
+                        .target(account)
+                        .detail(DetailKey::Reason, DetailValue::Text("conflict")),
+                );
+                Err(PasskeyError::Conflict)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    // ---- step-up ----
+
+    /// Starts a step-up for the account of `session`: assertion options that name the account's own credentials and nothing
+    /// else, as JSON text, and the token of the open challenge. An account without a usable passkey is
+    /// [`PasskeyError::Conflict`].
+    pub fn start_step_up(&self, session: &Session) -> Result<(String, ChallengeToken), PasskeyError> {
+        let now = self.clock.unix();
+        let account = session.account_id;
+        let passkeys: Vec<Passkey> = self.store.read(|tx| {
+            if !tx.account_get(account)?.is_some_and(|a| a.state == AccountState::Active) {
+                return Ok(Vec::new());
+            }
+            Ok(tx
+                .passkey_list(account)?
+                .into_iter()
+                .filter_map(|row| {
+                    let stored = Stored::parse(&row.passkey_json)?;
+                    (stored.passkey.cred_id().as_slice() == row.credential_id.as_slice()).then_some(stored.passkey)
+                })
+                .collect())
+        })?;
+        if passkeys.is_empty() {
+            return Err(PasskeyError::Conflict);
+        }
+        let (options, state) =
+            self.webauthn.start_passkey_authentication(&passkeys).map_err(|_| PasskeyError::Internal)?;
+        let json = serde_json::to_string(&options).map_err(|_| PasskeyError::Internal)?;
+        let token = self.open(Ceremony::StepUp { state, account }, now)?;
+        Ok((json, token))
+    }
+
+    /// Finishes a step-up: verifies the assertion for the session's own account only (another account's valid assertion is
+    /// [`PasskeyError::Invalid`]), moves the session's last sign-in time to now and writes one `session.step_up` line. A
+    /// failure is `Invalid` with one `signin.fail` line of method `passkey` and step `step_up`.
+    pub fn finish_step_up(
+        &self,
+        token: &str,
+        credential_json: &str,
+        session: &mut Session,
+        addr: IpAddr,
+    ) -> Result<(), PasskeyError> {
+        let now = self.clock.unix();
+        let account = session.account_id;
+        let taken = self.take(token, Kind::StepUp, now);
+        match self.step_up_inner(taken, credential_json, session, now) {
+            Ok(()) => {
+                self.record(
+                    &Event::new(Action::SessionStepUp, Outcome::Ok, Actor::Account(account), Some(addr))
+                        .detail(DetailKey::Method, DetailValue::Text(METHOD.as_str())),
+                );
+                Ok(())
+            }
+            Err(PasskeyError::Internal) => {
+                log::event(Level::Error, "passkey.step_up_failed", &[]);
+                Err(PasskeyError::Internal)
+            }
+            Err(error) => {
+                self.record(
+                    &Event::new(Action::SigninFail, Outcome::Fail, Actor::Account(account), Some(addr))
+                        .target(account)
+                        .detail(DetailKey::Method, DetailValue::Text(METHOD.as_str()))
+                        .detail(DetailKey::Step, DetailValue::Text("step_up"))
+                        .detail(DetailKey::Reason, DetailValue::Text("invalid")),
+                );
+                Err(error)
+            }
+        }
+    }
+
+    fn step_up_inner(
+        &self,
+        taken: Option<Ceremony>,
+        credential_json: &str,
+        session: &mut Session,
+        now: i64,
+    ) -> Result<(), PasskeyError> {
+        let Some(Ceremony::StepUp { state, account }) = taken else {
+            return Err(PasskeyError::Invalid);
+        };
+        if account != session.account_id {
+            return Err(PasskeyError::Invalid);
+        }
+        if credential_json.len() > MAX_CREDENTIAL_JSON {
+            return Err(PasskeyError::Invalid);
+        }
+        self.verifications.fetch_add(1, Ordering::SeqCst);
+        let credential: PublicKeyCredential =
+            serde_json::from_str(credential_json).map_err(|_| PasskeyError::Invalid)?;
+        let credential_id = credential.get_credential_id().to_vec();
+        self.store.write(|tx| {
+            if !tx.account_get(account)?.is_some_and(|a| a.state == AccountState::Active) {
+                return Ok(Err(PasskeyError::Invalid));
+            }
+            let Some(row) = tx.passkey_by_credential(&credential_id)?.filter(|r| r.account_id == account) else {
+                return Ok(Err(PasskeyError::Invalid));
+            };
+            let Some(mut stored) = Stored::parse(&row.passkey_json) else {
+                return Ok(Err(PasskeyError::Invalid));
+            };
+            if stored.passkey.cred_id().as_slice() != row.credential_id.as_slice() {
+                return Ok(Err(PasskeyError::Invalid));
+            }
+            let Ok(result) = self.webauthn.finish_passkey_authentication(&credential, &state) else {
+                return Ok(Err(PasskeyError::Invalid));
+            };
+            if result.cred_id().as_slice() != row.credential_id.as_slice()
+                || stored.passkey.update_credential(&result).is_none()
+            {
+                return Ok(Err(PasskeyError::Invalid));
+            }
+            stored.last_used = Some(now);
+            let Ok(text) = stored.text() else {
+                return Ok(Err(PasskeyError::Internal));
+            };
+            tx.passkey_update_json(account, row.id, &text)?;
+            Ok(Ok(()))
+        })??;
+        self.sessions.reauth(session, now).map_err(|_| PasskeyError::Internal)
+    }
 }
 
 /// The audit reason of a refusal. The same word for every cause of [`PasskeyError::Invalid`].
@@ -808,8 +985,32 @@ fn reason(error: PasskeyError) -> &'static str {
     }
 }
 
-/// The name a passkey is stored under. The policy is completed together with the rest of the management.
-fn clean_name(name: &str) -> String {
+/// The longest name, in characters.
+pub const MAX_NAME_CHARS: usize = 64;
+
+/// The most bytes of a name that are looked at: 64 characters of at most 4 bytes, with room for the spaces around them.
+const MAX_NAME_INPUT_BYTES: usize = 4 * MAX_NAME_CHARS + 64;
+
+/// Whether a character may be part of a name: not a control character and none of the invisible ones that change how text
+/// reads (zero-width spaces, direction marks and overrides, line and paragraph separators, the byte order mark).
+fn printable(c: char) -> bool {
+    !(c.is_control()
+        || matches!(
+            u32::from(c),
+            0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F | 0xFEFF | 0xFFF9..=0xFFFB
+        ))
+}
+
+/// The name a passkey is stored under: the text without the spaces around it when it is 1 to 64 printable characters,
+/// otherwise [`DEFAULT_NAME`]. A long name is not cut; it is replaced.
+pub fn clean_name(name: &str) -> String {
+    if name.len() > MAX_NAME_INPUT_BYTES {
+        return DEFAULT_NAME.to_owned();
+    }
     let trimmed = name.trim();
-    if trimmed.is_empty() { DEFAULT_NAME.to_owned() } else { trimmed.to_owned() }
+    let length = trimmed.chars().count();
+    if length == 0 || length > MAX_NAME_CHARS || !trimmed.chars().all(printable) {
+        return DEFAULT_NAME.to_owned();
+    }
+    trimmed.to_owned()
 }
