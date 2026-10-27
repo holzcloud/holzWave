@@ -1492,6 +1492,7 @@ impl AppCore {
     fn grow_in(&self, label: &str, add: impl FnOnce(&mut WindowSet) -> Option<PaneId>) -> Result<View, String> {
         let (view, creator, created) = {
             let mut set = lock(&self.windows);
+            self.room_for_a_pane(&set)?;
             let creator = set.layout(label).ok_or_else(no_such_window)?.tab().focus;
             let created = add(&mut set);
             if created.is_some() {
@@ -1952,6 +1953,19 @@ impl AppCore {
         self.connections.views(states)
     }
 
+    /// Whether the person may have one more pane: the layout, over all windows, holds fewer panes than the cap of the host
+    /// (`limits().max_panes`). Checked with the layout locked by every path that makes a pane, so two requests cannot both
+    /// take the last place. A layout restored with more panes than the cap keeps them all; this only refuses new ones.
+    /// Without a cap the layout's own limits decide, as they always did.
+    fn room_for_a_pane(&self, set: &WindowSet) -> Result<(), String> {
+        match self.host.limits().max_panes {
+            Some(cap) if set.pane_count() >= cap => {
+                Err(format!("this server allows {cap} panes per person; close one to open another"))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Split the focused pane; the new pane gets the focus and starts where the focused pane is. At the pane limits
     /// the view comes back unchanged.
     pub fn split_in(&self, label: &str, column: bool) -> Result<View, String> {
@@ -1967,6 +1981,7 @@ impl AppCore {
     pub fn new_workspace_in(&self, label: &str, name: &str) -> Result<View, String> {
         let view = {
             let mut set = lock(&self.windows);
+            self.room_for_a_pane(&set)?;
             if set.new_workspace(label, name).is_some() {
                 self.sync_routes(&set);
             }
@@ -2879,6 +2894,9 @@ impl AppCore {
         spec.notice = unusable.map(|note| format!("holzWave: {note}"));
         spec.cell_px = cell;
         spec.scrollback = cfg.settings.scrollback_lines as usize;
+        if let Some(cap) = self.host.limits().max_scrollback_lines {
+            spec.scrollback = spec.scrollback.min(cap);
+        }
         spec.option_as_alt = cfg.settings.option_as_alt;
         spec.theme = Some(cfg.theme().engine_theme());
         spec
@@ -7317,6 +7335,177 @@ mod tests {
         assert_ne!(win, linux, "Windows has its own table");
         // The core has no table called `web` yet: the name selects the Linux one until the web table exists.
         assert_eq!(web, linux);
+    }
+
+    /// The sentence a refused pane carries, for the cap `n`.
+    fn cap_sentence(n: usize) -> String {
+        format!("this server allows {n} panes per person; close one to open another")
+    }
+
+    /// A core on a web-flavoured host with `limits`, in a directory the caller keeps (so a second core can read the file).
+    fn core_capped(dir: &Scratch, limits: crate::seams::HostLimits) -> (Arc<AppCore>, Arc<TestHost>) {
+        let host = TestHost::on(crate::seams::Platform::Web, limits);
+        let core = AppCore::new_with_host(
+            dir.0.clone(),
+            Arc::new(Recorder::default()),
+            ShellSpec::new("/bin/cat", &[]),
+            None,
+            None,
+            host.clone(),
+        );
+        dir.attach(&core);
+        (core, host)
+    }
+
+    /// How many panes the layouts hold, over all windows. A function of its own so that a `println!` can call it twice.
+    fn layout_panes(core: &AppCore) -> usize {
+        lock(&core.windows).pane_count()
+    }
+
+    fn cap_of(max_panes: usize) -> crate::seams::HostLimits {
+        crate::seams::HostLimits { max_panes: Some(max_panes), max_scrollback_lines: None }
+    }
+
+    /// What a refused request must leave as it was: the layout, the routes of the panes and the panes that run.
+    fn cap_state(core: &AppCore) -> (String, usize, usize) {
+        let layout = lock(&core.windows).to_json().expect("layout json");
+        (layout, lock(&core.routes).live.len(), lock(&core.panes).len())
+    }
+
+    #[test]
+    fn cap_the_nth_pane_is_accepted_in_any_mix_and_the_next_one_is_refused_with_a_sentence() {
+        let dir = Scratch::new("cap-mix");
+        let (core, _host) = core_capped(&dir, cap_of(4));
+        let mut table = Vec::new();
+        // One pane in the layout: a split, a new tab and a new workspace make the 2nd, 3rd and 4th.
+        table.push(("cap 4", 1, "split", core.split_in(MAIN_WINDOW, true).map(|_| layout_panes(&core))));
+        table.push(("cap 4", 2, "new tab", core.new_tab_in(MAIN_WINDOW).map(|_| layout_panes(&core))));
+        table.push(("cap 4", 3, "new workspace", core.new_workspace_in(MAIN_WINDOW, "two").map(|_| layout_panes(&core))));
+        let before = cap_state(&core);
+        // The 5th, by every way of making a pane.
+        table.push(("cap 4", 4, "split", core.split_in(MAIN_WINDOW, false).map(|_| layout_panes(&core))));
+        table.push(("cap 4", 4, "new tab", core.new_tab_in(MAIN_WINDOW).map(|_| layout_panes(&core))));
+        table.push(("cap 4", 4, "new workspace", core.new_workspace_in(MAIN_WINDOW, "three").map(|_| layout_panes(&core))));
+        for (cap, panes, request, outcome) in &table {
+            println!("{cap} | panes before: {panes} | {request} | {outcome:?}");
+        }
+        for (_, _, _, outcome) in &table[..3] {
+            assert!(outcome.is_ok(), "{outcome:?}");
+        }
+        assert_eq!(table[2].3, Ok(4), "the 4th pane is the cap and is accepted");
+        for (_, _, _, outcome) in &table[3..] {
+            assert_eq!(outcome.as_ref().expect_err("refused"), &cap_sentence(4));
+        }
+        assert_eq!(cap_state(&core), before, "a refused request changes nothing and starts nothing");
+        assert_eq!(layout_panes(&core), 4);
+    }
+
+    #[test]
+    fn cap_of_one_refuses_the_first_split_and_the_sentence_names_the_cap() {
+        let dir = Scratch::new("cap-one");
+        let (core, _host) = core_capped(&dir, cap_of(1));
+        let before = cap_state(&core);
+        let outcome = core.split_in(MAIN_WINDOW, true);
+        println!("cap 1 | panes before: 1 | split | {outcome:?}");
+        assert_eq!(outcome.expect_err("refused"), "this server allows 1 panes per person; close one to open another");
+        assert_eq!(cap_state(&core), before);
+    }
+
+    #[test]
+    fn cap_a_layout_restored_above_the_cap_keeps_every_pane_and_refuses_new_ones_until_it_is_below() {
+        let dir = Scratch::new("cap-restored");
+        {
+            let (core, _host) = core_capped(&dir, crate::seams::HostLimits::default());
+            for _ in 0..5 {
+                core.split_in(MAIN_WINDOW, true).expect("split");
+            }
+            assert_eq!(layout_panes(&core), 6);
+            core.flush();
+        }
+        let (core, _host) = core_capped(&dir, cap_of(4));
+        assert_eq!(layout_panes(&core), 6, "the restored panes all stay");
+        let outcome = |core: &AppCore, request: &str| {
+            let before = layout_panes(core);
+            let result = match request {
+                "tab" => core.new_tab_in(MAIN_WINDOW),
+                _ => core.split_in(MAIN_WINDOW, true),
+            };
+            println!("cap 4 | panes before: {before} | {request} | {:?}", result.as_ref().map(|_| layout_panes(core)));
+            result
+        };
+        assert_eq!(outcome(&core, "tab").expect_err("refused"), cap_sentence(4));
+        // Closing two panes brings the count to 4, which is the cap: still no room.
+        let panes = lock(&core.windows).all_panes();
+        core.close_pane_in(MAIN_WINDOW, panes[0]).expect("close");
+        core.close_pane_in(MAIN_WINDOW, panes[1]).expect("close");
+        assert_eq!(layout_panes(&core), 4);
+        assert_eq!(outcome(&core, "split").expect_err("refused"), cap_sentence(4));
+        // A third one closed leaves room for exactly one.
+        core.close_pane_in(MAIN_WINDOW, panes[2]).expect("close");
+        assert_eq!(layout_panes(&core), 3);
+        assert!(outcome(&core, "split").is_ok());
+        assert_eq!(layout_panes(&core), 4);
+        assert_eq!(outcome(&core, "split").expect_err("refused"), cap_sentence(4));
+    }
+
+    #[test]
+    fn cap_a_block_that_needs_a_new_pane_is_refused_at_the_cap_and_assigns_nothing() {
+        let dir = Scratch::new("cap-block");
+        let folder = dir.0.join("docs");
+        std::fs::create_dir(&folder).unwrap();
+        let (core, _host) = core_capped(&dir, cap_of(1));
+        let before = cap_state(&core);
+        for placement in ["tab", "right", "down"] {
+            let outcome = core.block_open_in(MAIN_WINDOW, placement, BlockKind::Files, "local", folder.to_str().unwrap());
+            println!("cap 1 | panes before: 1 | block {placement} | {:?}", outcome.as_ref().map(|_| layout_panes(&core)));
+            assert_eq!(outcome.expect_err("refused"), cap_sentence(1));
+        }
+        assert!(core.blocks_list().is_empty(), "no block assignment is left behind");
+        assert_eq!(cap_state(&core), before);
+        // One more room and the same request is accepted: the refusal was the cap and nothing else.
+        let dir = Scratch::new("cap-block-room");
+        let (core, _host) = core_capped(&dir, cap_of(2));
+        core.block_open_in(MAIN_WINDOW, "tab", BlockKind::Files, "local", folder.to_str().unwrap()).expect("room for it");
+        assert_eq!(core.blocks_list().len(), 1);
+    }
+
+    #[test]
+    fn cap_with_no_cap_the_layouts_own_limit_decides_at_255_panes() {
+        let dir = Scratch::new("cap-none");
+        let (core, _host) = core_capped(&dir, crate::seams::HostLimits::default());
+        for k in 1..255 {
+            let made = if k % 2 == 0 { core.new_tab_in(MAIN_WINDOW) } else { core.new_workspace_in(MAIN_WINDOW, "w") };
+            made.expect("below the limit of the layout");
+        }
+        assert_eq!(layout_panes(&core), 255);
+        let at_255 = core.new_tab_in(MAIN_WINDOW);
+        println!("no cap | panes before: 255 | new tab | {:?}", at_255.as_ref().map(|_| layout_panes(&core)));
+        assert!(at_255.is_ok(), "{at_255:?}");
+        assert_eq!(layout_panes(&core), 256);
+        // At the layout's own limit the view comes back unchanged and is no error, as it always did.
+        let past = core.new_tab_in(MAIN_WINDOW);
+        assert!(past.is_ok(), "{past:?}");
+        assert_eq!(layout_panes(&core), 256);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cap_the_scrollback_of_a_new_pane_is_the_smaller_of_the_setting_and_the_cap() {
+        let spec_with = |setting: u32, cap: Option<usize>| {
+            let dir = Scratch::new("cap-scrollback");
+            std::fs::write(dir.0.join("settings.json"), format!(r#"{{"scrollback_lines": {setting}}}"#)).unwrap();
+            let limits = crate::seams::HostLimits { max_panes: None, max_scrollback_lines: cap };
+            let (core, _host) = core_capped(&dir, limits);
+            let lines = core.pane_spec(80, 24, (9, 18)).scrollback;
+            println!("scrollback setting {setting} | cap {cap:?} | pane {lines}");
+            // The setting itself is not rewritten by the cap.
+            assert_eq!(core.get_settings().settings.scrollback_lines, setting);
+            lines
+        };
+        assert_eq!(spec_with(10_000, Some(500)), 500);
+        assert_eq!(spec_with(300, Some(500)), 300);
+        assert_eq!(spec_with(500, Some(500)), 500);
+        assert_eq!(spec_with(10_000, None), 10_000);
     }
 
     #[test]
