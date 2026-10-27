@@ -1,12 +1,13 @@
 //! The one seam between the core and the shell that runs it: everything the shell decides is asked of a [`Host`].
 //!
-//! The desktop app and the server build the same [`AppCore`](crate::state::AppCore) and differ in exactly these five
+//! The desktop app and the server build the same [`AppCore`](crate::state::AppCore) and differ in exactly these seven
 //! answers: which platform the page is told it runs on (and so which table of default key chords it gets), where
 //! passwords, key passphrases, provider keys and integration secrets are kept, where the answer of the Local Network
-//! permission comes from, which text size the system asks for, and how many panes and lines of scrollback a person may
-//! have. [`NeutralHost`] answers for a build that is given no host: the platform of the build, secrets in memory, no
-//! permission source, a text scale of 100 and no limits. Every constructor that does not take a host uses it, so a test
-//! or a tool never touches a keychain.
+//! permission comes from, which text size the system asks for, how many panes and lines of scrollback a person may
+//! have, at which address the page finds a file it was granted, and whether the machine's process table may be shown.
+//! [`NeutralHost`] answers for a build that is given no host: the platform of the build, secrets in memory, no
+//! permission source, a text scale of 100, no limits, the address `/files/<token>` and a process list that may be shown.
+//! Every constructor that does not take a host uses it, so a test or a tool never touches a keychain.
 
 use std::sync::Arc;
 
@@ -79,6 +80,19 @@ pub trait Host: Send + Sync + 'static {
 
     /// The caps of this host.
     fn limits(&self) -> HostLimits;
+
+    /// Where the page finds the file a grant with `token` names: the address the browser can load it from. The server
+    /// serves a granted file at `/files/<token>`; the desktop overrides this with the address of its own file scheme.
+    fn file_url(&self, token: &str) -> String {
+        format!("/files/{token}")
+    }
+
+    /// Whether the reading of the local monitor may list the busiest processes of the machine. It may where the machine
+    /// is the person's own; the server answers false, because its machine also runs other people's programs and the
+    /// names of their processes are not this person's to see.
+    fn local_processes(&self) -> bool {
+        true
+    }
 }
 
 /// The host of a build that is given none: the platform of the build, secrets in memory, no permission source, a text

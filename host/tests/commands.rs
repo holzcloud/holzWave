@@ -11,6 +11,7 @@ use holzwave_host::commands::registry::{
     COMMANDS, CAP_DEFAULT, CAP_INPUT, CAP_PASTE, Command, ERROR_TEXT_LIMIT, Mode, NOT_IN_BROWSER, Outcome, Scope, Shell,
     Web, lookup,
 };
+use holzwave_host::seams::{Host, HostLimits, NeutralHost, Platform};
 use holzwave_host::state::{AppCore, Out, ShellSpec, Sink, Target};
 use holzwave_host::windows::{CursorSpot, Place};
 
@@ -61,13 +62,26 @@ impl World {
 
     /// A core whose panes run `program args`.
     fn running(tag: &str, program: &str, args: &[&str]) -> World {
+        World::built(tag, program, args, None)
+    }
+
+    /// A core that is given `host` to ask for what the shell decides.
+    fn hosted(tag: &str, host: Arc<dyn Host>) -> World {
+        World::built(tag, "/bin/cat", &[], Some(host))
+    }
+
+    fn built(tag: &str, program: &str, args: &[&str], host: Option<Arc<dyn Host>>) -> World {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("holzwave-commands-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir(&dir).expect("scratch dir");
         let sink = Arc::new(Counting::default());
-        let core = AppCore::new(dir.clone(), sink.clone(), ShellSpec::new(program, args));
+        let shell = ShellSpec::new(program, args);
+        let core = match host {
+            Some(host) => AppCore::new_with_host(dir.clone(), sink.clone(), shell, None, None, host),
+            None => AppCore::new(dir.clone(), sink.clone(), shell),
+        };
         World { dir, core, sink }
     }
 
@@ -928,6 +942,88 @@ fn tracer_a_range_reads_its_arguments_strictly_and_a_grant_of_a_text_file_is_ref
     let own = world.core.file_grant("local", note.to_str().expect("utf-8")).expect_err("text is not granted");
     let args = format!(r#"{{"source":"local","path":{}}}"#, json_string(note.to_str().expect("utf-8")));
     assert_eq!(world.call("file_grant", &args), Outcome::Err(json_string(&own)));
+}
+
+/// A host that is the neutral one in everything but the two seams of the browser build, which it sets as a server would.
+struct Elsewhere {
+    base: NeutralHost,
+    processes: bool,
+}
+
+impl Host for Elsewhere {
+    fn platform(&self) -> Platform {
+        Platform::Web
+    }
+
+    fn secrets(&self) -> Arc<dyn holzwave_core::secrets::SecretStore> {
+        self.base.secrets()
+    }
+
+    fn local_network(&self) -> Arc<dyn holzwave_host::local_network::Source> {
+        self.base.local_network()
+    }
+
+    fn text_scale(&self) -> u32 {
+        100
+    }
+
+    fn limits(&self) -> HostLimits {
+        HostLimits::default()
+    }
+
+    fn file_url(&self, token: &str) -> String {
+        format!("https://files.example.test/d/{token}")
+    }
+
+    fn local_processes(&self) -> bool {
+        self.processes
+    }
+}
+
+fn elsewhere(processes: bool) -> Arc<dyn Host> {
+    Arc::new(Elsewhere { base: NeutralHost::new(), processes })
+}
+
+#[test]
+fn tracer_the_two_seams_have_the_defaults_of_the_browser_build() {
+    let host = NeutralHost::new();
+
+    assert_eq!(host.file_url("abc"), "/files/abc");
+    assert_eq!(host.file_url(&"f".repeat(32)), format!("/files/{}", "f".repeat(32)));
+    assert!(host.local_processes());
+}
+
+#[test]
+fn tracer_the_address_of_a_grant_is_what_the_host_says_and_the_other_members_do_not_change() {
+    let neutral = World::new("tracer-url-neutral");
+    let other = World::hosted("tracer-url-other", elsewhere(true));
+    let (path, _) = write_picture(&neutral, "a.bin", 4096);
+    let (other_path, _) = write_picture(&other, "a.bin", 4096);
+
+    let (Outcome::Ok(a), Outcome::Ok(b)) = (
+        neutral.call("file_grant", &format!(r#"{{"source":"local","path":{}}}"#, json_string(&path))),
+        other.call("file_grant", &format!(r#"{{"source":"local","path":{}}}"#, json_string(&other_path))),
+    ) else {
+        panic!("both grants are answered")
+    };
+
+    let (a, b): (serde_json::Value, serde_json::Value) = (serde_json::from_str(&a).unwrap(), serde_json::from_str(&b).unwrap());
+    assert_eq!(a["url"], format!("/files/{}", a["token"].as_str().unwrap()));
+    assert_eq!(b["url"], format!("https://files.example.test/d/{}", b["token"].as_str().unwrap()));
+    assert_eq!((&a["mime"], &a["size"]), (&b["mime"], &b["size"]));
+}
+
+#[test]
+fn tracer_only_file_range_answers_raw_bytes() {
+    let raw: Vec<&str> = COMMANDS.iter().filter(|row| row.raw).map(|row| row.name).collect();
+
+    assert_eq!(raw, ["file_range"]);
+    let row = lookup("file_range").expect("file_range");
+    assert_eq!(row.answer.replace(' ', ""), "tauri::ipc::Response");
+    assert_eq!(row.error, Some("String"));
+    assert_eq!((row.scope, row.mode, row.cap, row.web), (Scope::None, Mode::Async, CAP_DEFAULT, Web::Same));
+    let revoke = lookup("file_revoke").expect("file_revoke");
+    assert_eq!((revoke.mode, revoke.error, revoke.answer), (Mode::Sync, None, "()"));
 }
 
 // ---- the recorded surface -----------------------------------------------------------------------------------------------

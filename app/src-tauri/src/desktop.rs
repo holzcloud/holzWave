@@ -40,6 +40,11 @@ impl Host for DesktopHost {
     fn limits(&self) -> HostLimits {
         HostLimits::default()
     }
+
+    /// The address of the desktop's own file scheme, which depends on the platform the way custom schemes do.
+    fn file_url(&self, token: &str) -> String {
+        crate::files_protocol::url_of(token)
+    }
 }
 
 #[cfg(test)]
@@ -47,10 +52,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tracer_the_desktop_host_serves_a_granted_file_at_the_address_of_its_file_scheme() {
+        let host = DesktopHost::new();
+        for token in ["0123456789abcdef0123456789abcdef", "ffffffffffffffffffffffffffffffff", "a"] {
+            assert_eq!(host.file_url(token), crate::files_protocol::url_of(token), "{token}");
+        }
+        let expected = if cfg!(any(windows, target_os = "android")) {
+            "http://holzfile.localhost/abc"
+        } else {
+            "holzfile://localhost/abc"
+        };
+        assert_eq!(host.file_url("abc"), expected);
+    }
+
+    #[test]
     fn the_desktop_host_answers_what_the_removed_code_answered() {
         let host = DesktopHost::new();
         assert_eq!(host.platform().as_str(), std::env::consts::OS);
         assert_eq!(host.limits(), HostLimits::default());
+        assert!(host.local_processes(), "the person's own computer shows its processes");
         // One store however often it is asked for (nothing is read from or written to the keychain here).
         assert!(Arc::ptr_eq(&host.secrets(), &host.secrets()));
     }

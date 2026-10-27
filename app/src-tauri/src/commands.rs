@@ -27,7 +27,7 @@ use holzwave_core::ai::profiles::KeySlot;
 use holzwave_core::ai::service::events::ChatState;
 use holzwave_core::ai::service::{AskView, ContextState, OfferView};
 use holzwave_core::ai::types::ContextKind;
-use holzwave_core::blocks::{BlockKind, BlockView, Grant, Opened, Saved};
+use holzwave_core::blocks::{BlockKind, BlockView, Opened, Saved};
 use holzwave_core::connections::{ConnView, ProfileView, SecretChange};
 use holzwave_core::files::{Entry, Listing};
 use holzwave_core::integrate::service::{ProfilesView, RunAnswer, SelectionView, ToolView};
@@ -35,7 +35,6 @@ use holzwave_core::integrate::ticket::Card;
 use holzwave_core::integrate::Selection;
 use holzwave_core::layout::PaneId;
 use holzwave_core::profiles::Profile;
-use serde::Serialize;
 use serde_json::Value;
 use tauri::{State, WebviewWindow};
 
@@ -48,8 +47,8 @@ use holzwave_host::state::{AppCore, AppInfo, SettingsView, View};
 // them from here.
 #[allow(unused_imports)]
 pub use holzwave_host::commands::wire::{
-    CopyMotionMsg, CopyOpMsg, CopyStateMsg, EditActionMsg, MouseActionMsg, MouseButtonMsg, PasteOutcomeMsg, SearchOpMsg,
-    SelectModeMsg, SelectOpMsg,
+    CopyMotionMsg, CopyOpMsg, CopyStateMsg, EditActionMsg, GrantAnswer, MouseActionMsg, MouseButtonMsg, PasteOutcomeMsg,
+    SearchOpMsg, SelectModeMsg, SelectOpMsg,
 };
 
 // ---- the wrappers that need the window shell ---------------------------------------------------------------------
@@ -227,40 +226,6 @@ pub fn file_open(core: State<Arc<AppCore>>, source: String, path: String) -> Res
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn file_stat(core: State<Arc<AppCore>>, source: String, path: String) -> Result<Entry, String> {
     core.file_stat(&source, &path)
-}
-
-/// Permission to show one image, video, audio or PDF: the answer has a `token`, the media type and the size, and
-/// `url` is where the `holzfile` scheme serves the file from (with byte ranges, so a video seeks and nothing is loaded
-/// whole). The grant names that one file and ends with `file_revoke`.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn file_grant(core: State<Arc<AppCore>>, source: String, path: String) -> Result<GrantAnswer, String> {
-    core.file_grant(&source, &path).map(|g| GrantAnswer { url: crate::files_protocol::url_of(&g.token), grant: g })
-}
-
-/// `len` bytes of a granted file from `offset` (at most 8 MiB), as raw bytes: what the PDF viewer reads pages with, so a
-/// large document is read in pieces and never whole. Fewer bytes come back at the end of the file.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn file_range(core: State<Arc<AppCore>>, token: String, offset: u64, len: u64) -> Result<tauri::ipc::Response, String> {
-    let len = len.min(crate::files_protocol::CHUNK);
-    match core.read_granted(&token, offset, len) {
-        Some(Ok(bytes)) => Ok(tauri::ipc::Response::new(bytes)),
-        Some(Err(why)) => Err(why),
-        None => Err("no such grant".into()),
-    }
-}
-
-/// End a grant.
-#[tauri::command(rename_all = "snake_case")]
-pub fn file_revoke(core: State<Arc<AppCore>>, token: String) {
-    core.file_revoke(&token);
-}
-
-/// The answer of `file_grant`.
-#[derive(Serialize)]
-pub struct GrantAnswer {
-    pub url: String,
-    #[serde(flatten)]
-    pub grant: Grant,
 }
 
 /// Save the editor's text over a file (written aside and renamed over it). `expected_modified` is the change time the

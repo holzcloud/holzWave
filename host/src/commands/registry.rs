@@ -105,6 +105,8 @@ pub struct Command {
     pub error: Option<&'static str>,
     pub web: Web,
     pub shell: Shell,
+    /// Whether the answer is raw bytes ([`Outcome::Binary`]) and not JSON text. Exactly one command is: `file_range`.
+    pub raw: bool,
     call: fn(&AppCore, &str, &str) -> Outcome,
 }
 
@@ -285,6 +287,39 @@ macro_rules! row_module {
             }
         }
     };
+    // A command that can fail and answers raw bytes: the plain function returns the bytes, and they are not written as JSON.
+    (
+        name: $name:ident, shell: $shell:ident, group: $group:ident, scope: $scope:ident, mode: $mode:ident,
+        cap: $cap:expr,
+        args: [$($arg:ident : $aty:ty),* $(,)?],
+        answers: raw $ok:ty, fails: $err:ty,
+        run: $run:path, web: $web:ident $(($variant:path))?
+    ) => {
+        pub mod $name {
+            use super::*;
+
+            #[derive(::serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            #[allow(dead_code)]
+            pub struct Args {
+                $(pub $arg: $aty,)*
+            }
+
+            #[allow(unused_variables)]
+            pub fn call(core: &AppCore, window: &str, args: &str) -> Outcome {
+                let parsed: Args = match parse(args) {
+                    Ok(parsed) => parsed,
+                    Err(refused) => return refused,
+                };
+                let answer: Result<Vec<u8>, $err> =
+                    invoke!($scope; browser!($web $(, $variant)?; $run); core, window, parsed; [$($arg),*]);
+                match answer {
+                    Ok(bytes) => Outcome::Binary(bytes),
+                    Err(error) => err_json(&error),
+                }
+            }
+        }
+    };
     // A command that can fail.
     (
         name: $name:ident, shell: $shell:ident, group: $group:ident, scope: $scope:ident, mode: $mode:ident,
@@ -356,6 +391,28 @@ macro_rules! row_meta {
         name: $name:ident, shell: $shell:ident, group: $group:ident, scope: $scope:ident, mode: $mode:ident,
         cap: $cap:expr,
         args: [$($arg:ident : $aty:ty),* $(,)?],
+        answers: raw $ok:ty, fails: $err:ty,
+        run: $run:path, web: $web:ident $(($variant:path))?
+    ) => {
+        Command {
+            name: stringify!($name),
+            group: stringify!($group),
+            scope: scope_of!($scope),
+            mode: mode_of!($mode),
+            cap: $cap,
+            args: &[$(ArgInfo { name: stringify!($arg), ty: stringify!($aty) }),*],
+            answer: stringify!($ok),
+            error: Some(stringify!($err)),
+            web: web_of!($web),
+            shell: shell_of!($shell),
+            raw: true,
+            call: rows::$name::call,
+        }
+    };
+    (
+        name: $name:ident, shell: $shell:ident, group: $group:ident, scope: $scope:ident, mode: $mode:ident,
+        cap: $cap:expr,
+        args: [$($arg:ident : $aty:ty),* $(,)?],
         answers: $ok:ty, fails: $err:ty,
         run: $run:path, web: $web:ident $(($variant:path))?
     ) => {
@@ -370,6 +427,7 @@ macro_rules! row_meta {
             error: Some(stringify!($err)),
             web: web_of!($web),
             shell: shell_of!($shell),
+            raw: false,
             call: rows::$name::call,
         }
     };
@@ -391,6 +449,7 @@ macro_rules! row_meta {
             error: None,
             web: web_of!($web),
             shell: shell_of!($shell),
+            raw: false,
             call: rows::$name::call,
         }
     };

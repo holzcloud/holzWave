@@ -25,7 +25,10 @@
 //! - `cap`: the most bytes of argument text the command takes (`CAP_INPUT`, `CAP_PASTE` or `CAP_DEFAULT`).
 //! - `args`: the arguments as `name: Type`, in the order of the plain function. An `Option` argument may be left out.
 //! - `answers`: the type the command answers; `fails`: the error type of a command that can fail (left out for one that
-//!   cannot). The plain function returns exactly `Result<answers, fails>`, or `answers` without `fails`.
+//!   cannot). The plain function returns exactly `Result<answers, fails>`, or `answers` without `fails`. A raw (binary)
+//!   answer is written `answers: raw <shell type>, fails: E`: the plain function returns `Result<Vec<u8>, E>`, the
+//!   registry answers the bytes as they are (`Outcome::Binary`, never JSON text), and the desktop wrapper wraps them as
+//!   the shell type, which is also the type text the recorded surface holds. Only a command that can fail may be raw.
 //! - `run`: the plain function `fn(core: &AppCore, [window: &str,] <args>) -> ...`. The desktop wrapper calls it; for a
 //!   `hand` row it is the shared part of the wrapper, or `none` when the wrapper has no shared part.
 //! - `web`: what the browser build does. `same` runs `run`; `unavailable` answers `Not available in the browser.` and
@@ -309,6 +312,24 @@ macro_rules! host_commands {
                 args: [pane: PaneId, rows: i32, x: f64, y: f64, mods: u32],
                 answers: (),
                 run: terminal::wheel, web: same
+            }
+            {
+                name: file_grant, shell: generated, group: files, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [source: String, path: String],
+                answers: GrantAnswer, fails: String,
+                run: files::file_grant, web: same
+            }
+            {
+                name: file_range, shell: generated, group: files, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [token: String, offset: u64, len: u64],
+                answers: raw tauri::ipc::Response, fails: String,
+                run: files::file_range, web: same
+            }
+            {
+                name: file_revoke, shell: generated, group: files, scope: none, mode: sync, cap: CAP_DEFAULT,
+                args: [token: String],
+                answers: (),
+                run: files::file_revoke, web: same
             }
         }
     };

@@ -9,16 +9,12 @@
 
 use tauri::http::{self, Method, Request, Response, StatusCode, header};
 
-use holzwave_host::ranges::{Range, parse_range};
+use holzwave_host::ranges::{CHUNK, Range, WHOLE, parse_range};
 
 use holzwave_host::state::AppCore;
 
 /// The scheme name, as registered and as in the policy.
 pub const SCHEME: &str = "holzfile";
-/// The most one ranged response carries.
-pub const CHUNK: u64 = 8 * 1024 * 1024;
-/// The most a response without a range carries; a larger file must be asked for in ranges.
-pub const WHOLE: u64 = 64 * 1024 * 1024;
 
 /// Where the page finds a granted file, which depends on the platform the way custom schemes do.
 pub fn url_of(token: &str) -> String {

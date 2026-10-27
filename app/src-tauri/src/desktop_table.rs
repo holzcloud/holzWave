@@ -45,6 +45,21 @@ macro_rules! desktop_wrapper {
             use crate::commands::$name;
         };
     };
+    // A raw (binary) answer: the plain function returns the bytes and the wrapper wraps them as the shell's raw response,
+    // which the page reads as an `ArrayBuffer`.
+    (
+        name: $name:ident, shell: generated, group: $group:ident, scope: none, mode: $mode:ident, cap: $cap:expr,
+        args: [$($arg:ident : $aty:ty),* $(,)?],
+        answers: raw $ok:ty, fails: $err:ty,
+        run: $run:path, web: $($web:tt)*
+    ) => {
+        attributed! { $mode;
+            #[allow(clippy::too_many_arguments)]
+            fn $name(core: State<Arc<AppCore>> $(, $arg: $aty)*) -> Result<$ok, $err> {
+                $run(&core $(, $arg)*).map(<$ok>::new)
+            }
+        }
+    };
     (
         name: $name:ident, shell: generated, group: $group:ident, scope: window, mode: $mode:ident, cap: $cap:expr,
         args: [$($arg:ident : $aty:ty),* $(,)?],

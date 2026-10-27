@@ -1,4 +1,12 @@
-//! The byte-range header of an HTTP request, as the desktop file scheme and the web file route both read it.
+//! The byte-range header of an HTTP request, as the desktop file scheme and the web file route both read it, and the two
+//! sizes every route that serves a granted file is held to.
+
+/// The most one ranged answer carries. The `file_range` command, the desktop file scheme and the file route of the server
+/// all cut to it, so a large file is read in pieces and never whole.
+pub const CHUNK: u64 = 8 * 1024 * 1024;
+
+/// The most an answer without a range carries; a larger file must be asked for in ranges.
+pub const WHOLE: u64 = 64 * 1024 * 1024;
 
 /// A byte range of a file of `size` bytes: `start..=end`, both inside the file.
 #[derive(Debug, PartialEq, Eq)]
@@ -42,6 +50,12 @@ mod tests {
         assert_eq!(parse_range(Some("bytes=-500"), 100), Range::Bytes(0, 99));
         assert_eq!(parse_range(Some("bytes=100-"), 100), Range::Unsatisfiable);
         assert_eq!(parse_range(Some("bytes=50-10"), 100), Range::Unsatisfiable);
+    }
+
+    #[test]
+    fn the_chunk_is_smaller_than_the_whole_and_both_are_whole_mebibytes() {
+        assert_eq!((CHUNK, WHOLE), (8 << 20, 64 << 20));
+        assert!(CHUNK < WHOLE);
     }
 
     #[test]

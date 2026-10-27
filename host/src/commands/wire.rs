@@ -4,6 +4,7 @@
 //! The op types are internally tagged with `kind` and every variant, motion and mode name is snake_case, so the page
 //! sends `{kind: "begin", x, y, mode: "word"}` and `{kind: "move", motion: "line_start"}`.
 
+use holzwave_core::blocks::Grant;
 use holzwave_core::engine::{
     CopyMotion, CopyOp, CopyState, MouseAction, MouseButton, PasteOutcome, SearchOp, SelectMode, SelectOp,
 };
@@ -228,4 +229,13 @@ impl From<CopyState> for CopyStateMsg {
     fn from(state: CopyState) -> Self {
         CopyStateMsg { active: state.active, selecting: state.selecting, yanked: state.yanked }
     }
+}
+
+/// The answer of `file_grant`: the address the page loads the file from beside the grant. It serializes as the `url`
+/// first and then the members of the core's grant (`token`, `mime`, `size`), as the desktop always answered.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GrantAnswer {
+    pub url: String,
+    #[serde(flatten)]
+    pub grant: Grant,
 }
