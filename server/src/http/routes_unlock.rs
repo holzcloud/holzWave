@@ -86,3 +86,13 @@ pub trait UnlockGate: StoreView {
 pub fn parts(_services: Arc<AuthServices>) -> Vec<Part> {
     Vec::new()
 }
+
+/// The throttle key of the unlock attempts of one account. Its own space: it never equals a sign-in key.
+pub fn unlock_account_key(_account: AccountId) -> String {
+    String::new()
+}
+
+/// The throttle key of the unlock attempts from one client address. Its own space: it never equals a sign-in key.
+pub fn unlock_address_key(_addr: std::net::IpAddr) -> String {
+    String::new()
+}

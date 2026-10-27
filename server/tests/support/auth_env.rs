@@ -391,6 +391,16 @@ impl AuthEnv {
             .json(body)
     }
 
+    /// A change with a raw body, as a hostile client sends it. The content type is a parameter.
+    pub fn post_raw(&self, path: &str, body: Vec<u8>, content_type: &str) -> Req {
+        Req::new(Method::POST, path)
+            .header("host", HOST)
+            .header("origin", ORIGIN)
+            .header("content-type", content_type)
+            .header("user-agent", FIREFOX)
+            .bytes(body)
+    }
+
     /// A change with a session: the cookie (and a pending or transaction cookie when given) and the token.
     pub fn post_as(&self, path: &str, body: &Value, who: &Signed) -> Req {
         self.post(path, body).set_cookies(&[("__Host-hw_session", &who.cookie)]).csrf(&who.csrf)
@@ -417,6 +427,11 @@ impl AuthEnv {
 
     pub async fn set_password(&self, id: AccountId) {
         enrol_password(&self.argon, &self.store, id, PASSWORD, self.clock.unix()).await.expect("password");
+    }
+
+    /// Gives the account a password of the given text.
+    pub async fn set_password_text(&self, id: AccountId, text: &str) {
+        enrol_password(&self.argon, &self.store, id, text, self.clock.unix()).await.expect("password");
     }
 
     pub fn set_authenticator(&self, name: &str, id: AccountId) {

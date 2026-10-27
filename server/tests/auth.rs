@@ -877,3 +877,832 @@ async fn a_dead_session_cookie_does_not_stop_a_sign_in() {
     assert_eq!(second.status, 200, "{}", second.text());
     assert_ne!(set_cookie_value(&second, SESSION).as_deref(), Some(stale.as_str()), "a value from the request is never adopted");
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Logout
+// ---------------------------------------------------------------------------------------------------------------------
+
+use std::sync::Arc;
+
+use auth_env::{Methods, PASSPHRASE, RECOVERY, Tuning};
+use holzwave_server::http::routes_unlock::{unlock_account_key, unlock_address_key};
+use holzwave_server::limits::Limits;
+use holzwave_server::store::Role;
+
+const SESSION_GONE: &str = "__Host-hw_session=; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=0";
+
+/// A session of `name` made by the manager, with the password method.
+fn signed(env: &AuthEnv, name: &str) -> edge::Signed {
+    env.session_for(name, SignInMethod::PasswordTotp)
+}
+
+#[tokio::test]
+async fn logout_ends_the_session_deletes_the_cookie_and_writes_one_line() {
+    let env = AuthEnv::all();
+    let alice = env.person("alice").await;
+    let who = signed(&env, "alice");
+    let response = env.send(env.post_as("/auth/logout", &json!({}), &who)).await;
+    assert_eq!(response.status, 204, "{}", response.text());
+    assert!(response.body.is_empty());
+    assert_eq!(response.all("set-cookie"), vec![SESSION_GONE.to_owned()]);
+    assert_eq!(response.header("cache-control").as_deref(), Some("no-store"));
+    assert_eq!(env.session_rows(alice), 0);
+    let lines: Vec<Value> = env.audit_lines().into_iter().filter(|l| l["action"] == "signout").collect();
+    assert_eq!(lines.len(), 1, "one signout line");
+    assert_eq!((lines[0]["actor"].as_str(), lines[0]["result"].as_str()), (Some(alice.get().to_string().as_str()), Some("ok")));
+    println!("Logout: 204, set-cookie [{SESSION_GONE}], one signout line, session rows 0");
+}
+
+#[tokio::test]
+async fn after_a_logout_the_old_cookie_gets_401_and_a_second_logout_too() {
+    let env = AuthEnv::all();
+    env.person("alice").await;
+    let who = signed(&env, "alice");
+    env.send(env.post_as("/auth/logout", &json!({}), &who)).await;
+    let again = env.send(env.post_as("/auth/logout", &json!({}), &who)).await;
+    assert_eq!(again.status, 401, "{}", again.text());
+    assert_eq!(again.json(), json!({"code": "invalid"}));
+    let me = env.send(env.get("/api/session").set_cookies(&[(SESSION, &who.cookie)])).await;
+    assert_eq!(me.json()["state"], "anonymous");
+    assert_eq!(env.count("signout"), 1, "the refused second logout wrote no line");
+}
+
+#[tokio::test]
+async fn logout_needs_the_token_and_an_empty_object() {
+    let env = AuthEnv::all();
+    let alice = env.person("alice").await;
+    let who = signed(&env, "alice");
+    let no_token = env.send(env.post("/auth/logout", &json!({})).set_cookies(&[(SESSION, &who.cookie)])).await;
+    assert_eq!(no_token.status, 403);
+    let with_member = env.send(env.post_as("/auth/logout", &json!({"all": true}), &who)).await;
+    assert_eq!(with_member.status, 400);
+    let get = env.send(env.get("/auth/logout").set_cookies(&[(SESSION, &who.cookie)])).await;
+    assert_eq!(get.status, 405);
+    assert_eq!(env.session_rows(alice), 1, "none of the three ended the session");
+    assert_eq!(env.count("signout"), 0);
+}
+
+#[tokio::test]
+async fn logout_ends_only_the_presented_session() {
+    let env = AuthEnv::all();
+    let alice = env.person("alice").await;
+    let first = signed(&env, "alice");
+    let second = signed(&env, "alice");
+    assert_eq!(env.session_rows(alice), 2);
+    env.send(env.post_as("/auth/logout", &json!({}), &first)).await;
+    assert_eq!(env.session_rows(alice), 1);
+    let me = env.send(env.get("/api/session").set_cookies(&[(SESSION, &second.cookie)])).await;
+    assert_eq!(me.json()["state"], "signed_in", "the other browser stays signed in");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Unlock
+// ---------------------------------------------------------------------------------------------------------------------
+
+async fn unlock(env: &AuthEnv, body: &Value, who: &edge::Signed) -> Resp {
+    env.send(env.post_as("/auth/unlock", body, who)).await
+}
+
+#[tokio::test]
+async fn unlock_with_the_passphrase_calls_the_gate_once() {
+    let env = AuthEnv::all();
+    let alice = env.person("alice").await;
+    let who = signed(&env, "alice");
+    env.gate.set_locked(alice, true);
+    let response = unlock(&env, &json!({"passphrase": PASSPHRASE}), &who).await;
+    assert_eq!(response.status, 200, "{}", response.text());
+    assert_eq!(response.json(), json!({"state": "unlocked"}));
+    assert_eq!(response.header("cache-control").as_deref(), Some("no-store"));
+    let calls = env.gate.unlocks();
+    assert_eq!(calls.len(), 1);
+    assert_eq!((calls[0].account, calls[0].kind, calls[0].secret.as_str()), (alice, "passphrase", PASSPHRASE));
+    let me = env.send(env.get("/api/session").set_cookies(&[(SESSION, &who.cookie)])).await;
+    assert_eq!(me.json()["state"], "signed_in", "the store is open now");
+    println!("Unlock: passphrase 200 {} gate calls 1", response.text());
+}
+
+#[tokio::test]
+async fn unlock_with_a_recovery_code_calls_the_gate_once() {
+    let env = AuthEnv::all();
+    let alice = env.person("alice").await;
+    let who = signed(&env, "alice");
+    let response = unlock(&env, &json!({"recovery_code": RECOVERY}), &who).await;
+    assert_eq!(response.status, 200, "{}", response.text());
+    assert_eq!(response.json(), json!({"state": "unlocked"}));
+    let calls = env.gate.unlocks();
+    assert_eq!((calls.len(), calls[0].account, calls[0].kind), (1, alice, "recovery_code"));
+}
+
+#[tokio::test]
+async fn unlock_refuses_a_body_that_is_not_exactly_one_secret() {
+    let env = AuthEnv::all();
+    env.person("alice").await;
+    let who = signed(&env, "alice");
+    let cases: Vec<(&str, Value, &str)> = vec![
+        ("both members", json!({"passphrase": PASSPHRASE, "recovery_code": RECOVERY}), "passphrase"),
+        ("neither", json!({}), "passphrase"),
+        ("a passphrase of 257 bytes", json!({"passphrase": "p".repeat(257)}), "passphrase"),
+        ("a recovery code of 65 characters", json!({"recovery_code": "R".repeat(65)}), "recovery_code"),
+        ("a passphrase that is a number", json!({"passphrase": 12345}), "passphrase"),
+        ("a recovery code that is a list", json!({"recovery_code": ["a"]}), "recovery_code"),
+        ("an empty passphrase", json!({"passphrase": ""}), "passphrase"),
+    ];
+    for (what, body, field) in &cases {
+        let response = unlock(&env, body, &who).await;
+        assert_eq!(response.status, 400, "{what}: {}", response.text());
+        assert_eq!(response.json(), json!({"code": "bad_request", "field": field}), "{what}");
+    }
+    let unknown = unlock(&env, &json!({"passphrase": PASSPHRASE, "extra": 1}), &who).await;
+    assert_eq!(unknown.status, 400);
+    let array = unlock(&env, &json!([PASSPHRASE]), &who).await;
+    assert_eq!(array.status, 400);
+    assert_eq!(env.gate.unlocks().len(), 0, "the gate was not called by any of them");
+    // The bounds themselves are fine: 256 bytes and 64 characters reach the gate.
+    let at_bound = unlock(&env, &json!({"passphrase": "p".repeat(256)}), &who).await;
+    assert_eq!(at_bound.status, 401);
+    let code_bound = unlock(&env, &json!({"recovery_code": "R".repeat(64)}), &who).await;
+    assert_eq!(code_bound.status, 401);
+    assert_eq!(env.gate.unlocks().len(), 2);
+    println!("Unlock: {} rows answer 400 bad_request with field, the gate is called 0 times; 256 bytes and 64 characters reach it", cases.len());
+}
+
+#[tokio::test]
+async fn a_wrong_secret_is_401_and_is_counted() {
+    let env = AuthEnv::all();
+    let alice = env.person("alice").await;
+    let who = signed(&env, "alice");
+    let response = unlock(&env, &json!({"passphrase": "not the passphrase"}), &who).await;
+    assert_invalid(&response, "a wrong passphrase");
+    assert_eq!(env.failures(&unlock_account_key(alice)), 1);
+    assert_eq!(env.failures(&unlock_address_key(std::net::IpAddr::from([0u8; 4]))), 1);
+}
+
+#[tokio::test]
+async fn the_fifth_wrong_secret_locks_and_a_locked_attempt_never_reaches_the_gate() {
+    let env = AuthEnv::all();
+    env.person("alice").await;
+    let who = signed(&env, "alice");
+    let lines_before = env.audit_lines().len();
+    for n in 1..=5 {
+        let response = unlock(&env, &json!({"passphrase": format!("wrong {n}")}), &who).await;
+        assert_invalid(&response, &format!("wrong attempt {n}"));
+    }
+    assert_eq!(env.gate.unlocks().len(), 5);
+    let locked = unlock(&env, &json!({"passphrase": PASSPHRASE}), &who).await;
+    assert_eq!(locked.status, 429, "{}", locked.text());
+    let seconds = locked.json()["retry_seconds"].as_u64().expect("seconds");
+    assert!((1..=900).contains(&seconds), "{seconds}");
+    assert_eq!(locked.header("retry-after").as_deref(), Some(seconds.to_string().as_str()));
+    assert_eq!(env.gate.unlocks().len(), 5, "the right secret during the lock never reached the gate");
+    assert_eq!(env.audit_lines().len(), lines_before, "the route wrote no audit line, not for a failure and not for the lock");
+    env.clock.advance(450);
+    let half = unlock(&env, &json!({"passphrase": PASSPHRASE}), &who).await;
+    assert_eq!(half.status, 429);
+    assert_eq!(half.json()["retry_seconds"], 450);
+    env.clock.advance(450);
+    let after = unlock(&env, &json!({"passphrase": PASSPHRASE}), &who).await;
+    assert_eq!(after.status, 200, "{}", after.text());
+    println!("Unlock: lock after 5 wrong, retry_seconds {seconds} at once and 450 half-way, right secret works at 900 s, gate calls 5 before the lock ended");
+}
+
+#[tokio::test]
+async fn twenty_wrong_secrets_from_one_address_lock_the_address() {
+    let env = AuthEnv::all();
+    let mut sessions = Vec::new();
+    for n in 0..6 {
+        let name = format!("user{n}");
+        env.person(&name).await;
+        sessions.push(signed(&env, &name));
+    }
+    for who in sessions.iter().take(5) {
+        for _ in 0..4 {
+            let response = unlock(&env, &json!({"passphrase": "wrong"}), who).await;
+            assert_invalid(&response, "a wrong secret");
+        }
+    }
+    let sixth = unlock(&env, &json!({"passphrase": PASSPHRASE}), &sessions[5]).await;
+    assert_eq!(sixth.status, 429, "a person who never failed is locked by the address: {}", sixth.text());
+    assert_eq!(env.gate.unlocks().len(), 20);
+}
+
+#[tokio::test]
+async fn a_sign_in_lock_does_not_lock_the_unlock_and_the_reverse() {
+    let env = AuthEnv::all();
+    env.person("alice").await;
+    let who = signed(&env, "alice");
+    for _ in 0..5 {
+        env.send(env.post("/auth/password", &json!({"username": "alice", "password": WRONG}))).await;
+    }
+    let locked = env.send(env.post("/auth/password", &json!({"username": "alice", "password": PASSWORD}))).await;
+    assert_eq!(locked.status, 429, "the sign-in is locked");
+    let open = unlock(&env, &json!({"passphrase": PASSPHRASE}), &who).await;
+    assert_eq!(open.status, 200, "the unlock is not: {}", open.text());
+
+    let other = AuthEnv::all();
+    other.person("alice").await;
+    let who = signed(&other, "alice");
+    for _ in 0..5 {
+        unlock(&other, &json!({"passphrase": "wrong"}), &who).await;
+    }
+    let locked = unlock(&other, &json!({"passphrase": PASSPHRASE}), &who).await;
+    assert_eq!(locked.status, 429, "the unlock is locked");
+    let first = other.send(other.post("/auth/password", &json!({"username": "alice", "password": PASSWORD}))).await;
+    assert_eq!(first.status, 200, "the sign-in is not: {}", first.text());
+    println!("Unlock: a locked sign-in leaves the unlock open (200) and a locked unlock leaves the sign-in open (200)");
+}
+
+#[tokio::test]
+async fn unlock_needs_a_session_and_the_token() {
+    let env = AuthEnv::all();
+    env.person("alice").await;
+    let who = signed(&env, "alice");
+    let anonymous = env.send(env.post("/auth/unlock", &json!({"passphrase": PASSPHRASE}))).await;
+    assert_eq!(anonymous.status, 401);
+    let no_token = env.send(env.post("/auth/unlock", &json!({"passphrase": PASSPHRASE})).set_cookies(&[(SESSION, &who.cookie)])).await;
+    assert_eq!(no_token.status, 403);
+    assert_eq!(env.gate.unlocks().len(), 0);
+}
+
+#[tokio::test]
+async fn a_gate_that_cannot_be_reached_is_503_and_not_counted() {
+    let env = AuthEnv::all();
+    let alice = env.person("alice").await;
+    let who = signed(&env, "alice");
+    env.gate.unavailable.store(true, std::sync::atomic::Ordering::SeqCst);
+    let response = unlock(&env, &json!({"passphrase": PASSPHRASE}), &who).await;
+    assert_eq!(response.status, 503, "{}", response.text());
+    assert_eq!(response.json(), json!({"code": "busy"}));
+    assert_eq!(env.failures(&unlock_account_key(alice)), 0);
+}
+
+#[tokio::test]
+async fn a_right_secret_clears_the_failures_of_the_account() {
+    let env = AuthEnv::all();
+    let alice = env.person("alice").await;
+    let who = signed(&env, "alice");
+    for _ in 0..4 {
+        unlock(&env, &json!({"passphrase": "wrong"}), &who).await;
+    }
+    assert_eq!(env.failures(&unlock_account_key(alice)), 4);
+    let ok = unlock(&env, &json!({"passphrase": PASSPHRASE}), &who).await;
+    assert_eq!(ok.status, 200);
+    assert_eq!(env.failures(&unlock_account_key(alice)), 0);
+}
+
+#[test]
+fn the_unlock_keys_are_their_own_space() {
+    use holzwave_server::auth::throttle::{account_key, address_key};
+    use holzwave_server::store::AccountId;
+    let ip = std::net::IpAddr::from([192, 0, 2, 7]);
+    let one = AccountId::from_raw(1);
+    let two = AccountId::from_raw(2);
+    let (a, b, c) = (unlock_account_key(one), unlock_account_key(two), unlock_address_key(ip));
+    assert!(a != b && a != c && b != c);
+    for key in [&a, &b, &c] {
+        assert!(!key.starts_with("a:") && !key.starts_with("i:"), "{key} is not in the sign-in space");
+        assert!(key.len() <= 80);
+    }
+    assert_ne!(c, address_key(ip));
+    assert_ne!(a, account_key("1"));
+    assert_eq!(unlock_address_key(ip), unlock_address_key(ip), "stable");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Step-up
+// ---------------------------------------------------------------------------------------------------------------------
+
+use auth_env::webauthn_client::SoftPasskey;
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+async fn step_up(env: &AuthEnv, body: &Value, who: &edge::Signed) -> Resp {
+    env.send(env.post_as("/auth/step-up", body, who)).await
+}
+
+async fn page_view(env: &AuthEnv, who: &edge::Signed) -> Value {
+    env.send(env.get("/api/session").set_cookies(&[(SESSION, &who.cookie)])).await.json()
+}
+
+#[tokio::test]
+async fn step_up_by_password_after_the_window_gives_a_fresh_window() {
+    let env = AuthEnv::all();
+    env.person("alice").await;
+    let who = env.password_sign_in("alice").await;
+    env.clock.advance(301);
+    assert_eq!(page_view(&env, &who).await["step_up"], 0, "the sign-in is older than the window");
+    let response = step_up(&env, &json!({"password": PASSWORD}), &who).await;
+    assert_eq!(response.status, 200, "{}", response.text());
+    assert_eq!(response.json(), json!({"step_up": 300}));
+    assert_eq!(response.header("cache-control").as_deref(), Some("no-store"));
+    assert_eq!(page_view(&env, &who).await["step_up"], 300);
+    assert_eq!(env.count("session.step_up"), 1);
+    println!("Step-up: password 200 {} /api/session step_up 300 (was 0)", response.text());
+}
+
+#[tokio::test]
+async fn a_step_up_never_extends_the_session() {
+    let env = AuthEnv::all();
+    env.person("alice").await;
+    let who = env.password_sign_in("alice").await;
+    env.clock.advance(100);
+    let before = page_view(&env, &who).await;
+    let row_before = env.sessions.lookup(&who.cookie, env.clock.unix()).expect("alive");
+    env.clock.advance(10);
+    let response = step_up(&env, &json!({"password": PASSWORD}), &who).await;
+    assert_eq!(response.status, 200, "{}", response.text());
+    let after = page_view(&env, &who).await;
+    let row_after = env.sessions.lookup(&who.cookie, env.clock.unix()).expect("alive");
+    assert_eq!(row_after.absolute_expires, row_before.absolute_expires, "the absolute end did not move");
+    assert_eq!(
+        after["seconds"].as_i64().expect("seconds"),
+        before["seconds"].as_i64().expect("seconds") - 10,
+        "10 seconds passed and the idle end did not move with the step-up"
+    );
+}
+
+#[tokio::test]
+async fn a_wrong_password_at_step_up_is_401_and_counts_on_the_sign_in_throttle() {
+    let env = AuthEnv::all();
+    env.person("alice").await;
+    let who = env.password_sign_in("alice").await;
+    env.clock.advance(301);
+    for n in 1..=5 {
+        let response = step_up(&env, &json!({"password": WRONG}), &who).await;
+        assert_invalid(&response, &format!("wrong password {n}"));
+    }
+    let locked = step_up(&env, &json!({"password": PASSWORD}), &who).await;
+    assert_eq!(locked.status, 429, "{}", locked.text());
+    assert_eq!(locked.json()["code"], "throttled");
+    assert!(locked.header("retry-after").is_some());
+    assert_eq!(page_view(&env, &who).await["step_up"], 0, "the session did not step up");
+    println!("Step-up: wrong password 401 x5, then 429 retry_seconds={}", locked.json()["retry_seconds"]);
+}
+
+#[tokio::test]
+async fn a_password_at_step_up_from_a_session_made_another_way_is_401() {
+    let env = AuthEnv::all();
+    let (_, mut key) = env.passkey_person("pia");
+    let by_passkey = env.passkey_sign_in(&mut key, None).await;
+    let who = env.signed_from(&by_passkey);
+    env.clock.advance(301);
+    let response = step_up(&env, &json!({"password": PASSWORD}), &who).await;
+    assert_invalid(&response, "a passkey session with a password");
+    let (_, callback, transaction) = env.oidc_begin().await;
+    let sso = env.send(env.oidc_callback_request(&callback.code, &callback.state, Some(&transaction))).await;
+    let sso = env.signed_from(&sso);
+    let response = step_up(&env, &json!({"password": PASSWORD}), &sso).await;
+    assert_invalid(&response, "a single sign-on session with a password");
+}
+
+#[tokio::test]
+async fn a_step_up_body_has_exactly_one_form() {
+    let env = AuthEnv::all();
+    env.person("alice").await;
+    let who = signed(&env, "alice");
+    for (what, body) in [
+        ("both forms", json!({"password": PASSWORD, "credential": {"id": "x"}})),
+        ("neither form", json!({})),
+        ("an unknown member", json!({"password": PASSWORD, "extra": 1})),
+        ("a password that is a number", json!({"password": 5})),
+        ("an array", json!([PASSWORD])),
+    ] {
+        let response = step_up(&env, &body, &who).await;
+        assert_eq!(response.status, 400, "{what}: {}", response.text());
+        assert_eq!(response.json()["code"], "bad_request", "{what}");
+    }
+    let no_token = env.send(env.post("/auth/step-up", &json!({"password": PASSWORD})).set_cookies(&[(SESSION, &who.cookie)])).await;
+    assert_eq!(no_token.status, 403);
+}
+
+/// A step-up with the passkey: the begin request, the assertion and the finish request.
+async fn passkey_step_up(env: &AuthEnv, who: &edge::Signed, key: &mut SoftPasskey, signer: Option<&mut SoftPasskey>) -> (Resp, Resp) {
+    let begin = env.send(env.post_as("/auth/step-up/begin", &json!({}), who)).await;
+    assert_eq!(begin.status, 200, "{}", begin.text());
+    let pending = set_cookie_value(&begin, PENDING).expect("a pending cookie");
+    let options = begin.json()["options"].clone();
+    let credential = match signer {
+        None => key.authenticate(&options, &env.origin).expect("answers"),
+        Some(other) => {
+            let mut forced = options;
+            forced["publicKey"]["allowCredentials"] = json!([{ "type": "public-key", "id": URL_SAFE_NO_PAD.encode(other.credential_id()) }]);
+            other.authenticate(&forced, &env.origin).expect("answers")
+        }
+    };
+    let finish = env
+        .send(env.post("/auth/step-up", &json!({"credential": credential})).set_cookies(&[(SESSION, &who.cookie), (PENDING, &pending)]).csrf(&who.csrf))
+        .await;
+    (begin, finish)
+}
+
+#[tokio::test]
+async fn step_up_by_passkey_lists_the_accounts_own_credentials_and_steps_up() {
+    let env = AuthEnv::all();
+    env.person("alice").await;
+    let mut key = env.register_passkey("alice");
+    let who = signed(&env, "alice");
+    env.clock.advance(301);
+    let (begin, finish) = passkey_step_up(&env, &who, &mut key, None).await;
+    let allowed: Vec<Value> =
+        begin.json()["options"]["publicKey"]["allowCredentials"].as_array().expect("a list").iter().map(|c| c["id"].clone()).collect();
+    assert_eq!(allowed, [json!(URL_SAFE_NO_PAD.encode(key.credential_id()))], "exactly the account's credential ids");
+    let line = set_cookie_line(&begin, PENDING).expect("pending");
+    token_of(&line, PENDING, PENDING_TAIL);
+    assert_eq!(finish.status, 200, "{}", finish.text());
+    assert_eq!(finish.json(), json!({"step_up": 300}));
+    assert_eq!(set_cookie_line(&finish, PENDING).as_deref(), Some(PENDING_GONE), "the pending cookie is deleted");
+    assert_eq!(page_view(&env, &who).await["step_up"], 300);
+    println!("Step-up: passkey begin 200 (allow list = the account's credential id, pending cookie set), finish 200 {}", finish.text());
+}
+
+#[tokio::test]
+async fn another_accounts_passkey_does_not_step_this_session_up() {
+    let env = AuthEnv::all();
+    env.person("alice").await;
+    let mut alice_key = env.register_passkey("alice");
+    env.person("bob").await;
+    let mut bob_key = env.register_passkey("bob");
+    let who = signed(&env, "alice");
+    env.clock.advance(301);
+    let (_, finish) = passkey_step_up(&env, &who, &mut alice_key, Some(&mut bob_key)).await;
+    assert_invalid(&finish, "bob's assertion for alice's session");
+    assert_eq!(page_view(&env, &who).await["step_up"], 0);
+    assert_eq!(env.count("session.step_up"), 0);
+}
+
+#[tokio::test]
+async fn a_passkey_step_up_begin_for_an_account_without_passkeys_is_409() {
+    let env = AuthEnv::all();
+    env.person("alice").await;
+    let who = signed(&env, "alice");
+    let begin = env.send(env.post_as("/auth/step-up/begin", &json!({}), &who)).await;
+    assert_eq!(begin.status, 409, "{}", begin.text());
+    assert_eq!(begin.json(), json!({"code": "conflict"}));
+    assert!(begin.all("set-cookie").is_empty());
+    let anonymous = env.send(env.post("/auth/step-up/begin", &json!({}))).await;
+    assert_eq!(anonymous.status, 401);
+}
+
+#[tokio::test]
+async fn a_passkey_step_up_with_a_missing_pending_cookie_is_401() {
+    let env = AuthEnv::all();
+    env.person("alice").await;
+    let mut key = env.register_passkey("alice");
+    let who = signed(&env, "alice");
+    let begin = env.send(env.post_as("/auth/step-up/begin", &json!({}), &who)).await;
+    let credential = key.authenticate(&begin.json()["options"], &env.origin).expect("answers");
+    let response = step_up(&env, &json!({"credential": credential}), &who).await;
+    assert_invalid(&response, "no pending cookie");
+}
+
+#[tokio::test]
+async fn the_method_matrix_covers_logout_unlock_and_step_up() {
+    let mut rows = Vec::new();
+    for methods in Methods::combinations() {
+        let env = AuthEnv::new(methods);
+        env.bare("alice", Role::Member);
+        let who = signed(&env, "alice");
+        let body = |value: Value| value;
+        let probes: Vec<(&str, Value, bool)> = vec![
+            ("/auth/logout", body(json!({})), true),
+            ("/auth/unlock", body(json!({"passphrase": "p"})), true),
+            ("/auth/step-up/begin", body(json!({})), methods.passkey),
+            ("/auth/step-up", body(json!({"password": "p"})), methods.password),
+            ("/auth/step-up", body(json!({"credential": {"id": "x"}})), methods.passkey),
+        ];
+        let mut statuses = Vec::new();
+        // The logout comes last: it ends the session.
+        let mut ordered: Vec<_> = probes.into_iter().collect();
+        ordered.rotate_left(1);
+        for (path, request_body, on) in ordered {
+            let response = env.send(env.post_as(path, &request_body, &who)).await;
+            statuses.push(format!("{path}={}", response.status.as_u16()));
+            if on {
+                assert_ne!(response.status, 404, "{} {path} {request_body} must exist", methods.label());
+            } else {
+                assert_eq!(response.status, 404, "{} {path} {request_body} must be absent", methods.label());
+                assert_eq!(response.json(), json!({"code": "not_found"}));
+            }
+        }
+        rows.push(format!("{}: {}", methods.label(), statuses.join(" ")));
+    }
+    println!("Matrix (logout, unlock, step-up):\n{}", rows.join("\n"));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The throttle through the routes
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn twenty_failures_from_one_address_lock_the_sign_in_for_every_name() {
+    let env = AuthEnv::all();
+    env.person("alice").await;
+    let before = env.argon.derivations();
+    let addr = std::net::IpAddr::from([198, 51, 100, 9]);
+    for n in 0..20 {
+        let response = env.send(env.post("/auth/password", &json!({"username": format!("nobody{n}"), "password": WRONG})).peer(addr)).await;
+        assert_invalid(&response, "a failure");
+    }
+    let derived = env.argon.derivations() - before;
+    assert_eq!(derived, 20);
+    let locked = env.send(env.post("/auth/password", &json!({"username": "alice", "password": PASSWORD})).peer(addr)).await;
+    assert_eq!(locked.status, 429, "{}", locked.text());
+    assert_eq!(env.argon.derivations() - before, 20, "a locked attempt derives nothing");
+    let elsewhere = env.send(env.post("/auth/password", &json!({"username": "alice", "password": PASSWORD}))).await;
+    assert_eq!(elsewhere.status, 200, "another address is not locked");
+    let totp = env.send(env.post("/auth/totp", &json!({"code": "000000"})).peer(addr)).await;
+    assert_eq!(totp.status, 429, "the second step is locked by the address as well");
+}
+
+#[tokio::test]
+async fn a_locked_sign_in_writes_one_locked_line_and_nothing_after() {
+    let env = AuthEnv::all();
+    env.person("alice").await;
+    for _ in 0..5 {
+        env.send(env.post("/auth/password", &json!({"username": "alice", "password": WRONG}))).await;
+    }
+    assert_eq!(env.count("signin.locked"), 1);
+    let lines = env.audit_lines().len();
+    for _ in 0..3 {
+        let response = env.send(env.post("/auth/password", &json!({"username": "alice", "password": PASSWORD}))).await;
+        assert_eq!(response.status, 429);
+    }
+    assert_eq!(env.audit_lines().len(), lines, "attempts during the lock write no line");
+}
+
+#[tokio::test]
+async fn the_lock_answer_is_the_same_for_a_known_and_an_unknown_name() {
+    let env = AuthEnv::all();
+    env.person("alice").await;
+    for name in ["alice", "nobody"] {
+        for _ in 0..5 {
+            env.send(env.post("/auth/password", &json!({"username": name, "password": WRONG}))).await;
+        }
+    }
+    // The address lock does not apply yet (10 failures); both names are locked by their own key.
+    let known = env.send(env.post("/auth/password", &json!({"username": "alice", "password": PASSWORD}))).await;
+    let unknown = env.send(env.post("/auth/password", &json!({"username": "nobody", "password": PASSWORD}))).await;
+    assert_eq!(known.status, 429);
+    assert_eq!(fingerprint(&known), fingerprint(&unknown), "status, headers and body are equal byte for byte");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Hostile input, overload, the canary and the races
+// ---------------------------------------------------------------------------------------------------------------------
+
+const MARKER: &str = "hostile-marker-31337";
+
+/// The routes of the plan and the members each takes.
+const ROUTES: [(&str, &[&str], bool); 8] = [
+    ("/auth/password", &["username", "password"], false),
+    ("/auth/totp", &["code"], false),
+    ("/auth/passkey/begin", &[], false),
+    ("/auth/passkey/finish", &["credential", "prf"], false),
+    ("/auth/logout", &[], true),
+    ("/auth/unlock", &["passphrase", "recovery_code"], true),
+    ("/auth/step-up", &["password", "credential"], true),
+    ("/auth/step-up/begin", &[], true),
+];
+
+/// The hostile bodies for one route: label, bytes and content type.
+fn hostile_bodies(route: &str, members: &[&str]) -> Vec<(String, Vec<u8>, &'static str)> {
+    let json_type = "application/json";
+    let first = members.first().copied().unwrap_or("x");
+    let mut bodies: Vec<(String, Vec<u8>, &'static str)> = Vec::new();
+    let prefix = format!("{{\"{first}\":\"{MARKER}\",\"pad\":\"");
+    let pad = 64 * 1024 + 1 - prefix.len() - 2;
+    bodies.push(("64 KiB plus one byte".into(), format!("{prefix}{}\"}}", "a".repeat(pad)).into_bytes(), json_type));
+    bodies.push(("invalid UTF-8".into(), [b"{\"".as_slice(), first.as_bytes(), b"\":\"\xff\xfe\"}"].concat(), json_type));
+    bodies.push(("a JSON array".into(), format!("[\"{MARKER}\",\"{MARKER}\"]").into_bytes(), json_type));
+    bodies.push(("nesting of 200 levels".into(), format!("{}\"{MARKER}\"{}", "[".repeat(200), "]".repeat(200)).into_bytes(), json_type));
+    bodies.push(("nested objects of 200 levels".into(), format!("{}\"{MARKER}\"{}", "{\"a\":".repeat(200), "}".repeat(200)).into_bytes(), json_type));
+    bodies.push(("duplicate keys".into(), format!("{{\"{first}\":\"a\",\"{first}\":\"{MARKER}\"}}").into_bytes(), json_type));
+    let nulls: Vec<String> = members.iter().map(|m| format!("\"{m}\":null")).collect();
+    if !members.is_empty() {
+        bodies.push(("null values".into(), format!("{{{}}}", nulls.join(",")).into_bytes(), json_type));
+    }
+    bodies.push(("text/plain".into(), format!("{{\"{first}\":\"{MARKER}\"}}").into_bytes(), "text/plain"));
+    bodies.push(("a string".into(), format!("\"{MARKER}\"").into_bytes(), json_type));
+    bodies.push(("truncated".into(), format!("{{\"{first}\":\"{MARKER}").into_bytes(), json_type));
+    match route {
+        "/auth/password" => {
+            bodies.push(("a username of 129 bytes".into(), format!("{{\"username\":\"{}\",\"password\":\"{MARKER}\"}}", "u".repeat(129)).into_bytes(), json_type));
+            bodies.push(("a password of 257 bytes".into(), format!("{{\"username\":\"alice\",\"password\":\"{}\"}}", "p".repeat(257)).into_bytes(), json_type));
+        }
+        "/auth/totp" => {
+            bodies.push(("a code of 7 digits".into(), b"{\"code\":\"1234567\"}".to_vec(), json_type));
+            bodies.push(("6 non-ASCII digits".into(), "{\"code\":\"\u{ff16}\u{ff16}\u{ff16}\u{ff16}\u{ff16}\u{ff16}\"}".as_bytes().to_vec(), json_type));
+            bodies.push(("a code that is a marker".into(), format!("{{\"code\":\"{MARKER}\"}}").into_bytes(), json_type));
+        }
+        "/auth/passkey/finish" => {
+            bodies.push(("a prf of 30 KiB".into(), format!("{{\"credential\":{{}},\"prf\":\"{}\"}}", "q".repeat(30 * 1024)).into_bytes(), json_type));
+            bodies.push(("a credential string".into(), format!("{{\"credential\":\"{MARKER}\"}}").into_bytes(), json_type));
+        }
+        "/auth/unlock" => {
+            bodies.push(("a passphrase of 257 bytes".into(), format!("{{\"passphrase\":\"{}\"}}", "p".repeat(257)).into_bytes(), json_type));
+            bodies.push(("a recovery code of 65 characters".into(), format!("{{\"recovery_code\":\"{}\"}}", "R".repeat(65)).into_bytes(), json_type));
+        }
+        "/auth/step-up" => {
+            bodies.push(("a password of 257 bytes".into(), format!("{{\"password\":\"{}\"}}", "p".repeat(257)).into_bytes(), json_type));
+            bodies.push(("a credential string".into(), format!("{{\"credential\":\"{MARKER}\"}}").into_bytes(), json_type));
+        }
+        _ => {}
+    }
+    bodies
+}
+
+#[tokio::test]
+async fn hostile_bodies_end_in_a_plain_refusal_and_derive_nothing() {
+    let env = AuthEnv::all();
+    env.person("alice").await;
+    let who = signed(&env, "alice");
+    let before = env.argon.derivations();
+    let mut count = 0usize;
+    let mut worst = std::collections::BTreeMap::<u16, usize>::new();
+    for (route, members, needs_session) in ROUTES {
+        for (what, bytes, content_type) in hostile_bodies(route, members) {
+            let mut req = env.post_raw(route, bytes, content_type);
+            if needs_session {
+                req = req.signed(&who);
+            }
+            let response = env.send(req).await;
+            let status = response.status.as_u16();
+            assert!(status < 500 || status == 503, "{route} {what}: status {status}");
+            assert!((400..=429).contains(&status) || status == 503, "{route} {what}: status {status} is not a refusal");
+            let all = format!("{}{:?}", response.text(), response.headers);
+            assert!(!all.contains(MARKER), "{route} {what}: the input was echoed");
+            assert!(!all.contains(&"p".repeat(20)) && !all.contains(&"u".repeat(20)), "{route} {what}: the input was echoed");
+            *worst.entry(status).or_default() += 1;
+            count += 1;
+        }
+    }
+    assert_eq!(env.argon.derivations(), before, "no hostile body caused a derivation");
+    assert_eq!(env.session_rows(who.account), 1, "and none made or ended a session");
+    println!("Hostile: {count} inputs over 8 routes, statuses {worst:?}, derivations 0");
+}
+
+#[tokio::test]
+async fn a_body_of_64_kib_exactly_is_read_and_one_byte_more_is_not() {
+    let env = AuthEnv::all();
+    let make = |size: usize| {
+        let prefix = "{\"code\":\"123456\",\"pad\":\"";
+        let pad = size - prefix.len() - 2;
+        format!("{prefix}{}\"}}", "a".repeat(pad)).into_bytes()
+    };
+    let at = env.send(env.post_raw("/auth/totp", make(64 * 1024), "application/json")).await;
+    assert_eq!(at.status, 400, "read, then refused as an unknown member");
+    let over = env.send(env.post_raw("/auth/totp", make(64 * 1024 + 1), "application/json")).await;
+    assert_eq!(over.status, 400);
+    assert_eq!(over.json(), json!({"code": "bad_request"}));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forty_simultaneous_password_posts_with_one_permit_give_busy_answers() {
+    let tuning = Tuning { permits: 1, derive_pause: Some(std::time::Duration::from_millis(50)), ..Tuning::default() };
+    let env = Arc::new(AuthEnv::build(Methods::ALL, tuning));
+    env.person("alice").await;
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..40 {
+        let env = env.clone();
+        set.spawn(async move { env.send(env.post("/auth/password", &json!({"username": "alice", "password": PASSWORD}))).await });
+    }
+    let (mut ok, mut invalid, mut busy, mut other) = (0, 0, 0, Vec::new());
+    while let Some(done) = set.join_next().await {
+        let response = done.expect("the task finished");
+        match response.status.as_u16() {
+            200 => ok += 1,
+            401 => invalid += 1,
+            503 => {
+                busy += 1;
+                assert_eq!(response.json(), json!({"code": "busy"}));
+                assert!(response.all("set-cookie").is_empty());
+            }
+            status => other.push(status),
+        }
+    }
+    println!("Overload: 40 posts, 200={ok} 401={invalid} 503={busy} other={other:?}");
+    assert!(busy >= 6, "one running and 32 waiting leave at least 7 for the busy answer, got {busy}");
+    assert!(other.is_empty(), "no other status: {other:?}");
+    let after = env.send(env.post("/auth/password", &json!({"username": "alice", "password": PASSWORD}))).await;
+    assert_eq!(after.status, 200, "a post after they finished works: {}", after.text());
+}
+
+const CANARY: &str = "canary-9f3b7c1e-must-not-appear-anywhere";
+
+#[tokio::test]
+async fn a_canary_in_every_input_appears_in_no_answer_header_or_audit_line() {
+    let env = AuthEnv::all();
+    let id = env.person("alice").await;
+    env.set_password_text(id, CANARY).await; // the canary is the real password
+    let who = signed(&env, "alice");
+    let mut seen: Vec<String> = Vec::new();
+    let mut note = |response: &Resp| seen.push(format!("{}\n{:?}", response.text(), response.headers));
+
+    // As a wrong name, a wrong password, a wrong code, a wrong pending cookie.
+    note(&env.send(env.post("/auth/password", &json!({"username": CANARY, "password": CANARY}))).await);
+    note(&env.send(env.post("/auth/password", &json!({"username": "alice", "password": format!("{CANARY}-wrong")}))).await);
+    let first = env.send(env.post("/auth/password", &json!({"username": "alice", "password": CANARY}))).await;
+    note(&first);
+    let pending = set_cookie_value(&first, PENDING).expect("pending");
+    note(&env.send(env.post("/auth/totp", &json!({"code": CANARY})).set_cookies(&[(PENDING, &pending)])).await);
+    note(&env.send(env.post("/auth/totp", &json!({"code": env.code("alice")})).set_cookies(&[(PENDING, &CANARY.replace(' ', "-"))])).await);
+    // As the prf value, the credential, the passphrase, the recovery code, the step-up password.
+    let (_, _, pending) = env.passkey_begin().await;
+    note(&finish_passkey(&env, Some(&pending), json!({"id": CANARY}), Some(json!(CANARY))).await);
+    note(&unlock(&env, &json!({"passphrase": CANARY}), &who).await);
+    note(&unlock(&env, &json!({"recovery_code": CANARY}), &who).await);
+    note(&step_up(&env, &json!({"password": CANARY}), &who).await);
+    note(&step_up(&env, &json!({"password": format!("{CANARY}-wrong")}), &who).await);
+    // And as the real thing: the sign-in that succeeds with the canary as the password.
+    let good = env.send(env.post("/auth/totp", &json!({"code": env.code("alice")})).set_cookies(&[(PENDING, &pending_of(&env).await)])).await;
+    note(&good);
+    // Cookies and query parameters that carry the canary.
+    note(&env.send(env.get(&format!("/auth/oidc/callback?code={CANARY}&state={CANARY}")).set_cookies(&[("__Host-hw_oidc", &CANARY.replace(' ', "-"))])).await);
+
+    for (n, text) in seen.iter().enumerate() {
+        assert!(!text.contains(CANARY), "answer {n} holds the canary");
+    }
+    let audit = env.audit_text();
+    assert!(!audit.contains(CANARY), "the audit holds the canary");
+    assert!(!audit.contains("canary-"), "nor a part of it");
+    let key = env.gate.started().iter().find(|c| c.kind == "password").map(|c| c.key.clone());
+    if let Some(key) = key {
+        let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+        assert!(!audit.contains(&hex) && seen.iter().all(|t| !t.contains(&hex)), "the key is nowhere");
+    }
+    println!("Canary: {} answers (bodies and every header) and the whole audit directory searched; the canary is nowhere", seen.len());
+}
+
+/// A fresh pending cookie for alice with the canary password.
+async fn pending_of(env: &AuthEnv) -> String {
+    let first = env.send(env.post("/auth/password", &json!({"username": "alice", "password": CANARY}))).await;
+    set_cookie_value(&first, PENDING).expect("pending")
+}
+
+#[test]
+fn the_route_sources_hold_no_print_and_no_log_field() {
+    for (name, source) in [
+        ("routes_auth.rs", include_str!("../src/http/routes_auth.rs")),
+        ("routes_unlock.rs", include_str!("../src/http/routes_unlock.rs")),
+    ] {
+        for banned in ["println!", "eprintln!", "dbg!", "print!(", "tracing::", "Debug)]\nstruct Password"] {
+            assert!(!source.contains(banned), "{name} contains {banned}");
+        }
+        for (n, line) in source.lines().enumerate() {
+            if line.contains("log::event(") {
+                assert!(line.contains("&[])"), "{name}:{}: a log line may carry no field: {line}", n + 1);
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sixteen_simultaneous_correct_codes_for_one_pending_token_make_one_session() {
+    let env = Arc::new(AuthEnv::all());
+    let alice = env.person("alice").await;
+    let first = env.send(env.post("/auth/password", &json!({"username": "alice", "password": PASSWORD}))).await;
+    let pending = set_cookie_value(&first, PENDING).expect("pending");
+    let code = env.code("alice");
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..16 {
+        let (env, pending, code) = (env.clone(), pending.clone(), code.clone());
+        set.spawn(async move { env.send(env.post("/auth/totp", &json!({"code": code})).set_cookies(&[(PENDING, &pending)])).await });
+    }
+    let (mut ok, mut invalid, mut other) = (0, 0, Vec::new());
+    while let Some(done) = set.join_next().await {
+        match done.expect("finished").status.as_u16() {
+            200 => ok += 1,
+            401 => invalid += 1,
+            status => other.push(status),
+        }
+    }
+    println!("Race: 16 correct /auth/totp posts for one pending token: 200={ok} 401={invalid} other={other:?}");
+    assert_eq!((ok, invalid), (1, 15), "{other:?}");
+    assert_eq!(env.session_rows(alice), 1);
+    assert_eq!(env.gate.started().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sixteen_simultaneous_wrong_unlocks_count_sixteen_failures() {
+    let tuning = Tuning {
+        limits: Limits { password_attempts_per_account: 100, password_attempts_per_address: 100, ..Limits::DEFAULT },
+        ..Tuning::default()
+    };
+    let env = Arc::new(AuthEnv::build(Methods::ALL, tuning));
+    let alice = env.person("alice").await;
+    let who = Arc::new(signed(&env, "alice"));
+    let mut set = tokio::task::JoinSet::new();
+    for n in 0..16 {
+        let (env, who) = (env.clone(), who.clone());
+        set.spawn(async move { env.send(env.post_as("/auth/unlock", &json!({"passphrase": format!("wrong {n}")}), &who)).await });
+    }
+    let mut invalid = 0;
+    while let Some(done) = set.join_next().await {
+        if done.expect("finished").status == 401 {
+            invalid += 1;
+        }
+    }
+    let account = env.failures(&unlock_account_key(alice));
+    let address = env.failures(&unlock_address_key(std::net::IpAddr::from([0u8; 4])));
+    println!("Race: 16 wrong unlocks: 401={invalid}, failures on the account key {account}, on the address key {address}");
+    assert_eq!((invalid, account, address), (16, 16, 16));
+}
