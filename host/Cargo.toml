@@ -10,10 +10,6 @@ publish = false
 [lib]
 name = "holzwave_host"
 
-[features]
-# The platform keychain store. The desktop app turns it on; the server never does, so its tree holds no keychain crate.
-keyring = ["holzwave-core/keyring"]
-
 [dependencies]
 holzwave-core = { path = "../core" }
 holzwave-ipc = { path = "../ipc" }

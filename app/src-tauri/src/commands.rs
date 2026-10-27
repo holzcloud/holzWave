@@ -694,8 +694,9 @@ pub fn app_info(core: State<Arc<AppCore>>) -> AppInfo {
 /// The text size the operating system asks for, in percent (100 to 300; 100 where the platform has no such setting or
 /// it cannot be read). Async: it runs a program, for at most a moment. The page multiplies its UI scale by it.
 #[tauri::command(async, rename_all = "snake_case")]
-pub fn os_text_scale() -> u32 {
-    crate::textscale::read(std::env::consts::OS)
+pub fn os_text_scale(core: State<Arc<AppCore>>) -> u32 {
+    let host = core.host().clone();
+    host.text_scale()
 }
 
 /// A pointer press, release or motion at `x`, `y` device pixels from the origin of the pane's grid; `mods` is
