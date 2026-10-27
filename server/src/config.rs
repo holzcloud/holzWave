@@ -65,8 +65,8 @@ pub const MAX_DURATION_SECS: u64 = 3650 * 86_400;
 /// The most entries of `tls.trusted_proxies`.
 pub const MAX_TRUSTED_PROXIES: usize = 256;
 
-/// The most names of `tls.domains`.
-pub const MAX_ACME_DOMAINS: usize = 100;
+/// The most names of `tls.domains`: one certificate holds ten names at most.
+pub const MAX_ACME_DOMAINS: usize = crate::acme::MAX_DOMAINS;
 
 /// The most entries of `auth.oidc`.
 pub const MAX_OIDC_PROVIDERS: usize = 32;
@@ -459,6 +459,9 @@ pub enum Tls {
         domains: Vec<String>,
         /// An extra trusted root for a private ACME directory.
         ca_file: Option<PathBuf>,
+        /// The operator's agreement to the terms of service of the certificate authority. There is no default: without
+        /// `true` the server does not start.
+        terms_agreed: Option<bool>,
     },
     /// Plain HTTP behind a proxy that ends TLS; only the listed addresses may connect.
     Proxy {
@@ -775,7 +778,7 @@ pub fn prepare(env: &Env, probe: &dyn Probe) -> Result<Prepared, Refusal> {
         }
     }
 
-    let tls = check_tls(config.tls.as_ref(), probe)?;
+    let tls = check_tls(config.tls.as_ref(), origin.host(), probe)?;
     check_auth(&config.auth, probe)?;
     check_workers(&config.workers, probe.own_uid())?;
     let sessions = check_sessions(&config.sessions)?;
@@ -823,7 +826,7 @@ fn read_config(path: &Path, probe: &dyn Probe) -> Result<Config, Refusal> {
 }
 
 /// The TLS section: present, one of the three modes, and complete.
-fn check_tls(tls: Option<&Tls>, probe: &dyn Probe) -> Result<TlsSetup, Refusal> {
+fn check_tls(tls: Option<&Tls>, public_host: &str, probe: &dyn Probe) -> Result<TlsSetup, Refusal> {
     let Some(tls) = tls else {
         return Err(Refusal::new(
             "the configuration has no tls section; choose a mode: \"files\", \"acme\" or \"proxy\" (the server has no plain-HTTP mode)",
@@ -848,33 +851,15 @@ fn check_tls(tls: Option<&Tls>, probe: &dyn Probe) -> Result<TlsSetup, Refusal> 
             }
             Ok(TlsSetup::Files { cert_file: cert_file.clone(), key_file: key_file.clone() })
         }
-        Tls::Acme { directory_url, contact, domains, ca_file } => {
-            if domains.is_empty() {
-                return Err(Refusal::new("tls mode \"acme\" needs at least one name in tls.domains"));
-            }
-            if domains.len() > MAX_ACME_DOMAINS {
-                return Err(Refusal::new(format!("tls.domains lists more than {MAX_ACME_DOMAINS} names")));
-            }
-            for name in domains {
-                if !valid_dns_name(name) {
-                    return Err(Refusal::new(format!(
-                        "tls.domains entry {name:?} is not a host name in lower case (a certificate cannot be issued for it)"
-                    )));
-                }
-            }
+        Tls::Acme { directory_url, contact, domains, ca_file, terms_agreed } => {
+            let directory = directory_url.as_deref().unwrap_or(DEFAULT_ACME_DIRECTORY);
+            crate::acme::check_terms(*terms_agreed, directory)?;
+            crate::acme::check_domains(domains, Some(public_host))?;
             let contact = contact.as_deref().map(str::trim).filter(|c| !c.is_empty()).ok_or_else(|| {
                 Refusal::new("tls mode \"acme\" needs tls.contact, an address such as mailto:admin@example.org")
             })?;
-            let address = contact.strip_prefix("mailto:").unwrap_or(contact);
-            if !address.contains('@') || address.contains(char::is_whitespace) {
-                return Err(Refusal::new(format!(
-                    "tls.contact {contact:?} is not an email address such as mailto:admin@example.org"
-                )));
-            }
-            let directory = directory_url.as_deref().unwrap_or(DEFAULT_ACME_DIRECTORY);
-            if !directory.starts_with("https://") || directory.chars().any(|c| c.is_control() || c.is_whitespace()) {
-                return Err(Refusal::new(format!("tls.directory_url {directory:?} must be an https address")));
-            }
+            crate::acme::normalise_contact(contact)?;
+            crate::acme::check_directory(directory)?;
             if let Some(ca) = ca_file
                 && !probe.readable(ca)
             {

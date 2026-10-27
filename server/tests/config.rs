@@ -433,7 +433,7 @@ fn config_a_valid_file_for_each_tls_mode_is_prepared() {
     let mut acme = base();
     set(&mut acme, "tls", json!({"mode": "acme", "contact": "mailto:admin@example.test",
         "domains": ["hw.example.test", "www.example.test"], "ca_file": "/certs/ca.pem",
-        "directory_url": "https://ca.example.test/directory"}));
+        "directory_url": "https://ca.example.test/directory", "terms_agreed": true}));
     let acme = prepare_json(&s, &acme).expect("acme mode");
     match acme.tls {
         TlsSetup::Acme { directory_url, contact, domains, ca_file } => {
@@ -445,7 +445,11 @@ fn config_a_valid_file_for_each_tls_mode_is_prepared() {
         other => panic!("{other:?}"),
     }
     let mut acme_default = base();
-    set(&mut acme_default, "tls", json!({"mode": "acme", "contact": "admin@example.test", "domains": ["hw.example.test"]}));
+    set(
+        &mut acme_default,
+        "tls",
+        json!({"mode": "acme", "contact": "admin@example.test", "domains": ["hw.example.test"], "terms_agreed": true}),
+    );
     match prepare_json(&s, &acme_default).expect("acme mode with defaults").tls {
         TlsSetup::Acme { directory_url, .. } => assert_eq!(directory_url, config::DEFAULT_ACME_DIRECTORY),
         other => panic!("{other:?}"),
@@ -680,7 +684,7 @@ fn acme_base() -> Value {
     set(
         &mut v,
         "tls",
-        json!({"mode": "acme", "contact": "mailto:admin@example.test", "domains": ["hw.example.test"]}),
+        json!({"mode": "acme", "contact": "mailto:admin@example.test", "domains": ["hw.example.test"], "terms_agreed": true}),
     );
     v
 }
@@ -770,8 +774,55 @@ fn matrix_the_tls_section() {
             ("contact is no address", vec![Edit::Set("tls.contact", json!("mailto:admin"))], "email address"),
             ("directory over http", vec![Edit::Set("tls.directory_url", json!("http://ca.example.test/dir"))], "https address"),
             ("unreadable root", vec![Edit::Set("tls.ca_file", json!("/certs/nothing.pem"))], "ACME root file"),
+            ("terms not given", vec![Edit::Remove("tls.terms_agreed")], "tls.terms_agreed"),
+            ("terms false", vec![Edit::Set("tls.terms_agreed", json!(false))], "tls.terms_agreed"),
+            ("terms null", vec![Edit::Set("tls.terms_agreed", json!(null))], "tls.terms_agreed"),
+            ("eleven names", vec![Edit::Set("tls.domains", json!([
+                "hw.example.test", "a1.example.test", "a2.example.test", "a3.example.test", "a4.example.test",
+                "a5.example.test", "a6.example.test", "a7.example.test", "a8.example.test", "a9.example.test",
+                "a10.example.test"]))], "more than 10 names"),
+            ("a wildcard", vec![Edit::Set("tls.domains", json!(["hw.example.test", "*.example.test"]))], "wildcard"),
+            ("an ip address", vec![Edit::Set("tls.domains", json!(["hw.example.test", "192.0.2.1"]))], "IP address"),
+            ("an ipv6 address", vec![Edit::Set("tls.domains", json!(["hw.example.test", "2001:db8::1"]))], "IP address"),
+            ("an underscore", vec![Edit::Set("tls.domains", json!(["hw.example.test", "ex_ample.test"]))], "not a host name"),
+            ("an empty label", vec![Edit::Set("tls.domains", json!(["hw.example.test", "a..b"]))], "not a host name"),
+            ("a duplicate", vec![Edit::Set("tls.domains", json!(["hw.example.test", "hw.example.test"]))], "twice"),
+            ("a name of 254 characters", vec![Edit::Set("tls.domains", json!(["hw.example.test", format!("{}.test", ["abcdefghi"; 25].join("."))]))], "not a host name"),
+            ("a label of 64 characters", vec![Edit::Set("tls.domains", json!(["hw.example.test", format!("{}.test", "a".repeat(64))]))], "not a host name"),
+            ("the public host is not a domain", vec![Edit::Set("tls.domains", json!(["www.example.test"]))], "public_url"),
+            ("two at signs in the contact", vec![Edit::Set("tls.contact", json!("a@b@c"))], "email address"),
+            ("a space in the contact", vec![Edit::Set("tls.contact", json!("ops @example.test"))], "email address"),
+            ("a newline in the contact", vec![Edit::Set("tls.contact", json!("ops@example.test\nBcc: x@example.test"))], "email address"),
+            ("a query in the contact", vec![Edit::Set("tls.contact", json!("mailto:ops@example.test?subject=x"))], "email address"),
+            ("a contact of 255 characters", vec![Edit::Set("tls.contact", json!(format!("{}@example.test", "a".repeat(240))))], "email address"),
+            ("a host of the contact that is no name", vec![Edit::Set("tls.contact", json!("ops@exa_mple.test"))], "email address"),
+            ("directory without a host", vec![Edit::Set("tls.directory_url", json!("https://"))], "https address"),
+            ("directory with a space", vec![Edit::Set("tls.directory_url", json!("https://ca.example.test/a b"))], "https address"),
         ],
     );
+}
+
+#[test]
+fn matrix_acme_accepts_ten_names_and_an_agreement_given_as_true() {
+    let s = setup();
+    let names: Vec<String> = std::iter::once("hw.example.test".to_owned())
+        .chain((1..10).map(|n| format!("a{n}.example.test")))
+        .collect();
+    assert_eq!(names.len(), 10);
+    let mut file = acme_base();
+    set(&mut file, "tls.domains", json!(names));
+    prepare_json(&s, &file).expect("ten names");
+
+    // The public host may be any one of the names.
+    let mut other = acme_base();
+    set(&mut other, "tls.domains", json!(["www.example.test", "hw.example.test"]));
+    prepare_json(&s, &other).expect("the public host is the second name");
+
+    for contact in ["ops@example.test", "mailto:ops.team+acme@example.test", "  ops@Example.Test  "] {
+        let mut file = acme_base();
+        set(&mut file, "tls.contact", json!(contact));
+        prepare_json(&s, &file).unwrap_or_else(|e| panic!("{contact:?} must be accepted: {e}"));
+    }
 }
 
 #[test]
