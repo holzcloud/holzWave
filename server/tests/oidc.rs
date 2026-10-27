@@ -11,19 +11,26 @@ mod scratch;
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use holzwave_server::accounts::Accounts;
 use holzwave_server::audit::Audit;
 use holzwave_server::auth::oidc::{OidcCallback, OidcError, OidcGrant, OidcService, OidcStart};
+use holzwave_server::auth::oidc_http::{
+    CONNECT_TIMEOUT, HttpError, HttpsClient, Limits, MAX_RESPONSE_BYTES, MAX_SECRET_FILE_BYTES, TOTAL_TIMEOUT, read_client_secret,
+};
 use holzwave_server::auth::session::{Method, SessionManager};
 use holzwave_server::clock::ManualClock;
 use holzwave_server::config::{self, Sessions};
 use holzwave_server::store::{AccountId, AccountState, Role, Store};
 use oidc_provider::{AtHash, Behaviour, Callback, Signer, CLIENT_ID, ISSUER, MemoryHttp, SECRET, TestProvider};
+use openidconnect::{AsyncHttpClient, HttpRequest};
 use scratch::Scratch;
 use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
 /// 2026-03-01T08:30:00Z.
 const NOW: i64 = 1_772_353_800;
@@ -798,4 +805,438 @@ async fn canary_no_secret_code_state_nonce_or_token_reaches_an_error_a_debug_tex
             assert!(!text.contains(secret), "a secret value appears in: {}", &text[..text.len().min(80)]);
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Task 3: the discovery cache and the providers
+// ---------------------------------------------------------------------------------------------------------------------
+
+fn requests(f: &Fixture) -> (usize, usize) {
+    (f.provider.discovery_requests.load(Ordering::SeqCst), f.provider.jwks_requests.load(Ordering::SeqCst))
+}
+
+#[tokio::test]
+async fn cache_a_second_start_within_the_hour_makes_no_discovery_request() {
+    let f = fixture("c-hit");
+    f.service.start("corp", ADDR).await.expect("first start");
+    assert_eq!(requests(&f), (1, 1));
+    f.clock.advance(3_599);
+    f.service.start("corp", ADDR).await.expect("second start");
+    assert_eq!(requests(&f), (1, 1), "still cached 3,599 seconds later");
+}
+
+#[tokio::test]
+async fn cache_the_discovery_is_fetched_again_once_the_hour_has_passed() {
+    let f = fixture("c-expire");
+    f.sign_in().await.expect("first sign-in");
+    f.clock.advance(3_600);
+    f.sign_in().await.expect("sign-in after an hour");
+    println!("discovery requests over the clock steps 0, 3599, 3600: {:?}", requests(&f));
+    assert_eq!(requests(&f), (2, 2), "one more discovery and key set after the hour");
+    f.clock.advance(3_599);
+    f.sign_in().await.expect("and cached again");
+    assert_eq!(requests(&f), (2, 2));
+}
+
+#[tokio::test]
+async fn cache_a_discovery_document_of_another_issuer_is_refused() {
+    let f = fixture("c-issuer");
+    f.provider.set(|b| b.discovery_issuer = Some("https://evil.example.test".to_owned()));
+    assert_eq!(f.service.start("corp", ADDR).await.err(), Some(OidcError::Failed));
+    let failures = f.failures();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0]["detail"]["reason"], "provider");
+    assert_eq!(f.service.open_transactions(), 0);
+}
+
+#[tokio::test]
+async fn cache_an_unreachable_provider_fails_alone_and_the_other_keeps_working() {
+    let scratch = Scratch::new("c-two");
+    let clock = Arc::new(ManualClock::new(NOW));
+    let a = TestProvider::new("idp-a.example.test", clock.clone(), Some(SECRET));
+    let b = TestProvider::new("idp-b.example.test", clock.clone(), Some(SECRET));
+    let secret = scratch.write_file("secret", SECRET.as_bytes(), 0o600);
+    let configs = [entry("a", &a.issuer, secret.clone()), entry("b", &b.issuer, secret)];
+    let store = Arc::new(Store::open(scratch.path()).expect("store"));
+    let audit = Arc::new(Audit::open(scratch.path(), clock.clone()).expect("audit"));
+    let sessions = Arc::new(SessionManager::new(store.clone(), clock.clone(), Sessions::default()));
+    let accounts = Arc::new(Accounts::new(store, clock.clone(), audit.clone(), RANGE));
+    let service =
+        OidcService::new(&configs, PUBLIC_URL, accounts, sessions, audit, clock, MemoryHttp::new(&[a.clone(), b.clone()]))
+            .expect("service");
+    a.set(|x| x.unreachable = true);
+    assert_eq!(service.start("a", ADDR).await.err(), Some(OidcError::Failed));
+    let start = service.start("b", ADDR).await.expect("b still works");
+    let callback = b.authorize(&start.url);
+    let parameters = OidcCallback { code: Some(callback.code), state: Some(callback.state), ..OidcCallback::default() };
+    service.finish(start.transaction.expose(), parameters, ADDR, DEVICE).await.expect("b signs in");
+    let lines = audit_lines(scratch.path());
+    let failures: Vec<&Value> = lines.iter().filter(|l| l["action"] == "signin.fail").collect();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0]["detail"]["reason"], "provider");
+}
+
+#[tokio::test]
+async fn cache_a_failed_discovery_is_not_tried_again_for_five_seconds() {
+    let f = fixture("c-backoff");
+    f.provider.set(|b| b.discovery_status = 500);
+    assert!(f.service.start("corp", ADDR).await.is_err());
+    assert_eq!(requests(&f).0, 1);
+    f.provider.reset();
+    f.clock.advance(4);
+    assert!(f.service.start("corp", ADDR).await.is_err(), "the provider is left alone");
+    assert_eq!(requests(&f).0, 1, "no request was made");
+    f.clock.advance(1);
+    f.service.start("corp", ADDR).await.expect("after five seconds the provider is asked again");
+    assert_eq!(requests(&f).0, 2);
+}
+
+#[tokio::test]
+async fn cache_the_provider_list_has_the_id_and_the_name_in_configuration_order() {
+    let f = fixture("c-list");
+    let listed = f.service.providers();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, "corp");
+    assert_eq!(listed[0].name, "Company corp");
+    assert_eq!(format!("{:?}", listed[0]), "ProviderInfo { id: \"corp\", name: \"Company corp\" }");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Task 3: the client secret file
+// ---------------------------------------------------------------------------------------------------------------------
+
+fn expected_basic() -> String {
+    use base64::Engine;
+    format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{CLIENT_ID}:{SECRET}")))
+}
+
+#[tokio::test]
+async fn secret_a_private_file_is_read_trimmed_and_used_as_the_client_authentication() {
+    let f = fixture("s-basic");
+    f.sign_in().await.expect("sign in");
+    let request = f.provider.last_token_request().expect("token request");
+    assert_eq!(request.authorization.as_deref(), Some(expected_basic().as_str()));
+    assert!(!request.form.iter().any(|(k, _)| k == "client_secret"), "the secret is not in the form");
+    assert!(!request.form.iter().any(|(k, _)| k == "client_id"), "basic authentication carries the id");
+    // The same file read directly: one trailing newline is dropped, nothing else.
+    let scratch = Scratch::new("s-read");
+    let path = scratch.write_file("secret", b"value-with-space \n", 0o640);
+    assert_eq!(read_client_secret(&path).expect("0640 is private enough").expose(), "value-with-space ");
+    let path = scratch.write_file("exact", &vec![b'x'; MAX_SECRET_FILE_BYTES as usize], 0o600);
+    assert_eq!(read_client_secret(&path).expect("4 KiB is allowed").expose().len(), 4_096);
+}
+
+#[test]
+fn secret_a_file_that_is_not_private_a_link_an_empty_or_a_large_file_is_refused() {
+    let scratch = Scratch::new("s-refuse");
+    let canary = "CANARY-SECRET-CONTENT";
+    let open = scratch.write_file("open", canary.as_bytes(), 0o644);
+    let target = scratch.write_file("target", canary.as_bytes(), 0o600);
+    let link = scratch.join("link");
+    std::os::unix::fs::symlink(&target, &link).expect("make a link");
+    let empty = scratch.write_file("empty", b"\n", 0o600);
+    let large = scratch.write_file("large", &vec![b'y'; MAX_SECRET_FILE_BYTES as usize + 1], 0o600);
+    let missing = scratch.join("missing");
+    let cases = [
+        ("mode 0644", open, "too open"),
+        ("a link", link, "link"),
+        ("empty", empty, "empty"),
+        ("larger than 4 KiB", large, "larger than 4096"),
+        ("missing", missing, "does not exist"),
+    ];
+    for (what, path, word) in cases {
+        let error = read_client_secret(&path).err().unwrap_or_else(|| panic!("{what} must be refused"));
+        let sentence = error.sentence();
+        println!("secret file refused ({what}): {sentence}");
+        assert!(sentence.contains(&path.display().to_string()), "{what}: the sentence names the path: {sentence}");
+        assert!(sentence.contains(word), "{what}: the sentence names the problem: {sentence}");
+        assert!(!sentence.contains(canary) && !sentence.contains("yyyy"), "{what}: no content: {sentence}");
+        assert!(!format!("{error:?}").contains(canary));
+    }
+}
+
+#[test]
+fn secret_a_refused_file_stops_the_service_from_being_built_with_the_same_sentence() {
+    let scratch = Scratch::new("s-service");
+    let clock = Arc::new(ManualClock::new(NOW));
+    let open = scratch.write_file("open", SECRET.as_bytes(), 0o644);
+    let store = Arc::new(Store::open(scratch.path()).expect("store"));
+    let audit = Arc::new(Audit::open(scratch.path(), clock.clone()).expect("audit"));
+    let sessions = Arc::new(SessionManager::new(store.clone(), clock.clone(), Sessions::default()));
+    let accounts = Arc::new(Accounts::new(store, clock.clone(), audit.clone(), RANGE));
+    let provider = TestProvider::standard(clock.clone());
+    let refusal = OidcService::new(
+        &[entry("corp", ISSUER, open.clone())],
+        PUBLIC_URL,
+        accounts,
+        sessions,
+        audit,
+        clock,
+        MemoryHttp::new(&[provider]),
+    )
+    .expect_err("a file open to others is refused");
+    assert!(refusal.sentence().contains(&open.display().to_string()));
+    assert!(refusal.sentence().contains("too open"));
+    assert!(!refusal.sentence().contains(SECRET));
+}
+
+#[tokio::test]
+async fn secret_a_provider_without_a_secret_file_is_a_public_client() {
+    let scratch = Scratch::new("s-public");
+    let clock = Arc::new(ManualClock::new(NOW));
+    let provider = TestProvider::new("idp.example.test", clock.clone(), None);
+    let store = Arc::new(Store::open(scratch.path()).expect("store"));
+    let audit = Arc::new(Audit::open(scratch.path(), clock.clone()).expect("audit"));
+    let sessions = Arc::new(SessionManager::new(store.clone(), clock.clone(), Sessions::default()));
+    let accounts = Arc::new(Accounts::new(store, clock.clone(), audit.clone(), RANGE));
+    let service = OidcService::new(
+        &[entry("corp", ISSUER, PathBuf::new())],
+        PUBLIC_URL,
+        accounts,
+        sessions,
+        audit,
+        clock,
+        MemoryHttp::new(std::slice::from_ref(&provider)),
+    )
+    .expect("a public client needs no file");
+    let start = service.start("corp", ADDR).await.expect("start");
+    let callback = provider.authorize(&start.url);
+    let parameters = OidcCallback { code: Some(callback.code), state: Some(callback.state), ..OidcCallback::default() };
+    service.finish(start.transaction.expose(), parameters, ADDR, DEVICE).await.expect("PKCE alone is enough");
+    let request = provider.last_token_request().expect("token request");
+    assert_eq!(request.authorization, None, "no Authorization header");
+    assert!(request.form.iter().any(|(k, v)| k == "client_id" && v == CLIENT_ID), "the client id is in the form");
+    assert!(request.form.iter().any(|(k, _)| k == "code_verifier"));
+}
+
+#[test]
+fn secret_the_debug_texts_print_no_secret_and_the_secret_type_wipes_on_drop() {
+    fn wipes<T: zeroize::ZeroizeOnDrop>() {}
+    let scratch = Scratch::new("s-debug");
+    let path = scratch.write_file("secret", SECRET.as_bytes(), 0o600);
+    let secret = read_client_secret(&path).expect("read");
+    wipes::<holzwave_server::auth::oidc_http::ClientSecretText>();
+    assert!(std::mem::needs_drop::<holzwave_server::auth::oidc_http::ClientSecretText>());
+    let text = format!("{secret:?} {:#?}", entry("corp", ISSUER, path.clone()));
+    assert!(!text.contains(SECRET), "{text}");
+    assert_eq!(format!("{secret:?}"), "ClientSecretText(..)");
+    let f = fixture("s-debug-service");
+    assert!(!format!("{:?}", f.service).contains(SECRET));
+    assert_eq!(format!("{:?}", f.service), "OidcService(..)");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Task 3: the HTTP client, against a plain local server
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[derive(Default)]
+struct LocalServer {
+    port: u16,
+    accepts: AtomicUsize,
+    second_hits: AtomicUsize,
+    sent: AtomicUsize,
+    cookies: Mutex<Vec<bool>>,
+}
+
+async fn local_server() -> Arc<LocalServer> {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind a local port");
+    let port = listener.local_addr().expect("address").port();
+    let server = Arc::new(LocalServer { port, ..LocalServer::default() });
+    let shared = server.clone();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            shared.accepts.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(serve(shared.clone(), stream));
+        }
+    });
+    server
+}
+
+async fn serve(server: Arc<LocalServer>, mut stream: TcpStream) {
+    let mut head = Vec::new();
+    let mut buffer = [0u8; 1024];
+    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+        match stream.read(&mut buffer).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => head.extend_from_slice(&buffer[..n]),
+        }
+        if head.len() > 16_384 {
+            return;
+        }
+    }
+    let text = String::from_utf8_lossy(&head).to_string();
+    let path = text.split_whitespace().nth(1).unwrap_or("/").to_owned();
+    server.cookies.lock().expect("lock").push(text.to_ascii_lowercase().contains("\r\ncookie:"));
+    let chunk = vec![b'z'; 64 * 1024];
+    match path.as_str() {
+        "/ok" => {
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: session=abc\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await;
+        }
+        "/exact" | "/declared" => {
+            let length = if path == "/exact" { MAX_RESPONSE_BYTES } else { MAX_RESPONSE_BYTES + 1 };
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n");
+            if stream.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            let mut left = length;
+            while left > 0 {
+                let n = left.min(chunk.len());
+                if stream.write_all(&chunk[..n]).await.is_err() {
+                    return;
+                }
+                server.sent.fetch_add(n, Ordering::SeqCst);
+                left -= n;
+            }
+        }
+        "/stream" => {
+            if stream.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n").await.is_err() {
+                return;
+            }
+            for _ in 0..1_024 {
+                if stream.write_all(&chunk).await.is_err() {
+                    return;
+                }
+                server.sent.fetch_add(chunk.len(), Ordering::SeqCst);
+            }
+        }
+        "/redirect" => {
+            let _ = stream
+                .write_all(b"HTTP/1.1 302 Found\r\nLocation: /second\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+        }
+        "/second" => {
+            server.second_hits.fetch_add(1, Ordering::SeqCst);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+        }
+        "/silent" => tokio::time::sleep(Duration::from_secs(30)).await,
+        _ => {
+            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+        }
+    }
+}
+
+fn get(server: &LocalServer, path: &str) -> HttpRequest {
+    openidconnect::http::Request::builder()
+        .method("GET")
+        .uri(format!("http://127.0.0.1:{}{path}", server.port))
+        .body(Vec::new())
+        .expect("a request")
+}
+
+fn plain_client() -> HttpsClient {
+    HttpsClient::new(false).expect("the client is built")
+}
+
+#[test]
+fn adapter_the_limits_are_ten_seconds_and_one_mib() {
+    assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(10));
+    assert_eq!(TOTAL_TIMEOUT, Duration::from_secs(10));
+    assert_eq!(MAX_RESPONSE_BYTES, 1024 * 1024);
+    assert_eq!(Limits::PRODUCTION, Limits { connect: CONNECT_TIMEOUT, total: TOTAL_TIMEOUT, max_bytes: MAX_RESPONSE_BYTES });
+    assert_eq!(format!("{:?}", plain_client()), "HttpsClient(..)");
+}
+
+#[tokio::test]
+async fn adapter_reads_exactly_one_mib_and_refuses_one_byte_more() {
+    let server = local_server().await;
+    let client = plain_client();
+    let answer = client.call(get(&server, "/exact")).await.expect("exactly 1 MiB is read");
+    assert_eq!(answer.body().len(), MAX_RESPONSE_BYTES);
+    assert_eq!(answer.status(), 200);
+    let error = client.call(get(&server, "/declared")).await.expect_err("1 MiB and a byte is refused");
+    assert_eq!(error, HttpError::TooLarge);
+}
+
+#[tokio::test]
+async fn adapter_does_not_buffer_past_the_cap_and_closes_the_connection() {
+    let server = local_server().await;
+    let client = plain_client();
+    let error = client.call(get(&server, "/stream")).await.expect_err("a stream without end is refused");
+    assert_eq!(error, HttpError::TooLarge);
+    // The server tried to send 64 MiB; it must notice the closed connection long before that.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let sent = server.sent.load(Ordering::SeqCst);
+    println!("stream: the server sent {sent} bytes of 67108864 before the client dropped the connection");
+    assert!(sent < 16 * 1024 * 1024, "the server was stopped after {sent} bytes");
+}
+
+#[tokio::test]
+async fn adapter_returns_a_redirect_and_does_not_follow_it() {
+    let server = local_server().await;
+    let answer = plain_client().call(get(&server, "/redirect")).await.expect("the redirect is an answer");
+    assert_eq!(answer.status(), 302);
+    assert!(answer.headers().contains_key("location"));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(server.second_hits.load(Ordering::SeqCst), 0, "the second path was never requested");
+}
+
+#[tokio::test]
+async fn adapter_cuts_off_a_server_that_says_nothing() {
+    let server = local_server().await;
+    let limits = Limits { connect: Duration::from_secs(1), total: Duration::from_secs(1), max_bytes: MAX_RESPONSE_BYTES };
+    let client = HttpsClient::with_limits(false, limits).expect("client");
+    let started = Instant::now();
+    let error = client.call(get(&server, "/silent")).await.expect_err("a silent server is cut off");
+    println!("silent server: {error:?} after {:?} with a 1 second limit", started.elapsed());
+    assert_eq!(error, HttpError::TimedOut);
+    assert!(started.elapsed() < Duration::from_secs(3));
+}
+
+#[tokio::test]
+async fn adapter_sends_no_cookie_and_keeps_none() {
+    let server = local_server().await;
+    let client = plain_client();
+    let first = client.call(get(&server, "/ok")).await.expect("first");
+    assert!(first.headers().contains_key("set-cookie"), "the answer is passed on as it is");
+    client.call(get(&server, "/ok")).await.expect("second");
+    assert_eq!(*server.cookies.lock().expect("lock"), vec![false, false], "no request carried a cookie");
+}
+
+#[tokio::test]
+async fn adapter_with_the_https_flag_on_refuses_http_before_connecting() {
+    let server = local_server().await;
+    let client = HttpsClient::new(true).expect("client");
+    let error = client.call(get(&server, "/ok")).await.expect_err("http is refused");
+    assert_eq!(error, HttpError::NotHttps);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(server.accepts.load(Ordering::SeqCst), 0, "no connection was attempted");
+    assert!(error.to_string().contains("not https"));
+}
+
+#[tokio::test]
+async fn adapter_ignores_the_proxy_variables_of_the_environment() {
+    let server = local_server().await;
+    // A child process of this test binary has the variables set; set_var in a process with threads is not safe.
+    let url = format!("http://127.0.0.1:{}/ok", server.port);
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(std::env::current_exe().expect("the test binary"))
+            .args(["--exact", "adapter_proxy_probe", "--include-ignored", "--nocapture", "--test-threads=1"])
+            .env("HTTP_PROXY", "http://127.0.0.1:9")
+            .env("http_proxy", "http://127.0.0.1:9")
+            .env("ALL_PROXY", "http://127.0.0.1:9")
+            .env("all_proxy", "http://127.0.0.1:9")
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .env("HW_OIDC_PROBE_URL", url)
+            .output()
+            .expect("the child runs")
+    })
+    .await
+    .expect("the blocking task ends");
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(output.status.success(), "the child failed: {text}");
+    assert!(text.contains("proxy probe: 200"), "{text}");
+    assert_eq!(server.accepts.load(Ordering::SeqCst), 1, "the request reached the server directly");
+}
+
+/// Run by the test above in a child process whose environment names an unusable proxy.
+#[tokio::test]
+#[ignore = "run by adapter_ignores_the_proxy_variables_of_the_environment"]
+async fn adapter_proxy_probe() {
+    let url = std::env::var("HW_OIDC_PROBE_URL").expect("the parent names the address");
+    let request = openidconnect::http::Request::builder().method("GET").uri(url).body(Vec::new()).expect("request");
+    let answer = plain_client().call(request).await.expect("the request goes direct, not through the proxy");
+    println!("proxy probe: {}", answer.status().as_u16());
 }

@@ -76,6 +76,9 @@ pub const MAX_ISS_BYTES: usize = 2_048;
 /// How far ahead of the server's clock an ID token may have been issued, in seconds: five minutes.
 pub const ISSUE_SKEW_SECS: i64 = 300;
 
+/// How long a provider whose discovery failed is left alone before the next try, in seconds.
+pub const DISCOVERY_RETRY_SECS: i64 = 5;
+
 /// The path of the callback below the public address of the server.
 pub const CALLBACK_PATH: &str = "/auth/oidc/callback";
 
@@ -369,6 +372,9 @@ struct Cache {
     loaded: Option<Loaded>,
     /// When the key set was last fetched because of an unknown key id. It outlives the discovery document.
     last_refetch: Option<i64>,
+    /// When the last discovery failed. A start in the next [`DISCOVERY_RETRY_SECS`] does not try again, so a provider that is
+    /// down cannot keep every start waiting for a timeout.
+    failed: Option<i64>,
 }
 
 struct Provider {
@@ -490,15 +496,20 @@ impl<H: Http> OidcService<H> {
         {
             return Ok(loaded.metadata.clone());
         }
+        if cache.failed.is_some_and(|failed| (0..DISCOVERY_RETRY_SECS).contains(&now.saturating_sub(failed))) {
+            return Err(Reason::Provider);
+        }
         let issuer = IssuerUrl::new(provider.issuer.clone()).map_err(|_| Reason::Provider)?;
         match CoreProviderMetadata::discover_async(issuer, &self.http).await {
             Ok(metadata) => {
                 let metadata = Arc::new(metadata);
                 cache.loaded = Some(Loaded { metadata: metadata.clone(), fetched: now });
+                cache.failed = None;
                 Ok(metadata)
             }
             Err(error) => {
                 cache.loaded = None;
+                cache.failed = Some(now);
                 log::event(Level::Warn, "oidc.discovery_failed", &[("kind", discovery_kind(&error))]);
                 Err(Reason::Provider)
             }

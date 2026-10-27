@@ -3,14 +3,23 @@
 //! The library that speaks the protocol (`openidconnect`) asks for one thing from its surroundings: a client that turns a
 //! request into a response. [`HttpError`] and [`HttpFuture`] are the shape of that answer. Every failure is one of a few
 //! fixed words, so that no address, header or body of a provider ends up in an error text.
+//!
+//! [`HttpsClient`] is the production client. It is built with the core's client builder, so the TLS stack is the same as the
+//! desktop's (`rustls` with the `ring` provider and the platform's certificate verifier) and so are the rules that no redirect
+//! is followed, no proxy setting of the environment is used and the address must be `https`. On top of that it sends no
+//! cookie and keeps none (the cookie store of the HTTP crate is not compiled), allows ten seconds for the connection and ten
+//! seconds in total for a request, and reads at most one MiB of a response: a longer answer is cut off as soon as the limit is
+//! passed, and the rest is never buffered. The client secret reader is at the end of the file.
 
 use std::fmt;
 use std::future::Future;
 use std::io::Read;
 use std::path::Path;
 use std::pin::Pin;
+use std::time::Duration;
 
-use openidconnect::HttpResponse;
+use holzwave_core::ai::http::{ClientOptions, ProxyPolicy, build_client};
+use openidconnect::{AsyncHttpClient, HttpRequest, HttpResponse};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::keyfile::{open_private, shown};
@@ -43,6 +52,110 @@ impl std::error::Error for HttpError {}
 
 /// What a client of the flow returns: a boxed future that can move between threads.
 pub type HttpFuture<'c> = Pin<Box<dyn Future<Output = Result<HttpResponse, HttpError>> + Send + 'c>>;
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The client
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// How long a connection to a provider may take, the TCP connect and the TLS handshake together.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a whole request to a provider may take, from the connection to the last byte of the answer.
+pub const TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The most bytes of a response that are read: one MiB.
+pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+
+/// The limits of a client. [`Limits::PRODUCTION`] is what the server uses; a test makes them smaller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// The bound on one connection attempt.
+    pub connect: Duration,
+    /// The bound on a whole request.
+    pub total: Duration,
+    /// The most bytes of an answer.
+    pub max_bytes: usize,
+}
+
+impl Limits {
+    /// Ten seconds to connect, ten seconds in total, one MiB.
+    pub const PRODUCTION: Limits =
+        Limits { connect: CONNECT_TIMEOUT, total: TOTAL_TIMEOUT, max_bytes: MAX_RESPONSE_BYTES };
+}
+
+/// The HTTP client the server reaches identity providers with.
+#[derive(Clone)]
+pub struct HttpsClient {
+    client: reqwest::Client,
+    https_only: bool,
+    limits: Limits,
+}
+
+impl fmt::Debug for HttpsClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("HttpsClient(..)")
+    }
+}
+
+impl HttpsClient {
+    /// The production client: `https` only when `https_only` (production passes `true`), the limits of
+    /// [`Limits::PRODUCTION`]. Building opens no socket.
+    pub fn new(https_only: bool) -> Result<HttpsClient, HttpError> {
+        HttpsClient::with_limits(https_only, Limits::PRODUCTION)
+    }
+
+    /// A client with other limits, for tests.
+    pub fn with_limits(https_only: bool, limits: Limits) -> Result<HttpsClient, HttpError> {
+        let mut options = ClientOptions::new(https_only, ProxyPolicy::Direct);
+        options.connect_timeout = limits.connect;
+        options.read_timeout = limits.total;
+        let client = build_client(&options).map_err(|_| HttpError::Failed)?;
+        Ok(HttpsClient { client, https_only, limits })
+    }
+
+    async fn send(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
+        match request.uri().scheme_str() {
+            Some("https") => {}
+            // Refused before a connection exists.
+            Some("http") if !self.https_only => {}
+            Some("http") => return Err(HttpError::NotHttps),
+            _ => return Err(HttpError::Failed),
+        }
+        let mut request = reqwest::Request::try_from(request).map_err(|_| HttpError::Failed)?;
+        *request.timeout_mut() = Some(self.limits.total);
+        let mut response = self.client.execute(request).await.map_err(classify)?;
+        if response.content_length().is_some_and(|length| length > self.limits.max_bytes as u64) {
+            return Err(HttpError::TooLarge);
+        }
+        let mut body = Vec::new();
+        // One chunk at a time: the limit is checked before a chunk is kept, and dropping the response closes the connection.
+        while let Some(chunk) = response.chunk().await.map_err(classify)? {
+            if body.len().saturating_add(chunk.len()) > self.limits.max_bytes {
+                return Err(HttpError::TooLarge);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let mut answer = openidconnect::http::Response::builder().status(response.status());
+        if let Some(headers) = answer.headers_mut() {
+            *headers = response.headers().clone();
+        }
+        answer.body(body).map_err(|_| HttpError::Failed)
+    }
+}
+
+/// The word for a failed request. Nothing of the error text is kept: it can hold the address.
+fn classify(error: reqwest::Error) -> HttpError {
+    if error.is_timeout() { HttpError::TimedOut } else { HttpError::Failed }
+}
+
+impl<'c> AsyncHttpClient<'c> for HttpsClient {
+    type Error = HttpError;
+    type Future = HttpFuture<'c>;
+
+    fn call(&'c self, request: HttpRequest) -> Self::Future {
+        Box::pin(self.send(request))
+    }
+}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The client secret
