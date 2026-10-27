@@ -608,6 +608,211 @@ fn copy_selection_answers_false_whatever_is_selected_and_touches_no_clipboard() 
     assert!(matches!(world.call("copy_selection", r#"{"pane":"x"}"#), Outcome::Err(_)), "the arguments are still read");
 }
 
+// ---- guards over every row of the table -----------------------------------------------------------------------------
+//
+// These read `COMMANDS`, so a row that a later change adds is held to them the moment it is in the table.
+
+/// The rows the browser build answers with the one sentence.
+fn unavailable_rows() -> Vec<&'static Command> {
+    COMMANDS.iter().filter(|row| row.web == Web::Unavailable).collect()
+}
+
+/// A value of the right shape for an argument type, as JSON text, or `None` for a type nobody wrote a sample for. A new
+/// type in the table fails `every_argument_type_has_a_sample` until it has one.
+fn sample(ty: &str) -> Option<&'static str> {
+    let ty: String = ty.chars().filter(|c| !c.is_whitespace()).collect();
+    if ty.starts_with("Option<") {
+        return Some("null");
+    }
+    Some(match ty.as_str() {
+        "PaneId" | "SplitId" | "u32" | "usize" | "i32" => "1",
+        "f32" | "f64" => "0.5",
+        "bool" => "false",
+        "String" => r#""x""#,
+        "Edge" => r#""left""#,
+        "DropKind" => r#""pane""#,
+        "EditActionMsg" => r#""word_back""#,
+        "MouseActionMsg" => r#""press""#,
+        "MouseButtonMsg" => r#""left""#,
+        "SelectOpMsg" | "SearchOpMsg" => r#"{"kind":"clear"}"#,
+        "CopyOpMsg" => r#"{"kind":"enter"}"#,
+        _ => return None,
+    })
+}
+
+/// The argument object of `row` with a valid sample for every argument.
+fn sample_args(row: &Command) -> String {
+    let fields: Vec<String> = row
+        .args
+        .iter()
+        .map(|arg| format!("{}:{}", json_string(arg.name), sample(arg.ty).unwrap_or_else(|| panic!("no sample for {}", arg.ty))))
+        .collect();
+    format!("{{{}}}", fields.join(","))
+}
+
+/// What a core shows of its layout besides the revision number, to see that nothing changed.
+fn layout_state(world: &World) -> (Vec<(u64, String)>, usize, usize, Vec<String>) {
+    let view = world.core.view_in("main").expect("the window main exists");
+    (
+        view.panes.iter().map(|(pane, rect)| (*pane, format!("{rect:?}"))).collect(),
+        view.tabs.len(),
+        view.windows,
+        view.workspaces.iter().map(|w| w.name.clone()).collect(),
+    )
+}
+
+#[test]
+fn every_argument_type_has_a_sample() {
+    for row in COMMANDS {
+        for arg in row.args {
+            assert!(sample(arg.ty).is_some(), "{}.{} has the type {}, which has no sample in this test", row.name, arg.name, arg.ty);
+        }
+    }
+}
+
+#[test]
+fn table_caps_follow_the_limits() {
+    for row in COMMANDS {
+        let want = match row.name {
+            "key" | "mouse" | "wheel" | "resize" => 4 * 1024,
+            "paste" => 8 * 1024 * 1024,
+            _ => 64 * 1024,
+        };
+        assert_eq!(row.cap, want, "{}", row.name);
+        assert!(row.cap > 0 && row.cap <= 8 * 1024 * 1024, "{}", row.name);
+        assert!(row.admits(row.cap) && !row.admits(row.cap + 1), "{}", row.name);
+    }
+}
+
+#[test]
+fn table_rows_refuse_unknown_fields() {
+    let world = World::new("unknown-all");
+    let mut checked = 0;
+    for row in COMMANDS.iter().filter(|row| row.web != Web::Unavailable) {
+        let (events, state) = (world.events(), layout_state(&world));
+        // The extra field alone, and the extra field after a valid sample of every argument: the second one shows that
+        // the field is what is refused and that the sample is well formed.
+        let alone = r#"{"zz_extra":1}"#.to_owned();
+        let sample = sample_args(row);
+        let after = format!("{},\"zz_extra\":1}}", &sample[..sample.len() - 1]);
+        let after = if row.args.is_empty() { alone.clone() } else { after };
+        for args in [alone, after] {
+            let text = error_text(&world.call(row.name, &args));
+            assert!(text.contains("zz_extra") && text.contains("unknown field"), "{}: {text}", row.name);
+            assert!(text.chars().count() <= ERROR_TEXT_LIMIT, "{}", row.name);
+        }
+        assert_eq!(world.events(), events, "{}: a refused call changed something", row.name);
+        assert_eq!(layout_state(&world), state, "{}: a refused call changed the layout", row.name);
+        assert_eq!(world.opened(), Vec::<String>::new(), "{}: a refused call made a window", row.name);
+        checked += 1;
+    }
+    assert!(checked >= 37, "only {checked} rows were checked");
+}
+
+#[test]
+fn table_rows_refuse_missing_fields() {
+    let world = World::new("missing-all");
+    let mut checked = 0;
+    for row in COMMANDS.iter().filter(|row| row.web != Web::Unavailable) {
+        let first_required = row.args.iter().find(|arg| !arg.ty.replace(' ', "").starts_with("Option<"));
+        let Some(first) = first_required else { continue };
+        let text = error_text(&world.call(row.name, "{}"));
+        assert!(
+            text.contains("missing field") && text.contains(first.name),
+            "{}: `{{}}` should be refused for the missing {}: {text}",
+            row.name,
+            first.name
+        );
+        checked += 1;
+    }
+    assert!(checked >= 30, "only {checked} rows were checked");
+}
+
+#[test]
+fn table_rows_accept_an_object_with_only_their_optional_fields() {
+    let world = World::new("optional-only");
+    for row in COMMANDS.iter().filter(|row| row.web != Web::Unavailable) {
+        if row.args.iter().all(|arg| arg.ty.replace(' ', "").starts_with("Option<")) && !row.args.is_empty() {
+            let outcome = world.call(row.name, "{}");
+            let text = match &outcome {
+                Outcome::Err(json) => json.clone(),
+                _ => String::new(),
+            };
+            assert!(!text.contains("missing field"), "{}: an optional field is required: {text}", row.name);
+        }
+    }
+}
+
+#[test]
+fn error_text_is_bounded() {
+    let world = World::new("bounded-all");
+    let long = "A".repeat(100 * 1024);
+    // A refusal is bounded and never holds the value. (A long value that is a valid value of a text argument, such as a
+    // name, is no refusal: the command takes it and the core cuts it.)
+    let check = |row: &Command, outcome: Outcome, what: &str| {
+        let Outcome::Err(json) = outcome else { return };
+        let text: String = serde_json::from_str(&json).unwrap_or_else(|_| panic!("{} {what}: {json:.100}", row.name));
+        assert!(text.chars().count() <= ERROR_TEXT_LIMIT, "{} {what}: {} characters", row.name, text.chars().count());
+        // The name of a field that is wrong is named, cut; a value is never repeated.
+        assert!(
+            what == "as a field name" || !text.contains("AAAAAAAAAA"),
+            "{} {what}: the long value is in the error: {text}",
+            row.name
+        );
+    };
+    let mut refused_values = 0;
+    for row in COMMANDS.iter().filter(|row| row.web != Web::Unavailable) {
+        check(row, world.call(row.name, &format!("{{\"{long}\":1}}")), "as a field name");
+        if let Some(first) = row.args.first() {
+            let outcome = world.call(row.name, &format!("{{\"{}\":\"{long}\"}}", first.name));
+            refused_values += usize::from(matches!(outcome, Outcome::Err(_)));
+            check(row, outcome, "as a value");
+        }
+    }
+    assert!(refused_values >= 30, "only {refused_values} rows refused the long value");
+}
+
+#[test]
+fn unavailable_rows_do_not_leak() {
+    let world = World::new("leak");
+    split_first(&world);
+    let named: BTreeSet<&str> = UNAVAILABLE.iter().map(|(name, _)| *name).collect();
+    let rows: BTreeSet<&str> = unavailable_rows().iter().map(|row| row.name).collect();
+    assert_eq!(rows, named, "the table and the list of this test name different unavailable rows");
+
+    let pane = other_pane(&world);
+    let (events, state) = (world.events(), layout_state(&world));
+    for row in unavailable_rows() {
+        let right_shape = sample_args(row);
+        let other_values = right_shape.replace(":1", &format!(":{pane}"));
+        let expected = Outcome::Err(json_string(NOT_IN_BROWSER));
+        for args in [right_shape, other_values, "{}".to_owned()] {
+            assert_eq!(world.call(row.name, &args), expected, "{} {args}", row.name);
+        }
+        assert_eq!(row.error, Some("String"), "{}: it answers the error value as a string", row.name);
+    }
+    assert_eq!(world.events(), events);
+    assert_eq!(layout_state(&world), state);
+    assert_eq!(world.opened(), Vec::<String>::new());
+}
+
+#[test]
+fn a_window_row_passes_the_label_it_is_given_and_a_pane_row_ignores_it() {
+    let world = World::new("scope");
+    assert_eq!(world.call_in("nope", "get_layout", "{}"), Outcome::Err(json_string("no such window")));
+    let own = world.core.selection_text(4711).expect_err("no such pane");
+    for label in ["main", "window-7", "nope"] {
+        assert_eq!(world.call_in(label, "selection_text", r#"{"pane":4711}"#), Outcome::Err(json_string(&own)), "{label}");
+    }
+    let windows: Vec<&str> = COMMANDS.iter().filter(|row| row.scope == Scope::Window).map(|row| row.name).collect();
+    for name in ["get_layout", "split", "new_tab", "close_pane", "move_pane", "window_ready", "tear_off_pane"] {
+        assert!(windows.contains(&name), "{name} works on the layout of the calling window");
+    }
+    for name in ["key", "paste", "selection_text", "mouse", "start_pane", "copy_selection"] {
+        assert!(!windows.contains(&name), "{name} names a pane and needs no window");
+    }
+}
+
 // ---- the recorded surface -----------------------------------------------------------------------------------------------
 
 const SURFACE: &str = include_str!("fixtures/desktop-commands.txt");
