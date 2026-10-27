@@ -7,8 +7,9 @@
 mod scratch;
 
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use holzwave_server::limits;
 use holzwave_server::proxy::{Admission, Mode, client_address};
@@ -59,7 +60,7 @@ fn tls13_client(roots: &[&Pair]) -> ClientConfig {
     config
 }
 
-/// A server on 127.0.0.1 that admits, handshakes, writes `hello` and closes, for every connection.
+/// A server on 127.0.0.1 that admits, handshakes, writes `hello` and echoes, for every connection.
 struct Server {
     addr: SocketAddr,
     admission: Admission,
@@ -72,7 +73,7 @@ impl Drop for Server {
     }
 }
 
-async fn serve(resolver: Arc<FileResolver>, handshake_timeout: std::time::Duration) -> Server {
+async fn serve(resolver: Arc<FileResolver>, handshake_timeout: Duration) -> Server {
     let config = tls::server_config(resolver, &tls::ALPN).expect("server configuration");
     let acceptor = tls::acceptor(Arc::new(config));
     let admission = Admission::with_defaults(Mode::Files);
@@ -88,6 +89,13 @@ async fn serve(resolver: Arc<FileResolver>, handshake_timeout: std::time::Durati
                 let _permit = permit;
                 if let Ok(mut tls) = tls::accept_tls(&acceptor, stream, handshake_timeout).await {
                     let _ = tls.write_all(b"hello").await;
+                    // Then echo until the client closes, so a connection can stay open across a reload.
+                    let mut byte = [0u8; 1];
+                    while matches!(tls.read(&mut byte).await, Ok(1)) {
+                        if tls.write_all(&byte).await.is_err() {
+                            break;
+                        }
+                    }
                     let _ = tls.shutdown().await;
                 }
             });
@@ -114,9 +122,9 @@ async fn handshake_from_files_is_tls13_with_h2_and_serves_hello() {
     let server = serve(resolver, limits::HANDSHAKE_TIMEOUT).await;
 
     let mut stream = connect(&server, tls13_client(&[&pair])).await.expect("handshake");
-    let mut text = String::new();
-    stream.read_to_string(&mut text).await.expect("read hello");
-    assert_eq!(text, "hello");
+    let mut hello = [0u8; 5];
+    stream.read_exact(&mut hello).await.expect("read hello");
+    assert_eq!(&hello, b"hello");
 
     let (_, conn) = stream.get_ref();
     assert_eq!(conn.protocol_version(), Some(ProtocolVersion::TLSv1_3));
@@ -143,7 +151,7 @@ async fn handshake_from_files_is_tls13_with_h2_and_serves_hello() {
         if server.admission.open_connections() == 0 {
             return;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("the slots of finished connections were not given back");
 }
@@ -162,4 +170,459 @@ fn the_client_address_outside_the_proxy_mode_is_the_peer() {
     for mode in [Mode::Files, Mode::Acme] {
         assert_eq!(client_address(mode, peer, &["198.51.100.7"], &["https"]), Ok(peer));
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The refusal matrix
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The first line of every key file in the matrix: a marker that no sentence may repeat.
+const MARKER: &str = "KEYMARKER-must-never-be-printed";
+
+fn key_text(pair: &Pair) -> String {
+    format!("# {MARKER}\n{}", pair.key_pem)
+}
+
+/// Loads the pair and returns the sentence of the refusal, after checking that it holds no key text.
+fn refusal(cert: &Path, key: &Path, key_file_text: &str) -> String {
+    let error = tls::load_certified_key(cert, key).expect_err("the pair must be refused");
+    let sentence = error.sentence().to_owned();
+    println!("Matrix: {sentence}");
+    assert!(!sentence.contains(MARKER), "{sentence}");
+    assert!(!format!("{error:?}").contains(MARKER));
+    for line in key_file_text.lines().filter(|l| l.len() > 16) {
+        assert!(!sentence.contains(line), "a line of the key file is in the sentence: {sentence}");
+    }
+    assert!(!sentence.contains('\n'), "one sentence on one line");
+    sentence
+}
+
+struct Case {
+    dir: Scratch,
+    pair: Pair,
+}
+
+impl Case {
+    fn new() -> Case {
+        Case { dir: Scratch::new("tls-matrix"), pair: generate(NAME) }
+    }
+
+    fn cert(&self) -> PathBuf {
+        self.dir.write_file("cert.pem", self.pair.cert_pem.as_bytes(), 0o644)
+    }
+
+    fn key(&self) -> PathBuf {
+        self.dir.write_file("key.pem", key_text(&self.pair).as_bytes(), 0o600)
+    }
+}
+
+#[test]
+fn a_key_file_with_a_leading_comment_loads() {
+    let case = Case::new();
+    let (cert, key) = (case.cert(), case.key());
+    tls::load_certified_key(&cert, &key).expect("a comment before the PEM block is fine");
+}
+
+#[test]
+fn a_missing_certificate_file_is_refused() {
+    let case = Case::new();
+    let key = case.key();
+    let sentence = refusal(&case.dir.join("absent.pem"), &key, &key_text(&case.pair));
+    assert!(sentence.contains("does not exist") && sentence.contains("absent.pem"), "{sentence}");
+}
+
+#[test]
+fn a_missing_key_file_is_refused() {
+    let case = Case::new();
+    let cert = case.cert();
+    let sentence = refusal(&cert, &case.dir.join("absent.key"), "");
+    assert!(sentence.contains("does not exist") && sentence.contains("absent.key"), "{sentence}");
+}
+
+#[test]
+fn an_empty_certificate_file_is_refused() {
+    let case = Case::new();
+    let cert = case.dir.write_file("cert.pem", b"", 0o644);
+    let sentence = refusal(&cert, &case.key(), &key_text(&case.pair));
+    assert!(sentence.contains("holds no certificate"), "{sentence}");
+}
+
+#[test]
+fn a_certificate_file_that_holds_a_key_is_refused() {
+    let case = Case::new();
+    let cert = case.dir.write_file("cert.pem", case.pair.key_pem.as_bytes(), 0o644);
+    let sentence = refusal(&cert, &case.key(), &key_text(&case.pair));
+    assert!(sentence.contains("holds no certificate"), "{sentence}");
+}
+
+#[test]
+fn a_chain_of_nine_certificates_is_refused_and_eight_are_accepted() {
+    let case = Case::new();
+    let key = case.key();
+    let eight = case.pair.cert_pem.repeat(8);
+    let cert = case.dir.write_file("eight.pem", eight.as_bytes(), 0o644);
+    tls::load_certified_key(&cert, &key).expect("eight certificates are the limit");
+    let nine = case.pair.cert_pem.repeat(9);
+    let cert = case.dir.write_file("nine.pem", nine.as_bytes(), 0o644);
+    let sentence = refusal(&cert, &key, &key_text(&case.pair));
+    assert!(sentence.contains("more than 8 certificates"), "{sentence}");
+}
+
+#[test]
+fn a_key_file_with_two_keys_is_refused() {
+    let case = Case::new();
+    let cert = case.cert();
+    let other = generate(NAME);
+    let text = format!("{}{}", case.pair.key_pem, other.key_pem);
+    let key = case.dir.write_file("key.pem", format!("# {MARKER}\n{text}").as_bytes(), 0o600);
+    let sentence = refusal(&cert, &key, &text);
+    assert!(sentence.contains("more than one private key"), "{sentence}");
+}
+
+#[test]
+fn a_key_file_with_no_key_is_refused() {
+    let case = Case::new();
+    let cert = case.cert();
+    let key = case.dir.write_file("key.pem", format!("# {MARKER}\n{}", case.pair.cert_pem).as_bytes(), 0o600);
+    let sentence = refusal(&cert, &key, &case.pair.cert_pem);
+    assert!(sentence.contains("holds no private key"), "{sentence}");
+}
+
+#[test]
+fn an_encrypted_key_is_refused() {
+    let case = Case::new();
+    let cert = case.cert();
+    let text = format!(
+        "# {MARKER}\n-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIFHDBOBgkqhkiG9w0BBQ0wQTApBgkqhkiG9w0BBQwwHAQIabcdefghijklmn\n-----END ENCRYPTED PRIVATE KEY-----\n"
+    );
+    let key = case.dir.write_file("key.pem", text.as_bytes(), 0o600);
+    let sentence = refusal(&cert, &key, &text);
+    assert!(sentence.contains("is encrypted"), "{sentence}");
+
+    let legacy = "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,00112233445566778899AABBCCDDEEFF\n\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n-----END RSA PRIVATE KEY-----\n";
+    let key = case.dir.write_file("legacy.pem", legacy.as_bytes(), 0o600);
+    let sentence = refusal(&cert, &key, legacy);
+    assert!(sentence.contains("is encrypted"), "{sentence}");
+}
+
+#[test]
+fn a_key_type_the_provider_does_not_support_is_refused() {
+    let case = Case::new();
+    let cert = case.cert();
+    // A well-formed PKCS #8 block whose content is not a key of any supported type.
+    let text = format!("# {MARKER}\n-----BEGIN PRIVATE KEY-----\nMAMCAQA=\n-----END PRIVATE KEY-----\n");
+    let key = case.dir.write_file("key.pem", text.as_bytes(), 0o600);
+    let sentence = refusal(&cert, &key, &text);
+    assert!(sentence.contains("does not support"), "{sentence}");
+}
+
+#[test]
+fn a_key_for_another_certificate_is_refused() {
+    let case = Case::new();
+    let cert = case.cert();
+    let other = generate(NAME);
+    let text = key_text(&other);
+    let key = case.dir.write_file("key.pem", text.as_bytes(), 0o600);
+    let sentence = refusal(&cert, &key, &text);
+    assert!(sentence.contains("does not match the first certificate"), "{sentence}");
+}
+
+#[test]
+fn a_key_file_with_a_loose_mode_is_refused() {
+    let case = Case::new();
+    let cert = case.cert();
+    let text = key_text(&case.pair);
+    let key = case.dir.write_file("key.pem", text.as_bytes(), 0o644);
+    let sentence = refusal(&cert, &key, &text);
+    assert!(sentence.contains("too open") && sentence.contains("0644"), "{sentence}");
+}
+
+#[test]
+fn a_key_file_that_is_a_link_is_refused() {
+    let case = Case::new();
+    let cert = case.cert();
+    let real = case.key();
+    let link = case.dir.join("link.pem");
+    std::os::unix::fs::symlink(&real, &link).expect("make a link");
+    let sentence = refusal(&cert, &link, &key_text(&case.pair));
+    assert!(sentence.contains("is a link"), "{sentence}");
+}
+
+#[test]
+fn a_directory_instead_of_a_key_file_or_certificate_file_is_refused() {
+    let case = Case::new();
+    let cert = case.cert();
+    let directory = case.dir.join("dir");
+    std::fs::create_dir(&directory).expect("make a directory");
+    let sentence = refusal(&cert, &directory, "");
+    assert!(sentence.contains("not a regular file"), "{sentence}");
+    let key = case.key();
+    let sentence = refusal(&directory, &key, &key_text(&case.pair));
+    assert!(sentence.contains("not a regular file"), "{sentence}");
+}
+
+#[test]
+fn a_file_of_300_kib_is_refused_before_it_is_parsed() {
+    let case = Case::new();
+    let cert = case.cert();
+    let big = format!("# {MARKER}\n{}", "A".repeat(300 * 1024));
+    let key = case.dir.write_file("big.key", big.as_bytes(), 0o600);
+    let sentence = refusal(&cert, &key, "");
+    assert!(sentence.contains("larger than 256 KiB"), "{sentence}");
+
+    let key = case.key();
+    let cert = case.dir.write_file("big.pem", "A".repeat(300 * 1024).as_bytes(), 0o644);
+    let sentence = refusal(&cert, &key, &key_text(&case.pair));
+    assert!(sentence.contains("larger than 256 KiB"), "{sentence}");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The protocol
+// ---------------------------------------------------------------------------------------------------------------------
+
+async fn server_for(dir: &Scratch, pair: &Pair, handshake_timeout: Duration) -> (Server, Arc<FileResolver>) {
+    let (cert, key) = write_pair(dir, pair);
+    let resolver = Arc::new(FileResolver::new(&cert, &key).expect("load the pair"));
+    (serve(resolver.clone(), handshake_timeout).await, resolver)
+}
+
+async fn wait_for_free_slots(server: &Server) {
+    for _ in 0..200 {
+        if server.admission.open_connections() == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{} slots are still held", server.admission.open_connections());
+}
+
+#[tokio::test]
+async fn a_client_limited_to_an_older_protocol_version_fails() {
+    let dir = Scratch::new("tls-old");
+    let pair = generate(NAME);
+    let (server, _) = server_for(&dir, &pair, limits::HANDSHAKE_TIMEOUT).await;
+    let old = client_config(&[&rustls::version::TLS12], &[&pair]);
+    let error = connect(&server, old).await.expect_err("a handshake limited to the older version must fail");
+    println!("older client: {error}");
+    wait_for_free_slots(&server).await;
+}
+
+#[tokio::test]
+async fn a_client_with_no_suite_in_common_fails() {
+    let dir = Scratch::new("tls-suites");
+    let pair = generate(NAME);
+    let (server, _) = server_for(&dir, &pair, limits::HANDSHAKE_TIMEOUT).await;
+    // The client offers both versions but only the suites of the older one, and the server has none of the older ones.
+    let mut provider = rustls::crypto::ring::default_provider();
+    provider.cipher_suites.retain(|suite| matches!(suite, rustls::SupportedCipherSuite::Tls12(_)));
+    assert!(!provider.cipher_suites.is_empty());
+    let mut store = RootCertStore::empty();
+    store.add(pair.der.clone()).expect("root");
+    let config = ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&[&rustls::version::TLS12, &rustls::version::TLS13])
+        .expect("client versions")
+        .with_root_certificates(store)
+        .with_no_client_auth();
+    connect(&server, config).await.expect_err("no common suite must fail");
+    wait_for_free_slots(&server).await;
+}
+
+#[tokio::test]
+async fn plain_http_gets_no_http_response_and_serves_nothing() {
+    let dir = Scratch::new("tls-plain");
+    let pair = generate(NAME);
+    let (server, _) = server_for(&dir, &pair, limits::HANDSHAKE_TIMEOUT).await;
+
+    let mut tcp = TcpStream::connect(server.addr).await.expect("connect");
+    tcp.write_all(format!("GET / HTTP/1.1\r\nHost: {NAME}\r\n\r\n").as_bytes()).await.expect("send");
+    let mut back = Vec::new();
+    let read = tokio::time::timeout(Duration::from_secs(5), tcp.read_to_end(&mut back)).await;
+    assert!(read.is_ok(), "the connection must be closed, not held open");
+    println!("Plain HTTP: {} bytes back: {:02x?}", back.len(), &back[..back.len().min(8)]);
+    assert!(!back.starts_with(b"HTTP/"), "an HTTP response came back");
+    assert!(!back.windows(5).any(|w| w == b"hello"), "the application was reached");
+    // A TLS alert record starts with the content type 21; nothing else may come back.
+    assert!(back.is_empty() || back[0] == 0x15, "{back:02x?}");
+    wait_for_free_slots(&server).await;
+}
+
+#[test]
+fn early_data_is_off_and_the_protocol_is_the_newer_one_only() {
+    let dir = Scratch::new("tls-config");
+    let pair = generate(NAME);
+    let (cert, key) = write_pair(&dir, &pair);
+    let resolver = Arc::new(FileResolver::new(&cert, &key).expect("load the pair"));
+    let config = tls::server_config(resolver, &tls::ALPN).expect("configuration");
+    assert_eq!(config.max_early_data_size, 0);
+    assert_eq!(config.alpn_protocols, vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
+    assert!(!config.ignore_client_order);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Reload
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Replaces both files the way a renewal does: a new file renamed over the old one.
+fn replace(dir: &Scratch, cert: &str, key: &str) {
+    for (name, contents, mode) in [("cert.pem", cert, 0o644), ("key.pem", key, 0o600)] {
+        let temp = dir.write_file(&format!("{name}.new"), contents.as_bytes(), mode);
+        std::fs::rename(&temp, dir.join(name)).expect("rename over the old file");
+    }
+}
+
+fn fingerprint(stream: &tokio_rustls::client::TlsStream<TcpStream>) -> String {
+    use sha2::{Digest, Sha256};
+    let chain = stream.get_ref().1.peer_certificates().expect("the server sent a certificate");
+    Sha256::digest(chain[0].as_ref()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[tokio::test]
+async fn a_renewed_pair_is_served_to_the_next_handshake_and_an_open_connection_is_unaffected() {
+    let dir = Scratch::new("tls-reload");
+    let old = generate(NAME);
+    let new = generate(NAME);
+    let (server, resolver) = server_for(&dir, &old, limits::HANDSHAKE_TIMEOUT).await;
+    let roots = [&old, &new];
+
+    let mut open = connect(&server, tls13_client(&roots)).await.expect("handshake");
+    let before = fingerprint(&open);
+    assert_eq!(before, resolver.fingerprint());
+
+    replace(&dir, &new.cert_pem, &new.key_pem);
+    assert_eq!(resolver.reload(), Ok(tls::Reload::Changed));
+
+    let fresh = connect(&server, tls13_client(&roots)).await.expect("handshake after the reload");
+    let after = fingerprint(&fresh);
+    println!("Reload: {} -> {}", &before[..8], &after[..8]);
+    assert_ne!(before, after);
+    assert_eq!(after, resolver.fingerprint());
+
+    // The connection opened before the reload still works.
+    let mut hello = [0u8; 5];
+    open.read_exact(&mut hello).await.expect("hello");
+    open.write_all(b"x").await.expect("write");
+    let mut echo = [0u8; 1];
+    open.read_exact(&mut echo).await.expect("echo");
+    assert_eq!(&echo, b"x");
+}
+
+#[test]
+fn a_garbage_key_leaves_the_old_pair_in_place() {
+    let dir = Scratch::new("tls-reload-garbage");
+    let old = generate(NAME);
+    let new = generate(NAME);
+    let (cert, key) = write_pair(&dir, &old);
+    let resolver = FileResolver::new(&cert, &key).expect("load");
+    let before = resolver.fingerprint();
+    replace(&dir, &new.cert_pem, "this is not a key\n");
+    let error = resolver.reload().expect_err("garbage must be refused");
+    println!("Reload refused: {error}");
+    assert!(error.sentence().contains("holds no private key"), "{error}");
+    assert_eq!(resolver.fingerprint(), before);
+}
+
+#[test]
+fn a_mismatching_pair_leaves_the_old_pair_in_place() {
+    let dir = Scratch::new("tls-reload-mismatch");
+    let old = generate(NAME);
+    let (cert, key) = write_pair(&dir, &old);
+    let resolver = FileResolver::new(&cert, &key).expect("load");
+    let before = resolver.fingerprint();
+    let one = generate(NAME);
+    let two = generate(NAME);
+    replace(&dir, &one.cert_pem, &two.key_pem);
+    let error = resolver.reload().expect_err("a mismatch must be refused");
+    assert!(error.sentence().contains("does not match"), "{error}");
+    assert_eq!(resolver.fingerprint(), before);
+    // The pair is repaired by a second renewal and is then served.
+    replace(&dir, &one.cert_pem, &one.key_pem);
+    assert_eq!(resolver.reload(), Ok(tls::Reload::Changed));
+    assert_ne!(resolver.fingerprint(), before);
+}
+
+#[test]
+fn an_unchanged_pair_reports_no_change() {
+    let dir = Scratch::new("tls-reload-same");
+    let pair = generate(NAME);
+    let (cert, key) = write_pair(&dir, &pair);
+    let resolver = FileResolver::new(&cert, &key).expect("load");
+    assert_eq!(resolver.reload(), Ok(tls::Reload::Unchanged));
+    // The same content in new files (new inodes) is still no change.
+    replace(&dir, &pair.cert_pem, &pair.key_pem);
+    assert_eq!(resolver.reload(), Ok(tls::Reload::Unchanged));
+    // And poll sees nothing to do when the files stay as they are.
+    assert!(resolver.poll().is_none());
+}
+
+#[tokio::test]
+async fn the_reloader_serves_a_replaced_pair_within_a_second_and_stops_when_dropped() {
+    let dir = Scratch::new("tls-reloader");
+    let old = generate(NAME);
+    let new = generate(NAME);
+    let (cert, key) = write_pair(&dir, &old);
+    let resolver = Arc::new(FileResolver::new(&cert, &key).expect("load"));
+    let before = resolver.fingerprint();
+
+    let reloader = tls::spawn_reloader(resolver.clone(), Duration::from_millis(50));
+    replace(&dir, &new.cert_pem, &new.key_pem);
+    let started = Instant::now();
+    while resolver.fingerprint() == before {
+        assert!(started.elapsed() < Duration::from_secs(1), "the new pair was not served within a second");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let served = resolver.fingerprint();
+
+    drop(reloader);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let third = generate(NAME);
+    replace(&dir, &third.cert_pem, &third.key_pem);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(resolver.fingerprint(), served, "a dropped reloader must not reload");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The bounded handshake
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_client_that_sends_nothing_is_closed_at_the_bound() {
+    let dir = Scratch::new("tls-silent");
+    let pair = generate(NAME);
+    let (server, _) = server_for(&dir, &pair, Duration::from_millis(300)).await;
+
+    let mut tcp = TcpStream::connect(server.addr).await.expect("connect");
+    let started = Instant::now();
+    let mut byte = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(5), tcp.read(&mut byte)).await.expect("closed in time");
+    assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+    let elapsed = started.elapsed();
+    assert!(elapsed >= Duration::from_millis(250) && elapsed < Duration::from_secs(2), "{elapsed:?}");
+    wait_for_free_slots(&server).await;
+}
+
+#[tokio::test]
+async fn a_client_that_sends_the_hello_one_byte_at_a_time_is_closed_at_the_same_bound() {
+    let dir = Scratch::new("tls-trickle");
+    let pair = generate(NAME);
+    let (server, _) = server_for(&dir, &pair, Duration::from_millis(300)).await;
+
+    let tcp = TcpStream::connect(server.addr).await.expect("connect");
+    let (mut reader, mut writer) = tcp.into_split();
+    let started = Instant::now();
+    let drip = tokio::spawn(async move {
+        // The header of a handshake record that announces 200 bytes, then one byte every 50 ms.
+        for byte in [0x16u8, 0x03, 0x01, 0x00, 0xc8].into_iter().chain(std::iter::repeat_n(0x01u8, 200)) {
+            if writer.write_all(&[byte]).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+    let mut sink = Vec::new();
+    let closed = tokio::time::timeout(Duration::from_secs(5), reader.read_to_end(&mut sink)).await;
+    assert!(closed.is_ok(), "the server did not close the connection");
+    let elapsed = started.elapsed();
+    assert!(elapsed >= Duration::from_millis(250) && elapsed < Duration::from_secs(2), "{elapsed:?}");
+    drip.abort();
+    wait_for_free_slots(&server).await;
 }
