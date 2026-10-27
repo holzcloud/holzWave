@@ -53,7 +53,8 @@
 .dlg.settings .web-tb:hover { color: var(--hw-ink); }
 .dlg.settings :is(.web-btn, .web-tb):focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 1px; }
 .dlg.settings .web-note { margin: .833rem 0 0; color: var(--hw-dim); overflow-wrap: anywhere; }
-.dlg.settings a.web-tb { color: var(--hw-ink-2); }
+.dlg.settings a.web-btn { text-decoration: none; }
+.dlg.settings a.web-solid { color: var(--hw-on-accent); }
 
 @media (forced-colors: active) {
   .dlg.settings .web-input, .dlg.settings .web-btn { border-color: CanvasText; }

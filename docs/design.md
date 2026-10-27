@@ -2253,14 +2253,17 @@ without the extension, unlocks it with their passphrase. Until then the window w
 the status line shows the mark `secrets locked` with a text button `Unlock` (6.30).
 
 The dialog is the box of the Settings over the window with the backdrop of the other dialogs, 24 rem wide, and is a real
-modal (`role="dialog"`, `aria-modal`, the focus stays inside). It opens by itself once when the window loads in the locked state, and
-again when the person presses `Unlock` or when a command that needs a saved secret is answered with `locked`. Top to bottom:
+modal (`role="dialog"`, `aria-modal`, the focus stays inside). It opens when the person presses `Unlock` in the status line or
+chooses `Unlock…` in the palette (the entry exists only while the store is locked). It does not open by itself, neither when the
+window loads locked nor when a command is refused for a locked store: the mark is the way, and the keyboard stays with the terminal. Top to bottom:
 the title `Your saved passwords are locked`; the lead `Enter your passphrase to use your saved passwords and keys.`; the field
 `Passphrase`; the error line; the buttons `Not now` (hairline) and `Unlock` (solid); the text button `Use recovery code`; and,
 in the dim style, `If you lost both, an admin can reset your secrets. That deletes your saved passwords and keys, and keeps
 your account, layout and history.` The text button swaps the field for `Recovery code` (the lead changes with it) and
 becomes `Use passphrase`. A wrong passphrase and a wrong recovery code say the same: `That did not unlock your secrets.` A
-throttled try says the sentence of rule 2. `Not now` and `Escape` close the dialog and leave the mark in the status line.
+throttled try says the sentence of rule 2; a server that does not answer says `Could not reach the server. Try again.` `Not now` and `Escape` close the dialog and leave the mark in the status line;
+when the store is unlocked somewhere else (another browser tab of the person) the open dialog closes and the mark goes.
+Closing the dialog gives the keyboard back to the terminal.
 
 **States of the setup, the invitation and the unlock.**
 
@@ -2354,8 +2357,15 @@ mono in the sentence `Signed in as NAME. Enter your password to make this change
 (an administrator sees the same box for an admin action). Then the field `Password` (`current-password`, focused), the buttons `Cancel` and `Confirm`
 (solid) and a text button `Use a passkey` when the account has a passkey. An account with neither a password nor a passkey has
 `Sign in again with NAME` (the provider's name) in place of the field and `Confirm`; it leaves the page like a sign-in. A
-wrong password says the sentence of 6.28 rule 1. `Escape` is `Cancel`; the focus stays inside the layer and returns to the
-button that opened it. A confirmation does not extend the session.
+wrong password says the sentence of 6.28 rule 1 (a throttled one the sentence of rule 2). `Escape` is `Cancel`; the focus stays inside the layer and returns to the
+button that opened it. A confirmation does not extend the session. The layer asks once: after a confirmation the change is sent again one time,
+and a second refusal is the change's own, with no second layer. Two changes that need it at the same moment share one layer. The words follow the
+ways the account has: with a password and a passkey the layer is the one above (`Use a passkey` is the text button, last in the order of the keys:
+`Password`, `Cancel`, `Confirm`, `Use a passkey`); with a passkey and no password the sentence is `Signed in as NAME. Use your passkey to make this
+change.`, there is no field and the solid button is `Use a passkey`; with a provider only the sentence is `Signed in as NAME. Sign in again to make this
+change.` and the link `Sign in again with NAME` is the solid button. A prompt of the browser that the person closed says nothing and leaves the layer
+as it was; a browser that fails says the sentence of 6.28 rule 1. An account with none of the three ways says `There is no way to confirm it here. Sign
+out and sign in again.` with `Cancel` only, and a layer that cannot read the account says `Could not reach the server. Try again.` with `Cancel` only.
 
 **People.** The box is 41 rem wide and scrolls inside. The title `People` with the hairline button `Invite` at the right, the
 status line, then a table with the columns `Name`, `Role`, `State`, `Last sign-in` and an actions column, the sentence `This list
@@ -2421,11 +2431,14 @@ panes, and nothing can be torn off.
 | reconnecting | `reconnecting` | dotted ring `◌` (as in 6.8) | one second after the connection to the server was lost; a shorter break draws nothing | warn colour, the ring and the word |
 | offline | `offline` | `!` | the browser reports that it has no network | danger colour, the mark and an underline |
 | session ends | `session ends in 4 min` | quarter circle `◔` | for the last five minutes of the idle time; the minutes count down once a minute, the last is `session ends in 1 min` | warn colour, the glyph and the words |
-| session ended | `session ended` | `!` | the session is over: the sign-in box of 6.28 opens over the window with `Your session ended. Sign in again.`; the panes keep running and are there again after the sign-in | danger colour, the mark and an underline |
+| session ended | `session ended` | `!` | the session is over (the server says so, or closes the connection with the code 4401): a layer opens over the window with the sentence `Your session ended. Sign in again.` and the one button `Sign in`, which has the focus and goes to the sign-in page, whose line says the sentence again; the page never leaves by itself, `Escape` does nothing, the terminal output stays readable behind the layer, the panes keep running and are there again after the sign-in | danger colour, the mark and an underline |
 | secrets locked | `secrets locked` and a text button `Unlock` | a lock glyph, drawn as a small box with a shackle | the saved passwords are locked (6.28); `Unlock` opens the dialog | plain ink; the glyph, the words and the button |
 
 The idle mark is announced when it first appears and again at one minute, not every minute. Any activity of the person ends it. While the
-connection is down the panes show their last screen.
+connection is down the panes show their last screen. When the browser reports that it has no network the mark `offline` takes the place of
+`reconnecting`, and it shows at once. When the server refuses the page (the close code 4403: the address or the host is not the one it serves)
+the mark `offline` stays for good, no layer opens and nothing reconnects. The marks stand in this order: session ended (alone; nothing else
+is shown then), offline or reconnecting, session ends, secrets locked. The status line shows no mark while the page cannot learn its session.
 
 **Upload by drop.** While a file is dragged over a pane that runs a shell, the pane shows a hairline dashed edge (1 px, `--hw-rose`, with
 `--hw-rose-wash` inside) and, centred, a small box with the label `Drop to upload` (uppercase, tracked) over `to` and the upload folder in mono. Rose
