@@ -926,3 +926,185 @@ async fn secrets_never_appear_in_debug_text_or_in_sentences() {
     let decision = rig.manager.decide();
     assert!(!decision.ignored.expect("a sentence").contains("SECRETMARKER"));
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Pebble (a real ACME server), run in containers by `sh scripts/web-container-test.sh acme`
+// ---------------------------------------------------------------------------------------------------------------------
+
+fn env_or_fail(name: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set; run this test with `sh scripts/web-container-test.sh acme`"))
+}
+
+/// One DER element: tag, content and the rest.
+fn der_element(input: &[u8]) -> (u8, &[u8], &[u8]) {
+    let tag = input[0];
+    let (length, header) = if input[1] < 0x80 {
+        (usize::from(input[1]), 2)
+    } else {
+        let count = usize::from(input[1] & 0x7f);
+        (input[2..2 + count].iter().fold(0usize, |a, b| (a << 8) | usize::from(*b)), 2 + count)
+    };
+    (tag, &input[header..header + length], &input[header + length..])
+}
+
+/// The serial number of a certificate, in hex.
+fn serial_hex(cert: &[u8]) -> String {
+    let (_, certificate, _) = der_element(cert);
+    let (_, tbs, _) = der_element(certificate);
+    let (tag, _, after_version) = der_element(tbs);
+    let rest = if tag == 0xa0 { after_version } else { tbs };
+    let (_, serial, _) = der_element(rest);
+    serial.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The text of the issuer's common name as it appears in the certificate (the run of printable bytes that starts at
+/// "Pebble").
+fn issuer_text(cert: &[u8]) -> String {
+    let start = cert.windows(6).position(|w| w == b"Pebble").expect("the issuer name contains Pebble");
+    cert[start..].iter().take_while(|b| (0x20..0x7f).contains(*b)).map(|b| char::from(*b)).collect()
+}
+
+/// A client configuration that trusts exactly these roots.
+fn trusting(roots: &[rustls::pki_types::CertificateDer<'static>], alpn: &[&[u8]]) -> ClientConfig {
+    let mut store = rustls::RootCertStore::empty();
+    for root in roots {
+        store.add(root.clone()).expect("a root certificate");
+    }
+    let mut config = ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("versions")
+        .with_root_certificates(store)
+        .with_no_client_auth();
+    config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
+    config
+}
+
+/// The roots of Pebble's current chain, from its management interface (they change at every start of Pebble). The
+/// connection to that interface trusts only the file the test was given.
+async fn pebble_roots(ca_file: &str, management: &str) -> Vec<rustls::pki_types::CertificateDer<'static>> {
+    use rustls::pki_types::pem::PemObject;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let minica = rustls::pki_types::CertificateDer::from_pem_file(ca_file).expect("the CA file of Pebble");
+    let (host, _) = management.split_once(':').expect("host:port");
+    let tcp = TcpStream::connect(management).await.expect("connect to the management interface");
+    let name = ServerName::try_from(host.to_owned()).expect("name");
+    let mut tls = TlsConnector::from(Arc::new(trusting(&[minica], &[b"http/1.1"]))).connect(name, tcp).await.expect("TLS to Pebble");
+    tls.write_all(format!("GET /roots/0 HTTP/1.1\r\nHost: {management}\r\nConnection: close\r\n\r\n").as_bytes()).await.expect("request");
+    let mut response = Vec::new();
+    let _ = tls.read_to_end(&mut response).await;
+    let body_at = response.windows(4).position(|w| w == b"\r\n\r\n").expect("a response with a body") + 4;
+    let roots: Vec<_> = rustls::pki_types::CertificateDer::pem_slice_iter(&response[body_at..]).collect::<Result<_, _>>().expect("PEM roots");
+    assert!(!roots.is_empty(), "Pebble sent a root");
+    roots
+}
+
+/// A listener on all addresses of the validation port with the real acceptor. A challenge connection is closed after the
+/// handshake; any other connection gets a fixed line and is then echoed until the client closes.
+async fn listen_on_all(resolver: Arc<AcmeResolver>, port: u16) -> Listener {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let config = tls::server_config(resolver, &acme::ALPN).expect("server configuration");
+    let acceptor = tls::acceptor(Arc::new(config));
+    let listener = TcpListener::bind(("0.0.0.0", port)).await.expect("bind the validation port");
+    let addr = listener.local_addr().expect("local address");
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else { return };
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let Ok(mut tls) = tls::accept_tls(&acceptor, stream, Duration::from_secs(10)).await else { return };
+                if acme::is_challenge(tls.get_ref().1.alpn_protocol()) {
+                    return;
+                }
+                let _ = tls.write_all(b"hello from holzwave\n").await;
+                let mut byte = [0u8; 1];
+                while matches!(tls.read(&mut byte).await, Ok(1)) {
+                    if tls.write_all(&byte).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    Listener { addr, task }
+}
+
+#[tokio::test]
+#[ignore = "needs Pebble: run `sh scripts/web-container-test.sh acme`"]
+async fn acme_pebble_issues_serves_renews_and_keeps_the_old_certificate_when_an_order_fails() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let directory = env_or_fail("HW_ACME_DIRECTORY");
+    let ca_file = env_or_fail("HW_ACME_CA_FILE");
+    let domain = env_or_fail("HW_ACME_DOMAIN");
+    let port: u16 = env_or_fail("HW_ACME_PORT").parse().expect("the validation port");
+    let management = env_or_fail("HW_ACME_MANAGEMENT");
+
+    let dir = Scratch::new("acme-pebble");
+    let clock: Arc<dyn holzwave_server::clock::Clock> = Arc::new(holzwave_server::clock::SystemClock);
+    let resolver = Arc::new(AcmeResolver::new());
+    let settings = AcmeSettings::new(&directory, "ops@example.test", std::slice::from_ref(&domain), Some(ca_file.clone().into()), true, Some(&domain))
+        .expect("settings");
+    let manager = AcmeManager::new(settings, resolver.clone(), &server_key(9), dir.path(), clock.clone()).expect("manager");
+    let _listener = listen_on_all(resolver.clone(), port).await;
+    let local = SocketAddr::from(([127, 0, 0, 1], port));
+    let roots = pebble_roots(&ca_file, &management).await;
+
+    // Before the first issuance a normal handshake fails: the server is not ready.
+    assert!(!manager.ready());
+
+    // 1. The first order, through the real challenge on the TLS port.
+    let step = manager.step(|| manager.order_once()).await;
+    assert!(step.ordered && step.error.is_none(), "the first order: {:?}", step.error);
+    assert!(manager.ready());
+    assert_eq!(resolver.pending_count(), 0, "no challenge is left");
+
+    // 2. A client that asks for the domain gets the issued certificate, chained to Pebble's root.
+    let connect = |alpn: &'static [&'static [u8]]| {
+        let roots = roots.clone();
+        let domain = domain.clone();
+        async move {
+            let tcp = TcpStream::connect(local).await.expect("connect");
+            let name = ServerName::try_from(domain).expect("name");
+            TlsConnector::from(Arc::new(trusting(&roots, alpn))).connect(name, tcp).await
+        }
+    };
+    let mut first = connect(&[b"http/1.1"]).await.expect("a client that verifies the chain to Pebble's root");
+    let first_leaf = first.get_ref().1.peer_certificates().expect("certificates")[0].as_ref().to_vec();
+    let mut hello = [0u8; 20];
+    first.read_exact(&mut hello).await.expect("hello");
+    assert_eq!(&hello, b"hello from holzwave\n");
+    assert!(!first_leaf.windows(10).any(|w| w == [0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x01, 0x1f]), "not a challenge certificate");
+    let first_serial = serial_hex(&first_leaf);
+    let issuer = issuer_text(&first_leaf);
+    assert!(issuer.contains("Pebble"), "{issuer}");
+    // A client that offers the challenge protocol for the domain gets nothing now that no challenge is pending.
+    assert!(connect(&[b"acme-tls/1"]).await.is_err(), "no challenge is pending, so no certificate");
+
+    // 3. A renewal on demand: a different serial; the old connection goes on.
+    let again = manager.order_once().await.expect("the second order");
+    manager.accept(&again, clock.now()).expect("the second certificate is accepted");
+    assert_eq!(resolver.pending_count(), 0);
+    first.write_all(b"x").await.expect("the old connection still writes");
+    let mut echo = [0u8; 1];
+    first.read_exact(&mut echo).await.expect("the old connection still reads");
+    assert_eq!(&echo, b"x");
+    let second = connect(&[b"http/1.1"]).await.expect("the second handshake");
+    let second_leaf = second.get_ref().1.peer_certificates().expect("certificates")[0].as_ref().to_vec();
+    let second_serial = serial_hex(&second_leaf);
+    assert_ne!(first_serial, second_serial, "a renewal is a different certificate");
+    println!("Pebble: serial {} then {}, issuer {issuer}", &first_serial[..8], &second_serial[..8]);
+
+    // 4. A name that does not resolve: the order fails with a sentence, the certificate in use stays, nothing is pending.
+    let other_dir = Scratch::new("acme-pebble-failure");
+    let broken_name = "does-not-resolve.example.test".to_owned();
+    let broken = AcmeSettings::new(&directory, "ops@example.test", std::slice::from_ref(&broken_name), Some(ca_file.into()), true, Some(&broken_name))
+        .expect("settings");
+    let broken = AcmeManager::new(broken, resolver.clone(), &server_key(9), other_dir.path(), clock).expect("manager");
+    let failure = broken.order_once().await.expect_err("an order for a name that does not resolve fails");
+    println!("Failure case: {failure}");
+    assert!(!failure.sentence().is_empty() && !failure.sentence().contains('\n'));
+    assert_eq!(resolver.pending_count(), 0, "the challenge of the failed order was cleared");
+    let still = resolver.certified_key().expect("a certificate is still served");
+    assert_eq!(still.cert[0].as_ref(), second_leaf.as_slice(), "the previous certificate is still the one served");
+    let third = connect(&[b"http/1.1"]).await.expect("a handshake after the failed order");
+    assert_eq!(third.get_ref().1.peer_certificates().expect("certificates")[0].as_ref(), second_leaf.as_slice());
+}

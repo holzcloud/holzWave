@@ -1,12 +1,17 @@
 #!/bin/sh
 # The container tests of the web build, from the Mac, in Docker.
 #
-#   sh scripts/web-container-test.sh [caps|all]    (default: all)
+#   sh scripts/web-container-test.sh [caps|acme|all]    (default: all)
 #
 # Modes: `caps` builds the privileged helper and its container test binary inside the Linux test image, gives one copy
 # of the helper the file capabilities `cap_setuid,cap_setgid,cap_chown,cap_kill=p` and another none, and runs the test
 # binary as an unprivileged user in a container that adds exactly those four capabilities. It proves what a worker is left
 # with (no capability, no extra descriptor, a fixed environment) and that the helper refuses to run without its capabilities.
+# `acme` builds the ACME test binary in the Linux test image, starts Pebble (the ACME test server of Let's Encrypt,
+# ghcr.io/letsencrypt/pebble:2.10.1) on a user-defined Docker network, and runs the ignored test `acme_pebble` in a second
+# container on that network whose network alias is the test domain, so that Pebble finds the server's TLS port when it
+# validates the TLS-ALPN-01 challenge. The test proves a real issuance, serving, a renewal and a failed order that keeps the
+# old certificate. The containers, the network and the volume are removed on every exit path.
 # `all` runs every mode there is. Later modes are added as one function and one line in the `case` at the end.
 #
 # The image `holzwave-linux-test` of scripts/linux-container-test.sh is the base; the first run adds `libcap2-bin` and
@@ -40,13 +45,13 @@ BASE_IMAGE=holzwave-linux-test$SUFFIX
 WEB_IMAGE=holzwave-web-test$SUFFIX
 
 usage() {
-    echo "usage: sh scripts/web-container-test.sh [caps|all]" >&2
+    echo "usage: sh scripts/web-container-test.sh [caps|acme|all]" >&2
     exit 2
 }
 
 mode=all
 case "${1:-}" in
-    caps | all)
+    caps | acme | all)
         mode=$1
         shift
         ;;
@@ -194,10 +199,139 @@ mode_caps() {
     caps_run
 }
 
+# ---- acme ---------------------------------------------------------------------------------------------------------
+
+PEBBLE_IMAGE=ghcr.io/letsencrypt/pebble:2.10.1
+ACME_NET=holzwave-web-acme$SUFFIX
+ACME_VOLUME=holzwave-web-acme-bin$SUFFIX
+ACME_PEBBLE=holzwave-web-acme-pebble$SUFFIX
+ACME_TEST=holzwave-web-acme-test$SUFFIX
+ACME_DOMAIN=hw.example.test
+ACME_PORT=5001
+ACME_CA_DIR=
+
+# The test the acme run must report as passed, by name.
+ACME_TESTS="acme_pebble_issues_serves_renews_and_keeps_the_old_certificate_when_an_order_fails"
+
+acme_cleanup() {
+    docker rm -f "$ACME_TEST" "$ACME_PEBBLE" >/dev/null 2>&1
+    docker network rm "$ACME_NET" >/dev/null 2>&1
+    docker volume rm -f "$ACME_VOLUME" >/dev/null 2>&1
+    [ -z "$ACME_CA_DIR" ] || rm -rf "$ACME_CA_DIR"
+}
+
+mode_acme() {
+    ensure_images
+    # The port the test listens on must be the one Pebble validates on.
+    grep -q "\"tlsPort\": $ACME_PORT" "$here/../server/tests/support/pebble.json" || {
+        echo "web-container-test: server/tests/support/pebble.json does not name tlsPort $ACME_PORT" >&2
+        exit 1
+    }
+    if ! docker image inspect "$PEBBLE_IMAGE" >/dev/null 2>&1; then
+        echo "+ docker pull $PEBBLE_IMAGE"
+        docker pull ${PLATFORM:+--platform "$PLATFORM"} "$PEBBLE_IMAGE" >/dev/null || {
+            echo "web-container-test: the Pebble image $PEBBLE_IMAGE could not be pulled" >&2
+            exit 1
+        }
+    fi
+    trap acme_cleanup EXIT INT TERM
+    acme_cleanup
+    docker network create "$ACME_NET" >/dev/null && docker volume create "$ACME_VOLUME" >/dev/null || {
+        echo "web-container-test: the network or the volume could not be created" >&2
+        exit 1
+    }
+
+    echo "+ docker run $WEB_IMAGE (build the acme test binary)"
+    tree_stream | docker run --rm -i --init ${PLATFORM:+--platform "$PLATFORM"} \
+        -v holzwave-linux-cargo-registry:/root/.cargo/registry \
+        -v holzwave-linux-cargo-git:/root/.cargo/git \
+        -v holzwave-linux-target$SUFFIX:/work/target \
+        -v "$ACME_VOLUME":/opt/hw \
+        -e CARGO_TERM_COLOR=never \
+        ${CARGO_BUILD_JOBS:+-e CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS"} \
+        "$WEB_IMAGE" sh -c '
+set -eu
+tar -x --no-same-owner -C /work
+cd /work
+test_bin=$(cargo test --locked -p holzwave-server --test acme --no-run --message-format=json \
+    | jq -r "select(.reason == \"compiler-artifact\" and .target.name == \"acme\" and .profile.test == true) | .executable" \
+    | tail -n 1)
+test -x "$test_bin"
+install -m 0755 "$test_bin" /opt/hw/acme
+' || {
+        echo "web-container-test: the build in the container failed" >&2
+        exit 1
+    }
+
+    # Pebble's own CA file, copied out of the image, for the test's connection to Pebble.
+    ACME_CA_DIR=$(mktemp -d "${TMPDIR:-/tmp}/holzwave-web-acme.XXXXXX") || exit 2
+    chmod 0755 "$ACME_CA_DIR"
+    docker create --name "$ACME_PEBBLE" "$PEBBLE_IMAGE" >/dev/null &&
+        docker cp "$ACME_PEBBLE:/test/certs/pebble.minica.pem" "$ACME_CA_DIR/pebble.minica.pem" &&
+        docker rm -f "$ACME_PEBBLE" >/dev/null || {
+        echo "web-container-test: the CA file of Pebble could not be copied out of the image" >&2
+        exit 1
+    }
+    chmod 0644 "$ACME_CA_DIR/pebble.minica.pem"
+
+    echo "+ docker run -d $PEBBLE_IMAGE (PEBBLE_VA_NOSLEEP=1)"
+    docker run -d --name "$ACME_PEBBLE" --network "$ACME_NET" --network-alias pebble ${PLATFORM:+--platform "$PLATFORM"} \
+        -e PEBBLE_VA_NOSLEEP=1 \
+        -v "$here/../server/tests/support/pebble.json":/pebble.json:ro \
+        "$PEBBLE_IMAGE" -config /pebble.json >/dev/null || {
+        echo "web-container-test: Pebble could not be started" >&2
+        exit 1
+    }
+    tries=0
+    until docker logs "$ACME_PEBBLE" 2>&1 | grep -q "ACME directory available"; do
+        tries=$((tries + 1))
+        if [ "$tries" -gt 60 ] || [ "$(docker inspect -f '{{.State.Running}}' "$ACME_PEBBLE" 2>/dev/null)" != true ]; then
+            echo "web-container-test: Pebble did not come up" >&2
+            docker logs "$ACME_PEBBLE" >&2
+            exit 1
+        fi
+        sleep 1
+    done
+
+    log=$(mktemp "${TMPDIR:-/tmp}/holzwave-web-test.XXXXXX") || exit 2
+    code=$(mktemp "${TMPDIR:-/tmp}/holzwave-web-test-code.XXXXXX") || exit 2
+    echo "+ docker run --rm --network $ACME_NET --network-alias $ACME_DOMAIN $WEB_IMAGE /opt/hw/acme --ignored"
+    {
+        docker run --rm --init --name "$ACME_TEST" --network "$ACME_NET" --network-alias "$ACME_DOMAIN" \
+            ${PLATFORM:+--platform "$PLATFORM"} \
+            --user 10001:10001 --cap-drop ALL --read-only \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,mode=1777 \
+            -v "$ACME_VOLUME":/opt/hw:ro \
+            -v "$ACME_CA_DIR":/acme-ca:ro \
+            -e HW_ACME_DIRECTORY=https://pebble:14000/dir -e HW_ACME_CA_FILE=/acme-ca/pebble.minica.pem \
+            -e HW_ACME_DOMAIN="$ACME_DOMAIN" -e HW_ACME_PORT="$ACME_PORT" -e HW_ACME_MANAGEMENT=pebble:15000 \
+            "$WEB_IMAGE" /opt/hw/acme --ignored --show-output
+        echo $? >"$code"
+    } 2>&1 | tee "$log"
+
+    status=$(cat "$code")
+    missing=
+    for name in $ACME_TESTS; do
+        grep -q "^test $name \.\.\. ok$" "$log" || missing="$missing $name"
+    done
+    passed=$(grep '^test .* \.\.\. ok$' "$log" | sed 's/^test \(.*\) \.\.\. ok$/\1/')
+    rm -f "$log" "$code"
+    echo
+    echo "web-container-test: acme: passed: $passed"
+    if [ "$status" != 0 ] || [ -n "$missing" ]; then
+        echo "web-container-test: FAILED (docker exit $status)${missing:+, not passed:$missing}" >&2
+        exit 1
+    fi
+}
+
 # ---- dispatch -----------------------------------------------------------------------------------------------------
 
 case "$mode" in
     caps) mode_caps ;;
-    all) mode_caps ;;
+    acme) mode_acme ;;
+    all)
+        mode_caps
+        mode_acme
+        ;;
 esac
 echo "web-container-test: ok"
