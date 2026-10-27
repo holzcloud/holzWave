@@ -299,7 +299,7 @@ pub fn public_origin(url: &str) -> Result<Origin, Refusal> {
 
 /// Whether `host` (already lower case) is a name a certificate can be issued for: dot-separated labels of letters, digits and
 /// hyphens, none empty, none longer than 63, none starting or ending with a hyphen, and a last label that is not a number.
-fn valid_dns_name(host: &str) -> bool {
+pub fn valid_dns_name(host: &str) -> bool {
     if host.is_empty() || host.len() > 253 {
         return false;
     }
