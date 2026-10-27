@@ -33,6 +33,7 @@ use zeroize::Zeroizing;
 
 use crate::audit::{Action, Actor, Audit, DetailKey, DetailValue, Event, Outcome};
 use crate::auth::session::{Created, Method, SessionManager};
+use crate::auth::throttle::address_key;
 use crate::clock::Clock;
 use crate::config::{self, Refusal};
 use crate::log::{self, Level};
@@ -271,8 +272,9 @@ impl Stored {
 // The ceremonies' public types
 // ---------------------------------------------------------------------------------------------------------------------
 
-/// Who a passkey is registered for. The module does not look this up and does not make an account.
-#[derive(Debug, Clone)]
+/// Who a passkey is registered for. The module does not look this up and does not make an account. The `Debug` text prints a
+/// marker: the names are the person's.
+#[derive(Clone)]
 pub struct RegistrationSubject {
     /// The 16-byte WebAuthn user handle of the account (the handle the account will have, when it does not exist yet).
     pub handle: [u8; HANDLE_BYTES],
@@ -280,6 +282,12 @@ pub struct RegistrationSubject {
     pub user_name: String,
     /// The name shown to people.
     pub display_name: String,
+}
+
+impl fmt::Debug for RegistrationSubject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RegistrationSubject(..)")
+    }
 }
 
 /// A registration that was verified and not stored yet. Not `Clone`, a marker for `Debug`.
@@ -347,6 +355,16 @@ impl fmt::Debug for Registered {
     }
 }
 
+impl fmt::Debug for PasskeyInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PasskeyInfo")
+            .field("id", &self.id)
+            .field("created_at", &self.created_at)
+            .field("last_used", &self.last_used)
+            .finish_non_exhaustive()
+    }
+}
+
 /// What a finished sign-in hands back.
 #[derive(Debug)]
 pub struct SignedIn {
@@ -358,8 +376,8 @@ pub struct SignedIn {
     pub prf: Option<PrfMaterial>,
 }
 
-/// One passkey as the account dialog shows it. No credential bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One passkey as the account dialog shows it. No credential bytes. The `Debug` text leaves the name out.
+#[derive(Clone, PartialEq, Eq)]
 pub struct PasskeyInfo {
     /// The row id.
     pub id: i64,
@@ -401,22 +419,68 @@ impl Ceremony {
 struct Entry {
     ceremony: Ceremony,
     created: i64,
+    /// The key of the client address that started it.
+    address: String,
+    /// Counts the starts, so that "oldest" is exact when several start in one second.
+    sequence: u64,
+}
+
+impl Entry {
+    fn expired(&self, now: i64) -> bool {
+        now > self.created.saturating_add(CHALLENGE_TTL_SECS)
+    }
 }
 
 #[derive(Default)]
 struct Challenges {
     map: HashMap<TokenHash, Entry>,
+    next: u64,
 }
 
 impl Challenges {
-    fn insert(&mut self, hash: TokenHash, entry: Entry) {
-        self.map.insert(hash, entry);
+    /// Opens a challenge. Room is made first, with work bounded by the size of the map ([`MAX_CHALLENGES`]): expired entries
+    /// go, then the oldest of the same address while that address has [`MAX_CHALLENGES_PER_ADDRESS`], then the oldest of all
+    /// while the map is full.
+    fn insert(&mut self, hash: TokenHash, ceremony: Ceremony, created: i64, address: String) {
+        self.map.retain(|_, entry| !entry.expired(created));
+        while self.map.values().filter(|entry| entry.address == address).count() >= MAX_CHALLENGES_PER_ADDRESS {
+            let oldest = self
+                .map
+                .iter()
+                .filter(|(_, entry)| entry.address == address)
+                .min_by_key(|(_, entry)| entry.sequence)
+                .map(|(hash, _)| *hash);
+            match oldest {
+                Some(hash) => self.map.remove(&hash),
+                None => break,
+            };
+        }
+        while self.map.len() >= MAX_CHALLENGES {
+            let oldest = self.map.iter().min_by_key(|(_, entry)| entry.sequence).map(|(hash, _)| *hash);
+            match oldest {
+                Some(hash) => self.map.remove(&hash),
+                None => break,
+            };
+        }
+        let sequence = self.next;
+        self.next = self.next.wrapping_add(1);
+        self.map.insert(hash, Entry { ceremony, created, address, sequence });
     }
 
     /// Removes the entry of a token whatever happens next; answers it when it is within its time.
     fn take(&mut self, hash: &TokenHash, now: i64) -> Option<Entry> {
         let entry = self.map.remove(hash)?;
-        (now <= entry.created.saturating_add(CHALLENGE_TTL_SECS)).then_some(entry)
+        (!entry.expired(now)).then_some(entry)
+    }
+
+    /// Removes at most `most` expired entries; answers how many it removed.
+    fn purge(&mut self, now: i64, most: usize) -> usize {
+        let old: Vec<TokenHash> =
+            self.map.iter().filter(|(_, entry)| entry.expired(now)).map(|(hash, _)| *hash).take(most).collect();
+        for hash in &old {
+            self.map.remove(hash);
+        }
+        old.len()
     }
 }
 
@@ -519,10 +583,16 @@ impl Passkeys {
         }
     }
 
-    fn open(&self, ceremony: Ceremony, now: i64) -> Result<ChallengeToken, PasskeyError> {
+    fn open(&self, ceremony: Ceremony, now: i64, addr: IpAddr) -> Result<ChallengeToken, PasskeyError> {
         let (token, hash) = new_token()?;
-        self.lock().insert(hash, Entry { ceremony, created: now });
+        self.lock().insert(hash, ceremony, now, address_key(addr));
         Ok(token)
+    }
+
+    /// Removes the challenges that are past their time, at most `most` of them; answers how many it removed. A start does
+    /// the same for all of them, so this is for a periodic task and for tests.
+    pub fn purge(&self, most: usize) -> usize {
+        self.lock().purge(self.clock.unix(), most)
     }
 
     /// The ceremony of a token, removed from the map whatever its kind and whatever happens next.
@@ -540,7 +610,7 @@ impl Passkeys {
     pub fn start_registration(
         &self,
         subject: &RegistrationSubject,
-        _addr: IpAddr,
+        addr: IpAddr,
     ) -> Result<(String, ChallengeToken), PasskeyError> {
         let now = self.clock.unix();
         let (account, existing) = self.store.read(|tx| {
@@ -570,7 +640,7 @@ impl Passkeys {
         if !add_prf_request(&mut json, &self.prf_input) {
             return Err(PasskeyError::Internal);
         }
-        let token = self.open(Ceremony::Registration { state, account }, now)?;
+        let token = self.open(Ceremony::Registration { state, account }, now, addr)?;
         Ok((json.to_string(), token))
     }
 
@@ -683,7 +753,7 @@ impl Passkeys {
 
     /// Starts a username-less sign-in: discoverable-credential request options with the PRF input added, as JSON text, and
     /// the token of the open challenge.
-    pub fn start_sign_in(&self, _addr: IpAddr) -> Result<(String, ChallengeToken), PasskeyError> {
+    pub fn start_sign_in(&self, addr: IpAddr) -> Result<(String, ChallengeToken), PasskeyError> {
         let now = self.clock.unix();
         let (options, state) =
             self.webauthn.start_discoverable_authentication().map_err(|_| PasskeyError::Internal)?;
@@ -691,7 +761,7 @@ impl Passkeys {
         if !add_prf_request(&mut json, &self.prf_input) {
             return Err(PasskeyError::Internal);
         }
-        let token = self.open(Ceremony::SignIn(state), now)?;
+        let token = self.open(Ceremony::SignIn(state), now, addr)?;
         Ok((json.to_string(), token))
     }
 
@@ -881,7 +951,8 @@ impl Passkeys {
         let (options, state) =
             self.webauthn.start_passkey_authentication(&passkeys).map_err(|_| PasskeyError::Internal)?;
         let json = serde_json::to_string(&options).map_err(|_| PasskeyError::Internal)?;
-        let token = self.open(Ceremony::StepUp { state, account }, now)?;
+        let addr = session.addr.parse::<IpAddr>().unwrap_or(IpAddr::from([0u8; 4]));
+        let token = self.open(Ceremony::StepUp { state, account }, now, addr)?;
         Ok((json, token))
     }
 

@@ -11,7 +11,7 @@ mod webauthn_client;
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -799,4 +799,593 @@ fn a_disabled_or_a_deleted_account_cannot_sign_in_with_a_valid_credential() {
         assert!(f.store.read(|tx| tx.session_list(account)).expect("sessions").is_empty());
     }
     f.sign_in(&mut alice_key, None).expect("the active account still signs in");
+}
+
+
+// ---- the bounds of the challenge store ----
+
+/// An address of the test network with a distinct key per `n`.
+fn addr_n(n: usize) -> IpAddr {
+    IpAddr::V4(Ipv4Addr::new(10, 7, u8::try_from(n / 256).expect("fits"), u8::try_from(n % 256).expect("fits")))
+}
+
+/// Starts a sign-in from `addr` and has the authenticator answer it at once.
+fn started_at(f: &Fixture, key: &mut SoftPasskey, addr: IpAddr) -> (ChallengeToken, String) {
+    let (options, token) = f.passkeys.start_sign_in(addr).expect("starts");
+    let options: Value = serde_json::from_str(&options).expect("JSON");
+    let response = key.authenticate(&options, &f.origin).expect("answers").to_string();
+    (token, response)
+}
+
+#[test]
+fn the_1025th_challenge_pushes_out_the_oldest_of_all() {
+    let f = fixture("cap-total");
+    let (_alice, handle) = f.account("alice");
+    let (mut key, _) = f.register("alice", handle, "Key");
+
+    let (first, first_response) = started_at(&f, &mut key, addr_n(0));
+    let (second, second_response) = started_at(&f, &mut key, addr_n(0));
+    // 16 per address: 1,024 live challenges come from 64 addresses.
+    for n in 2..1_024 {
+        f.passkeys.start_sign_in(addr_n(n / 16)).expect("starts");
+    }
+    assert_eq!(f.passkeys.open_challenges(), 1_024);
+    f.passkeys.start_sign_in(addr_n(500)).expect("the 1,025th starts");
+    assert_eq!(f.passkeys.open_challenges(), 1_024, "the map did not grow");
+
+    let evicted = f.passkeys.finish_sign_in(first.expose(), &first_response, None, ADDR, DEVICE);
+    assert_eq!(evicted.err(), Some(PasskeyError::Invalid), "the oldest is gone");
+    f.passkeys.finish_sign_in(second.expose(), &second_response, None, ADDR, DEVICE).expect("the second is still there");
+}
+
+#[test]
+fn the_17th_challenge_of_one_address_pushes_out_that_addresss_oldest() {
+    let f = fixture("cap-address");
+    let (_alice, handle) = f.account("alice");
+    let (mut key, _) = f.register("alice", handle, "Key");
+    let a = addr_n(1);
+    let b = addr_n(2);
+
+    // The other address's challenge is the oldest of all.
+    let (b0, b0_response) = {
+        let (options, token) = f.passkeys.start_sign_in(b).expect("starts");
+        let options: Value = serde_json::from_str(&options).expect("JSON");
+        (token, (options, ()))
+    };
+    let mut a_tokens = Vec::new();
+    for _ in 0..16 {
+        let (options, token) = f.passkeys.start_sign_in(a).expect("starts");
+        a_tokens.push((token, serde_json::from_str::<Value>(&options).expect("JSON")));
+    }
+    assert_eq!(f.passkeys.open_challenges(), 17);
+    f.passkeys.start_sign_in(a).expect("the 17th of the address starts");
+    assert_eq!(f.passkeys.open_challenges(), 17, "one went out and one came in");
+
+    let a0 = key.authenticate(&a_tokens[0].1, &f.origin).expect("answers").to_string();
+    let a1 = key.authenticate(&a_tokens[1].1, &f.origin).expect("answers").to_string();
+    let b0_text = key.authenticate(&b0_response.0, &f.origin).expect("answers").to_string();
+    let gone = f.passkeys.finish_sign_in(a_tokens[0].0.expose(), &a0, None, ADDR, DEVICE);
+    assert_eq!(gone.err(), Some(PasskeyError::Invalid), "the oldest of address A is gone");
+    f.passkeys.finish_sign_in(a_tokens[1].0.expose(), &a1, None, ADDR, DEVICE).expect("the next of A is still there");
+    f.passkeys.finish_sign_in(b0.expose(), &b0_text, None, ADDR, DEVICE).expect("address B's older challenge was not touched");
+}
+
+#[test]
+fn a_challenge_works_for_five_minutes_exactly_and_not_a_second_longer() {
+    let f = fixture("ttl");
+    let (_alice, handle) = f.account("alice");
+    let (mut key, _) = f.register("alice", handle, "Key");
+
+    let (token, response) = started_at(&f, &mut key, ADDR);
+    f.clock.advance(300);
+    f.passkeys.finish_sign_in(token.expose(), &response, None, ADDR, DEVICE).expect("works at 300 seconds");
+
+    let (token, response) = started_at(&f, &mut key, ADDR);
+    f.clock.advance(301);
+    let late = f.passkeys.finish_sign_in(token.expose(), &response, None, ADDR, DEVICE);
+    assert_eq!(late.err(), Some(PasskeyError::Invalid), "refused at 301 seconds");
+    assert_eq!(f.passkeys.open_challenges(), 0, "and it is gone");
+
+    // A registration token has the same time.
+    let (_options, token) = f.passkeys.start_registration(&f.subject("alice", handle), ADDR).expect("starts");
+    f.clock.advance(301);
+    assert_eq!(f.passkeys.verify_registration(token.expose(), "{}", None).err(), Some(PasskeyError::Invalid));
+}
+
+#[test]
+fn expired_challenges_are_purged_by_a_bounded_call_and_by_every_start() {
+    let f = fixture("purge");
+    for n in 0..6 {
+        f.passkeys.start_sign_in(addr_n(n)).expect("starts");
+    }
+    f.clock.advance(301);
+    assert_eq!(f.passkeys.purge(4), 4, "at most the number asked for");
+    assert_eq!(f.passkeys.open_challenges(), 2);
+    assert_eq!(f.passkeys.purge(10), 2);
+    assert_eq!(f.passkeys.open_challenges(), 0);
+
+    for n in 0..3 {
+        f.passkeys.start_sign_in(addr_n(n)).expect("starts");
+    }
+    f.clock.advance(301);
+    f.passkeys.start_sign_in(addr_n(9)).expect("starts");
+    assert_eq!(f.passkeys.open_challenges(), 1, "a start removed the expired ones");
+    assert_eq!(f.passkeys.purge(10), 0, "nothing that is alive is purged");
+}
+
+#[test]
+fn a_token_of_the_wrong_kind_is_refused_and_consumed() {
+    let f = fixture("wrong-kind");
+    let (_alice, handle) = f.account("alice");
+    let mut key = SoftPasskey::new();
+    let (reg_options, reg_token) = f.passkeys.start_registration(&f.subject("alice", handle), ADDR).expect("starts");
+    let reg_options: Value = serde_json::from_str(&reg_options).expect("JSON");
+    let reg_response = key.register(&reg_options, &f.origin).expect("answers").to_string();
+
+    // A registration token used for a sign-in is refused, and is gone for the registration too.
+    let cross = f.passkeys.finish_sign_in(reg_token.expose(), &reg_response, None, ADDR, DEVICE);
+    assert_eq!(cross.err(), Some(PasskeyError::Invalid));
+    let after = f.passkeys.finish_registration(reg_token.expose(), &reg_response, None, "Key", ADDR);
+    assert_eq!(after.err(), Some(PasskeyError::Invalid));
+
+    // And the reverse.
+    let (options, token) = f.start_sign_in();
+    let _ = options;
+    let cross = f.passkeys.finish_registration(token.expose(), &reg_response, None, "Key", ADDR);
+    assert_eq!(cross.err(), Some(PasskeyError::Invalid));
+    assert_eq!(f.passkeys.open_challenges(), 0);
+}
+
+#[test]
+fn a_token_from_another_process_or_made_up_is_refused_without_calling_the_library() {
+    let f = fixture("foreign-token");
+    let (_alice, handle) = f.account("alice");
+    let (mut key, _) = f.register("alice", handle, "Key");
+    let (token, response) = started_at(&f, &mut key, ADDR);
+
+    // A second service over the same store is a restarted process: it has none of the first one's challenges.
+    let clock: Arc<ManualClock> = f.clock.clone();
+    let audit = Arc::new(Audit::open(f.scratch.path(), clock.clone()).expect("audit"));
+    let restarted =
+        Passkeys::new(PUBLIC_URL, "holzWave", f.store.clone(), f.sessions.clone(), audit, clock).expect("builds");
+    let result = restarted.finish_sign_in(token.expose(), &response, None, ADDR, DEVICE);
+    assert_eq!(result.err(), Some(PasskeyError::Invalid));
+    assert_eq!(restarted.library_calls(), 0, "no token, no library call");
+
+    let before = f.passkeys.library_calls();
+    for text in ["", "short", &"A".repeat(42), &"A".repeat(44), &format!("{}!", "A".repeat(42)), &"é".repeat(22), &"A".repeat(1_000_000)] {
+        let result = f.passkeys.finish_sign_in(text, &response, None, ADDR, DEVICE);
+        assert_eq!(result.err(), Some(PasskeyError::Invalid), "token {:?}", text.chars().take(8).collect::<String>());
+    }
+    assert_eq!(f.passkeys.library_calls(), before, "a made-up token never reaches the library");
+    f.passkeys.finish_sign_in(token.expose(), &response, None, ADDR, DEVICE).expect("the real token still works");
+}
+
+// ---- replay and concurrency ----
+
+#[test]
+fn a_successful_response_sent_again_fails_against_a_new_challenge_and_against_the_old_token() {
+    let f = fixture("replay");
+    let (_alice, handle) = f.account("alice");
+    let (mut key, _) = f.register("alice", handle, "Key");
+    let (token, response) = started_at(&f, &mut key, ADDR);
+    f.passkeys.finish_sign_in(token.expose(), &response, None, ADDR, DEVICE).expect("the first use verifies");
+
+    let (_options, fresh) = f.start_sign_in();
+    let replay = f.passkeys.finish_sign_in(fresh.expose(), &response, None, ADDR, DEVICE);
+    assert_eq!(replay.err(), Some(PasskeyError::Invalid), "a new challenge does not accept the old answer");
+    let again = f.passkeys.finish_sign_in(token.expose(), &response, None, ADDR, DEVICE);
+    assert_eq!(again.err(), Some(PasskeyError::Invalid), "the old token is used up");
+    assert_eq!(f.count("signin.ok"), 1);
+    assert_eq!(f.shapes("signin.fail").len(), 2);
+}
+
+#[test]
+fn a_counter_that_goes_backwards_is_refused() {
+    let f = fixture("counter");
+    let (alice, handle) = f.account("alice");
+    let (mut key, id) = f.register("alice", handle, "Key");
+    f.sign_in(&mut key, None).expect("counter 1");
+    f.sign_in(&mut key, None).expect("counter 2");
+
+    // The stored row is ahead of the authenticator, as after a clone of the credential was used.
+    let row = f.store.read(|tx| tx.passkey_list(alice)).expect("rows").remove(0);
+    assert_eq!(row.id, id);
+    let mut stored: Value = serde_json::from_str(&row.passkey_json).expect("JSON");
+    assert_eq!(stored["passkey"]["cred"]["counter"], 2, "the sign-ins moved the stored counter");
+    stored["passkey"]["cred"]["counter"] = json!(9);
+    f.store.write(|tx| tx.passkey_update_json(alice, id, &stored.to_string())).expect("write");
+    assert_eq!(f.sign_in(&mut key, None).err(), Some(PasskeyError::Invalid));
+    let after = f.store.read(|tx| tx.passkey_list(alice)).expect("rows").remove(0);
+    assert_eq!(after.passkey_json, stored.to_string(), "the row was not repaired or removed");
+}
+
+#[test]
+fn two_threads_finishing_one_sign_in_token_make_one_session() {
+    let f = fixture("race-sign-in");
+    let (alice, handle) = f.account("alice");
+    let (mut key, _) = f.register("alice", handle, "Key");
+    for round in 0..5 {
+        let (token, response) = started_at(&f, &mut key, ADDR);
+        let barrier = Barrier::new(8);
+        let results: Vec<Result<(), PasskeyError>> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        f.passkeys.finish_sign_in(token.expose(), &response, None, ADDR, DEVICE).map(|_| ())
+                    })
+                })
+                .collect();
+            workers.into_iter().map(|w| w.join().expect("no panic")).collect()
+        });
+        let ok = results.iter().filter(|r| r.is_ok()).count();
+        let invalid = results.iter().filter(|r| **r == Err(PasskeyError::Invalid)).count();
+        println!("round {round}: ok {ok}, invalid {invalid}");
+        assert_eq!((ok, invalid), (1, 7));
+    }
+    assert_eq!(f.store.read(|tx| tx.session_list(alice)).expect("sessions").len(), 5, "one session per round");
+    assert_eq!(f.count("signin.ok"), 5);
+}
+
+#[test]
+fn threads_registering_with_one_token_store_one_row() {
+    let f = fixture("race-register");
+    let (alice, handle) = f.account("alice");
+    let mut key = SoftPasskey::new();
+    let (options, token) = f.passkeys.start_registration(&f.subject("alice", handle), ADDR).expect("starts");
+    let options: Value = serde_json::from_str(&options).expect("JSON");
+    let response = key.register(&options, &f.origin).expect("answers").to_string();
+    let barrier = Barrier::new(6);
+    let results: Vec<Result<i64, PasskeyError>> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..6)
+            .map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    f.passkeys.finish_registration(token.expose(), &response, None, "Key", ADDR).map(|r| r.id)
+                })
+            })
+            .collect();
+        workers.into_iter().map(|w| w.join().expect("no panic")).collect()
+    });
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+    assert_eq!(results.iter().filter(|r| **r == Err(PasskeyError::Invalid)).count(), 5);
+    assert_eq!(f.store.read(|tx| tx.passkey_count(alice)).expect("count"), 1);
+    assert_eq!(f.shapes("auth.passkey.add").iter().filter(|l| l["result"] == "ok").count(), 1);
+}
+
+// ---- hostile input ----
+
+fn flip_bit_in(field: &mut Value, byte: usize) {
+    let mut bytes = URL_SAFE_NO_PAD.decode(field.as_str().expect("a string")).expect("base64url");
+    bytes[byte] ^= 1;
+    *field = json!(URL_SAFE_NO_PAD.encode(bytes));
+}
+
+fn edit_client_data(response: &mut Value, edit: impl FnOnce(&mut Value)) {
+    let field = &mut response["response"]["clientDataJSON"];
+    let bytes = URL_SAFE_NO_PAD.decode(field.as_str().expect("a string")).expect("base64url");
+    let mut client_data: Value = serde_json::from_slice(&bytes).expect("client data is JSON");
+    edit(&mut client_data);
+    *field = json!(URL_SAFE_NO_PAD.encode(client_data.to_string()));
+}
+
+#[test]
+fn an_oversize_credential_never_reaches_the_library() {
+    let f = fixture("oversize");
+    let (alice, handle) = f.account("alice");
+    let (mut key, _) = f.register("alice", handle, "Key");
+    let session = f.session(alice);
+    let mut session_mut = session.clone();
+    let big = "x".repeat(32 * 1024 + 1);
+    let exact = " ".repeat(32 * 1024);
+    let before = f.passkeys.library_calls();
+
+    let (_options, token) = f.start_sign_in();
+    assert_eq!(f.passkeys.finish_sign_in(token.expose(), &big, None, ADDR, DEVICE).err(), Some(PasskeyError::Invalid));
+    let (_options, token) = f.passkeys.start_registration(&f.subject("alice", handle), ADDR).expect("starts");
+    assert_eq!(f.passkeys.verify_registration(token.expose(), &big, None).err(), Some(PasskeyError::Invalid));
+    let (_options, token) = f.passkeys.start_step_up(&session).expect("starts");
+    assert_eq!(
+        f.passkeys.finish_step_up(token.expose(), &big, &mut session_mut, ADDR).err(),
+        Some(PasskeyError::Invalid)
+    );
+    assert_eq!(f.passkeys.library_calls(), before, "32 KiB plus one byte: the library was not called");
+
+    // Exactly 32 KiB is looked at (and is not a credential).
+    let (_options, token) = f.start_sign_in();
+    assert_eq!(f.passkeys.finish_sign_in(token.expose(), &exact, None, ADDR, DEVICE).err(), Some(PasskeyError::Invalid));
+    assert_eq!(f.passkeys.library_calls(), before + 1, "exactly 32 KiB reaches the parser");
+
+    // The same sizes with a real, correct response around them still work.
+    f.sign_in(&mut key, None).expect("a normal sign-in works");
+}
+
+#[test]
+fn hostile_sign_in_responses_all_end_in_the_one_error_with_the_same_audit_shape() {
+    let f = fixture("hostile");
+    let (_alice, handle) = f.account("alice");
+    let (mut key, _) = f.register("alice", handle, "Key");
+    type Edit = Box<dyn Fn(Value) -> String>;
+    let cases: Vec<(&str, Edit)> = vec![
+        ("truncated JSON", Box::new(|v| { let t = v.to_string(); t[..t.len() / 2].to_owned() })),
+        ("an array", Box::new(|_| "[1,2,3]".to_owned())),
+        ("a string", Box::new(|_| "\"MARKER-text\"".to_owned())),
+        ("empty text", Box::new(|_| String::new())),
+        ("missing id", Box::new(|mut v| { v.as_object_mut().expect("o").remove("id"); v.to_string() })),
+        ("rawId not base64", Box::new(|mut v| { v["rawId"] = json!("MARKER-rawid!!"); v.to_string() })),
+        ("another client data type", Box::new(|mut v| { edit_client_data(&mut v, |c| c["type"] = json!("webauthn.create")); v.to_string() })),
+        ("challenge off by one bit", Box::new(|mut v| {
+            edit_client_data(&mut v, |c| {
+                let mut challenge = c["challenge"].clone();
+                flip_bit_in(&mut challenge, 0);
+                c["challenge"] = challenge;
+            });
+            v.to_string()
+        })),
+        ("another origin in the client data", Box::new(|mut v| { edit_client_data(&mut v, |c| c["origin"] = json!("https://evil.example.test")); v.to_string() })),
+        ("signature off by one bit", Box::new(|mut v| { flip_bit_in(&mut v["response"]["signature"], 5); v.to_string() })),
+        ("relying party hash off by one bit", Box::new(|mut v| { flip_bit_in(&mut v["response"]["authenticatorData"], 10); v.to_string() })),
+        ("counter off by one bit", Box::new(|mut v| { flip_bit_in(&mut v["response"]["authenticatorData"], 36); v.to_string() })),
+        ("user handle of 15 bytes", Box::new(|mut v| { v["response"]["userHandle"] = json!(URL_SAFE_NO_PAD.encode([7u8; 15])); v.to_string() })),
+        ("user handle of 17 bytes", Box::new(|mut v| { v["response"]["userHandle"] = json!(URL_SAFE_NO_PAD.encode([7u8; 17])); v.to_string() })),
+        ("user handle of no account", Box::new(|mut v| { v["response"]["userHandle"] = json!(URL_SAFE_NO_PAD.encode([7u8; 16])); v.to_string() })),
+        ("no user handle", Box::new(|mut v| { v["response"].as_object_mut().expect("o").remove("userHandle"); v.to_string() })),
+        ("credential id of no credential", Box::new(|mut v| { v["rawId"] = json!(URL_SAFE_NO_PAD.encode([9u8; 32])); v["id"] = v["rawId"].clone(); v.to_string() })),
+    ];
+    let mut markers_seen = Vec::new();
+    for (name, edit) in &cases {
+        let (token, response) = {
+            let (options, token) = f.start_sign_in();
+            (token, key.authenticate(&options, &f.origin).expect("answers"))
+        };
+        let text = edit(response);
+        let result = f.passkeys.finish_sign_in(token.expose(), &text, None, ADDR, DEVICE);
+        let error = result.expect_err(name);
+        assert_eq!(error, PasskeyError::Invalid, "{name}");
+        for shown in [format!("{error}"), format!("{error:?}")] {
+            assert!(!shown.contains("MARKER") && (text.is_empty() || !shown.contains(&text)), "{name}: the error shows input");
+            markers_seen.push(shown);
+        }
+    }
+    // The hash of another relying party id, signed correctly.
+    let (options, token) = f.start_sign_in();
+    let tweaks = Tweaks { skip_browser_checks: true, rp_id: Some("example.test".into()), ..Tweaks::default() };
+    let response = key.authenticate_with(&options, &f.origin, &tweaks).expect("signs").to_string();
+    assert_eq!(f.passkeys.finish_sign_in(token.expose(), &response, None, ADDR, DEVICE).err(), Some(PasskeyError::Invalid));
+
+    let fails = f.shapes("signin.fail");
+    assert_eq!(fails.len(), cases.len() + 1);
+    assert!(fails.iter().all(|line| *line == fails[0]), "one audit shape for every cause");
+    assert_eq!(fails[0]["detail"], json!({ "method": "passkey", "reason": "invalid" }));
+    assert_eq!(f.count("signin.ok"), 0);
+    let audit_text: String = f.lines().iter().map(Value::to_string).collect();
+    assert!(!audit_text.contains("MARKER"));
+    f.sign_in(&mut key, None).expect("the real authenticator still signs in after all of it");
+    println!("hostile cases: {}", cases.iter().map(|(n, _)| *n).collect::<Vec<_>>().join("; "));
+}
+
+#[test]
+fn hostile_registrations_are_refused_and_store_nothing() {
+    let f = fixture("hostile-reg");
+    let (alice, handle) = f.account("alice");
+    let mut key = SoftPasskey::new();
+    type Make = Box<dyn Fn(&Fixture, &mut SoftPasskey, &Value) -> String>;
+    let cases: Vec<(&str, Make)> = vec![
+        ("truncated", Box::new(|f, k, o| { let t = k.register(o, &f.origin).expect("a").to_string(); t[..t.len() / 3].to_owned() })),
+        ("an array", Box::new(|_, _, _| "[]".to_owned())),
+        ("another origin", Box::new(|_, k, o| k.register_with(o, &Url::parse("https://evil.example.test").expect("u"), &Tweaks::unchecked()).expect("a").to_string())),
+        ("another relying party id", Box::new(|f, k, o| k.register_with(o, &f.origin, &Tweaks { skip_browser_checks: true, rp_id: Some("example.test".into()), ..Tweaks::default() }).expect("a").to_string())),
+        ("no user verification", Box::new(|f, k, o| k.register_with(o, &f.origin, &Tweaks { user_verification: Some("discouraged".into()), ..Tweaks::default() }).expect("a").to_string())),
+        ("another client data type", Box::new(|f, k, o| { let mut v = k.register(o, &f.origin).expect("a"); edit_client_data(&mut v, |c| c["type"] = json!("webauthn.get")); v.to_string() })),
+        ("challenge off by one bit", Box::new(|f, k, o| {
+            let mut v = k.register(o, &f.origin).expect("a");
+            edit_client_data(&mut v, |c| { let mut ch = c["challenge"].clone(); flip_bit_in(&mut ch, 3); c["challenge"] = ch; });
+            v.to_string()
+        })),
+    ];
+    for (name, make) in &cases {
+        let (options, token) = f.passkeys.start_registration(&f.subject("alice", handle), ADDR).expect("starts");
+        let options: Value = serde_json::from_str(&options).expect("JSON");
+        let text = make(&f, &mut key, &options);
+        let result = f.passkeys.finish_registration(token.expose(), &text, None, "Key", ADDR);
+        assert_eq!(result.err(), Some(PasskeyError::Invalid), "{name}");
+    }
+    assert_eq!(f.store.read(|tx| tx.passkey_count(alice)).expect("count"), 0, "nothing was stored");
+    let fails = f.shapes("auth.passkey.add");
+    assert_eq!(fails.len(), cases.len());
+    assert!(fails.iter().all(|line| *line == fails[0] && line["result"] == "fail"), "one audit shape");
+    assert!(f.store.read(|tx| tx.session_list(alice)).expect("sessions").is_empty());
+}
+
+// ---- damage ----
+
+#[test]
+fn a_damaged_stored_credential_is_refused_and_neither_removed_nor_repaired() {
+    let f = fixture("tamper");
+    let (alice, handle) = f.account("alice");
+    let (mut key, id) = f.register("alice", handle, "Key");
+    let original = f.store.read(|tx| tx.passkey_list(alice)).expect("rows").remove(0).passkey_json;
+    let value: Value = serde_json::from_str(&original).expect("JSON");
+
+    let mut damaged: Vec<(&str, String)> = vec![("empty", String::new()), ("not JSON", "x".repeat(40))];
+    let mut first_byte = original.clone();
+    first_byte.replace_range(0..1, "[");
+    damaged.push(("first byte changed", first_byte));
+    for (name, pointer) in [
+        ("credential id inside the JSON", "/passkey/cred/cred_id"),
+        ("public key x", "/passkey/cred/cred/key/EC_EC2/x"),
+        ("public key y", "/passkey/cred/cred/key/EC_EC2/y"),
+    ] {
+        let mut copy = value.clone();
+        let text = copy.pointer(pointer).and_then(Value::as_str).expect(name).to_owned();
+        let mut chars: Vec<char> = text.chars().collect();
+        chars[3] = if chars[3] == 'A' { 'B' } else { 'A' };
+        *copy.pointer_mut(pointer).expect(name) = json!(chars.into_iter().collect::<String>());
+        damaged.push((name, copy.to_string()));
+    }
+    let mut versioned = value.clone();
+    versioned["v"] = json!(2);
+    damaged.push(("another version", versioned.to_string()));
+    let mut extra = value.clone();
+    extra["evil"] = json!(1);
+    damaged.push(("an unknown member", extra.to_string()));
+    let mut policy = value.clone();
+    policy["passkey"]["cred"]["user_verified"] = json!("yes");
+    damaged.push(("a wrong type", policy.to_string()));
+
+    for (name, text) in &damaged {
+        f.store.write(|tx| tx.passkey_update_json(alice, id, text)).expect("write the damage");
+        assert_eq!(f.sign_in(&mut key, None).err(), Some(PasskeyError::Invalid), "{name}");
+        let row = f.store.read(|tx| tx.passkey_list(alice)).expect("rows");
+        assert_eq!(row.len(), 1, "{name}: the row is still there");
+        assert_eq!(&row[0].passkey_json, text, "{name}: the row was not repaired");
+        // A damaged row can still be listed and removed.
+        assert_eq!(f.passkeys.list(alice).expect("list").len(), 1);
+    }
+    f.store.write(|tx| tx.passkey_update_json(alice, id, &original)).expect("restore");
+    f.sign_in(&mut key, None).expect("the untouched row signs in");
+    assert_eq!(f.shapes("signin.fail").len(), damaged.len());
+    assert!(f.shapes("signin.fail").iter().all(|l| l["detail"] == json!({ "method": "passkey", "reason": "invalid" })));
+}
+
+#[test]
+fn a_row_whose_credential_id_does_not_match_its_json_is_refused() {
+    let f = fixture("mismatch");
+    let (alice, handle) = f.account("alice");
+    let (mut first, _) = f.register("alice", handle, "One");
+    let first_row = f.store.read(|tx| tx.passkey_list(alice)).expect("rows").remove(0);
+
+    // A second authenticator that is verified but never stored, then stored under its own id with the first one's JSON.
+    let mut second = SoftPasskey::new();
+    let (options, token) = f.passkeys.start_registration(&f.subject("alice", handle), ADDR).expect("starts");
+    let options: Value = serde_json::from_str(&options).expect("JSON");
+    let response = second.register(&options, &f.origin).expect("answers").to_string();
+    let verified = f.passkeys.verify_registration(token.expose(), &response, None).expect("verifies");
+    f.store
+        .write(|tx| tx.passkey_add(alice, verified.credential_id(), &first_row.passkey_json, Some(&[1u8; 32]), NOW))
+        .expect("the mismatched row");
+    assert_eq!(f.sign_in(&mut second, None).err(), Some(PasskeyError::Invalid));
+    f.sign_in(&mut first, None).expect("the first, untouched row still signs in");
+}
+
+// ---- user verification and attestation ----
+
+#[test]
+fn an_assertion_without_the_user_verified_flag_is_refused() {
+    let f = fixture("uv");
+    let (_alice, handle) = f.account("alice");
+    let (mut key, _) = f.register("alice", handle, "Key");
+    let (options, token) = f.start_sign_in();
+    let tweaks = Tweaks { user_verification: Some("discouraged".into()), ..Tweaks::default() };
+    let response = key.authenticate_with(&options, &f.origin, &tweaks).expect("answers").to_string();
+    assert_eq!(f.passkeys.finish_sign_in(token.expose(), &response, None, ADDR, DEVICE).err(), Some(PasskeyError::Invalid));
+    f.sign_in(&mut key, None).expect("with the flag it works");
+}
+
+fn attestation_format(response: &Value) -> String {
+    let object = URL_SAFE_NO_PAD
+        .decode(response["response"]["attestationObject"].as_str().expect("an attestation object"))
+        .expect("base64url");
+    // The object is a CBOR map; the format is the text after the key "fmt" (0x63 'f' 'm' 't').
+    let at = object.windows(4).position(|w| w == [0x63, b'f', b'm', b't']).expect("fmt key") + 4;
+    let length = usize::from(object[at] & 0x1f);
+    String::from_utf8(object[at + 1..at + 1 + length].to_vec()).expect("text")
+}
+
+fn with_attestation_format(response: &Value, to: &str) -> Value {
+    let mut object = URL_SAFE_NO_PAD
+        .decode(response["response"]["attestationObject"].as_str().expect("an attestation object"))
+        .expect("base64url");
+    let at = object.windows(4).position(|w| w == [0x63, b'f', b'm', b't']).expect("fmt key") + 4;
+    let length = usize::from(object[at] & 0x1f);
+    let mut replacement = vec![0x60 | u8::try_from(to.len()).expect("short")];
+    replacement.extend_from_slice(to.as_bytes());
+    object.splice(at..at + 1 + length, replacement);
+    let mut out = response.clone();
+    out["response"]["attestationObject"] = json!(URL_SAFE_NO_PAD.encode(object));
+    out
+}
+
+#[test]
+fn a_registration_whose_attestation_is_not_none_is_pinned() {
+    let f = fixture("attestation");
+    let (alice, handle) = f.account("alice");
+    let mut outcomes = Vec::new();
+    for (case, format) in [("as sent by the authenticator", None), ("none", Some("none")), ("a format of a vendor", Some("android-key")), ("a format nobody knows", Some("nonsense"))] {
+        let mut key = SoftPasskey::new();
+        let (options, token) = f.passkeys.start_registration(&f.subject("alice", handle), ADDR).expect("starts");
+        let options: Value = serde_json::from_str(&options).expect("JSON");
+        let sent = key.register(&options, &f.origin).expect("answers");
+        let sent = match format {
+            None => sent,
+            Some(to) => with_attestation_format(&sent, to),
+        };
+        let own = attestation_format(&sent);
+        let result = f.passkeys.finish_registration(token.expose(), &sent.to_string(), None, case, ADDR);
+        println!("attestation {case}: format {own:?}: {}", if result.is_ok() { "accepted" } else { "refused" });
+        outcomes.push((case, own, result.is_ok()));
+    }
+    // What was observed with the pinned library: the soft authenticator sends a self-attested statement and it is accepted,
+    // with the statement not trusted for anything (the stored form says `Self_`); a changed format with a statement that does
+    // not fit it is refused.
+    println!("{outcomes:?}");
+    assert!(outcomes[0].2, "{outcomes:?}");
+    let row = f.store.read(|tx| tx.passkey_list(alice)).expect("rows").remove(0);
+    let stored: Value = serde_json::from_str(&row.passkey_json).expect("JSON");
+    assert_eq!(stored["passkey"]["cred"]["attestation"]["data"], "Self_", "no attestation authority is recorded");
+    assert_eq!(stored["passkey"]["cred"]["attestation"]["metadata"], "None");
+    assert_eq!(f.store.read(|tx| tx.passkey_count(alice)).expect("count"), outcomes.iter().filter(|o| o.2).count());
+}
+
+// ---- the canary ----
+
+#[test]
+fn a_canary_in_the_names_shows_up_nowhere_it_should_not() {
+    const CANARY: &str = "canary-7c1e9f";
+    let f = fixture("canary");
+    let (alice, handle) = f.account(CANARY);
+    let subject = RegistrationSubject {
+        handle,
+        user_name: CANARY.to_owned(),
+        display_name: format!("{CANARY} display"),
+    };
+    let mut shown: Vec<String> = vec![format!("{subject:?}")];
+
+    let mut key = SoftPasskey::new();
+    let (options, token) = f.passkeys.start_registration(&subject, ADDR).expect("starts");
+    let options: Value = serde_json::from_str(&options).expect("JSON");
+    let response = key.register(&options, &f.origin).expect("answers").to_string();
+    let registered =
+        f.passkeys.finish_registration(token.expose(), &response, None, &format!("{CANARY} name"), ADDR).expect("verifies");
+    shown.push(format!("{registered:?}"));
+    // The name is stored where it belongs, and nowhere else.
+    assert_eq!(f.passkeys.list(alice).expect("list")[0].name, format!("{CANARY} name"));
+    shown.push(format!("{:?}", f.passkeys.list(alice).expect("list")));
+
+    // Failures of every kind.
+    let (_o, token) = f.passkeys.start_registration(&subject, ADDR).expect("starts");
+    shown.push(format!("{:?}", f.passkeys.finish_registration(token.expose(), &response, None, CANARY, ADDR)));
+    shown.push(format!("{:?}", f.passkeys.finish_registration(CANARY, CANARY, Some(CANARY), CANARY, ADDR)));
+    shown.push(format!("{:?}", f.passkeys.finish_sign_in(CANARY, CANARY, Some(CANARY), ADDR, CANARY)));
+    let (_o, token) = f.start_sign_in();
+    shown.push(format!("{:?}", f.passkeys.finish_sign_in(token.expose(), CANARY, Some(CANARY), ADDR, CANARY)));
+    shown.push(format!("{:?}", f.passkeys.remove(alice, 99, Some(ADDR))));
+    shown.push(format!("{:?}", f.passkeys.remove(alice, 1, Some(ADDR))));
+    let mut session = f.session(alice);
+    let (_o, token) = f.passkeys.start_step_up(&session).expect("starts");
+    shown.push(format!("{:?}", f.passkeys.finish_step_up(token.expose(), CANARY, &mut session, ADDR)));
+    shown.push(format!("{:?}", f.passkeys));
+    let signed_in = f.sign_in(&mut key, Some(CANARY)).expect("signs in");
+    shown.push(format!("{signed_in:?}"));
+    shown.push(format!("{}", PasskeyError::Invalid));
+
+    for text in &shown {
+        assert!(!text.contains(CANARY), "the canary is in: {text}");
+    }
+    let audit = std::fs::read_dir(f.scratch.path().join("server/audit"))
+        .expect("audit dir")
+        .map(|e| std::fs::read_to_string(e.expect("entry").path()).expect("read"))
+        .collect::<String>();
+    assert!(!audit.is_empty() && !audit.contains(CANARY), "the audit file has no name");
 }
