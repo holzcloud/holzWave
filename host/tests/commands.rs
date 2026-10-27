@@ -625,7 +625,7 @@ fn sample(ty: &str) -> Option<&'static str> {
         return Some("null");
     }
     Some(match ty.as_str() {
-        "PaneId" | "SplitId" | "u32" | "usize" | "i32" => "1",
+        "PaneId" | "SplitId" | "u32" | "u64" | "usize" | "i32" => "1",
         "f32" | "f64" => "0.5",
         "bool" => "false",
         "String" => r#""x""#,
@@ -811,6 +811,123 @@ fn a_window_row_passes_the_label_it_is_given_and_a_pane_row_ignores_it() {
     for name in ["key", "paste", "selection_text", "mouse", "start_pane", "copy_selection"] {
         assert!(!windows.contains(&name), "{name} names a pane and needs no window");
     }
+}
+
+// ---- the file commands: a grant with a browser address and a raw range ------------------------------------------------
+
+/// The eight-mebibyte piece a range answer is cut to, as the host crate spells it.
+const CHUNK: usize = 8 * 1024 * 1024;
+
+/// The byte at place `i` of a picture file made by [`write_picture`] after its 16-byte header.
+fn body_byte(i: usize) -> u8 {
+    (i % 251) as u8
+}
+
+/// A file that a grant accepts (the first bytes of a PNG, then a known pattern) of `total` bytes. Returns its path text.
+fn write_picture(world: &World, name: &str, total: usize) -> (String, Vec<u8>) {
+    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R'];
+    bytes.extend((0..total - bytes.len()).map(body_byte));
+    let path = world.dir.join(name);
+    std::fs::write(&path, &bytes).expect("a picture file");
+    (path.to_string_lossy().into_owned(), bytes)
+}
+
+/// Grant the file at `path` through the registry and return the token of the answer.
+fn grant_token(world: &World, path: &str) -> String {
+    let args = format!(r#"{{"source":"local","path":{}}}"#, json_string(path));
+    let Outcome::Ok(text) = world.call("file_grant", &args) else { panic!("file_grant did not answer") };
+    let answer: serde_json::Value = serde_json::from_str(&text).expect("the answer is JSON");
+    answer["token"].as_str().expect("a token").to_owned()
+}
+
+fn range_args(token: &str, offset: u64, len: u64) -> String {
+    format!(r#"{{"token":{},"offset":{offset},"len":{len}}}"#, json_string(token))
+}
+
+#[test]
+fn tracer_a_grant_answers_the_address_of_the_browser_and_the_members_of_the_desktop_answer() {
+    let world = World::new("tracer-grant");
+    let (path, bytes) = write_picture(&world, "a.bin", 20 * 1024);
+
+    let outcome = world.call("file_grant", &format!(r#"{{"source":"local","path":{}}}"#, json_string(&path)));
+
+    let Outcome::Ok(text) = outcome else { panic!("file_grant answered {outcome:?}") };
+    let answer: serde_json::Value = serde_json::from_str(&text).expect("the answer is JSON");
+    let token = answer["token"].as_str().expect("a token");
+    assert_eq!(token.len(), 32, "{token}");
+    assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_eq!(answer["url"], format!("/files/{token}"));
+    // The members of the desktop answer, and nothing else: the url first, then the flattened grant.
+    let mut members: Vec<&str> = answer.as_object().expect("an object").keys().map(String::as_str).collect();
+    members.sort_unstable();
+    assert_eq!(members, ["mime", "size", "token", "url"]);
+    assert_eq!((answer["mime"].as_str(), answer["size"].as_u64()), (Some("image/png"), Some(bytes.len() as u64)));
+    assert!(text.starts_with(&format!(r#"{{"url":"/files/{token}","token":"{token}""#)), "{text}");
+    // The grant is the core's: the core knows the token and what it names.
+    assert_eq!(world.core.granted(token), Some(("image/png".to_owned(), bytes.len() as u64)));
+}
+
+#[test]
+fn tracer_a_range_answers_raw_bytes_cut_to_the_chunk_and_to_the_end_of_the_file() {
+    let world = World::new("tracer-range");
+    let (path, bytes) = write_picture(&world, "a.bin", 20 * 1024);
+    let (big_path, big) = write_picture(&world, "big.bin", CHUNK + 1000);
+    let (token, big_token) = (grant_token(&world, &path), grant_token(&world, &big_path));
+
+    assert_eq!(world.call("file_range", &range_args(&token, 5, 100)), Outcome::Binary(bytes[5..105].to_vec()));
+    assert_eq!(world.call("file_range", &range_args(&token, 0, 0)), Outcome::Binary(Vec::new()));
+    // Fewer bytes at the end of the file, and none past it.
+    let tail = bytes.len() as u64 - 10;
+    assert_eq!(world.call("file_range", &range_args(&token, tail, 100)), Outcome::Binary(bytes[bytes.len() - 10..].to_vec()));
+    assert_eq!(world.call("file_range", &range_args(&token, bytes.len() as u64 + 50, 100)), Outcome::Binary(Vec::new()));
+    // Nine mebibytes asked for: the chunk comes back, and it is the first chunk of the file.
+    let Outcome::Binary(piece) = world.call("file_range", &range_args(&big_token, 0, 9 * 1024 * 1024)) else {
+        panic!("a range is a raw answer")
+    };
+    assert_eq!(piece.len(), CHUNK);
+    assert!(piece == big[..CHUNK], "the chunk is the start of the file");
+    // And a piece of exactly the chunk from further in.
+    let Outcome::Binary(rest) = world.call("file_range", &range_args(&big_token, 500, u64::MAX)) else { panic!("raw") };
+    assert_eq!(rest.len(), CHUNK);
+    assert!(rest == big[500..500 + CHUNK]);
+}
+
+#[test]
+fn tracer_a_range_of_a_grant_nobody_made_or_that_was_revoked_answers_no_such_grant() {
+    let world = World::new("tracer-revoked");
+    let (path, bytes) = write_picture(&world, "a.bin", 20 * 1024);
+    let token = grant_token(&world, &path);
+    let unknown = "0".repeat(32);
+    let refused = Outcome::Err(json_string("no such grant"));
+
+    assert_eq!(world.call("file_range", &range_args(&unknown, 0, 10)), refused);
+    assert_eq!(world.call("file_range", &range_args(&token, 0, 10)), Outcome::Binary(bytes[..10].to_vec()));
+    assert_eq!(world.call("file_revoke", &format!(r#"{{"token":"{token}"}}"#)), Outcome::Ok("null".into()));
+    assert_eq!(world.call("file_range", &range_args(&token, 0, 10)), refused, "the grant ended");
+    assert_eq!(world.call("file_revoke", &format!(r#"{{"token":"{unknown}"}}"#)), Outcome::Ok("null".into()), "nothing to end");
+    assert_eq!(world.core.granted(&token), None);
+}
+
+#[test]
+fn tracer_a_range_reads_its_arguments_strictly_and_a_grant_of_a_text_file_is_refused_as_before() {
+    let world = World::new("tracer-strict");
+    let (path, _) = write_picture(&world, "a.bin", 4096);
+    let token = grant_token(&world, &path);
+    let before = world.events();
+
+    let text = error_text(&world.call("file_range", &format!(r#"{{"token":"{token}","offset":"5","len":1}}"#)));
+    assert!(text.contains("u64") && !text.contains('5'), "what was expected, not what was sent: {text}");
+    let text = error_text(&world.call("file_range", &format!(r#"{{"token":"{token}","offset":5,"len":1,"extra":1}}"#)));
+    assert!(text.contains("extra") && text.contains("unknown field"), "{text}");
+    let text = error_text(&world.call("file_range", &format!(r#"{{"token":"{token}","offset":5}}"#)));
+    assert!(text.contains("len") && text.contains("missing field"), "{text}");
+    assert_eq!(world.events(), before);
+
+    let note = world.dir.join("note.txt");
+    std::fs::write(&note, "not a picture").expect("a text file");
+    let own = world.core.file_grant("local", note.to_str().expect("utf-8")).expect_err("text is not granted");
+    let args = format!(r#"{{"source":"local","path":{}}}"#, json_string(note.to_str().expect("utf-8")));
+    assert_eq!(world.call("file_grant", &args), Outcome::Err(json_string(&own)));
 }
 
 // ---- the recorded surface -----------------------------------------------------------------------------------------------
