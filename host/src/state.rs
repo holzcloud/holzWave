@@ -51,7 +51,7 @@ use crate::integrate_host::{
     ConfirmAnswer, ConfirmKind, ContextAnswer, IntegrationEvent, IntegrationFault, IntegrationHost, IntegrationParts,
     LaunchAnswer, LaunchNote,
 };
-use crate::local_network::PlatformParts;
+use crate::seams::{Host, NeutralHost};
 use crate::windows::{CursorSpot, DropKind, Drops, Hovers, Place};
 
 /// A layout file larger than this is not read: a real layout is a few KiB.
@@ -80,18 +80,6 @@ fn path_with_wsh(bin: &Path, path: Option<&std::ffi::OsStr>) -> Option<std::ffi:
     }
     dirs.insert(0, bin.to_path_buf());
     std::env::join_paths(dirs).ok()
-}
-
-/// Where passwords and key passphrases are kept: the operating system's keychain.
-#[cfg(feature = "keyring")]
-fn default_secrets() -> Arc<dyn SecretStore> {
-    Arc::new(holzwave_core::secrets::KeychainStore)
-}
-
-/// Where passwords and key passphrases are kept when the host is built without the platform keychain: a store in memory.
-#[cfg(not(feature = "keyring"))]
-fn default_secrets() -> Arc<dyn SecretStore> {
-    Arc::new(holzwave_core::secrets::MemoryStore::default())
 }
 
 /// The saved connections, and the keychain entries of the profiles that a list from another computer removed: those
@@ -289,25 +277,31 @@ struct Config {
 }
 
 impl Config {
-    fn new(settings: Settings, themes: ThemeRegistry, file_notes: Vec<String>, stamps: Stamps) -> Config {
-        let (keybindings, binding_notes) = Keybindings::resolve(&settings.keybindings);
+    fn new(
+        settings: Settings,
+        themes: ThemeRegistry,
+        file_notes: Vec<String>,
+        stamps: Stamps,
+        chord_table: &str,
+    ) -> Config {
+        let (keybindings, binding_notes) = Keybindings::resolve_for(chord_table, &settings.keybindings);
         Config { settings, themes, keybindings, file_notes, binding_notes, stamps }
     }
 
     /// Read `settings.json` and `themes/` of `dir`. Never fails: what cannot be used is reported as a note.
-    fn load(dir: &Path) -> Config {
+    fn load(dir: &Path, chord_table: &str) -> Config {
         // Stamped first: a file that changes while it is read is then seen as changed by the next reload.
         let stamped = stamps(dir);
         let (settings, status) = Settings::load(dir);
         let mut notes = status_notes(SETTINGS_FILE, status);
         let (themes, theme_notes) = ThemeRegistry::load(dir);
         notes.extend(theme_notes);
-        Config::new(settings, themes, notes, stamped)
+        Config::new(settings, themes, notes, stamped, chord_table)
     }
 
     /// Replace the settings and resolve the key bindings again.
-    fn set_settings(&mut self, settings: Settings) {
-        let (keybindings, binding_notes) = Keybindings::resolve(&settings.keybindings);
+    fn set_settings(&mut self, settings: Settings, chord_table: &str) {
+        let (keybindings, binding_notes) = Keybindings::resolve_for(chord_table, &settings.keybindings);
         self.settings = settings;
         self.keybindings = keybindings;
         self.binding_notes = binding_notes;
@@ -846,6 +840,9 @@ fn load_launch_marks(dir: &Path, live: &[PaneId]) -> BTreeMap<PaneId, String> {
 /// `windows`, and never together with each other. `flush` runs the save job, which locks `windows`, so it is never
 /// called with `windows` held. The sink is never called with `windows` held, except `send`, which only queues.
 pub struct AppCore {
+    /// What the shell decides: the platform id, the store of every secret, the Local Network source, the text scale and
+    /// the caps (see [`crate::seams`]).
+    host: Arc<dyn Host>,
     /// The app data directory: `layout.json`, `settings.json`, `session.json` and `themes/` live in it.
     dir: PathBuf,
     /// The layout of every window.
@@ -1029,7 +1026,7 @@ impl AppCore {
     }
 
     /// [`AppCore::new_with_ai`] with the machine and the keychain of the integrations passed in as well, which is how the
-    /// tests give them a scratch computer and a store in memory. `None` is the real machine and the platform keychain.
+    /// tests give them a scratch computer and a store in memory. `None` is the real machine and the store of the host.
     pub fn new_with_parts(
         dir: PathBuf,
         sink: Arc<dyn Sink>,
@@ -1037,19 +1034,23 @@ impl AppCore {
         ai: AiParts,
         integration: Option<IntegrationParts>,
     ) -> Arc<AppCore> {
-        AppCore::new_with_platform(dir, sink, shell, ai, integration, PlatformParts::default())
+        AppCore::new_with_host(dir, sink, shell, Some(ai), integration, Arc::new(NeutralHost::new()))
     }
 
-    /// [`AppCore::new_with_parts`] with the pieces that only the platform can supply passed in as well (see
-    /// [`PlatformParts`]); the other constructors use the default, which has none of them.
-    pub fn new_with_platform(
+    /// The full constructor: [`AppCore::new_with_parts`] with the [`Host`] of the shell passed in (see
+    /// [`crate::seams`]); the other constructors use a [`NeutralHost`]. The platform id, the key binding table, the
+    /// store of every secret, the Local Network source, the text scale and the caps come from `host`. `None` for `ai` or
+    /// `integration` builds that service over the store of `host`; parts passed in are used as they are.
+    pub fn new_with_host(
         dir: PathBuf,
         sink: Arc<dyn Sink>,
         shell: ShellSpec,
-        ai: AiParts,
+        ai: Option<AiParts>,
         integration: Option<IntegrationParts>,
-        platform: PlatformParts,
+        host: Arc<dyn Host>,
     ) -> Arc<AppCore> {
+        let secrets = host.secrets();
+        let ai = ai.unwrap_or_else(|| AiParts::with_secrets(secrets.clone()));
         // What the sync downloaded last time is put in place before anything is read.
         let promoted = holzwave_core::sync::engine::promote_incoming_with_report(&dir);
         let applied = promoted.applied;
@@ -1079,10 +1080,10 @@ impl AppCore {
             }
         });
 
-        let config = Mutex::new(Config::load(&dir));
+        let config = Mutex::new(Config::load(&dir, host.platform().chord_table()));
         let connections = {
             let live = lock(&windows).all_panes();
-            let (connections, status) = load_connections(&dir, default_secrets(), &live, &promoted.dropped_profiles);
+            let (connections, status) = load_connections(&dir, secrets.clone(), &live, &promoted.dropped_profiles);
             match status {
                 holzwave_core::layout::LoadStatus::Clean => {}
                 holzwave_core::layout::LoadStatus::Repaired(notes) => {
@@ -1143,13 +1144,13 @@ impl AppCore {
             eprintln!("holzwave: no history file ({e}); the history is kept in memory");
             holzwave_core::history::History::in_memory().expect("in-memory history")
         });
-        let sync = crate::sync::SyncRuntime::new(dir.clone(), default_secrets());
-        let host = AiHost::new(&dir, sink.clone(), ai);
-        let local_network = crate::local_network::LocalNetworkHost::new(&dir, Some(platform.local_network));
+        let sync = crate::sync::SyncRuntime::new(dir.clone(), secrets.clone());
+        let ai_host = AiHost::new(&dir, sink.clone(), ai);
+        let local_network = crate::local_network::LocalNetworkHost::new(&dir, Some(host.local_network()));
         let integrations = {
             let parts = integration.unwrap_or_else(|| {
                 let configured = lock(&config).settings.shell.clone();
-                IntegrationParts::system(&dir, resolve_system_shell(&shell, &configured).launch)
+                IntegrationParts::system(&dir, resolve_system_shell(&shell, &configured).launch, secrets.clone())
             });
             let live = lock(&windows).all_panes();
             IntegrationHost::new(&dir, sink.clone(), parts, &live)
@@ -1165,7 +1166,7 @@ impl AppCore {
             connections.set_prompter(prompts.clone());
             // The source of shared content reaches the panes and the files through the core, so it gets a weak
             // reference before the core exists: it keeps the core alive for nothing.
-            host.bind(me.clone());
+            ai_host.bind(me.clone());
             // The sync applies what the app does not own right after a run, through the same weak reference.
             let weak = me.clone();
             sync.bind_applier(Arc::new(move || weak.upgrade().map(|core| core.apply_synced()).unwrap_or_default()));
@@ -1193,7 +1194,8 @@ impl AppCore {
                 launch_marks: Mutex::new(launch_marks),
                 held: Mutex::new(BTreeMap::new()),
                 sync,
-                ai: host,
+                ai: ai_host,
+                host,
                 local_network,
                 remote_execs: RemoteExecs::new(),
                 prompts,
@@ -1226,6 +1228,12 @@ impl AppCore {
     /// The person gave up on the question of a login.
     pub fn login_prompt_cancel(&self, id: &str) -> bool {
         self.prompts.cancel(id)
+    }
+
+    /// What the shell decided for this core: the platform, the secrets, the Local Network source, the text scale and the
+    /// caps.
+    pub fn host(&self) -> &Arc<dyn Host> {
+        &self.host
     }
 
     /// The AI chat service of the shell.
@@ -2691,7 +2699,7 @@ impl AppCore {
     pub fn app_info(&self) -> AppInfo {
         AppInfo {
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            os: std::env::consts::OS.to_owned(),
+            os: self.host.platform().as_str().to_owned(),
             hostname: read_hostname(),
         }
     }
@@ -2758,7 +2766,7 @@ impl AppCore {
         let (view, before, after) = {
             let mut cfg = lock(&self.config);
             let before = cfg.look();
-            cfg.set_settings(next);
+            cfg.set_settings(next, self.host.platform().chord_table());
             cfg.stamps.settings = saved;
             (cfg.view(), before, cfg.look())
         };
@@ -2805,7 +2813,7 @@ impl AppCore {
                 other => (loaded, status_notes(SETTINGS_FILE, other)),
             };
             notes.extend(theme_notes);
-            *cfg = Config::new(settings, themes, notes, now);
+            *cfg = Config::new(settings, themes, notes, now, self.host.platform().chord_table());
             (cfg.view(), before, cfg.look())
         };
         self.push_to_panes(&before, &after);
@@ -7179,6 +7187,136 @@ mod tests {
         let file = |_: &str| Some(b"not-used".to_vec());
         assert_eq!(hostname_from("macos", &env, &file), "");
         assert_eq!(hostname_from("plan9", &env, &file), "");
+    }
+
+    /// A secret store that remembers what was asked of it, with the secret replaced by its length.
+    struct RecordingStore {
+        inner: holzwave_core::secrets::MemoryStore,
+        log: Mutex<Vec<String>>,
+    }
+
+    impl RecordingStore {
+        fn new() -> Arc<RecordingStore> {
+            Arc::new(RecordingStore { inner: holzwave_core::secrets::MemoryStore::default(), log: Mutex::new(Vec::new()) })
+        }
+
+        fn calls(&self) -> Vec<String> {
+            lock(&self.log).clone()
+        }
+    }
+
+    impl SecretStore for RecordingStore {
+        fn get(&self, account: &str) -> holzwave_core::Result<Option<String>> {
+            lock(&self.log).push(format!("get {account}"));
+            self.inner.get(account)
+        }
+
+        fn set(&self, account: &str, secret: &str) -> holzwave_core::Result<()> {
+            lock(&self.log).push(format!("set {account} ({} bytes)", secret.len()));
+            self.inner.set(account, secret)
+        }
+
+        fn delete(&self, account: &str) -> holzwave_core::Result<()> {
+            lock(&self.log).push(format!("delete {account}"));
+            self.inner.delete(account)
+        }
+    }
+
+    /// A host that is not the desktop: the platform and the limits are the test's, the store records.
+    struct TestHost {
+        platform: crate::seams::Platform,
+        store: Arc<RecordingStore>,
+        limits: crate::seams::HostLimits,
+    }
+
+    impl TestHost {
+        fn web() -> Arc<TestHost> {
+            TestHost::on(crate::seams::Platform::Web, crate::seams::HostLimits::default())
+        }
+
+        fn on(platform: crate::seams::Platform, limits: crate::seams::HostLimits) -> Arc<TestHost> {
+            Arc::new(TestHost { platform, store: RecordingStore::new(), limits })
+        }
+    }
+
+    impl crate::seams::Host for TestHost {
+        fn platform(&self) -> crate::seams::Platform {
+            self.platform
+        }
+
+        fn secrets(&self) -> Arc<dyn SecretStore> {
+            self.store.clone()
+        }
+
+        fn local_network(&self) -> Arc<dyn crate::local_network::Source> {
+            Arc::new(crate::local_network::Unsupported)
+        }
+
+        fn text_scale(&self) -> u32 {
+            100
+        }
+
+        fn limits(&self) -> crate::seams::HostLimits {
+            self.limits
+        }
+    }
+
+    fn core_on(host: Arc<TestHost>) -> (Arc<AppCore>, Arc<Recorder>, Scratch) {
+        let dir = Scratch::new("host");
+        let rec = Arc::new(Recorder::default());
+        let core = AppCore::new_with_host(dir.0.clone(), rec.clone(), ShellSpec::new("/bin/cat", &[]), None, None, host);
+        dir.attach(&core);
+        (core, rec, dir)
+    }
+
+    #[test]
+    fn seam_a_web_host_sets_the_platform_and_receives_the_connection_secret() {
+        let host = TestHost::web();
+        let (core, _rec, _dir) = core_on(host.clone());
+        assert_eq!(core.app_info().os, "web");
+        assert_eq!(core.host().platform(), crate::seams::Platform::Web);
+        assert_eq!(core.host().text_scale(), 100);
+
+        let profile = Profile {
+            user: "holz".into(),
+            auth: holzwave_core::profiles::Auth::Password,
+            ..Profile::new("web-1", "Web 1", "web1.example.invalid")
+        };
+        let saved = core
+            .connection_save(profile, SecretChange::Set { value: "correct horse battery".into() })
+            .expect("a valid connection");
+        assert!(saved.has_secret);
+
+        let calls = host.store.calls();
+        println!("recording store: {calls:?}");
+        assert!(calls.iter().any(|call| call == "set ssh:web-1 (21 bytes)"), "{calls:?}");
+        assert!(calls.iter().all(|call| !call.contains("correct horse")), "{calls:?}");
+        assert_eq!(host.store.inner.get("ssh:web-1").expect("get").as_deref(), Some("correct horse battery"));
+    }
+
+    #[test]
+    fn seam_the_constructors_without_a_host_use_the_neutral_one() {
+        let (core, _rec, _dir) = core("/bin/cat", &[]);
+        assert_eq!(core.host().platform(), crate::seams::Platform::current());
+        assert_eq!(core.app_info().os, std::env::consts::OS);
+        assert_eq!(core.host().limits(), crate::seams::HostLimits::default());
+        assert_eq!(core.host().text_scale(), 100);
+        assert!(!core.host().local_network().applies());
+    }
+
+    #[test]
+    fn seam_the_key_binding_table_follows_the_platform_of_the_host() {
+        use crate::seams::{HostLimits, Platform};
+        let rows = |platform: Platform| {
+            let (core, _rec, _dir) = core_on(TestHost::on(platform, HostLimits::default()));
+            core.get_settings().keybindings.iter().map(|r| (r.action.clone(), r.chord.clone())).collect::<Vec<_>>()
+        };
+        let (mac, win, linux, web) =
+            (rows(Platform::MacOs), rows(Platform::Windows), rows(Platform::Linux), rows(Platform::Web));
+        assert_ne!(mac, linux, "macOS has its own table");
+        assert_ne!(win, linux, "Windows has its own table");
+        // The core has no table called `web` yet: the name selects the Linux one until the web table exists.
+        assert_eq!(web, linux);
     }
 
     #[test]

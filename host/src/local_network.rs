@@ -52,8 +52,8 @@ pub trait Source: Send + Sync {
 }
 
 /// A source for a system that has no such setting: it never applies, so nothing is stored, nothing is probed and the page
-/// draws nothing. The behaviour of Windows and Linux, and the default of [`PlatformParts`].
-struct Unsupported;
+/// draws nothing. The behaviour of Windows and Linux, and the answer of the neutral host.
+pub struct Unsupported;
 
 impl Source for Unsupported {
     fn applies(&self) -> bool {
@@ -62,20 +62,6 @@ impl Source for Unsupported {
 
     fn probe(&self, _window: Duration) -> Reading {
         Reading::Unknown
-    }
-}
-
-/// What only the platform can supply to the core. The desktop app passes its own (the macOS source of the Local Network
-/// permission); the default has none of them and reports the setting as unsupported.
-#[derive(Clone)]
-pub struct PlatformParts {
-    /// Where the system's answer about the Local Network permission comes from.
-    pub local_network: Arc<dyn Source>,
-}
-
-impl Default for PlatformParts {
-    fn default() -> PlatformParts {
-        PlatformParts { local_network: Arc::new(Unsupported) }
     }
 }
 

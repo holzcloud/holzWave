@@ -28,6 +28,7 @@
 mod ai_device;
 mod clipboard;
 mod commands;
+mod desktop;
 mod files_protocol;
 mod local_network;
 mod menu;
@@ -44,6 +45,7 @@ use tauri::{
 
 use holzwave_core::session::{DEFAULT_SIZE, MonitorRect, Placement, WindowState};
 use holzwave_host::ai_host::AiParts;
+use holzwave_host::seams::Host;
 use holzwave_host::state::{AppCore, Out, ShellSpec, Sink, Target};
 use holzwave_host::windows::{
     CursorSpot, Frame, Normal, Place, WindowTracker, physical_pixels, pointer_is_global, position_beside,
@@ -362,9 +364,9 @@ pub fn run() {
             let mut protected = Vec::new();
             protected.extend(app.path().app_config_dir().ok());
             protected.extend(ipc_dir(app.handle()));
-            let parts = AiParts::system().protecting(protected);
-            let core =
-                AppCore::new_with_platform(dir, sink, ShellSpec::default(), parts, None, local_network::platform_parts());
+            let host = Arc::new(desktop::DesktopHost::new());
+            let parts = AiParts::with_secrets(host.secrets()).protecting(protected);
+            let core = AppCore::new_with_host(dir, sink, ShellSpec::default(), Some(parts), None, host);
             // The on-device model (macOS only): the host learns where it comes from and asks nothing of it until a person acts.
             if let Some(source) = ai_device::system() {
                 core.ai().use_device(source);

@@ -30,8 +30,7 @@ use holzwave_core::Error as CoreError;
 use holzwave_core::files::{FileSource, Kind as FileKind};
 use holzwave_core::layout::PaneId;
 use holzwave_core::preview::{Content, SNIFF, classify};
-#[cfg(feature = "keyring")]
-use holzwave_core::secrets::KeychainStore;
+use holzwave_core::secrets::SecretStore;
 use holzwave_core::settings::Settings;
 use holzwave_core::textread::TextRegion;
 use serde::{Deserialize, Serialize, Serializer};
@@ -62,20 +61,15 @@ pub struct AiParts {
 }
 
 impl AiParts {
-    /// The platform keychain and the system clock.
-    #[cfg(feature = "keyring")]
+    /// A keychain in memory and the system clock: the value of a core that is given no host. A shell passes the store of
+    /// its host with [`AiParts::with_secrets`].
     pub fn system() -> AiParts {
-        AiParts { vault: KeyVault::new(Arc::new(KeychainStore)), clock: None, protected: Vec::new() }
+        AiParts::with_secrets(Arc::new(holzwave_core::secrets::MemoryStore::default()))
     }
 
-    /// A keychain in memory and the system clock: the value of a host built without the platform keychain.
-    #[cfg(not(feature = "keyring"))]
-    pub fn system() -> AiParts {
-        AiParts {
-            vault: KeyVault::new(Arc::new(holzwave_core::secrets::MemoryStore::default())),
-            clock: None,
-            protected: Vec::new(),
-        }
+    /// The keys of the profiles live in `secrets`; the system clock.
+    pub fn with_secrets(secrets: Arc<dyn SecretStore>) -> AiParts {
+        AiParts { vault: KeyVault::new(secrets), clock: None, protected: Vec::new() }
     }
 
     /// The same parts with `dirs` added to the places no tool may touch. The deny list of the service, of the tools
@@ -1610,10 +1604,10 @@ mod tests {
             assert!(body_of(source, path).contains("self.forget_pane("), "{path} does not forget the pane");
         }
         // The settings and the end of the app reach the service too.
-        // `new_with_ai` hands over to `new_with_parts`, which hands over to `new_with_platform`, which builds the core.
+        // `new_with_ai` hands over to `new_with_parts`, which hands over to `new_with_host`, which builds the core.
         assert!(body_of(source, "fn new_with_ai(").contains("AppCore::new_with_parts("));
-        assert!(body_of(source, "fn new_with_parts(").contains("AppCore::new_with_platform("));
-        for place in ["fn new_with_platform(", "fn set_setting(", "fn reload_settings("] {
+        assert!(body_of(source, "fn new_with_parts(").contains("AppCore::new_with_host("));
+        for place in ["fn new_with_host(", "fn set_setting(", "fn reload_settings("] {
             assert!(body_of(source, place).contains("apply_settings"), "{place} does not apply the settings");
         }
         assert!(body_of(source, "pub fn shutdown(").contains("self.ai.shutdown()"));

@@ -11,6 +11,7 @@ pub mod integrate_host;
 pub mod local_network;
 pub mod login_prompt;
 pub mod ranges;
+pub mod seams;
 pub mod state;
 pub mod sync;
 pub mod windows;

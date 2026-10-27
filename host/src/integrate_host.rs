@@ -41,23 +41,10 @@ pub struct IntegrationParts {
 }
 
 impl IntegrationParts {
-    /// The real machine and the platform keychain. `shell` is the person's shell as the app resolved it for the
+    /// The real machine and the store of the host. `shell` is the person's shell as the app resolved it for the
     /// settings, for a pane that is the shell itself.
-    #[cfg(feature = "keyring")]
-    pub fn system(dir: &Path, shell: ShellLaunch) -> IntegrationParts {
-        IntegrationParts {
-            facts: HostFacts::system(dir, shell),
-            secrets: Arc::new(holzwave_core::secrets::KeychainStore),
-        }
-    }
-
-    /// The real machine and a keychain in memory: the value of a host built without the platform keychain.
-    #[cfg(not(feature = "keyring"))]
-    pub fn system(dir: &Path, shell: ShellLaunch) -> IntegrationParts {
-        IntegrationParts {
-            facts: HostFacts::system(dir, shell),
-            secrets: Arc::new(holzwave_core::secrets::MemoryStore::default()),
-        }
+    pub fn system(dir: &Path, shell: ShellLaunch, secrets: Arc<dyn SecretStore>) -> IntegrationParts {
+        IntegrationParts { facts: HostFacts::system(dir, shell), secrets }
     }
 
     /// A machine and a store of the caller's making.
