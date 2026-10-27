@@ -12,8 +12,9 @@
 //! - **The secret store is told, not asked.** The key material of the method that was used goes to the [`UnlockGate`]; a
 //!   failure of the gate does not fail the sign-in, and the material is in no answer, log or audit line.
 //!
-//! This file writes no log line on purpose: the services and the gate own their log and audit lines, and a route that logged
-//! would be one more place a value could leak to.
+//! This file writes no log line with a field on purpose: the services and the gate own their log and audit lines, and a route
+//! that logged a value would be one more place for it to leak to. The one line it writes, when the audit file cannot take the
+//! `signout` line, has no field.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -27,24 +28,28 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use cookie::Cookie;
+use serde::Deserialize;
 use serde::de::value::MapAccessDeserializer;
 use serde::de::{Deserializer, MapAccess, Visitor};
-use serde::Deserialize;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
+use crate::audit::{Action, Actor, Event, Outcome};
 use crate::auth::oidc::Http;
 use crate::auth::oidc::{OidcCallback, OidcError, OidcGrant, OidcService, OidcStart};
 use crate::auth::passkey::{PasskeyError, Passkeys};
 use crate::auth::signin::{SignIn, SignInError};
 use crate::http::app::App;
 use crate::http::router::{Access, ApiError, ApiJson, Authed, ClientAddr, MaybeAuthed, Part};
+use crate::log::{self, Level};
 use crate::store::AccountId;
 
-use super::cookies::{self, MAX_COOKIE_HEADER_BYTES, MAX_COOKIE_PAIRS, MAX_TOKEN_CHARS, OIDC_COOKIE, PENDING_COOKIE};
+use super::cookies::{
+    self, MAX_COOKIE_HEADER_BYTES, MAX_COOKIE_PAIRS, MAX_TOKEN_CHARS, OIDC_COOKIE, PENDING_COOKIE,
+};
 use super::routes_unlock::{GateFuture, Material, UnlockGate};
 
 /// How long a sign-in waits for the unlock gate before it goes on without it.
-const GATE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(super) const GATE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The longest `User-Agent` text that is looked at, in bytes. A real header is far shorter.
 const MAX_AGENT_BYTES: usize = 512;
@@ -65,7 +70,11 @@ const UNKNOWN_DEVICE: &str = "Browser";
 /// The single sign-on service as the routes use it, without its HTTP client type.
 pub trait OidcFlow: Send + Sync {
     /// Starts a sign-in at the provider `id`.
-    fn start<'a>(&'a self, id: &'a str, addr: IpAddr) -> GateFuture<'a, Result<OidcStart, OidcError>>;
+    fn start<'a>(
+        &'a self,
+        id: &'a str,
+        addr: IpAddr,
+    ) -> GateFuture<'a, Result<OidcStart, OidcError>>;
 
     /// Finishes a sign-in from the callback of the provider.
     fn finish<'a>(
@@ -78,7 +87,11 @@ pub trait OidcFlow: Send + Sync {
 }
 
 impl<H: Http> OidcFlow for OidcService<H> {
-    fn start<'a>(&'a self, id: &'a str, addr: IpAddr) -> GateFuture<'a, Result<OidcStart, OidcError>> {
+    fn start<'a>(
+        &'a self,
+        id: &'a str,
+        addr: IpAddr,
+    ) -> GateFuture<'a, Result<OidcStart, OidcError>> {
         Box::pin(OidcService::start(self, id, addr))
     }
 
@@ -89,7 +102,13 @@ impl<H: Http> OidcFlow for OidcService<H> {
         addr: IpAddr,
         device: &'a str,
     ) -> GateFuture<'a, Result<OidcGrant, OidcError>> {
-        Box::pin(OidcService::finish(self, transaction, callback, addr, device))
+        Box::pin(OidcService::finish(
+            self,
+            transaction,
+            callback,
+            addr,
+            device,
+        ))
     }
 }
 
@@ -166,7 +185,10 @@ pub fn device_of(user_agent: &str) -> String {
 
 /// The device summary of a request.
 fn device_of_request(headers: &HeaderMap) -> String {
-    let agent = headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok()).unwrap_or("");
+    let agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
     device_of(agent)
 }
 
@@ -181,7 +203,9 @@ impl IntoResponse for Refusal {
     fn into_response(self) -> Response {
         let mut response = self.0.into_response();
         if let ApiError::Throttled { retry_seconds } = self.0 {
-            response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from(retry_seconds));
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from(retry_seconds));
         }
         response
     }
@@ -206,7 +230,9 @@ impl From<SignInError> for Refusal {
 impl From<PasskeyError> for Refusal {
     fn from(error: PasskeyError) -> Refusal {
         Refusal(match error {
-            PasskeyError::Invalid | PasskeyError::TooMany | PasskeyError::NotFound => ApiError::Invalid,
+            PasskeyError::Invalid | PasskeyError::TooMany | PasskeyError::NotFound => {
+                ApiError::Invalid
+            }
             PasskeyError::Conflict => ApiError::Conflict { field: None },
             PasskeyError::Internal => ApiError::Busy,
         })
@@ -214,9 +240,15 @@ impl From<PasskeyError> for Refusal {
 }
 
 /// An answer with a JSON body, `no-store` and the given cookies.
-pub(super) fn answer(status: StatusCode, body: &serde_json::Value, cookies: Vec<HeaderValue>) -> Response {
+pub(super) fn answer(
+    status: StatusCode,
+    body: &serde_json::Value,
+    cookies: Vec<HeaderValue>,
+) -> Response {
     let mut response = (status, Json(body)).into_response();
-    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     for cookie in cookies {
         response.headers_mut().append(header::SET_COOKIE, cookie);
     }
@@ -244,13 +276,19 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Object<T> {
             }
         }
 
-        deserializer.deserialize_map(Reader(std::marker::PhantomData)).map(Object)
+        deserializer
+            .deserialize_map(Reader(std::marker::PhantomData))
+            .map(Object)
     }
 }
 
 /// Runs a blocking service call off the async threads.
-pub(super) async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, Refusal> {
-    tokio::task::spawn_blocking(work).await.map_err(|_| Refusal(ApiError::Busy))
+pub(super) async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, Refusal> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| Refusal(ApiError::Busy))
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -286,7 +324,9 @@ fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
     found.filter(|value| {
         !value.is_empty()
             && value.len() <= MAX_TOKEN_CHARS
-            && value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~'))
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~'))
     })
 }
 
@@ -298,12 +338,21 @@ fn pending_value(headers: &HeaderMap) -> String {
 /// What follows a verified sign-in: the session the browser still held is ended, and the unlock gate is told which key
 /// material the method produced. A failure of either changes nothing for the person: the old session expires by itself, and
 /// a store that stays locked shows the unlock dialog.
-async fn after_sign_in(services: &Shared, held: Option<Authed>, account: AccountId, material: Material) {
+async fn after_sign_in(
+    services: &Shared,
+    held: Option<Authed>,
+    account: AccountId,
+    material: Material,
+) {
     if let Some(old) = held {
         let sessions = services.app.session_manager.clone();
         let _ = tokio::task::spawn_blocking(move || sessions.end(&old.session)).await;
     }
-    let _ = tokio::time::timeout(GATE_TIMEOUT, services.gate.session_started(account, material)).await;
+    let _ = tokio::time::timeout(
+        GATE_TIMEOUT,
+        services.gate.session_started(account, material),
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -342,9 +391,16 @@ async fn password_route(
     Extension(client): Extension<ClientAddr>,
     ApiJson(Object(body)): ApiJson<Object<PasswordBody>>,
 ) -> Result<Response, Refusal> {
-    let token = services.signin.begin_password(&body.username, &body.password, client.0).await?;
+    let token = services
+        .signin
+        .begin_password(&body.username, &body.password, client.0)
+        .await?;
     let cookie = cookies::pending(token.expose()).ok_or(ApiError::Busy)?;
-    Ok(answer(StatusCode::OK, &serde_json::json!({ "next": "totp" }), vec![cookie]))
+    Ok(answer(
+        StatusCode::OK,
+        &serde_json::json!({ "next": "totp" }),
+        vec![cookie],
+    ))
 }
 
 /// `POST /auth/totp`: the second step. The only place a password sign-in makes a session.
@@ -364,7 +420,11 @@ async fn totp_route(
     let cookie = cookies::session(grant.session.value.expose()).ok_or(ApiError::Busy)?;
     let account = grant.session.session.account_id;
     after_sign_in(&services, held, account, Material::Password(grant.unlock)).await;
-    Ok(answer(StatusCode::OK, &serde_json::json!({ "next": "done" }), vec![cookie, cookies::delete_pending()]))
+    Ok(answer(
+        StatusCode::OK,
+        &serde_json::json!({ "next": "done" }),
+        vec![cookie, cookies::delete_pending()],
+    ))
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -397,7 +457,11 @@ async fn passkey_begin_route(
     let (options, token) = blocking(move || passkeys.start_sign_in(addr)).await??;
     let options: serde_json::Value = serde_json::from_str(&options).map_err(|_| ApiError::Busy)?;
     let cookie = cookies::pending(token.expose()).ok_or(ApiError::Busy)?;
-    Ok(answer(StatusCode::OK, &serde_json::json!({ "options": options }), vec![cookie]))
+    Ok(answer(
+        StatusCode::OK,
+        &serde_json::json!({ "options": options }),
+        vec![cookie],
+    ))
 }
 
 /// `POST /auth/passkey/finish`: verifies the assertion against the challenge of the pending cookie. A session is made by the
@@ -426,7 +490,11 @@ async fn passkey_finish_route(
     let cookie = cookies::session(signed.session.value.expose()).ok_or(ApiError::Busy)?;
     let material = signed.prf.map_or(Material::None, Material::Passkey);
     after_sign_in(&services, held, signed.account, material).await;
-    Ok(answer(StatusCode::OK, &serde_json::json!({ "next": "done" }), vec![cookie, cookies::delete_pending()]))
+    Ok(answer(
+        StatusCode::OK,
+        &serde_json::json!({ "next": "done" }),
+        vec![cookie, cookies::delete_pending()],
+    ))
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -437,8 +505,15 @@ async fn passkey_finish_route(
 fn provider_known(services: &AuthServices, id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_PROVIDER_ID
-        && id.bytes().all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
-        && services.app.auth.oidc.iter().any(|provider| provider.id == id)
+        && id
+            .bytes()
+            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
+        && services
+            .app
+            .auth
+            .oidc
+            .iter()
+            .any(|provider| provider.id == id)
 }
 
 /// The fixed redirect of a failed single sign-on: no reason, no input, the transaction cookie deleted.
@@ -457,12 +532,23 @@ async fn oidc_start_route(
     Extension(client): Extension<ClientAddr>,
     id: Result<Path<String>, PathRejection>,
 ) -> Result<Response, Refusal> {
-    let Ok(Path(id)) = id else { return Err(ApiError::NotFound.into()) };
-    let Some(flow) = services.oidc.as_ref().filter(|_| provider_known(&services, &id)) else {
+    let Ok(Path(id)) = id else {
         return Err(ApiError::NotFound.into());
     };
-    let Ok(start) = flow.start(&id, client.0).await else { return Ok(oidc_failure()) };
-    let (Ok(location), Some(cookie)) = (HeaderValue::from_str(&start.url), cookies::oidc(start.transaction.expose())) else {
+    let Some(flow) = services
+        .oidc
+        .as_ref()
+        .filter(|_| provider_known(&services, &id))
+    else {
+        return Err(ApiError::NotFound.into());
+    };
+    let Ok(start) = flow.start(&id, client.0).await else {
+        return Ok(oidc_failure());
+    };
+    let (Ok(location), Some(cookie)) = (
+        HeaderValue::from_str(&start.url),
+        cookies::oidc(start.transaction.expose()),
+    ) else {
         return Ok(oidc_failure());
     };
     let mut response = StatusCode::FOUND.into_response();
@@ -491,22 +577,167 @@ async fn oidc_callback_route(
     headers: HeaderMap,
     query: Result<Query<CallbackQuery>, QueryRejection>,
 ) -> Response {
-    let Some(flow) = services.oidc.as_ref() else { return ApiError::NotFound.into_response() };
+    let Some(flow) = services.oidc.as_ref() else {
+        return ApiError::NotFound.into_response();
+    };
     // A query that cannot be read is a callback with nothing in it: the transaction is used up all the same.
     let query = query.map(|Query(query)| query).unwrap_or_default();
-    let callback = OidcCallback { code: query.code, state: query.state, error: query.error, iss: query.iss };
+    let callback = OidcCallback {
+        code: query.code,
+        state: query.state,
+        error: query.error,
+        iss: query.iss,
+    };
     let transaction = read_cookie(&headers, OIDC_COOKIE).unwrap_or_default();
     let device = device_of_request(&headers);
-    let Ok(grant) = flow.finish(&transaction, callback, client.0, &device).await else { return oidc_failure() };
-    let Some(cookie) = cookies::session(grant.session.value.expose()) else { return oidc_failure() };
+    let Ok(grant) = flow.finish(&transaction, callback, client.0, &device).await else {
+        return oidc_failure();
+    };
+    let Some(cookie) = cookies::session(grant.session.value.expose()) else {
+        return oidc_failure();
+    };
     after_sign_in(&services, held, grant.account, Material::None).await;
     let mut response = (StatusCode::OK, services.page.login_page()).into_response();
     let headers = response.headers_mut();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.append(header::SET_COOKIE, cookie);
     headers.append(header::SET_COOKIE, cookies::delete_oidc());
     response
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Logout and step-up
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// `POST /auth/logout`: ends the session of the request, writes one `signout` line and deletes the cookie. A session that is
+/// not alive never gets here: the router answers 401 before this runs.
+async fn logout_route(
+    State(services): State<Shared>,
+    authed: Authed,
+    ApiJson(Object(_)): ApiJson<Object<Empty>>,
+) -> Result<Response, Refusal> {
+    let app = services.app.clone();
+    let session = authed.session.clone();
+    let (account, addr) = (authed.account.id, authed.client);
+    let ended = blocking(move || {
+        let ended = app.session_manager.end(&session);
+        if matches!(ended, Ok(true)) {
+            let event = Event::new(
+                Action::Signout,
+                Outcome::Ok,
+                Actor::Account(account),
+                Some(addr),
+            );
+            if app.audit.record(&event).is_err() {
+                log::event(Level::Error, "signout.audit_failed", &[]);
+            }
+        }
+        ended
+    })
+    .await?;
+    ended.map_err(|_| ApiError::Busy)?;
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.append(header::SET_COOKIE, cookies::delete_session());
+    Ok(response)
+}
+
+/// `POST /auth/step-up/begin`: the assertion options for the passkeys of the session's own account and the pending cookie of
+/// the challenge. An account without a passkey is `409`.
+async fn step_up_begin_route(
+    State(services): State<Shared>,
+    authed: Authed,
+    ApiJson(Object(_)): ApiJson<Object<Empty>>,
+) -> Result<Response, Refusal> {
+    let passkeys = services.passkeys.clone();
+    let session = authed.session.clone();
+    let (options, token) = blocking(move || passkeys.start_step_up(&session)).await??;
+    let options: serde_json::Value = serde_json::from_str(&options).map_err(|_| ApiError::Busy)?;
+    let cookie = cookies::pending(token.expose()).ok_or(ApiError::Busy)?;
+    Ok(answer(
+        StatusCode::OK,
+        &serde_json::json!({ "options": options }),
+        vec![cookie],
+    ))
+}
+
+/// The members of a step-up body: the password, or the credential (with the `prf` member the page sends beside it, which a
+/// step-up has no use for).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StepUpBody {
+    #[serde(default)]
+    password: Option<serde_json::Value>,
+    #[serde(default)]
+    credential: Option<serde_json::Value>,
+    #[serde(default)]
+    prf: Option<serde_json::Value>,
+}
+
+/// The one form of a step-up body.
+enum StepUpForm {
+    Password(Zeroizing<String>),
+    Passkey(serde_json::Value),
+}
+
+fn step_up_form(body: StepUpBody) -> Result<StepUpForm, ApiError> {
+    match (body.password, body.credential, body.prf) {
+        (Some(serde_json::Value::String(text)), None, None) => {
+            Ok(StepUpForm::Password(Zeroizing::new(text)))
+        }
+        (Some(_), None, None) => Err(ApiError::BadRequest {
+            field: Some("password"),
+        }),
+        (None, Some(credential), _) => Ok(StepUpForm::Passkey(credential)),
+        _ => Err(ApiError::BadRequest { field: None }),
+    }
+}
+
+/// `POST /auth/step-up`: proves again, with the password or with a passkey, that the person is there. It moves the time of the
+/// last sign-in and nothing else: the idle and the absolute end of the session stay where they were. A form of a method that
+/// is off does not exist.
+async fn step_up_route(
+    State(services): State<Shared>,
+    authed: Authed,
+    headers: HeaderMap,
+    ApiJson(Object(body)): ApiJson<Object<StepUpBody>>,
+) -> Result<Response, Refusal> {
+    let window = services.app.sessions.step_up.as_secs();
+    let mut session = authed.session.clone();
+    let addr = authed.client;
+    let mut cookies_out = Vec::new();
+    match step_up_form(body)? {
+        StepUpForm::Password(password) => {
+            if !services.app.auth.password_totp {
+                return Err(ApiError::NotFound.into());
+            }
+            services
+                .signin
+                .step_up_password(&mut session, &password, addr)
+                .await?;
+        }
+        StepUpForm::Passkey(credential) => {
+            if !services.app.auth.passkey {
+                return Err(ApiError::NotFound.into());
+            }
+            let token = pending_value(&headers);
+            let credential = credential.to_string();
+            let passkeys = services.passkeys.clone();
+            blocking(move || passkeys.finish_step_up(&token, &credential, &mut session, addr))
+                .await??;
+            cookies_out.push(cookies::delete_pending());
+        }
+    }
+    Ok(answer(
+        StatusCode::OK,
+        &serde_json::json!({ "step_up": window }),
+        cookies_out,
+    ))
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -520,21 +751,41 @@ pub fn parts(services: Arc<AuthServices>) -> Vec<Part> {
     let mut public: Router<Shared> = Router::new();
     let mut public_routes = 0usize;
     if auth.password_totp {
-        public = public.route("/auth/password", post(password_route)).route("/auth/totp", post(totp_route));
+        public = public
+            .route("/auth/password", post(password_route))
+            .route("/auth/totp", post(totp_route));
         public_routes += 2;
     }
     if auth.passkey {
-        public = public.route("/auth/passkey/begin", post(passkey_begin_route)).route("/auth/passkey/finish", post(passkey_finish_route));
+        public = public
+            .route("/auth/passkey/begin", post(passkey_begin_route))
+            .route("/auth/passkey/finish", post(passkey_finish_route));
         public_routes += 2;
     }
     if !auth.oidc.is_empty() && services.oidc.is_some() {
-        public = public.route("/auth/oidc/{id}/start", get(oidc_start_route)).route("/auth/oidc/callback", get(oidc_callback_route));
+        public = public
+            .route("/auth/oidc/{id}/start", get(oidc_start_route))
+            .route("/auth/oidc/callback", get(oidc_callback_route));
         public_routes += 2;
+    }
+    let mut signed_in: Router<Shared> = Router::new().route("/auth/logout", post(logout_route));
+    if auth.password_totp || auth.passkey {
+        signed_in = signed_in.route("/auth/step-up", post(step_up_route));
+    }
+    if auth.passkey {
+        signed_in = signed_in.route("/auth/step-up/begin", post(step_up_begin_route));
     }
     let mut parts = Vec::new();
     // A part with no route would make the router builder panic, so only a part with a route is returned.
     if public_routes > 0 {
-        parts.push(Part { access: Access::Public, router: public.with_state(services) });
+        parts.push(Part {
+            access: Access::Public,
+            router: public.with_state(services.clone()),
+        });
     }
+    parts.push(Part {
+        access: Access::Session,
+        router: signed_in.with_state(services),
+    });
     parts
 }

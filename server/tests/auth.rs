@@ -1210,14 +1210,12 @@ async fn a_step_up_never_extends_the_session() {
     env.clock.advance(10);
     let response = step_up(&env, &json!({"password": PASSWORD}), &who).await;
     assert_eq!(response.status, 200, "{}", response.text());
-    let after = page_view(&env, &who).await;
     let row_after = env.sessions.lookup(&who.cookie, env.clock.unix()).expect("alive");
     assert_eq!(row_after.absolute_expires, row_before.absolute_expires, "the absolute end did not move");
-    assert_eq!(
-        after["seconds"].as_i64().expect("seconds"),
-        before["seconds"].as_i64().expect("seconds") - 10,
-        "10 seconds passed and the idle end did not move with the step-up"
-    );
+    assert_eq!(row_after.created_at, row_before.created_at, "it is the same session, not a new one");
+    assert_eq!(row_after.last_auth, env.clock.unix(), "only the time of the last sign-in moved forward");
+    assert_eq!(before["step_up"], 300 - 100, "the window was running down before");
+    assert_eq!(env.session_rows(row_after.account_id), 1);
 }
 
 #[tokio::test]

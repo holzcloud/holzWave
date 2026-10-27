@@ -80,6 +80,19 @@ pub fn account_key(username: &str) -> String {
     key
 }
 
+/// A key in a space of its own: `scope`, a colon and the SHA-256 of `bytes` as lower-case hex. A caller outside the sign-in
+/// uses a scope that is neither `a` nor `i`, so that its counts never meet the counts of a sign-in.
+pub fn scoped_key(scope: &str, bytes: &[u8]) -> String {
+    let mut key = String::with_capacity(scope.len() + 1 + 64);
+    key.push_str(scope);
+    key.push(':');
+    for byte in Sha256::digest(bytes) {
+        key.push(char::from(b"0123456789abcdef"[usize::from(byte >> 4)]));
+        key.push(char::from(b"0123456789abcdef"[usize::from(byte & 15)]));
+    }
+    key
+}
+
 /// The key a client address is counted under: the one the connection admission uses (IPv6 grouped by its /64).
 pub fn address_key(addr: IpAddr) -> String {
     format!("i:{}", key_of(addr))
