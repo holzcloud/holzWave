@@ -3,6 +3,7 @@
 // Escape to `login_prompt_cancel`, and `login-prompt-end` takes the dialog away when the core ended the question. What the
 // server wrote is text under a fixed sentence and never a title. The stub plays the core.
 import assert from "node:assert/strict";
+import { listenerCount } from "./lib.mjs";
 
 const ID = "0123456789abcdef0123456789abcdef";
 const ID2 = "fedcba9876543210fedcba9876543210";
@@ -25,8 +26,8 @@ export default async function ({ page, url, errors }) {
   await page.goto(`${url}index.html?renderer=canvas`);
   await page.waitForSelector(".divider");
   await page.waitForFunction(() => window.__MOCK__.callsOf("start_pane").length >= 1);
-  assert.equal(await page.evaluate(() => window.__MOCK__.listening("login-prompt")), 1, "the page listens once");
-  assert.equal(await page.evaluate(() => window.__MOCK__.listening("login-prompt-end")), 1);
+  assert.equal(await listenerCount(page, "login-prompt"), 1, "the page listens once");
+  assert.equal(await listenerCount(page, "login-prompt-end"), 1);
 
   await openAndAnswer(page);
   await cancelCases(page);

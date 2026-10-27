@@ -111,7 +111,7 @@ async function contractCase(page, url) {
   await page.waitForSelector("li.ai-side-row");
 
   // The answer the mock gives, called as the page calls it: no argument, the members of the golden.
-  const answer = await page.evaluate(() => window.__TAURI__.core.invoke("ai_conversation_list"));
+  const answer = await page.evaluate(() => window.__MOCK__.invoke("ai_conversation_list"));
   assert.deepEqual(Object.keys(answer).sort(), Object.keys(protocol.answers.ai.conversations).sort());
   assert.equal(answer.chats.length, 2);
   for (const chat of answer.chats) {

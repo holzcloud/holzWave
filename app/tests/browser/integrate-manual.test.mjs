@@ -1,5 +1,6 @@
 // A view whose verb has no interval is read when it opens and when the person asks, and never by itself (design.md 6.25).
 import assert from "node:assert/strict";
+import { waitForListeners } from "./lib.mjs";
 import { BLOCK, answer, listView, openBlock, rowsShown } from "./integrate-lib.mjs";
 
 export default async function ({ page, url, errors }) {
@@ -22,7 +23,7 @@ export default async function ({ page, url, errors }) {
   // change of the tools asks the core again.
   const reads = () => page.evaluate(() => window.__IG__.started);
   const tools = () => page.evaluate(() => window.__MOCK__.callsOf("integration_tools").length);
-  await page.waitForFunction(() => window.__MOCK__.listening("integration") === 1);
+  await waitForListeners(page, "integration", 1);
   const r0 = await reads();
   await page.evaluate(() => window.__MOCK__.emit("integration", { seq: 1, kind: "context", tool: "kube", pane: 9, code: null }));
   await page.evaluate(() => window.__MOCK__.emit("integration", { seq: 2, kind: "context", tool: "kube", pane: 2, code: null }));

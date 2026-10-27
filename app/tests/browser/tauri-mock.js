@@ -17,7 +17,7 @@
 //     callsOf(cmd)     the args of every call to `cmd`, oldest first
 //     label            this window's label
 //     emit(name, p)    deliver `p` to every listener of `name` as { payload: p } (an event for all windows); returns how
-//                      many got it
+//                      many got it (in ws mode a promise of that number: the event goes out as a frame at once)
 //     emitTo(label, name, p)  an event addressed to one window, delivered as Tauri does it: to the listeners that
 //                      named that window and to those that named none (a listener without a target hears every window)
 //     listening(name)  how many listeners `name` has

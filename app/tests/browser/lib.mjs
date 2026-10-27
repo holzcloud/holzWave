@@ -107,3 +107,22 @@ export const callsOf = (page, cmd) => page.evaluate((c) => window.__MOCK__.calls
 
 /** Deliver an event to the page's listeners as the core would. */
 export const emit = (page, name, payload) => page.evaluate(([n, p]) => window.__MOCK__.emit(n, p), [name, payload]);
+
+/**
+ * How many listeners the page holds for the event `name`, read from the page's own bridge (the same module the page
+ * uses, so it is right on both backends: the bridge counts its own registrations).
+ */
+export const listenerCount = (page, name) =>
+  page.evaluate(async (n) => (await import(new URL("bridge.js", location.href).href)).listenerCount(n), name);
+
+/** Wait until the page holds exactly `n` listeners for `name`. */
+export async function waitForListeners(page, name, n, timeoutMs = 5000) {
+  const t0 = Date.now();
+  let seen = -1;
+  while (Date.now() - t0 < timeoutMs) {
+    seen = await listenerCount(page, name);
+    if (seen === n) return;
+    await page.waitForTimeout(20);
+  }
+  throw new Error(`the page holds ${seen} listeners for "${name}", expected ${n}`);
+}

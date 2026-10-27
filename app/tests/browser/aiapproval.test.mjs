@@ -116,7 +116,7 @@ async function contractCase(page, url) {
   const hash = await storedHash(page);
 
   // A snapshot taken while the card waits holds the card of the event.
-  const snapshot = await page.evaluate(() => window.__TAURI__.core.invoke("ai_turn_snapshot", { conversation: "chat-mock-1" }));
+  const snapshot = await page.evaluate(() => window.__MOCK__.invoke("ai_turn_snapshot", { conversation: "chat-mock-1" }));
   assert.equal(snapshot.running, true);
   assert.equal(snapshot.pending.length, 1);
   const sent = await page.evaluate(() => structuredClone(window.__MOCK__.ai.sent));

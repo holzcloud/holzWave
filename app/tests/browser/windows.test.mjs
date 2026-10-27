@@ -3,7 +3,10 @@
 // the shell refuses with `no such window` is not an error of the page. A second page with another label stands for
 // the second window; the two never see each other's events.
 import assert from "node:assert/strict";
-import { callsOf, emit, newPage } from "./lib.mjs";
+import { callsOf, emit, listenerCount, newPage } from "./lib.mjs";
+
+export const backends = ["tauri"];
+export const backendNote = "the subject is a second window with its own label and the events addressed to it, which only the desktop has";
 
 async function open(page, url, query = "?renderer=canvas") {
   await page.goto(`${url}index.html${query}`);
@@ -29,7 +32,7 @@ async function readyCase(page, url) {
   assert.equal(calls.filter((c) => c === "window_ready").length, 1, "once");
   assert.ok(calls.indexOf("window_ready") > calls.indexOf("get_layout"), "after the first layout was asked for and applied");
   assert.ok(await page.locator(".divider").count(), "the layout is drawn when the shell is told");
-  const listening = await page.evaluate(() => ["frame", "layout", "title", "cwd", "pane-exit", "incoming-drop"].map((n) => window.__MOCK__.listening(n)));
+  const listening = await Promise.all(["frame", "layout", "title", "cwd", "pane-exit", "incoming-drop"].map((n) => listenerCount(page, n)));
   assert.ok(listening.every((n) => n >= 1), `every listener existed by the time the shell was told: ${listening}`);
   assert.ok(calls.indexOf("window_ready") > calls.indexOf("start_pane"), "the panes were started by the layout that was applied");
 

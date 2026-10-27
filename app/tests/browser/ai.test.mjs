@@ -81,7 +81,7 @@ async function contractCase(page, url) {
   await boot(page, url);
   const run = await page.evaluate(async () => {
     const ai = window.__MOCK__.ai;
-    const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
+    const invoke = (cmd, args) => window.__MOCK__.invoke(cmd, args);
     const settle = (n) => new Promise((resolve, reject) => {
       const t0 = Date.now();
       const tick = () => {

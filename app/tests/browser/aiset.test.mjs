@@ -123,7 +123,7 @@ async function contractCase(page, url) {
 
   // The answer of the mock has the shape of the core's: the members of a golden view, states from the golden's names.
   const shape = await page.evaluate(async () => {
-    const answer = await window.__TAURI__.core.invoke("ai_profiles");
+    const answer = await window.__MOCK__.invoke("ai_profiles");
     const { readProfileViews } = await import(new URL("aistate.js", location.href).href);
     return { answer, read: readProfileViews(answer) };
   });
@@ -143,7 +143,7 @@ async function contractCase(page, url) {
       acknowledge_gateway: false, api_key: "never",
     };
     try {
-      await window.__TAURI__.core.invoke("ai_profile_save", { input });
+      await window.__MOCK__.invoke("ai_profile_save", { input });
       return null;
     } catch (e) {
       return e;

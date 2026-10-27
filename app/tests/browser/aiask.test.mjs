@@ -4,6 +4,7 @@
 // no text but the prompt and draws it as text. A mock that plays the core is held to the golden of the core's types.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { listenerCount } from "./lib.mjs";
 import { ASK, ASK_WORD, LOCAL_ASK, askCalls, askCard, askView, boot, closeAsk, emitAsk, tickClock } from "./ai-lib.mjs";
 
 const GOLDEN = JSON.parse(readFileSync(new URL("../fixtures/ai_ask.json", import.meta.url), "utf8"));
@@ -37,7 +38,7 @@ const gone = (page) => page.waitForFunction(() => document.querySelector("sectio
 async function traceCase(page, url) {
   await start(page, url);
   assert.equal(await askCard(page).count(), 0, "no card at first");
-  assert.ok((await page.evaluate(() => window.__MOCK__.listening("ai-ask"))) >= 1, "the page listens for the requests");
+  assert.ok((await listenerCount(page, "ai-ask")) >= 1, "the page listens for the requests");
   await page.evaluate(() => {
     window.__before = document.activeElement;
   });

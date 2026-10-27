@@ -95,7 +95,7 @@ async function onlyCase(page, url) {
   await openAi(page);
   await page.waitForFunction(() => document.querySelector(".chat-chip")?.textContent === "no provider set up");
   assert.equal(await page.locator(".chat-setup").textContent(), "Set up…");
-  const members = await page.evaluate(async () => Object.keys(await window.__TAURI__.core.invoke("ai_profiles")).sort());
+  const members = await page.evaluate(async () => Object.keys(await window.__MOCK__.invoke("ai_profiles")).sort());
   assert.deepEqual(members, ["notes", "profiles"]);
 }
 

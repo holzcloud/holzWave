@@ -5,7 +5,7 @@
 // clipboard text), search-ui (the search bar), palette (the command palette), frames (the pane mirrors), bridge,
 // state, geometry. This file only starts them.
 // Every window runs this same page; it listens with its own label (bridge) and says `window_ready` when it has drawn.
-import { call, listen } from "./bridge.js";
+import { call, listen, onConnection } from "./bridge.js";
 import { initAiSettings } from "./aisettings.js";
 import { initAsk } from "./askcard.js";
 import { attention } from "./attentionstate.js";
@@ -101,6 +101,11 @@ async function main() {
   await initDragDropEvents();
   fit();
   applyView(await call("get_layout"));
+  // A connection to a server that came back may have missed a layout change: ask again and draw what is there. An error
+  // is ignored, the next event or the next reconnect repairs it. On the desktop this never fires.
+  onConnection((info) => {
+    if (info.state === "open" && info.resumed) void call("get_layout").then(applyView, () => {});
+  });
   focusCanvas();
   // Every window says so once it has drawn its first layout and listens: the shell shows a window it built hidden (a
   // torn off or restored one) now, and tells it the last title and directory of its panes. A no-op for a shown one.

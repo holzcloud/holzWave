@@ -7,6 +7,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { APP_DIR, callsOf } from "./lib.mjs";
 
+export const backends = ["tauri"];
+export const backendNote = "the subject is the macOS local-network permission of the shell, which belongs to a desktop window";
+
 export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(5000); // a dialog that never appears fails here, not at the runner's 30 s limit
   await noticeCase(page, url);

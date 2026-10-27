@@ -112,8 +112,13 @@ recorder writes sanitised output only and never runs a verb that changes a clust
 
 Notes:
 
-- `npm run test:browser` takes `--only <part of a file name>` and `--engine webkit|chromium`; a test fails on any page
-  error or Content-Security-Policy violation, even when its own assertions passed.
+- `npm run test:browser` takes `--only <part of a file name>`, `--engine webkit|chromium` and
+  `--backend tauri|ws|both` (default both); a test fails on any page error or Content-Security-Policy violation, even
+  when its own assertions passed. On the `tauri` backend the page finds an in-page Tauri stub; on the `ws` backend it has
+  no Tauri global and talks over one socket to a fake server (`app/tests/browser/ws-mock.js`) that answers through the
+  same mock core with a JSON round trip, so the same test proves that the wire carries what the desktop carries. A test
+  file that only makes sense on the desktop exports `backends = ["tauri"]` and a one-sentence `backendNote` naming the
+  desktop-only subject; the run prints it as `NOT RUN`.
 - The budget tests are `#[ignore]` because a debug build is meant to be slower than the budget. They print the measured
   update plus encode time and the key-to-frame time; the numbers of 2026-10-11 are in
   [architecture.md](architecture.md) section 12. They are measured without the webview.

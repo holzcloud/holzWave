@@ -10,6 +10,9 @@
 import assert from "node:assert/strict";
 import { callsOf, emit, newPage } from "./lib.mjs";
 
+export const backends = ["tauri"];
+export const backendNote = "the subject is a pane or tab dragged between two windows and the files an operating system drops on a window, which only the desktop has";
+
 const VIEW = {
   workspaces: [{ name: "alpha", active: true }, { name: "beta", active: false }],
   tabs: [

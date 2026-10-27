@@ -2,7 +2,8 @@
 // (`window.__HW_BACKEND__ === "ws"`, see lib.mjs). It replaces the browser's socket constructor by `FakeWebSocket`.
 // A text frame the page sends is `{id, cmd, args}`; the fake calls `window.__MOCK__.invoke(cmd, args)`, the same
 // function the Tauri global runs, and answers `{id, ok}` or `{id, err}` after a JSON round trip, so a value that does not
-// survive JSON is lost here as it would be on the wire. An `ArrayBuffer` or typed array result goes back as the binary
+// survive JSON is lost here as it would be on the wire (an empty argument object is handed on as no arguments, which is
+// what the page passed). An `ArrayBuffer` or typed array result goes back as the binary
 // frame (8 bytes of id, big endian, then the bytes). Every `__MOCK__.emit` of a test arrives as an event frame
 // `{event, payload}`. Frames reach the page in the same turn of the event loop that the Tauri mock would have used, so a
 // test sees the same timing on both backends; only the opening of a socket takes one timer tick.
@@ -12,7 +13,8 @@
 //     sockets           every FakeWebSocket made, oldest first
 //     sent              every text frame the page sent, oldest first, as the raw strings
 //     push(name, payload, wanted)  send one event frame to every open socket when `wanted({ target })` accepts the page;
-//                       returns how many sockets got it. This is what `__MOCK__.emit` and `emitTo` call
+//                       answers (a promise) how many listeners the page has for `name`, 0 when nothing was sent. This is what
+//                       `__MOCK__.emit` and `emitTo` call, so on this backend they answer a promise of the number
 //     drop(code)        the server closes every open socket with `code` (1006 for a lost connection, 4401 or 4403 for the
 //                       codes that end it)
 //     refuseOpen(n)     the next `n` sockets fail to open and close with 1006
@@ -131,13 +133,14 @@
         return;
       }
       const { id, cmd } = frame;
-      const args = frame.args;
+      // A call without arguments is `{}` on the wire; the mock core records it as the Tauri global does, without them.
+      const args = frame.args && typeof frame.args === "object" && Object.keys(frame.args).length === 0 ? undefined : frame.args;
       Promise.resolve()
         .then(() => mock.invoke(cmd, args))
         .then(
           (result) => {
             if (result instanceof ArrayBuffer || ArrayBuffer.isView(result)) this._deliver(binaryFrame(id, result));
-            else this._deliver(JSON.stringify({ id, ok: result }));
+            else this._deliver(JSON.stringify({ id, ok: result ?? null })); // the server always writes the member
           },
           (e) => {
             const err = e instanceof Error ? e.message : e;
@@ -170,11 +173,15 @@
       return state.sent;
     },
     push(name, payload, wanted) {
-      if (!wanted({ target: mock.label })) return 0;
+      if (!wanted({ target: mock.label })) return Promise.resolve(0);
       const text = JSON.stringify({ event: name, payload });
-      let n = 0;
-      for (const s of state.sockets) if (s._deliver(text)) n++;
-      return n;
+      let delivered = 0;
+      for (const s of state.sockets) if (s._deliver(text)) delivered++;
+      // The Tauri mock answers how many listeners got the event. The server cannot know that, so the page's own bridge
+      // is asked (it counts its registrations; all of them name the one window `main`). The frame itself went out above,
+      // in this turn, as it would have been delivered to the Tauri listeners.
+      if (delivered === 0) return Promise.resolve(0);
+      return import(new URL("bridge.js", location.href).href).then((bridge) => bridge.listenerCount(name));
     },
     drop(code) {
       for (const s of state.sockets) {

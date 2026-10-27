@@ -3,6 +3,7 @@
 // event names. A payload that is not a pane id, an event for another window and a second event while the dialog is open open
 // nothing. The stub plays the core.
 import assert from "node:assert/strict";
+import { listenerCount } from "./lib.mjs";
 
 export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(5000);
@@ -18,7 +19,7 @@ export default async function ({ page, url, errors }) {
   await page.waitForFunction(() => window.__MOCK__.callsOf("start_pane").length >= 1);
 
   // The page listens for the event, once.
-  assert.equal(await page.evaluate(() => window.__MOCK__.listening("history-open")), 1);
+  assert.equal(await listenerCount(page, "history-open"), 1);
   const dialogs = () => page.locator(".history").count();
   const frames = () => page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done(true)))));
 
