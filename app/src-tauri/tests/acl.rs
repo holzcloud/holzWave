@@ -123,6 +123,23 @@ fn handler_manifest_and_capability_list_the_same_commands() {
     assert!(problems.is_empty(), "the allow-list is out of step:\n  {}", problems.join("\n  "));
 }
 
+#[test]
+fn every_row_of_the_table_is_in_the_handler_the_manifest_and_the_capability() {
+    let handler = handler_names();
+    let manifest = manifest_commands(BUILD_RS).expect("manifest list");
+    let permissions = capability_permissions().expect("capability permissions");
+
+    for row in COMMANDS {
+        assert!(handler.contains(row.name), "the row {} has no wrapper in the invoke handler", row.name);
+        assert!(manifest.contains(row.name), "the row {} is not in the manifest of build.rs", row.name);
+        assert!(permissions.contains(&permission_of(row.name)), "the row {} is not granted by the capability", row.name);
+    }
+    // 85 rows of the table and the 34 commands of the AI and the integrations that are still written out.
+    assert_eq!(COMMANDS.len(), 85);
+    assert_eq!(handler.len(), 119);
+    assert_eq!(handler.iter().filter(|name| lookup(name).is_none()).count(), 34);
+}
+
 /// The window labels the capability grants: `main` and the pattern of the windows the app makes itself. Nothing else,
 /// and above all never a bare `*`: a label that is not made by the core has no permission to anything.
 const GRANTED_WINDOWS: [&str; 2] = ["main", "window-*"];

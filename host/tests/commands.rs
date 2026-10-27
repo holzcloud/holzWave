@@ -1560,6 +1560,239 @@ fn the_sync_starts_off_and_keeps_no_secret_when_it_cannot_reach_the_server() {
     assert_eq!(world.call("sync_now", "{}"), same_as(world.core.sync_now()));
 }
 
+// ---- guards over all the rows of the two table plans ---------------------------------------------------------------------
+
+/// The number of rows the table has after the second table plan.
+const ROWS: usize = 85;
+
+/// The 13 commands the browser build does not have: eight of the first table plan, five of the second.
+const THE_UNAVAILABLE: [&str; 13] = [
+    "attach_pane",
+    "attach_tab",
+    "clipboard_text",
+    "drag_end",
+    "drag_over",
+    "local_network_answer",
+    "local_network_open_settings",
+    "local_network_status",
+    "open_url",
+    "release_outside",
+    "reveal_path",
+    "tear_off_pane",
+    "tear_off_tab",
+];
+
+/// The three commands that carry a document and so take a larger argument text.
+const THE_LARGE: [&str; 3] = ["file_save", "markdown_render", "widget_note_save"];
+
+#[test]
+fn the_table_has_85_rows_and_the_unavailable_set_is_pinned_by_name() {
+    assert_eq!(COMMANDS.len(), ROWS);
+    let mut unavailable: Vec<&str> = COMMANDS.iter().filter(|row| row.web == Web::Unavailable).map(|row| row.name).collect();
+    unavailable.sort_unstable();
+
+    assert_eq!(unavailable, THE_UNAVAILABLE, "a row cannot become unavailable (or stop being) without a change of this list");
+    // And every one of them says so in the one way: it answers the sentence whatever it is sent.
+    let world = World::new("pinned-unavailable");
+    for name in THE_UNAVAILABLE {
+        for args in ["{}", "", r#"{"unknown":1}"#] {
+            assert_eq!(world.call(name, args), Outcome::Err(json_string(NOT_IN_BROWSER)), "{name} {args:?}");
+        }
+    }
+}
+
+#[test]
+fn the_caps_are_64_kib_and_the_three_document_commands_take_8_mib() {
+    let mut large: Vec<&str> = COMMANDS.iter().filter(|row| row.cap == 8 * 1024 * 1024).map(|row| row.name).collect();
+    large.retain(|name| *name != "paste");
+    large.sort_unstable();
+    assert_eq!(large, THE_LARGE);
+
+    for row in COMMANDS.iter().filter(|row| !matches!(row.group, "terminal" | "layout")) {
+        let want = if THE_LARGE.contains(&row.name) { 8 * 1024 * 1024 } else { 64 * 1024 };
+        assert_eq!(row.cap, want, "{}", row.name);
+    }
+    // One row of each size admits its cap and refuses one byte more.
+    for name in ["files_list", "file_save"] {
+        let row = lookup(name).expect("a row");
+        assert!(row.admits(row.cap), "{name}");
+        assert!(!row.admits(row.cap + 1), "{name}");
+        assert!(row.admits(0), "{name}");
+    }
+    assert!(lookup("markdown_render").expect("a row").admits(CAP_PASTE));
+    assert!(!lookup("get_settings").expect("a row").admits(CAP_PASTE));
+}
+
+/// What a command could change in a core and its data directory, as far as this test can see.
+fn fingerprint(world: &World, source: &CountingSource) -> (Vec<(String, Vec<u8>)>, usize, (Vec<(u64, String)>, usize, usize, Vec<String>), Vec<String>, usize) {
+    let mut files: Vec<(String, Vec<u8>)> = files_below(&world.dir)
+        .into_iter()
+        .filter(|(path, _)| path.extension().is_some_and(|ext| ext == "json") && !path.ends_with("layout.json"))
+        .map(|(path, bytes)| (path.file_name().expect("a name").to_string_lossy().into_owned(), bytes))
+        .collect();
+    files.sort();
+    (files, world.events(), layout_state(world), world.opened(), source.asked.load(Ordering::SeqCst))
+}
+
+#[test]
+fn every_row_refuses_an_unknown_field_by_name_before_anything_runs() {
+    let source = Arc::new(CountingSource::default());
+    let world = World::hosted("strict-extra", elsewhere_with(true, 100, source.clone()));
+    let before = fingerprint(&world, &source);
+    let mut checked = 0;
+
+    for row in COMMANDS.iter().filter(|row| row.web != Web::Unavailable) {
+        let sample = sample_args(row);
+        let with_extra = if row.args.is_empty() { r#"{"zz_extra":1}"#.to_owned() } else { format!("{},\"zz_extra\":1}}", &sample[..sample.len() - 1]) };
+        let leading = format!("{{\"zz_extra\":1{}", if row.args.is_empty() { "}".to_owned() } else { format!(",{}", &sample[1..]) });
+        for args in [with_extra, leading, r#"{"zz_extra":1}"#.to_owned()] {
+            let text = error_text(&world.call(row.name, &args));
+            assert!(text.contains("zz_extra") && text.contains("unknown field"), "{} {args:.120}: {text}", row.name);
+            assert!(text.chars().count() <= ERROR_TEXT_LIMIT, "{}", row.name);
+        }
+        checked += 1;
+    }
+
+    assert_eq!(checked, ROWS - THE_UNAVAILABLE.len(), "every row that reads its arguments was held to this");
+    assert_eq!(fingerprint(&world, &source), before, "a refused call changed something");
+}
+
+#[test]
+fn every_row_with_a_required_argument_names_it_when_it_is_missing() {
+    let world = World::new("strict-missing");
+    let mut checked = 0;
+
+    for row in COMMANDS.iter().filter(|row| row.web != Web::Unavailable) {
+        let optional = |ty: &str| ty.replace(' ', "").starts_with("Option<");
+        for left_out in row.args.iter().filter(|arg| !optional(arg.ty)) {
+            // The sample of every argument but one.
+            let fields: Vec<String> = row
+                .args
+                .iter()
+                .filter(|arg| arg.name != left_out.name)
+                .map(|arg| format!("{}:{}", json_string(arg.name), sample(arg.ty).expect("a sample")))
+                .collect();
+            let text = error_text(&world.call(row.name, &format!("{{{}}}", fields.join(","))));
+            assert!(
+                text.contains("missing field") && text.contains(left_out.name),
+                "{}: leaving out {} should be refused by name: {text}",
+                row.name,
+                left_out.name
+            );
+            checked += 1;
+        }
+    }
+
+    let required: usize = COMMANDS
+        .iter()
+        .filter(|row| row.web != Web::Unavailable)
+        .map(|row| row.args.iter().filter(|arg| !arg.ty.replace(' ', "").starts_with("Option<")).count())
+        .sum();
+    assert_eq!(checked, required);
+    assert!(required >= 100, "only {required} required arguments");
+}
+
+#[test]
+fn no_row_but_file_range_ever_answers_raw_bytes() {
+    let world = World::new("raw-once");
+    let (path, _) = write_picture(&world, "a.bin", 4096);
+    let token = grant_token(&world, &path);
+    let mut raw = Vec::new();
+
+    for row in COMMANDS.iter().filter(|row| row.web != Web::Unavailable) {
+        // Every row once with a valid sample of each argument; `file_range` with a real grant as well.
+        let mut outcomes = vec![world.call(row.name, &sample_args(row))];
+        if row.name == "file_range" {
+            outcomes.push(world.call(row.name, &range_args(&token, 0, 16)));
+        }
+        for outcome in outcomes {
+            if matches!(outcome, Outcome::Binary(_)) {
+                raw.push(row.name);
+            }
+        }
+    }
+
+    assert!(raw.iter().all(|name| *name == "file_range"), "{raw:?}");
+    assert_eq!(raw, ["file_range"], "the one raw row answered raw bytes once");
+}
+
+/// The problems of the split between the table and the wrappers that are still written out in the app: a command that is
+/// neither a row nor a wrapper of the AI or integration groups, a row that is also a wrapper without being a hand row, a
+/// wrapper for a command that does not exist, and a wrapper of the AI or integration groups that is also a row.
+fn coverage_problems(commands: &[&str], rows: &BTreeSet<&str>, hand_rows: &BTreeSet<&str>, written: &BTreeSet<&str>) -> Vec<String> {
+    let still_written = |name: &str| name.starts_with("ai_") || name.starts_with("integration_");
+    let mut problems = Vec::new();
+    for name in commands {
+        if rows.contains(name) {
+            if written.contains(name) && !hand_rows.contains(name) {
+                problems.push(format!("{name} is a row and still has a wrapper in commands.rs"));
+            }
+            if still_written(name) {
+                problems.push(format!("{name} is a row, but the ai_ and integration_ commands are the table's next plan"));
+            }
+        } else if !still_written(name) {
+            problems.push(format!("{name} is neither a row of the table nor an ai_ or integration_ wrapper"));
+        } else if !written.contains(name) {
+            problems.push(format!("{name} is not a row and has no wrapper"));
+        }
+    }
+    for name in written {
+        if !commands.contains(name) {
+            problems.push(format!("{name} has a wrapper but is no command of the desktop"));
+        }
+    }
+    problems
+}
+
+fn names<'a>(items: &[&'a str]) -> BTreeSet<&'a str> {
+    items.iter().copied().collect()
+}
+
+#[test]
+fn only_the_ai_and_integration_commands_are_still_written_out_and_every_other_command_is_a_row() {
+    let commands: Vec<&str> = surface_lines().iter().map(|(name, _)| *name).collect();
+    let rows: BTreeSet<&str> = COMMANDS.iter().map(|row| row.name).collect();
+    let hand: BTreeSet<&str> = COMMANDS.iter().filter(|row| row.shell == Shell::Hand).map(|row| row.name).collect();
+    let written = written_wrappers();
+
+    let problems = coverage_problems(&commands, &rows, &hand, &written);
+
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert_eq!(hand.iter().copied().collect::<Vec<_>>(), ["clipboard_text", "copy_selection", "window_ready"]);
+    let not_rows: BTreeSet<&str> = commands.iter().copied().filter(|name| !rows.contains(name)).collect();
+    assert_eq!(not_rows.iter().filter(|name| name.starts_with("ai_")).count(), 19);
+    assert_eq!(not_rows.iter().filter(|name| name.starts_with("integration_")).count(), 15);
+    assert_eq!(not_rows.len(), 34, "only the 34 commands of the next table plan are left");
+    assert_eq!(rows.len() + not_rows.len(), 119);
+}
+
+#[test]
+fn the_coverage_rule_fails_for_a_command_that_is_neither_and_for_a_row_that_is_also_written() {
+    let rows = names(&["get_settings", "copy_selection", "set_setting"]);
+    let hand = names(&["copy_selection"]);
+    let commands = ["get_settings", "copy_selection", "set_setting", "ai_send", "integration_run"];
+    let written = names(&["copy_selection", "ai_send", "integration_run"]);
+    assert_eq!(coverage_problems(&commands, &rows, &hand, &written), Vec::<String>::new());
+
+    // A command that is neither a row nor a wrapper of the two groups.
+    let more = ["get_settings", "copy_selection", "set_setting", "ai_send", "integration_run", "brand_new"];
+    let problems = coverage_problems(&more, &rows, &hand, &written);
+    assert_eq!(problems, ["brand_new is neither a row of the table nor an ai_ or integration_ wrapper"]);
+    // A row of the table that is still written out as a wrapper (not a hand row).
+    let both = names(&["copy_selection", "ai_send", "integration_run", "set_setting"]);
+    let problems = coverage_problems(&commands, &rows, &hand, &both);
+    assert_eq!(problems, ["set_setting is a row and still has a wrapper in commands.rs"]);
+    // A wrapper of another group, written out and not a row.
+    let rows_without = names(&["get_settings", "copy_selection"]);
+    let problems = coverage_problems(&commands, &rows_without, &hand, &written);
+    assert_eq!(problems, ["set_setting is neither a row of the table nor an ai_ or integration_ wrapper"]);
+    // An ai_ command that is missing a wrapper, and a wrapper nobody declared.
+    let thin = names(&["copy_selection", "integration_run"]);
+    assert_eq!(coverage_problems(&commands, &rows, &hand, &thin), ["ai_send is not a row and has no wrapper"]);
+    let extra = names(&["copy_selection", "ai_send", "integration_run", "ai_ghost"]);
+    assert_eq!(coverage_problems(&commands, &rows, &hand, &extra), ["ai_ghost has a wrapper but is no command of the desktop"]);
+}
+
 // ---- the recorded surface -----------------------------------------------------------------------------------------------
 
 const SURFACE: &str = include_str!("fixtures/desktop-commands.txt");
