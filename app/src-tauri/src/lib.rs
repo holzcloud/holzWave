@@ -29,6 +29,7 @@ mod ai_device;
 mod clipboard;
 mod commands;
 mod desktop;
+mod desktop_table;
 mod files_protocol;
 mod local_network;
 mod menu;
@@ -436,20 +437,18 @@ pub fn run() {
                 responder.respond(response);
             });
         })
-        .invoke_handler(tauri::generate_handler![
-            commands::get_layout,
+        // The generated wrappers of the command table and the hand-written ones answer through one handler.
+        .invoke_handler(desktop_table::join(tauri::generate_handler![
             commands::start_pane,
             commands::key,
             commands::send_edit,
             commands::text,
-            commands::paste,
             commands::paste_cue,
             commands::resize,
             commands::scroll,
             commands::scroll_to_bottom,
             commands::request_full,
             commands::select,
-            commands::selection_text,
             commands::copy_selection,
             commands::clipboard_text,
             commands::search,
@@ -556,7 +555,7 @@ pub fn run() {
             commands::integration_context,
             commands::integration_tools,
             commands::integration_run,
-        ])
+        ]))
         .build(tauri::generate_context!())
         .expect("error while building holzWave")
         .run(move |app, event| {

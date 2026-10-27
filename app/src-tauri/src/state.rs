@@ -57,6 +57,7 @@ mod protocol {
     use holzwave_core::integrate::ToolId;
     use holzwave_core::layout::Axis;
     use holzwave_core::wire::{ModesMsg, SearchMsg};
+    use holzwave_host::commands::registry::COMMANDS;
 
     fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
         m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -779,10 +780,19 @@ mod protocol {
         })
     }
 
-    /// The command table of the golden: Rust name to ordered argument names.
+    /// The command table of the golden: Rust name to ordered argument names. A command the shell writes from the host's
+    /// command table comes from its row, the others from the text of `commands.rs`; a command that is both (its wrapper is
+    /// hand-written because it needs the window shell) must name the same arguments in both places.
     fn command_table() -> Value {
-        let table: BTreeMap<String, Vec<String>> =
+        let mut table: BTreeMap<String, Vec<String>> =
             parse_commands(COMMANDS_SRC).into_iter().map(|c| (c.name, c.args)).collect();
+        for row in COMMANDS {
+            let args: Vec<String> = row.args.iter().map(|arg| arg.name.to_owned()).collect();
+            if let Some(written) = table.get(row.name) {
+                assert_eq!(written, &args, "the wrapper of {} in commands.rs and its row name different arguments", row.name);
+            }
+            table.insert(row.name.to_owned(), args);
+        }
         to_value(&table)
     }
 
@@ -842,9 +852,20 @@ mod protocol {
             );
         }
         assert!(
-            !commands.iter().any(|c| c.name == "input"),
+            !commands.iter().any(|c| c.name == "input") && !COMMANDS.iter().any(|row| row.name == "input"),
             "the raw input command must not exist: keys, text and paste go through the engine encoder (D-05)"
         );
+        // A row is written once, in the table: its wrapper is either generated or in `commands.rs`, never both and never
+        // neither (the build already fails for a hand-written wrapper that is missing).
+        for row in COMMANDS {
+            let written = commands.iter().any(|c| c.name == row.name);
+            assert_eq!(
+                written,
+                row.shell == holzwave_host::commands::registry::Shell::Hand,
+                "{}: a generated row has no wrapper in commands.rs, and a hand row has one",
+                row.name
+            );
+        }
         for name in ["note_window", "placement"] {
             assert!(
                 !commands.iter().any(|c| c.name == name) && !COMMANDS_SRC.contains(&format!("fn {name}")),

@@ -5,6 +5,8 @@
 
 use std::collections::BTreeSet;
 
+use holzwave_host::commands::registry::{COMMANDS, Shell, lookup};
+
 const LIB_RS: &str = include_str!("../src/lib.rs");
 const COMMANDS_RS: &str = include_str!("../src/commands.rs");
 const HOST_RS: &str = include_str!("../../../host/src/ai_host.rs");
@@ -38,6 +40,16 @@ fn handler_commands(lib_rs: &str) -> Result<BTreeSet<String>, String> {
         }
     }
     Ok(names)
+}
+
+/// Every command the invoke handler answers: the ones `lib.rs` lists and the ones the shell writes from the host's command
+/// table. A name in both is an error, as a name twice in the list is.
+fn handler_names() -> BTreeSet<String> {
+    let mut names = handler_commands(LIB_RS).expect("handler list");
+    for row in COMMANDS.iter().filter(|row| row.shell == Shell::Generated) {
+        assert!(names.insert(row.name.to_owned()), "{} is generated from the table and listed in lib.rs as well", row.name);
+    }
+    names
 }
 
 /// The quoted names inside the manifest list of `build.rs` (`.commands(&["name", ...])`).
@@ -103,7 +115,7 @@ fn set(names: &[&str]) -> BTreeSet<String> {
 
 #[test]
 fn handler_manifest_and_capability_list_the_same_commands() {
-    let handler = handler_commands(LIB_RS).expect("handler list");
+    let handler = handler_names();
     let manifest = manifest_commands(BUILD_RS).expect("manifest list");
     let permissions = capability_permissions().expect("capability permissions");
     assert!(!handler.is_empty(), "the invoke handler lists no command: the scan found nothing");
@@ -185,7 +197,7 @@ fn the_page_cannot_create_windows_or_webviews() {
 
 #[test]
 fn there_is_no_raw_input_command() {
-    let handler = handler_commands(LIB_RS).expect("handler list");
+    let handler = handler_names();
     let manifest = manifest_commands(BUILD_RS).expect("manifest list");
     for list in [&handler, &manifest] {
         assert!(!list.contains("input"), "the raw input command is gone and must not come back");
@@ -385,7 +397,7 @@ const AI_COMMANDS: [&str; 19] = [
 
 #[test]
 fn the_ai_commands_are_exactly_the_reviewed_list() {
-    let handler = handler_commands(LIB_RS).expect("handler list");
+    let handler = handler_names();
     let manifest = manifest_commands(BUILD_RS).expect("manifest list");
     let permissions = capability_permissions().expect("capability permissions");
     let reviewed: BTreeSet<String> = AI_COMMANDS.iter().map(|n| (*n).to_owned()).collect();
@@ -414,9 +426,22 @@ fn the_ai_commands_are_exactly_the_reviewed_list() {
     }
 }
 
-/// The text between `->` and the body of the function `name` in `source`; empty for a function that returns nothing.
-/// `None` when there is no such function.
+/// The answer type of the command `name`: the text between `->` and the body of its function in `source`, empty for a
+/// function that returns nothing. A command that is a row of the host's table has no function in `source`; its answer is
+/// written from the row in the same shape. `None` when there is no such command.
 fn return_type(source: &str, name: &str) -> Option<String> {
+    return_type_in_text(source, name).or_else(|| {
+        let row = lookup(name)?;
+        Some(match row.error {
+            Some(error) => format!("Result<{}, {}>", row.answer, error),
+            None if row.answer == "()" => String::new(),
+            None => row.answer.to_owned(),
+        })
+    })
+}
+
+/// [`return_type`] for a function that is written out in `source`.
+fn return_type_in_text(source: &str, name: &str) -> Option<String> {
     let at = source.find(&format!("pub fn {name}("))?;
     let rest = &source[at..];
     let open = rest.find('(')?;
@@ -520,9 +545,21 @@ pub fn key(core: State<Arc<AppCore>>, pane: PaneId) {\n    todo()\n}\n";
 
 // ---- what the page may send for shared content ----------------------------------------------------------------------
 
-/// The arguments of the function `name` in `source`, as (name, type) pairs in order. The `State` parameter that Tauri
-/// fills in is left out. `None` when there is no such function.
+/// The arguments of the command `name`, as (name, type) pairs in order. The `State` parameter that Tauri fills in is left
+/// out. A command that is a row of the host's table has no function in `source`; its arguments are written from the row,
+/// with the calling window first when the row has one, as the function would have had it. `None` when there is no such
+/// command.
 fn arguments(source: &str, name: &str) -> Option<Vec<(String, String)>> {
+    arguments_in_text(source, name).or_else(|| {
+        let row = lookup(name)?;
+        let window = (row.scope == holzwave_host::commands::registry::Scope::Window)
+            .then(|| ("window".to_owned(), "WebviewWindow".to_owned()));
+        Some(window.into_iter().chain(row.args.iter().map(|arg| (arg.name.to_owned(), arg.ty.to_owned()))).collect())
+    })
+}
+
+/// [`arguments`] for a function that is written out in `source`.
+fn arguments_in_text(source: &str, name: &str) -> Option<Vec<(String, String)>> {
     let at = source.find(&format!("pub fn {name}("))?;
     let rest = &source[at..];
     let open = rest.find('(')?;
@@ -976,7 +1013,7 @@ const INTEGRATION_COMMANDS: &[&str] = &[
 
 #[test]
 fn the_integration_commands_are_exactly_the_reviewed_list() {
-    let handler = handler_commands(LIB_RS).expect("handler list");
+    let handler = handler_names();
     let manifest = manifest_commands(BUILD_RS).expect("manifest list");
     let permissions = capability_permissions().expect("capability permissions");
     let reviewed: BTreeSet<String> = INTEGRATION_COMMANDS.iter().map(|n| (*n).to_owned()).collect();

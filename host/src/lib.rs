@@ -7,6 +7,7 @@ pub mod ai_exec;
 pub mod ai_host;
 pub mod ai_tools;
 pub mod ai_write;
+pub mod commands;
 pub mod integrate_host;
 pub mod local_network;
 pub mod login_prompt;

@@ -31,8 +31,7 @@ use holzwave_core::integrate::service::{ProfilesView, RunAnswer, SelectionView, 
 use holzwave_core::integrate::ticket::Card;
 use holzwave_core::integrate::Selection;
 use holzwave_core::engine::{
-    CopyMotion, CopyOp, CopyState, DomKey, Mods, MouseAction, MouseButton, PasteOutcome, SearchOp, SelectMode,
-    SelectOp,
+    CopyMotion, CopyOp, CopyState, DomKey, Mods, MouseAction, MouseButton, SearchOp, SelectMode, SelectOp,
 };
 use holzwave_core::layout::{Edge, PaneId, SplitId};
 use holzwave_core::pane::EditAction;
@@ -47,6 +46,9 @@ use crate::clipboard;
 use holzwave_host::integrate_host::{ConfirmAnswer, ContextAnswer, IntegrationFault, LaunchAnswer};
 use holzwave_host::state::{AppCore, AppInfo, Released, SettingsView, View};
 use holzwave_host::windows::DropKind;
+
+// The wire types that the table's commands use live in the host crate; the shell's tests and the protocol golden import them from here.
+pub use holzwave_host::commands::wire::PasteOutcomeMsg;
 
 // ---- wire types ------------------------------------------------------------------------------------------------
 
@@ -196,25 +198,6 @@ impl From<CopyOpMsg> for CopyOp {
     }
 }
 
-/// What a paste did: `written`, `empty` or `rejected`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PasteOutcomeMsg {
-    Written,
-    Empty,
-    Rejected,
-}
-
-impl From<PasteOutcome> for PasteOutcomeMsg {
-    fn from(outcome: PasteOutcome) -> Self {
-        match outcome {
-            PasteOutcome::Written => PasteOutcomeMsg::Written,
-            PasteOutcome::Empty => PasteOutcomeMsg::Empty,
-            PasteOutcome::Rejected => PasteOutcomeMsg::Rejected,
-        }
-    }
-}
-
 /// What a pointer button did: `press`, `release` or `motion`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -272,11 +255,6 @@ impl From<CopyState> for CopyStateMsg {
 
 // ---- commands --------------------------------------------------------------------------------------------------
 
-#[tauri::command(rename_all = "snake_case")]
-pub fn get_layout(core: State<Arc<AppCore>>, window: WebviewWindow) -> Result<View, String> {
-    core.view_in(window.label())
-}
-
 /// Start the shell of a pane if it has none yet. Waits for the actor's startup handshake.
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn start_pane(
@@ -321,17 +299,6 @@ pub fn text(core: State<Arc<AppCore>>, pane: PaneId, text: String) -> Result<(),
     core.text(pane, text)
 }
 
-/// Paste clipboard text. Waits for the engine's answer.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn paste(
-    core: State<Arc<AppCore>>,
-    pane: PaneId,
-    text: String,
-    allow_unsafe: bool,
-) -> Result<PasteOutcomeMsg, String> {
-    core.paste(pane, text, allow_unsafe).map(PasteOutcomeMsg::from)
-}
-
 /// Tell the program of a pane that something that is not text was pasted (an image on the clipboard): an empty bracketed
 /// paste when the program turned on bracketed paste, nothing otherwise. The bytes are fixed in the core, so no argument
 /// carries content. Waits for the engine's answer.
@@ -371,12 +338,6 @@ pub fn request_full(core: State<Arc<AppCore>>, pane: PaneId) -> Result<(), Strin
 #[tauri::command(rename_all = "snake_case")]
 pub fn select(core: State<Arc<AppCore>>, pane: PaneId, op: SelectOpMsg) -> Result<(), String> {
     core.select(pane, op.into())
-}
-
-/// The selected text, `null` when nothing is selected. Waits for the engine's answer.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn selection_text(core: State<Arc<AppCore>>, pane: PaneId) -> Result<Option<String>, String> {
-    core.selection_text(pane)
 }
 
 /// Copy the core's own selection of a pane to the system clipboard: `true` when text was written, `false` when the pane
