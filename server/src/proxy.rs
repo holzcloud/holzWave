@@ -163,8 +163,10 @@ impl TrustedProxies {
     }
 }
 
-/// The address a connection is counted under: an IPv4 address as it is, an IPv6 address by its first 64 bits.
-fn key_of(ip: IpAddr) -> IpAddr {
+/// The address a connection is counted under: an IPv4 address as it is (an IPv4-mapped IPv6 address as the IPv4 address it
+/// carries), an IPv6 address by its first 64 bits. The connection admission and the sign-in throttle both count under it, so
+/// one subscriber is one counter in both.
+pub fn key_of(ip: IpAddr) -> IpAddr {
     match ip.to_canonical() {
         IpAddr::V4(v4) => IpAddr::V4(v4),
         IpAddr::V6(v6) => {
