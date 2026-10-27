@@ -27,7 +27,8 @@ use openidconnect::core::{
 };
 use openidconnect::{
     AccessTokenHash, AdditionalClaims, AsyncHttpClient, AuthorizationCode, Client, ClientId, ClientSecret, CsrfToken,
-    DiscoveryError, EmptyExtraTokenFields, EndpointNotSet, IdTokenFields, IdTokenVerifier, IssuerUrl, Nonce,
+    ClaimsVerificationError, DiscoveryError, EmptyExtraTokenFields, EndpointNotSet, IdTokenFields, IdTokenVerifier, IssuerUrl,
+    JsonWebKeySet, Nonce, SignatureVerificationError,
     OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RequestTokenError, Scope, StandardErrorResponse,
     StandardTokenResponse, TokenResponse,
 };
@@ -56,6 +57,24 @@ pub const MAX_TRANSACTIONS_PER_ADDRESS: usize = 16;
 
 /// How long a discovery document and its key set are used before they are fetched again, in seconds: one hour.
 pub const DISCOVERY_TTL_SECS: i64 = 3_600;
+
+/// The fewest seconds between two fetches of a provider's key set because of an unknown key id: five minutes.
+pub const KEY_REFETCH_SECS: i64 = 300;
+
+/// The longest authorization code that is looked at, in bytes.
+pub const MAX_CODE_BYTES: usize = 2_048;
+
+/// The longest state that is looked at, in bytes.
+pub const MAX_STATE_BYTES: usize = 256;
+
+/// The longest error code that is looked at, in bytes.
+pub const MAX_ERROR_BYTES: usize = 64;
+
+/// The longest issuer parameter that is looked at, in bytes.
+pub const MAX_ISS_BYTES: usize = 2_048;
+
+/// How far ahead of the server's clock an ID token may have been issued, in seconds: five minutes.
+pub const ISSUE_SKEW_SECS: i64 = 300;
 
 /// The path of the callback below the public address of the server.
 pub const CALLBACK_PATH: &str = "/auth/oidc/callback";
@@ -348,6 +367,8 @@ struct Loaded {
 #[derive(Default)]
 struct Cache {
     loaded: Option<Loaded>,
+    /// When the key set was last fetched because of an unknown key id. It outlives the discovery document.
+    last_refetch: Option<i64>,
 }
 
 struct Provider {
@@ -575,7 +596,17 @@ impl<H: Http> OidcService<H> {
         let taken = self.lock().take(&hash, now).ok_or(Reason::State)?;
         let provider = self.providers.get(taken.provider).ok_or(Reason::State)?;
 
+        // The sizes are bounded before anything is compared or sent: nothing a browser carries reaches the provider unchecked.
         let state = callback.state.as_deref().ok_or(Reason::State)?;
+        if state.len() > MAX_STATE_BYTES {
+            return Err(Reason::State);
+        }
+        if callback.code.as_deref().is_some_and(|code| code.len() > MAX_CODE_BYTES)
+            || callback.error.as_deref().is_some_and(|error| error.len() > MAX_ERROR_BYTES)
+            || callback.iss.as_deref().is_some_and(|iss| iss.len() > MAX_ISS_BYTES)
+        {
+            return Err(Reason::Provider);
+        }
         if !bool::from(taken.state.secret().as_bytes().ct_eq(state.as_bytes())) {
             return Err(Reason::State);
         }
@@ -587,7 +618,7 @@ impl<H: Http> OidcService<H> {
         }
         let code = callback.code.ok_or(Reason::Provider)?;
 
-        let metadata = self.snapshot(provider).await?;
+        let mut metadata = self.snapshot(provider).await?;
         let client = self.client(provider, &metadata);
         let response: Tokens = client
             .exchange_code(AuthorizationCode::new(code))
@@ -598,8 +629,23 @@ impl<H: Http> OidcService<H> {
             .map_err(token_reason)?;
         let id_token = response.id_token().ok_or(Reason::Token)?;
 
-        let verifier = self.verifier(provider, &metadata);
-        let claims = id_token.claims(&verifier, &taken.nonce).map_err(|_| Reason::Token)?;
+        let mut verifier = self.verifier(provider, &metadata);
+        let claims = match id_token.claims(&verifier, &taken.nonce) {
+            Ok(claims) => claims,
+            // A key id the cached key set does not know may mean the provider rotated its keys: the set is fetched again, at
+            // most once in five minutes, and the token is checked once more against the fresh set.
+            Err(ClaimsVerificationError::SignatureVerification(SignatureVerificationError::NoMatchingKey)) => {
+                metadata = self.refetch_keys(provider, &metadata).await.ok_or(Reason::Token)?;
+                verifier = self.verifier(provider, &metadata);
+                id_token.claims(&verifier, &taken.nonce).map_err(|_| Reason::Token)?
+            }
+            Err(_) => return Err(Reason::Token),
+        };
+        // The audience check of the library already refuses an audience besides the client; an authorized party that names
+        // another client is refused as well.
+        if claims.authorized_party().is_some_and(|azp| azp.as_str() != provider.client_id) {
+            return Err(Reason::Token);
+        }
         if let Some(expected) = claims.access_token_hash() {
             let alg = id_token.signing_alg().map_err(|_| Reason::Token)?;
             let key = id_token.signing_key(&verifier).map_err(|_| Reason::Token)?;
@@ -646,7 +692,41 @@ impl<H: Http> OidcService<H> {
             metadata.jwks().clone(),
         )
         .set_allowed_algs(ALLOWED_ALGS)
-        .set_time_fn(move || SystemTime::into(clock.now()))
+        .set_time_fn({
+            let clock = clock.clone();
+            move || SystemTime::into(clock.now())
+        })
+        .set_issue_time_verifier_fn(move |issued| {
+            let issued = crate::clock::unix_seconds(SystemTime::from(issued));
+            if issued > clock.unix().saturating_add(ISSUE_SKEW_SECS) {
+                return Err("the token was issued in the future".to_owned());
+            }
+            Ok(())
+        })
+    }
+
+    /// Fetches the key set of a provider again after an unknown key id, when the last such fetch is five minutes old or more.
+    /// The time is taken before the request, so a failed fetch counts. Answers the metadata with the fresh set, or the set
+    /// another task fetched meanwhile if it differs from `current`, or `None` when nothing new is available.
+    async fn refetch_keys(
+        &self,
+        provider: &Provider,
+        current: &Arc<CoreProviderMetadata>,
+    ) -> Option<Arc<CoreProviderMetadata>> {
+        let mut cache = provider.cache.lock().await;
+        let now = self.clock.unix();
+        let held = cache.loaded.as_ref()?.metadata.clone();
+        let allowed = !cache.last_refetch.is_some_and(|last| (0..KEY_REFETCH_SECS).contains(&now.saturating_sub(last)));
+        if !allowed {
+            return (!Arc::ptr_eq(&held, current)).then_some(held);
+        }
+        cache.last_refetch = Some(now);
+        let keys = JsonWebKeySet::fetch_async(held.jwks_uri(), &self.http).await.ok()?;
+        let fresh = Arc::new(CoreProviderMetadata::clone(&held).set_jwks(keys));
+        if let Some(loaded) = cache.loaded.as_mut() {
+            loaded.metadata = fresh.clone();
+        }
+        Some(fresh)
     }
 }
 
