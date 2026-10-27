@@ -340,7 +340,8 @@ impl Req {
         self
     }
 
-    fn build(self) -> Request<Body> {
+    /// The request as the router receives it (for a harness that owns its own router).
+    pub fn build(self) -> Request<Body> {
         let mut builder = Request::builder().method(self.method).uri(self.uri);
         for (name, value) in self.headers {
             builder = builder.header(name, value);
