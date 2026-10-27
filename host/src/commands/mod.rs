@@ -19,7 +19,12 @@ pub mod prelude {
     pub use super::layout;
     pub use super::registry::{CAP_DEFAULT, CAP_INPUT, CAP_PASTE};
     pub use super::terminal;
-    pub use super::wire::PasteOutcomeMsg;
-    pub use crate::state::View;
-    pub use holzwave_core::layout::PaneId;
+    pub use super::wire::{
+        CopyOpMsg, CopyStateMsg, EditActionMsg, MouseActionMsg, MouseButtonMsg, PasteOutcomeMsg, SearchOpMsg,
+        SelectOpMsg,
+    };
+    pub use crate::state::{Released, View};
+    pub use crate::windows::DropKind;
+    pub use holzwave_core::layout::{Edge, PaneId, SplitId};
+    pub use holzwave_core::wire::SearchMsg;
 }

@@ -16,16 +16,23 @@ use holzwave_host::windows::{CursorSpot, Place};
 
 // ---- a core to call against -----------------------------------------------------------------------------------------
 
-/// A sink that counts what the core sends and records the windows it was asked to open.
+/// A sink that counts what the core sends, remembers the name and the window of each event, and records the windows it
+/// was asked to open.
 #[derive(Default)]
 struct Counting {
     events: AtomicUsize,
+    log: Mutex<Vec<(String, &'static str)>>,
     opened: Mutex<Vec<String>>,
 }
 
 impl Sink for Counting {
-    fn send(&self, _target: Target, _out: Out) {
+    fn send(&self, target: Target, out: Out) {
         self.events.fetch_add(1, Ordering::SeqCst);
+        let window = match target {
+            Target::All => "*".to_owned(),
+            Target::Window(label) => label.to_string(),
+        };
+        self.log.lock().unwrap_or_else(PoisonError::into_inner).push((window, out.name()));
     }
 
     fn close_window(&self, _label: &str) {}
@@ -49,13 +56,18 @@ struct World {
 
 impl World {
     fn new(tag: &str) -> World {
+        World::running(tag, "/bin/cat", &[])
+    }
+
+    /// A core whose panes run `program args`.
+    fn running(tag: &str, program: &str, args: &[&str]) -> World {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("holzwave-commands-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir(&dir).expect("scratch dir");
         let sink = Arc::new(Counting::default());
-        let core = AppCore::new(dir.clone(), sink.clone(), ShellSpec::new("/bin/cat", &[]));
+        let core = AppCore::new(dir.clone(), sink.clone(), ShellSpec::new(program, args));
         World { dir, core, sink }
     }
 
@@ -71,6 +83,21 @@ impl World {
     /// The events the core has sent so far.
     fn events(&self) -> usize {
         self.sink.events.load(Ordering::SeqCst)
+    }
+
+    /// The windows the core was asked to open.
+    fn opened(&self) -> Vec<String> {
+        self.sink.opened.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    /// How many events named `name` went to the window `window`.
+    fn sent(&self, window: &str, name: &str) -> usize {
+        self.sink.log.lock().unwrap_or_else(PoisonError::into_inner).iter().filter(|(w, n)| w == window && *n == name).count()
+    }
+
+    /// The pane that has the focus in the window `main`.
+    fn focus(&self) -> u64 {
+        self.core.view_in("main").expect("the window main exists").focus
     }
 }
 
@@ -280,6 +307,305 @@ fn an_error_text_is_cut_to_the_limit_and_never_holds_a_long_value() {
     assert!(as_field.chars().count() <= ERROR_TEXT_LIMIT, "{} characters", as_field.chars().count());
     assert!(as_value.chars().count() <= ERROR_TEXT_LIMIT, "{} characters", as_value.chars().count());
     assert!(!as_value.contains("AAAAAAAAAA"), "the value is not in the error: {as_value}");
+}
+
+// ---- the layout commands answer the view the core gives ---------------------------------------------------------------
+
+/// Two cores that were made alike: the registry call runs on one and the plain call on the other, so that the two views
+/// can be compared byte for byte (a view carries the number of the next revision, which a second call on the same core
+/// would change).
+fn assert_same_view(
+    tag: &str,
+    setup: &dyn Fn(&World),
+    name: &str,
+    args: &dyn Fn(&World) -> String,
+    plain: &dyn Fn(&World) -> Result<holzwave_host::state::View, String>,
+) {
+    let (through, direct) = (World::new(&format!("{tag}-through")), World::new(&format!("{tag}-direct")));
+    setup(&through);
+    setup(&direct);
+    assert_eq!(args(&through), args(&direct), "the two cores were not made alike");
+
+    let answered = through.call(name, &args(&through));
+    let own = plain(&direct).unwrap_or_else(|e| panic!("the plain call of {name} failed: {e}"));
+
+    assert_eq!(answered, Outcome::Ok(serde_json::to_string(&own).expect("a view is JSON")), "{name}");
+}
+
+fn split_first(world: &World) {
+    world.core.split_in("main", false).expect("a split");
+}
+
+fn other_pane(world: &World) -> u64 {
+    let view = world.core.view_in("main").expect("the window main exists");
+    view.panes.iter().map(|(pane, _)| *pane).find(|pane| *pane != view.focus).expect("a pane that has not the focus")
+}
+
+#[test]
+fn split_answers_the_view_the_core_gives() {
+    assert_same_view("split", &|_| {}, "split", &|_| r#"{"column":true}"#.into(), &|w| w.core.split_in("main", true));
+}
+
+#[test]
+fn new_tab_answers_the_view_the_core_gives() {
+    assert_same_view("new-tab", &|_| {}, "new_tab", &|_| "{}".into(), &|w| w.core.new_tab_in("main"));
+}
+
+#[test]
+fn new_workspace_answers_the_view_the_core_gives() {
+    assert_same_view(
+        "new-workspace",
+        &|_| {},
+        "new_workspace",
+        &|_| r#"{"name":"notes"}"#.into(),
+        &|w| w.core.new_workspace_in("main", "notes"),
+    );
+}
+
+#[test]
+fn focus_pane_answers_the_view_the_core_gives() {
+    assert_same_view(
+        "focus-pane",
+        &split_first,
+        "focus_pane",
+        &|w| format!(r#"{{"pane":{}}}"#, other_pane(w)),
+        &|w| w.core.focus_pane_in("main", other_pane(w)),
+    );
+}
+
+#[test]
+fn close_pane_answers_the_view_the_core_gives() {
+    assert_same_view(
+        "close-pane",
+        &split_first,
+        "close_pane",
+        &|w| format!(r#"{{"pane":{}}}"#, other_pane(w)),
+        &|w| w.core.close_pane_in("main", other_pane(w)),
+    );
+}
+
+#[test]
+fn rename_tab_answers_the_view_the_core_gives() {
+    assert_same_view(
+        "rename-tab",
+        &|_| {},
+        "rename_tab",
+        &|_| r#"{"index":0,"name":"build"}"#.into(),
+        &|w| w.core.rename_tab_in("main", 0, "build"),
+    );
+}
+
+#[test]
+fn move_tab_answers_the_view_the_core_gives() {
+    assert_same_view(
+        "move-tab",
+        &|w| {
+            w.core.new_tab_in("main").expect("a second tab");
+        },
+        "move_tab",
+        &|_| r#"{"from":0,"to":1}"#.into(),
+        &|w| w.core.move_tab_in("main", 0, 1),
+    );
+}
+
+#[test]
+fn set_ratio_answers_the_view_the_core_gives() {
+    let split = |w: &World| w.core.view_in("main").expect("view").dividers[0].split;
+    assert_same_view(
+        "set-ratio",
+        &split_first,
+        "set_ratio",
+        &|w| format!(r#"{{"split":{},"ratio":0.25}}"#, split(w)),
+        &|w| w.core.set_ratio_in("main", split(w), 0.25),
+    );
+}
+
+#[test]
+fn a_layout_command_for_a_window_that_does_not_exist_answers_the_error_and_changes_nothing() {
+    let world = World::new("layout-no-window");
+
+    for (name, args) in [
+        ("split", r#"{"column":false}"#),
+        ("new_tab", "{}"),
+        ("rename_tab", r#"{"index":0,"name":"x"}"#),
+        ("close_workspace", r#"{"index":0}"#),
+    ] {
+        assert_eq!(world.call_in("nope", name, args), Outcome::Err(json_string("no such window")), "{name}");
+    }
+    assert_eq!(world.core.view_in("main").expect("view").tabs.len(), 1);
+}
+
+// ---- the pointer and keyboard rows read their documented shapes ----------------------------------------------------------
+
+const KEY: &str = r#"{"pane":PANE,"code":"KeyA","key":"a","mods":4,"repeat":false,"release":false,"composing":false}"#;
+const MOUSE: &str = r#"{"pane":PANE,"action":"press","button":"left","x":12.5,"y":3,"mods":0}"#;
+
+#[cfg(unix)]
+#[test]
+fn the_input_rows_accept_their_documented_shapes_and_refuse_a_string_for_a_number() {
+    let world = World::new("input-shapes");
+    let pane = world.focus();
+    world.core.start_pane(pane, 80, 24, 0, 0).expect("cat starts");
+    let with = |template: &str| template.replace("PANE", &pane.to_string());
+
+    assert_eq!(world.call("key", &with(KEY)), Outcome::Ok("null".into()));
+    assert_eq!(world.call("mouse", &with(MOUSE)), Outcome::Ok("null".into()));
+    assert_eq!(world.call("wheel", &with(r#"{"pane":PANE,"rows":-3,"x":1.5,"y":2.5,"mods":1}"#)), Outcome::Ok("null".into()));
+    assert_eq!(world.call("resize", &with(r#"{"pane":PANE,"cols":100,"rows":30}"#)), Outcome::Ok("null".into()));
+    assert_eq!(
+        world.call("resize", &with(r#"{"pane":PANE,"cols":100,"rows":30,"cell_w":9,"cell_h":null}"#)),
+        Outcome::Ok("null".into()),
+        "the cell size may be left out or null"
+    );
+    for (name, template, field) in [
+        ("key", KEY.replace(r#""mods":4"#, r#""mods":"4""#), "u32"),
+        ("mouse", MOUSE.replace(r#""x":12.5"#, r#""x":"12.5""#), "f64"),
+        ("wheel", r#"{"pane":PANE,"rows":"-3","x":1,"y":2,"mods":0}"#.to_owned(), "i32"),
+        ("resize", r#"{"pane":PANE,"cols":"100","rows":30}"#.to_owned(), "u32"),
+    ] {
+        let text = error_text(&world.call(name, &with(&template)));
+        assert!(text.contains(field), "{name}: {text}");
+    }
+    // A float is no whole number.
+    assert!(matches!(world.call("resize", &with(r#"{"pane":PANE,"cols":100.5,"rows":30}"#)), Outcome::Err(_)));
+}
+
+#[cfg(unix)]
+#[test]
+fn search_select_and_copy_mode_read_their_tagged_operations() {
+    let world = World::new("tagged-ops");
+    let pane = world.focus();
+    world.core.start_pane(pane, 80, 24, 0, 0).expect("cat starts");
+    let with = |template: &str| template.replace("PANE", &pane.to_string());
+
+    assert_eq!(
+        world.call("search", &with(r#"{"pane":PANE,"op":{"kind":"set","needle":"a"}}"#)),
+        Outcome::Ok(r#"{"total":0,"current":null}"#.into())
+    );
+    assert_eq!(world.call("search", &with(r#"{"pane":PANE,"op":{"kind":"clear"}}"#)), Outcome::Ok(r#"{"total":0,"current":null}"#.into()));
+    assert_eq!(world.call("select", &with(r#"{"pane":PANE,"op":{"kind":"begin","x":1,"y":2,"mode":"word"}}"#)), Outcome::Ok("null".into()));
+    assert_eq!(world.call("select", &with(r#"{"pane":PANE,"op":{"kind":"extend","x":4,"y":2}}"#)), Outcome::Ok("null".into()));
+    assert_eq!(world.call("select", &with(r#"{"pane":PANE,"op":{"kind":"clear"}}"#)), Outcome::Ok("null".into()));
+    let entered = world.call("copy_mode", &with(r#"{"pane":PANE,"op":{"kind":"enter"}}"#));
+    assert_eq!(entered, Outcome::Ok(r#"{"active":true,"selecting":false,"yanked":null}"#.into()));
+    assert_eq!(
+        world.call("copy_mode", &with(r#"{"pane":PANE,"op":{"kind":"move","motion":"line_start"}}"#)),
+        Outcome::Ok(r#"{"active":true,"selecting":false,"yanked":null}"#.into())
+    );
+    // An operation that is not one of the documented ones is refused and no value of it is repeated.
+    let text = error_text(&world.call("search", &with(r#"{"pane":PANE,"op":{"kind":"explode"}}"#)));
+    assert!(text.contains("unknown variant"), "{text}");
+    let text = error_text(&world.call("select", &with(r#"{"pane":PANE,"op":{"kind":"begin","x":1,"y":2,"mode":"paragraph"}}"#)));
+    assert!(text.contains("unknown variant"), "{text}");
+    let text = error_text(&world.call("select", &with(r#"{"pane":PANE,"op":{"kind":"begin","x":"left","y":2,"mode":"cell"}}"#)));
+    assert!(!text.contains("left"), "{text}");
+}
+
+// ---- what the browser build does with the commands it does not have -------------------------------------------------
+
+const UNAVAILABLE: [(&str, &str); 8] = [
+    ("tear_off_pane", r#"{"pane":PANE,"at_cursor":false}"#),
+    ("tear_off_tab", r#"{"pane":PANE,"at_cursor":false}"#),
+    ("release_outside", r#"{"pane":PANE,"kind":"pane"}"#),
+    ("drag_over", r#"{"pane":PANE,"kind":"tab"}"#),
+    ("drag_end", "{}"),
+    ("attach_pane", r#"{"pane":PANE,"target":null,"edge":null,"workspace":0}"#),
+    ("attach_tab", r#"{"pane":PANE,"workspace":0}"#),
+    ("clipboard_text", "{}"),
+];
+
+#[test]
+fn the_commands_the_browser_does_not_have_answer_one_sentence_and_run_nothing() {
+    let world = World::new("unavailable");
+    split_first(&world);
+    let pane = other_pane(&world);
+    let before = world.core.view_in("main").expect("view");
+
+    for (name, template) in UNAVAILABLE {
+        let row = lookup(name).expect("a row");
+        assert_eq!(row.web, Web::Unavailable, "{name}");
+        let outcome = world.call(name, &template.replace("PANE", &pane.to_string()));
+        assert_eq!(outcome, Outcome::Err(json_string("Not available in the browser.")), "{name}");
+    }
+
+    assert_eq!(world.opened(), Vec::<String>::new(), "no window was made");
+    let after = world.core.view_in("main").expect("view");
+    assert_eq!((after.panes.clone(), after.tabs.len(), after.windows), (before.panes.clone(), 1, 1));
+    assert_eq!(after.rev, before.rev + 1, "nothing but the two views of this test was built");
+}
+
+#[test]
+fn the_plain_function_of_a_tear_off_would_have_made_a_window_so_the_test_above_can_fail() {
+    let world = World::new("tear-off-plain");
+    split_first(&world);
+    let pane = other_pane(&world);
+
+    holzwave_host::commands::layout::tear_off_pane(&world.core, "main", pane, false).expect("the plain function tears off");
+
+    assert_eq!(world.opened().len(), 1);
+}
+
+#[test]
+fn an_unavailable_row_answers_the_sentence_whatever_the_arguments_are() {
+    let world = World::new("unavailable-any");
+
+    for (name, _) in UNAVAILABLE {
+        for args in ["{}", "", "not json", r#"{"pane":"x"}"#, r#"{"unknown":1}"#] {
+            assert_eq!(world.call(name, args), Outcome::Err(json_string(NOT_IN_BROWSER)), "{name} {args:?}");
+        }
+    }
+}
+
+#[test]
+fn window_ready_runs_the_replay_for_the_window_it_is_given_and_answers_null() {
+    let world = World::new("window-ready");
+
+    assert_eq!(world.call("window_ready", "{}"), Outcome::Ok("null".into()));
+    assert_eq!(world.call_in("nope", "window_ready", "{}"), Outcome::Err(json_string("no such window")));
+}
+
+/// Wait until `done` holds, for at most five seconds.
+#[cfg(unix)]
+fn eventually(what: &str, done: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !done() {
+        assert!(std::time::Instant::now() < deadline, "gave up waiting for {what}");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn window_ready_tells_the_page_the_last_title_of_its_panes() {
+    let world = World::running("replay", "/bin/sh", &["-c", r"printf '\033]2;hello\007'; sleep 30"]);
+    let pane = world.focus();
+    world.core.start_pane(pane, 80, 24, 0, 0).expect("the shell starts");
+    eventually("the title of the pane", || world.sent("main", "title") >= 1);
+    let before = world.sent("main", "title");
+
+    assert_eq!(world.call("window_ready", "{}"), Outcome::Ok("null".into()));
+
+    assert_eq!(world.sent("main", "title"), before + 1, "the last title was told again");
+}
+
+#[cfg(unix)]
+#[test]
+fn copy_selection_answers_false_whatever_is_selected_and_touches_no_clipboard() {
+    let world = World::running("copy-selection", "/bin/sh", &["-c", "printf 'some text'; sleep 30"]);
+    let pane = world.focus();
+    world.core.start_pane(pane, 80, 24, 0, 0).expect("the shell starts");
+    let args = format!(r#"{{"pane":{pane}}}"#);
+    assert_eq!(world.call("copy_selection", &args), Outcome::Ok("false".into()), "nothing is selected");
+    // The output may not have reached the screen yet: select everything again until the selection holds it.
+    eventually("a selection with text", || {
+        let all = format!(r#"{{"pane":{pane},"op":{{"kind":"all"}}}}"#);
+        assert_eq!(world.call("select", &all), Outcome::Ok("null".into()));
+        matches!(world.call("selection_text", &args), Outcome::Ok(text) if text.contains("some text"))
+    });
+
+    assert_eq!(world.call("copy_selection", &args), Outcome::Ok("false".into()), "the page copies with the browser");
+    assert_eq!(world.call("copy_selection", r#"{"pane":4711}"#), Outcome::Ok("false".into()), "not even a pane is looked for");
+    assert!(matches!(world.call("copy_selection", r#"{"pane":"x"}"#), Outcome::Err(_)), "the arguments are still read");
 }
 
 // ---- the recorded surface -----------------------------------------------------------------------------------------------

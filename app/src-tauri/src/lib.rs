@@ -25,6 +25,9 @@
 //! user typed. A tool call that waits for the person is decided by `ai_decide`, which takes the chat, the call, `allow`
 //! or `deny` and the hash of the card, and answers nothing.
 
+// The handler of the generated command wrappers names its rows one macro call at a time.
+#![recursion_limit = "256"]
+
 mod ai_device;
 mod clipboard;
 mod commands;
@@ -439,45 +442,8 @@ pub fn run() {
         })
         // The generated wrappers of the command table and the hand-written ones answer through one handler.
         .invoke_handler(desktop_table::join(tauri::generate_handler![
-            commands::start_pane,
-            commands::key,
-            commands::send_edit,
-            commands::text,
-            commands::paste_cue,
-            commands::resize,
-            commands::scroll,
-            commands::scroll_to_bottom,
-            commands::request_full,
-            commands::select,
             commands::copy_selection,
             commands::clipboard_text,
-            commands::search,
-            commands::copy_mode,
-            commands::split,
-            commands::new_tab,
-            commands::new_workspace,
-            commands::close_pane,
-            commands::close_tab,
-            commands::close_workspace,
-            commands::focus_pane,
-            commands::cycle_focus,
-            commands::select_tab,
-            commands::select_workspace,
-            commands::rename_pane,
-            commands::rename_tab,
-            commands::rename_workspace,
-            commands::move_pane,
-            commands::move_pane_to_workspace,
-            commands::move_tab,
-            commands::move_tab_to_workspace,
-            commands::set_ratio,
-            commands::tear_off_pane,
-            commands::tear_off_tab,
-            commands::release_outside,
-            commands::drag_over,
-            commands::drag_end,
-            commands::attach_pane,
-            commands::attach_tab,
             commands::window_ready,
             commands::get_settings,
             commands::set_setting,
@@ -487,8 +453,6 @@ pub fn run() {
             commands::os_text_scale,
             commands::open_url,
             commands::reveal_path,
-            commands::mouse,
-            commands::wheel,
             commands::connections_list,
             commands::connection_save,
             commands::connection_delete,
