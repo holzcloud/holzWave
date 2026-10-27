@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 //! The application logic of holzWave without a window shell: the desktop app and the server both run it.
 
+// The command table spells a type by the path the desktop's wrappers used (`holzwave_host::sync::SyncView`), because the
+// recorded surface of the desktop holds that text. This line lets the same text resolve inside the crate as well.
+extern crate self as holzwave_host;
+
 pub mod ai_ask;
 pub mod ai_device;
 pub mod ai_exec;

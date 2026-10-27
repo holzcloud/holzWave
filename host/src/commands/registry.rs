@@ -23,6 +23,11 @@ pub const CAP_INPUT: usize = 4 * 1024;
 /// The most bytes of argument text of `paste`, the largest message a page may send.
 pub const CAP_PASTE: usize = 8 * 1024 * 1024;
 
+/// The most bytes of argument text of a command that carries a document: `file_save`, `widget_note_save` and
+/// `markdown_render`. The core takes a Markdown source of 2 MiB and a text of 8 MiB to save, and escaping in JSON can make
+/// either several times longer, so a smaller cap would refuse a document the core accepts, in the browser only.
+pub const CAP_LARGE: usize = 8 * 1024 * 1024;
+
 /// The most bytes of argument text of every other command of this table.
 pub const CAP_DEFAULT: usize = 64 * 1024;
 
@@ -172,7 +177,8 @@ fn err_json<E: Serialize>(value: &E) -> Outcome {
 }
 
 /// What is wrong with an argument text, in a short sentence: the name of a field that is unknown, missing or repeated,
-/// or what kind of value was expected. It never repeats a value the caller sent, and it is at most
+/// or what kind of value was expected (a word that is not one of the allowed words is called `unknown variant`, without
+/// the word). It never repeats a value the caller sent, and it is at most
 /// [`ERROR_TEXT_LIMIT`] characters.
 pub fn argument_error(error: &serde_json::Error) -> String {
     use serde_json::error::Category;
@@ -183,8 +189,11 @@ pub fn argument_error(error: &serde_json::Error) -> String {
         Some(at) => &full[..at],
         None => full.as_str(),
     };
-    let named = ["unknown field `", "missing field `", "duplicate field `", "unknown variant `"];
-    let text = if named.iter().any(|start| message.starts_with(start)) {
+    let named = ["unknown field `", "missing field `", "duplicate field `"];
+    let text = if message.starts_with("unknown variant `") {
+        // The word that was sent is a value of the caller, so it is not repeated; the field it was in is not known here.
+        "unknown variant"
+    } else if named.iter().any(|start| message.starts_with(start)) {
         // The name, and not the list of the names that would have been right.
         match message.rfind("`, expected ") {
             Some(end) => &message[..=end],

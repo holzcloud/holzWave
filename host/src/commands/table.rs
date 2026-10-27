@@ -331,6 +331,228 @@ macro_rules! host_commands {
                 answers: (),
                 run: files::file_revoke, web: same
             }
+            {
+                name: get_settings, shell: generated, group: settings, scope: none, mode: sync, cap: CAP_DEFAULT,
+                args: [],
+                answers: SettingsView,
+                run: settings::get_settings, web: same
+            }
+            {
+                name: set_setting, shell: generated, group: settings, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [key: String, value: Value],
+                answers: SettingsView, fails: String,
+                run: settings::set_setting, web: same
+            }
+            {
+                name: reset_setting, shell: generated, group: settings, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [key: String],
+                answers: SettingsView, fails: String,
+                run: settings::reset_setting, web: same
+            }
+            {
+                name: reload_settings, shell: generated, group: settings, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: SettingsView,
+                run: settings::reload_settings, web: same
+            }
+            {
+                name: os_text_scale, shell: generated, group: settings, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: u32,
+                run: settings::os_text_scale, web: same
+            }
+            {
+                name: app_info, shell: generated, group: settings, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: AppInfo,
+                run: settings::app_info, web: same
+            }
+            {
+                name: markdown_render, shell: generated, group: settings, scope: none, mode: async, cap: CAP_LARGE,
+                args: [text: String],
+                answers: Option<String>,
+                run: settings::markdown_render, web: same
+            }
+            {
+                name: open_url, shell: generated, group: settings, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [url: String],
+                answers: (), fails: String,
+                run: settings::open_url, web: unavailable
+            }
+            {
+                name: reveal_path, shell: generated, group: settings, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [path: String, base: Option<String>],
+                answers: (), fails: String,
+                run: settings::reveal_path, web: unavailable
+            }
+            {
+                name: connections_list, shell: generated, group: connections, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: Vec<ProfileView>,
+                run: connections::connections_list, web: same
+            }
+            {
+                name: connection_save, shell: generated, group: connections, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [profile: Profile, secret: SecretChange],
+                answers: ProfileView, fails: String,
+                run: connections::connection_save, web: same
+            }
+            {
+                name: connection_delete, shell: generated, group: connections, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [id: String],
+                answers: (), fails: String,
+                run: connections::connection_delete, web: same
+            }
+            {
+                name: connect, shell: generated, group: connections, scope: window, mode: async, cap: CAP_DEFAULT,
+                args: [id: String],
+                answers: View, fails: String,
+                run: connections::connect, web: same
+            }
+            {
+                name: pane_connections, shell: generated, group: connections, scope: none, mode: sync, cap: CAP_DEFAULT,
+                args: [],
+                answers: Vec<ConnView>,
+                run: connections::pane_connections, web: same
+            }
+            {
+                name: login_prompt_answer, shell: generated, group: connections, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [id: String, answers: Vec<String>],
+                answers: bool,
+                run: connections::login_prompt_answer, web: same
+            }
+            {
+                name: login_prompt_cancel, shell: generated, group: connections, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [id: String],
+                answers: bool,
+                run: connections::login_prompt_cancel, web: same
+            }
+            {
+                name: wsh_install, shell: generated, group: connections, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [pane: PaneId],
+                answers: String, fails: String,
+                run: connections::wsh_install, web: same
+            }
+            {
+                name: block_open, shell: generated, group: blocks, scope: window, mode: async, cap: CAP_DEFAULT,
+                args: [kind: BlockKind, source: String, path: String, placement: String],
+                answers: View, fails: String,
+                run: blocks::block_open, web: same
+            }
+            {
+                name: block_update, shell: generated, group: blocks, scope: none, mode: sync, cap: CAP_DEFAULT,
+                args: [pane: PaneId, path: String],
+                answers: (), fails: String,
+                run: blocks::block_update, web: same
+            }
+            {
+                name: pane_blocks, shell: generated, group: blocks, scope: none, mode: sync, cap: CAP_DEFAULT,
+                args: [],
+                answers: Vec<BlockView>,
+                run: blocks::pane_blocks, web: same
+            }
+            {
+                name: widgets_list, shell: generated, group: blocks, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: holzwave_host::state::WidgetsView,
+                run: blocks::widgets_list, web: same
+            }
+            {
+                name: widget_note_save, shell: generated, group: blocks, scope: none, mode: async, cap: CAP_LARGE,
+                args: [id: String, text: String],
+                answers: (), fails: String,
+                run: blocks::widget_note_save, web: same
+            }
+            {
+                name: monitor_sample, shell: generated, group: blocks, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [pane: PaneId],
+                answers: holzwave_core::monitor::Reading, fails: String,
+                run: blocks::monitor_sample, web: same
+            }
+            {
+                name: files_list, shell: generated, group: files, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [source: String, path: String],
+                answers: Listing, fails: String,
+                run: files::files_list, web: same
+            }
+            {
+                name: file_open, shell: generated, group: files, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [source: String, path: String],
+                answers: Opened, fails: String,
+                run: files::file_open, web: same
+            }
+            {
+                name: file_stat, shell: generated, group: files, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [source: String, path: String],
+                answers: Entry, fails: String,
+                run: files::file_stat, web: same
+            }
+            {
+                name: file_save, shell: generated, group: files, scope: none, mode: async, cap: CAP_LARGE,
+                args: [source: String, path: String, text: String, expected_modified: Option<i64>, expected_digest: Option<String>],
+                answers: Saved, fails: String,
+                run: files::file_save, web: same
+            }
+            {
+                name: history_search, shell: generated, group: history_sync, scope: window, mode: async, cap: CAP_DEFAULT,
+                args: [query: String, limit: usize],
+                answers: Vec<holzwave_core::history::Hit>,
+                run: history_sync::history_search, web: same
+            }
+            {
+                name: history_delete, shell: generated, group: history_sync, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [cmd: String],
+                answers: usize, fails: String,
+                run: history_sync::history_delete, web: same
+            }
+            {
+                name: history_clear, shell: generated, group: history_sync, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: (), fails: String,
+                run: history_sync::history_clear, web: same
+            }
+            {
+                name: sync_status, shell: generated, group: history_sync, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: holzwave_host::sync::SyncView,
+                run: history_sync::sync_status, web: same
+            }
+            {
+                name: sync_save, shell: generated, group: history_sync, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [endpoint: String, user: String, password: String, passphrase: String],
+                answers: holzwave_host::sync::SyncView, fails: String,
+                run: history_sync::sync_save, web: same
+            }
+            {
+                name: sync_now, shell: generated, group: history_sync, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: holzwave_host::sync::SyncView, fails: String,
+                run: history_sync::sync_now, web: same
+            }
+            {
+                name: sync_off, shell: generated, group: history_sync, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: holzwave_host::sync::SyncView,
+                run: history_sync::sync_off, web: same
+            }
+            {
+                name: local_network_status, shell: generated, group: history_sync, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: holzwave_host::local_network::LocalNetworkView,
+                run: history_sync::local_network_status, web: unavailable
+            }
+            {
+                name: local_network_answer, shell: generated, group: history_sync, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [allow: bool],
+                answers: holzwave_host::local_network::LocalNetworkView, fails: String,
+                run: history_sync::local_network_answer, web: unavailable
+            }
+            {
+                name: local_network_open_settings, shell: generated, group: history_sync, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: (), fails: String,
+                run: history_sync::local_network_open_settings, web: unavailable
+            }
         }
     };
 }

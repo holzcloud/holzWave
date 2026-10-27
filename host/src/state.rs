@@ -1739,13 +1739,25 @@ impl AppCore {
     /// page names the pane and never an address, so the core alone decides which computer is asked. Blocks (a few
     /// milliseconds here, a round trip for another computer): not on the main thread.
     pub fn monitor_sample(&self, pane: PaneId) -> Result<holzwave_core::monitor::Reading, String> {
+        self.monitor_sample_with(pane, true)
+    }
+
+    /// [`AppCore::monitor_sample`] for a host that may not show the processes of the machine that runs the core: with
+    /// `processes` false the reading of this computer carries the numbers and an empty list of processes. The reading of
+    /// another computer, over a saved connection, is the person's own and is passed on as it is. Which of the two it is
+    /// comes from the pane's block, so the answer cannot be local and listed at once.
+    pub fn monitor_sample_with(&self, pane: PaneId, processes: bool) -> Result<holzwave_core::monitor::Reading, String> {
         let block = self
             .blocks
             .block_of(pane)
             .filter(|block| block.kind == BlockKind::Monitor)
             .ok_or_else(|| "this pane shows no system monitor".to_owned())?;
         if block.source == LOCAL {
-            return Ok(holzwave_core::monitor::Reading::Live(self.monitor.sample()));
+            let mut snapshot = self.monitor.sample();
+            if !processes {
+                snapshot.procs.clear();
+            }
+            return Ok(holzwave_core::monitor::Reading::Live(snapshot));
         }
         self.remote_monitors.sample(&self.connections, &block.source)
     }

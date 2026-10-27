@@ -1,7 +1,8 @@
-//! The commands the webview can call: thin wrappers over [`AppCore`] (D-19). The terminal, layout, window and pointer
-//! commands are rows of the host's command table (`holzwave_host::commands::table`) and their wrappers are written from
-//! it in `desktop_table.rs`; the three of them that need the window shell (`copy_selection`, `clipboard_text`,
-//! `window_ready`) and the commands of the other groups are written out here.
+//! The commands the webview can call: thin wrappers over [`AppCore`] (D-19). The terminal, layout, window, pointer,
+//! settings, connection, block, file, history, sync and local network commands are rows of the host's command table
+//! (`holzwave_host::commands::table`) and their wrappers are written from it in `desktop_table.rs`; the three of them
+//! that need the window shell (`copy_selection`, `clipboard_text`, `window_ready`) and the AI and integration commands
+//! are written out here.
 //!
 //! Two conventions hold for every command, and `state.rs` has a test that reads this file and the table to keep them:
 //!
@@ -27,21 +28,17 @@ use holzwave_core::ai::profiles::KeySlot;
 use holzwave_core::ai::service::events::ChatState;
 use holzwave_core::ai::service::{AskView, ContextState, OfferView};
 use holzwave_core::ai::types::ContextKind;
-use holzwave_core::blocks::{BlockKind, BlockView, Opened, Saved};
-use holzwave_core::connections::{ConnView, ProfileView, SecretChange};
-use holzwave_core::files::{Entry, Listing};
 use holzwave_core::integrate::service::{ProfilesView, RunAnswer, SelectionView, ToolView};
 use holzwave_core::integrate::ticket::Card;
 use holzwave_core::integrate::Selection;
 use holzwave_core::layout::PaneId;
-use holzwave_core::profiles::Profile;
 use serde_json::Value;
 use tauri::{State, WebviewWindow};
 
 use holzwave_host::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, RemovalView, TicketView};
 use crate::clipboard;
 use holzwave_host::integrate_host::{ConfirmAnswer, ContextAnswer, IntegrationFault, LaunchAnswer};
-use holzwave_host::state::{AppCore, AppInfo, SettingsView, View};
+use holzwave_host::state::AppCore;
 
 // The wire types of the table's commands live in the host crate. The protocol golden and the tests of the shell import
 // them from here.
@@ -88,277 +85,6 @@ pub fn window_ready(core: State<Arc<AppCore>>, window: WebviewWindow) -> Result<
         window.set_focus().map_err(|e| e.to_string())?;
     }
     Ok(())
-}
-
-// ---- settings, themes and key bindings ----------------------------------------------------------------------------
-
-/// The settings, the themes, the theme in force and the key bindings. Reads memory only.
-#[tauri::command(rename_all = "snake_case")]
-pub fn get_settings(core: State<Arc<AppCore>>) -> SettingsView {
-    core.get_settings()
-}
-
-/// Set one setting (`key` is a field of `settings.json`, `value` its JSON value). Validated, written atomically,
-/// pushed to every live pane and announced as the `settings` event; the answer is the new view, or the reason why
-/// nothing changed. Writes a file, so it is async.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn set_setting(core: State<Arc<AppCore>>, key: String, value: Value) -> Result<SettingsView, String> {
-    core.set_setting(&key, value)
-}
-
-/// Restore the default of one setting. Async for the same reason as `set_setting`.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn reset_setting(core: State<Arc<AppCore>>, key: String) -> Result<SettingsView, String> {
-    core.reset_setting(&key)
-}
-
-/// Re-read `settings.json` and `themes/` when a file changed; does nothing otherwise. Async: it inspects files.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn reload_settings(core: State<Arc<AppCore>>) -> SettingsView {
-    core.reload_settings()
-}
-
-// ---- links, paths, app info and the pointer -----------------------------------------------------------------------
-
-/// Open a link with the platform opener. Only http, https and mailto links up to 2048 bytes are opened. Async: it
-/// starts a process.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn open_url(core: State<Arc<AppCore>>, url: String) -> Result<(), String> {
-    core.open_url(&url)
-}
-
-/// Reveal a file or folder in the file manager and never run it. `path` is absolute, `~/...` or relative to `base`
-/// (the pane's working directory); it has to exist. Async: it starts a process.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn reveal_path(core: State<Arc<AppCore>>, path: String, base: Option<String>) -> Result<(), String> {
-    core.reveal_path(&path, base.as_deref())
-}
-
-/// The version, the operating system and the host name. Async: it may run a program.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn app_info(core: State<Arc<AppCore>>) -> AppInfo {
-    core.app_info()
-}
-
-/// The text size the operating system asks for, in percent (100 to 300; 100 where the platform has no such setting or
-/// it cannot be read). Async: it runs a program, for at most a moment. The page multiplies its UI scale by it.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn os_text_scale(core: State<Arc<AppCore>>) -> u32 {
-    let host = core.host().clone();
-    host.text_scale()
-}
-
-// ---- connections ------------------------------------------------------------------------------------------------
-
-/// The saved connections (SSH, WSL, Docker), each with whether a secret is saved for it. Asks the keychain, so async.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn connections_list(core: State<Arc<AppCore>>) -> Vec<ProfileView> {
-    core.connections_list()
-}
-
-/// Add or change a connection. `secret` says what to do with its password or key passphrase: `{kind: "keep"}`,
-/// `{kind: "set", value}` or `{kind: "clear"}`. The answer is the connection as saved, or why it was refused.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn connection_save(core: State<Arc<AppCore>>, profile: Profile, secret: SecretChange) -> Result<ProfileView, String> {
-    core.connection_save(profile, secret)
-}
-
-/// Remove a connection and its secret.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn connection_delete(core: State<Arc<AppCore>>, id: String) -> Result<(), String> {
-    core.connection_delete(&id)
-}
-
-/// Open connection `id` in a new tab; the answer is the view with that tab shown.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn connect(core: State<Arc<AppCore>>, window: WebviewWindow, id: String) -> Result<View, String> {
-    core.connect_in(window.label(), &id)
-}
-
-/// The connection state of every running pane that has a connection. Reads memory only.
-#[tauri::command(rename_all = "snake_case")]
-pub fn pane_connections(core: State<Arc<AppCore>>) -> Vec<ConnView> {
-    core.pane_connections()
-}
-
-// ---- files and previews -----------------------------------------------------------------------------------------
-
-/// Open a file browser or a preview: `kind` is `files` or `preview`, `source` is `local` or a connection id, `placement`
-/// is `tab`, `right` or `down`. An empty `path` is the start directory of the source (for a browser). The answer is the
-/// view with the new pane focused. Reads a directory over the network, so async.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn block_open(
-    core: State<Arc<AppCore>>,
-    window: WebviewWindow,
-    kind: BlockKind,
-    source: String,
-    path: String,
-    placement: String,
-) -> Result<View, String> {
-    core.block_open_in(window.label(), &placement, kind, &source, &path)
-}
-
-/// Every pane that shows a file browser or a preview. Reads memory only.
-#[tauri::command(rename_all = "snake_case")]
-pub fn pane_blocks(core: State<Arc<AppCore>>) -> Vec<BlockView> {
-    core.blocks_list()
-}
-
-/// The pane's block now shows `path`.
-#[tauri::command(rename_all = "snake_case")]
-pub fn block_update(core: State<Arc<AppCore>>, pane: PaneId, path: String) -> Result<(), String> {
-    core.block_update(pane, &path)
-}
-
-/// The entries of a directory, folders first. Over SFTP this waits for the network, so async.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn files_list(core: State<Arc<AppCore>>, source: String, path: String) -> Result<Listing, String> {
-    core.files_list(&source, &path)
-}
-
-/// What a file is: its kind, size, and for Markdown the sanitised HTML, for small text the content.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn file_open(core: State<Arc<AppCore>>, source: String, path: String) -> Result<Opened, String> {
-    core.file_open(&source, &path)
-}
-
-/// One entry, following links.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn file_stat(core: State<Arc<AppCore>>, source: String, path: String) -> Result<Entry, String> {
-    core.file_stat(&source, &path)
-}
-
-/// Save the editor's text over a file (written aside and renamed over it). `expected_modified` is the change time the
-/// file was opened with and `expected_digest` the SHA-256 of the bytes that were read: with a digest the check is exact
-/// (the file is read again), without one the change time is compared; a file that changed meanwhile is not overwritten
-/// (`null` for both overwrites). The answer is the new change time and the digest of what was written.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn file_save(
-    core: State<Arc<AppCore>>,
-    source: String,
-    path: String,
-    text: String,
-    expected_modified: Option<i64>,
-    expected_digest: Option<String>,
-) -> Result<Saved, String> {
-    core.file_save(&source, &path, &text, expected_modified, expected_digest.as_deref())
-}
-
-/// The state of the sync.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn sync_status(core: State<Arc<AppCore>>) -> holzwave_host::sync::SyncView {
-    core.sync_status()
-}
-
-/// Set up the sync for an account (the first run makes the folder on a new server) or why it was refused.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn sync_save(
-    core: State<Arc<AppCore>>,
-    endpoint: String,
-    user: String,
-    password: String,
-    passphrase: String,
-) -> Result<holzwave_host::sync::SyncView, String> {
-    core.sync_save(&endpoint, &user, &password, &passphrase)
-}
-
-/// Run the sync now.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn sync_now(core: State<Arc<AppCore>>) -> Result<holzwave_host::sync::SyncView, String> {
-    core.sync_now()
-}
-
-/// Turn the sync off and forget the account.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn sync_off(core: State<Arc<AppCore>>) -> holzwave_host::sync::SyncView {
-    core.sync_off()
-}
-
-/// The Local Network permission of macOS as the page needs it: `{supported, notice_due, state}`. Where the system has no such
-/// setting (Windows, Linux, macOS below 15) `supported` is false and nothing is read. With the choice `requested` it
-/// browses the local network for a moment and may answer `denied`; otherwise it touches nothing. Async: it waits.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn local_network_status(core: State<Arc<AppCore>>) -> holzwave_host::local_network::LocalNetworkView {
-    core.local_network().view()
-}
-
-/// The person answered the notice of the Local Network permission (or pressed `Allow` in the Settings row). `allow` true
-/// stores the choice and makes the app touch the network once, which makes macOS show its own question; false stores
-/// `Not now`. Async: it waits.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn local_network_answer(core: State<Arc<AppCore>>, allow: bool) -> Result<holzwave_host::local_network::LocalNetworkView, String> {
-    core.local_network().answer(allow)
-}
-
-/// Open System Settings at Privacy & Security, Local Network (macOS only). Takes nothing from the page. Async: it starts a
-/// process.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn local_network_open_settings(core: State<Arc<AppCore>>) -> Result<(), String> {
-    core.open_local_network_settings()
-}
-
-/// What the computer of a monitor pane is doing: CPU, memory, network and the busiest processes, or the word that it is
-/// not a computer this monitor can read. The page names a pane and never an address: the pane's block names the source.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn monitor_sample(core: State<Arc<AppCore>>, pane: PaneId) -> Result<holzwave_core::monitor::Reading, String> {
-    core.monitor_sample(pane)
-}
-
-/// Put the bundled `wsh` on the host of the saved SSH connection the focused pane runs, verify it there and say the result
-/// as a line on the pane. The page names the pane and never a host; the core resolves the connection, and nothing is
-/// installed without this call (the palette action `Install wsh on this host`). The answer is the sentence the pane shows.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn wsh_install(core: State<Arc<AppCore>>, pane: PaneId) -> Result<String, String> {
-    core.wsh_install(pane)
-}
-
-/// Typed commands that match `query` (fuzzy), newest and best first; an empty query lists the newest. The search is the
-/// history of the host the focused pane of the calling window runs on: the page sends no host.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn history_search(
-    core: State<Arc<AppCore>>,
-    window: WebviewWindow,
-    query: String,
-    limit: usize,
-) -> Vec<holzwave_core::history::Hit> {
-    core.history_search_in(window.label(), &query, limit)
-}
-
-/// Forget every use of one command.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn history_delete(core: State<Arc<AppCore>>, cmd: String) -> Result<usize, String> {
-    core.history_delete(&cmd)
-}
-
-/// Forget the whole history.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn history_clear(core: State<Arc<AppCore>>) -> Result<(), String> {
-    core.history_clear()
-}
-
-/// The person answered the question of a login (a one-time code, a PAM prompt): one answer per question, in order. True when
-/// the question was waiting; an unknown, old or malformed id changes nothing. Nothing of the answers is kept or logged.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn login_prompt_answer(core: State<Arc<AppCore>>, id: String, answers: Vec<String>) -> bool {
-    core.login_prompt_answer(&id, answers)
-}
-
-/// The person gave up on the question of a login. True when it was waiting.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn login_prompt_cancel(core: State<Arc<AppCore>>, id: String) -> bool {
-    core.login_prompt_cancel(&id)
-}
-
-/// The widgets of the sidebar, their saved notes and what was wrong with a widget file.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn widgets_list(core: State<Arc<AppCore>>) -> holzwave_host::state::WidgetsView {
-    core.widgets_list()
-}
-
-/// Save the text of a note widget (an empty text forgets it).
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn widget_note_save(core: State<Arc<AppCore>>, id: String, text: String) -> Result<(), String> {
-    core.widget_note_save(&id, &text)
 }
 
 // ---- the AI chat -------------------------------------------------------------------------------------------------
@@ -561,15 +287,6 @@ pub fn ai_key_clear(core: State<Arc<AppCore>>, profile: String, slot: KeySlot) -
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn ai_has_key(core: State<Arc<AppCore>>, profile: String, slot: KeySlot) -> Result<bool, AiFault> {
     core.ai().has_key(&profile, slot)
-}
-
-/// Render the Markdown of a chat reply as HTML, with the sanitiser the previews use: an allow-list of tags and of link
-/// schemes, no images, no styles, no scripts. Answers nothing when the text is larger than the renderer takes. The page
-/// copies the answer through an allow-list of its own a second time and never trusts this one alone. It holds no state,
-/// so it needs no handle.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn markdown_render(text: String) -> Option<String> {
-    holzwave_core::preview::render_markdown(&text)
 }
 
 // ---- the integrations ----------------------------------------------------------------------------------------------
