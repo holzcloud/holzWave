@@ -21,9 +21,11 @@ export default async function ({ page, url, errors }) {
   );
   const titles = await page.evaluate(async () => (await import(new URL("actions.js", location.href).href)).listActions().map((a) => a.id));
   for (const id of ["unlock.open", "account.open", "account.signout"]) assert.ok(!titles.includes(id), `no action ${id} on the desktop`);
-  assert.equal(await page.locator("#status .seg.web").count(), 1, "the segment exists");
-  assert.equal(await page.locator("#status .seg.web").evaluate((el) => el.textContent === "" && el.children.length === 0), true, "and is empty");
-  assert.equal(await page.locator("#status .seg.web").evaluate((el) => getComputedStyle(el).display), "none", "so nothing is shown");
+  assert.equal(await page.locator("#status .seg.web").count(), 0, "the strip is the one it always was: no segment of the web build");
+  assert.deepEqual(
+    await page.locator("#status > *").evaluateAll((n) => n.map((x) => x.className.replace("seg label ", ""))),
+    ["mode", "notice", "conns", "panes", "renderer", "encoding", "version"],
+  );
   const sheets = await page.evaluate(() => Array.from(document.querySelectorAll('link[rel="stylesheet"]')).map((l) => new URL(l.href).pathname));
   assert.ok(!sheets.some((s) => /websession|account/.test(s)), "no style sheet of the web layers is loaded");
   assert.deepEqual(server.foreign, [], "a request left the page's origin");

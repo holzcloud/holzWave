@@ -1,0 +1,56 @@
+/* The account dialog (account.ts, docs/design.md 6.29). Loaded after dialogs.css, settings.css and websession.css, whose box,
+   groups, fields and buttons it uses. Every colour is a `--hw-*` token and every size is in rem. A state is a word at the right
+   of the row, never colour alone: `set` and `saved` in the ok colour, `not set` and `none` dim. An armed button has the danger
+   border and its words change. Nothing moves. */
+.dlg.settings.account { width: min(40rem, calc(100vw - 4rem)); }
+.dlg.account [hidden] { display: none !important; }
+.dlg.account .set-status { min-height: 1.4em; color: var(--hw-ink-2); }
+.dlg.account .acc-group { margin: 0 0 .833rem; }
+.dlg.account .acc-row { display: flex; align-items: center; gap: .667rem; min-height: 2rem; }
+.dlg.account .acc-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.dlg.account .acc-state { flex: none; color: var(--hw-dim); }
+.dlg.account .acc-state[data-tone="ok"] { color: var(--hw-ok); }
+.dlg.account .acc-state[data-tone="dim"] { color: var(--hw-dim); }
+.dlg.account .acc-meta, .dlg.account .acc-addr { flex: none; color: var(--hw-dim); }
+.dlg.account .acc-addr { color: var(--hw-ink-2); }
+.dlg.account .acc-this { color: var(--hw-ink-2); }
+.dlg.account .acc-dot { flex: none; color: var(--hw-ink-2); }
+.dlg.account .acc-list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
+.dlg.account .acc-item { display: flex; align-items: center; gap: .667rem; min-height: 2rem; }
+.dlg.account .acc-end { justify-content: flex-end; }
+.dlg.account .acc-form { display: flex; flex-direction: column; min-width: 0; padding: .25rem 0; }
+.dlg.account .acc-note { margin: 0 0 .5rem; color: var(--hw-ink-2); overflow-wrap: anywhere; }
+.dlg.account .acc-buttons { display: flex; gap: .5rem; margin-top: .25rem; }
+.dlg.account .acc-save { color: var(--hw-on-accent); background: var(--hw-rose-deep); border-color: var(--hw-rose-deep); }
+.dlg.account .acc-save:hover { color: var(--hw-on-accent); background: var(--hw-rose-deep); }
+.dlg.account button { min-height: 1.75rem; }
+.dlg.account button:disabled { color: var(--hw-dim); cursor: default; background: none; }
+.dlg.account .acc-danger[data-armed="true"] { color: var(--hw-danger); border-color: var(--hw-danger); }
+.dlg.account .acc-secret { min-width: 0; }
+
+/* The two once-only steps (secretsteps.ts) are made for the sign-in page and named by its classes; here they take the dialog's look. */
+.dlg.account .lg-step { min-width: 0; }
+.dlg.account .lg-f { display: flex; flex-direction: column; gap: .333rem; min-width: 0; margin: 0 0 .667rem; }
+.dlg.account .lg-label { color: var(--hw-dim); }
+.dlg.account .lg-row2 { display: flex; align-items: center; gap: .667rem; min-width: 0; margin: 0 0 .667rem; }
+.dlg.account .lg-step > .lg-f > .lg-row2 { margin: 0; }
+.dlg.account .lg-secret { box-sizing: border-box; display: block; flex: 1 1 auto; min-width: 0; padding: .5rem .667rem; letter-spacing: .08em;
+                          color: var(--hw-ink); background: var(--hw-ground); border: 1px solid var(--hw-line); border-radius: .333rem;
+                          overflow-wrap: anywhere; user-select: all; }
+.dlg.account .lg-code { letter-spacing: .05em; }
+.dlg.account .lg-in { box-sizing: border-box; display: flex; align-items: center; flex: 1 1 auto; min-width: 0; min-height: 2rem; padding: 0 .667rem;
+                      color: var(--hw-ink); background: var(--hw-ground); border: 1px solid var(--hw-line); border-radius: .333rem; }
+.dlg.account .lg-tx { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dlg.account .lg-chk { display: flex; align-items: center; gap: .667rem; min-height: 2rem; cursor: pointer; color: var(--hw-ink); }
+.dlg.account .lg-chk input { width: 1rem; height: 1rem; margin: 0; accent-color: var(--hw-rose); }
+.dlg.account .lg-full { width: 100%; justify-content: center; }
+.dlg.account .lg-note { min-height: 1.4em; margin: .133rem 0 0; color: var(--hw-ink-2); }
+.dlg.account .lg-btn:disabled { color: var(--hw-dim); }
+.dlg.account :is(.lg-chk input, .acc-main, .acc-danger, .acc-save):focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 2px; }
+
+@media (forced-colors: active) {
+  .dlg.account .lg-secret, .dlg.account .lg-in, .dlg.account .acc-group { border-color: CanvasText; }
+  .dlg.account .acc-save { outline: 1px solid ButtonText; }
+  .dlg.account .acc-danger[data-armed="true"] { outline: 2px solid Mark; }
+  .dlg.account :is(button, input):focus-visible { outline-color: Highlight; }
+}

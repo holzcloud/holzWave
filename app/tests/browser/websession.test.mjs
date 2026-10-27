@@ -257,7 +257,7 @@ export default async function ({ page, url, errors }) {
     assert.equal(await page.getByRole("dialog").count() + (await page.getByRole("alertdialog").count()), 0);
     assert.ok(server.unscripted.includes("GET /api/session"), "the page asked, got 404 and left it at that");
     assert.ok(!(await actionTitles(page)).includes("Unlock…"));
-    assert.equal(await page.locator("#status .seg.web").count(), 1, "the segment exists and is empty");
+    assert.equal(await page.locator("#status .seg.web").count(), 0, "the strip is the one it always was");
   }
 
   // ---- a lookup that is not an answer leaves the page as it is -----------------------------------------------------------

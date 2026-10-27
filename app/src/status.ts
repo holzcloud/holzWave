@@ -19,7 +19,8 @@ const seg = (cls: string): HTMLElement => el("span", `seg label ${cls}`);
 const modeSeg = seg("mode");
 const noticeSeg = seg("notice");
 noticeSeg.setAttribute("role", "status");
-// The marks of the browser build (the session, the connection, the saved passwords); empty, so not shown, on the desktop.
+// The marks of the browser build (the session, the connection, the saved passwords). The segment is made here and put into the
+// strip by `renderWeb` only once the web code has something to say, so the desktop strip is what it always was.
 const webSeg = seg("web");
 webSeg.setAttribute("role", "status");
 const conns = seg("conns");
@@ -27,7 +28,7 @@ const panes = seg("panes");
 const renderer = seg("renderer");
 const encoding = seg("encoding");
 const version = seg("version");
-strip.append(modeSeg, noticeSeg, webSeg, conns, panes, renderer, encoding, version);
+strip.append(modeSeg, noticeSeg, conns, panes, renderer, encoding, version);
 
 /** The segments of the Kubernetes context and the Azure subscription, made when the core has a value and removed when it has not. */
 const ctxSegs = new Map<string, HTMLButtonElement>();

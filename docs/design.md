@@ -2334,21 +2334,32 @@ for an account that has a password, the others always.
 |---|---|---|
 | Password | `set` | `Change` |
 | Authenticator | `set` | `Replace` |
-| Passkeys | `N saved` | `Add passkey`; under it one row for each passkey with its name, `used` and when, and `Remove` |
-| Unlock passphrase | `set` or `not set` | `Change` or `Set` |
-| Recovery code | `saved` or `none` | `Make a new code` |
+| Passkeys | the name reads `N passkeys` (`1 passkey`, `No passkeys`); the state is `saved` or `none` | `Add passkey`; under it one row for each passkey with its name, `used today`, `used 3 days ago` or `not used yet`, and `Remove` |
+| Unlock passphrase | `set` or `not set` | `Change` or `Set`; while the saved passwords are locked `Unlock` instead, which opens the dialog of 6.28 |
+| Recovery code | `saved` or `none` | `Make a new code`; while the saved passwords are locked `Unlock` instead |
 | Sessions | none | `Sign out` on every row but this one, and `Sign out everywhere` |
 
 A state word is its own cue: `set` and `saved` are in the ok colour, `not set` and `none` are dim; the colour is never alone.
 A change opens its form in the place of the group's row, with `Save` and `Cancel`: the password asks `Current password` and `New password`
-(`current-password`, `new-password`, the refusal sentence of 6.28 rule 7); the authenticator shows the key, the link and `Code` of
-the invitation step; a passkey asks for a `Name` and then shows the prompt of the browser; the passphrase asks for `New
-passphrase`; a new recovery code is shown in the same once-only step as in 6.28 and says `The new code replaces the old one.`
-before it is made. Removing the last way to sign in is refused with `This is your last way to sign in. Add another first.`
+(`current-password`, `new-password`, the refusal sentence of 6.28 rule 7 under `New password`, the sentence of rule 1 under `Current
+password`; there is no repeat field); the authenticator shows the key, the link and `Code` of
+the invitation step (a wrong code says `That code did not match. Try again.`, empties `Code` and keeps the step); a passkey asks for a `Name` and then shows the prompt of the browser
+(a prompt that was closed says nothing, a failed one says `That passkey was not saved. Try again.`); the passphrase asks for `New
+passphrase`; a new recovery code says `The new code replaces the old one.` before it is made, with the buttons `Make code` and `Cancel`, and is then shown
+in the same once-only step as in 6.28, during which `Close` is disabled and `Escape` does nothing. Removing the last way to sign in is refused with `This is your last way to sign in. Add another first.`
+A change that was made says `Saved.` in the status line and the dialog reads the account again; a refusal in a form is said under its fields with the mark `!` and the underline of 6.28 and
+empties the secret fields. A change that the server refuses for another reason says `That change was not made. Try again.`; one that needs the saved
+passwords while they are locked says `Your saved passwords are locked. Unlock them first.`; a server that does not answer says `Could not reach the server. Try again.`, which is also what
+the dialog says when it cannot read the account (then only `Close` is left). `Remove` and `Sign out everywhere` ask twice: the first press changes the words to
+`Click again to remove` and `Click again to sign out everywhere` and gives the button the danger border and text, leaving the button disarms it. A secret that the dialog
+shows (the key, the recovery code) is removed from the page when its step ends, not hidden, and no secret is ever put into the status line, an attribute, the title, the
+address or the storage of the browser.
 
-A session row shows the device (the browser and system, as a short summary), the address in mono, and when it was last seen. The
-session that shows the dialog is marked with the words `this session` and a filled dot `●` and has no `Sign out`; every other row
-has one. `Sign out everywhere` ends every session including this one, and the window then shows the sign-in page.
+A session row shows the device (the browser and system, as a short summary), the address in mono, and when it was last seen
+(`now` for this session, then `just now`, `3 min ago`, `3 h ago`, `2 days ago`). The
+session that shows the dialog is first, marked with the words `this session` and a filled dot `●`, and has no `Sign out`; every other row
+has one, newest first. `Sign out everywhere` ends every session including this one, and the window then shows the start page (the location is replaced, so the browser's back
+button does not return to the dialog). The palette entry `Sign out` ends this session only and does the same, and it does so even when the server cannot be reached. `Account…` and `Sign out` are palette entries of the browser build only.
 
 **Confirm it is you.** Every change asks for a sign-in no older than five minutes. The page sends the change; when the answer
 says that a recent sign-in is needed, it shows this layer once and repeats the change after it. A layer above the dialog,

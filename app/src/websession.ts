@@ -30,6 +30,8 @@ let unlockActionOn = false;
 let endedShown = false;
 let timer: ReturnType<typeof setTimeout> | undefined;
 let unlockApi: typeof import("./unlock.js") | null = null;
+/** True once the first lookup was an answer: from then on the `web` segment is part of the strip, empty or not, so that it is a live region before it speaks. */
+let known = false;
 
 /** The account of the last answer of `GET /api/session`, or null (none yet, or the desktop). The people dialog reads the role from it. */
 export function sessionAccount(): Account | null {
@@ -76,9 +78,32 @@ function syncActions(): void {
   }
 }
 
-async function openUnlockDialog(): Promise<void> {
+async function openUnlockDialog(after?: () => void): Promise<void> {
   unlockApi ??= await import("./unlock.js");
-  await unlockApi.openUnlock(() => setModel(reduce(model, { state: "unlocked" }, Date.now())));
+  await unlockApi.openUnlock(() => {
+    setModel(reduce(model, { state: "unlocked" }, Date.now()));
+    after?.();
+  });
+}
+
+/** Open the unlock dialog from another dialog (the account dialog's `Unlock`); `after` runs once the secrets are open. */
+export function requestUnlock(after?: () => void): Promise<void> {
+  return openUnlockDialog(after);
+}
+
+/** Palette entry `Sign out`: end this session on the server and show the start page, even when the server cannot be reached. */
+async function signOut(): Promise<void> {
+  try {
+    await http("POST", "/auth/logout", {});
+  } catch {
+    // the page leaves either way: a session that could not be ended on the server ends at its own expiry
+  }
+  location.replace("/");
+}
+
+async function openAccountDialog(): Promise<void> {
+  const { openAccount } = await import("./account.js");
+  await openAccount();
 }
 
 /** The text button of a mark was pressed. */
@@ -115,6 +140,11 @@ async function showEnded(): Promise<void> {
 export function renderWeb(segment: HTMLElement): void {
   if (!started) return;
   const list = marks(model, Date.now());
+  // The segment joins the strip, after the notice, once the server has answered or a mark is due: before that the strip is the desktop's.
+  if (!segment.isConnected) {
+    if (!known && list.length === 0) return;
+    document.querySelector("#status .seg.notice")?.after(segment);
+  }
   const key = JSON.stringify(list);
   if (key === drawn) return;
   drawn = key;
@@ -153,6 +183,9 @@ export function initWebSession(onChange: () => void): Promise<void> {
   if (backend !== "web" || started) return Promise.resolve();
   started = true;
   changed = onChange;
+  // The palette entries of the account: the dialog and the end of this session.
+  registerAction({ id: "account.open", title: "Account…", run: () => void openAccountDialog() });
+  registerAction({ id: "account.signout", title: "Sign out", run: () => void signOut() });
   // The rules of the marks; a sheet that cannot load leaves the marks as plain text.
   void loadStyles("./websession.css").catch(() => {});
   onSession((event) => {
@@ -171,6 +204,7 @@ export function initWebSession(onChange: () => void): Promise<void> {
       const info = readSessionInfo(raw);
       if (info === null) return;
       account = info.account;
+      known = true;
       const next = fromInfo(model, info, Date.now());
       setModel(storeFromEvent ? { ...next, store: model.store } : next);
     },
