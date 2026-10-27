@@ -27,7 +27,7 @@ const STATIC = /\.(?:html|js|css|woff2|png|svg)$/;
  * Script the server for `page`. `table` is a list of `{ method, path, status, body }`; `body` is a value or a function
  * `(request, n) => value` where `request` is `{ method, path, headers, text, json }` and `n` counts the earlier requests
  * to the same route. `status` may be a function of the same two arguments. `abort: true` fails the request as a lost network
- * would, `delay` waits that many milliseconds before answering. An entry may also carry `answers`, a list of such answers
+ * would, `reply` answers `{ status, body }` from the request, `delay` waits that many milliseconds before answering. An entry may also carry `answers`, a list of such answers
  * `{ status, body, abort, delay }` used in turn (the last one repeats).
  *
  * Returns `{ log, foreign, unscripted, assets, count(method, path) }`:
@@ -78,8 +78,10 @@ export async function installRoutes(page, table, { origin }) {
     const pick = Array.isArray(entry.answers) ? entry.answers[Math.min(n, entry.answers.length - 1)] : entry;
     if (pick.delay) await new Promise((done) => setTimeout(done, pick.delay));
     if (pick.abort) return route.abort("failed");
-    const status = typeof pick.status === "function" ? pick.status(entryLog, n) : (pick.status ?? 200);
-    const body = typeof pick.body === "function" ? pick.body(entryLog, n) : pick.body;
+    // `reply(request, n)` answers `{ status, body }` in one piece, for a route whose answer depends on the step in the body.
+    const replied = typeof pick.reply === "function" ? pick.reply(entryLog, n) : undefined;
+    const status = replied ? (replied.status ?? 200) : typeof pick.status === "function" ? pick.status(entryLog, n) : (pick.status ?? 200);
+    const body = replied ? replied.body : typeof pick.body === "function" ? pick.body(entryLog, n) : pick.body;
     if (pick.html) return route.fulfill({ status, contentType: "text/html; charset=utf-8", body: String(body ?? "") });
     if (status === 204) return route.fulfill({ status });
     return route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body ?? {}) });
@@ -188,6 +190,45 @@ export async function installAuthenticator(page) {
     // The whole container is replaced (on the prototype, where the getter lives), so no engine can hand out the real one.
     const fake = { get, create, store: async () => undefined, preventSilentAccess: async () => undefined };
     Object.defineProperty(Navigator.prototype, "credentials", { get: () => fake, configurable: true });
+  });
+}
+
+/**
+ * A clipboard that records what is written: `window.__copied` lists the texts. (A headless browser may refuse the real one,
+ * and a test must not depend on what another program put there.)
+ */
+export async function installClipboard(page) {
+  await page.addInitScript(() => {
+    window.__copied = [];
+    Object.defineProperty(Navigator.prototype, "clipboard", {
+      get: () => ({ writeText: async (text) => void window.__copied.push(String(text)) }),
+      configurable: true,
+    });
+  });
+}
+
+/**
+ * Record where the address bar has been: every address given to `history.replaceState` or `pushState` as
+ * `window.__addresses`, and the address at the moment the first element of the page's box was drawn as
+ * `window.__atFirstRender`. A token in the fragment must be gone by then.
+ */
+export async function installAddressTrace(page) {
+  await page.addInitScript(() => {
+    window.__addresses = [];
+    for (const name of ["replaceState", "pushState"]) {
+      const original = History.prototype[name];
+      History.prototype[name] = function (state, title, address) {
+        window.__addresses.push(String(address));
+        return original.call(this, state, title, address);
+      };
+    }
+    const watch = new MutationObserver(() => {
+      if (document.querySelector(".lg-box") && window.__atFirstRender === undefined) {
+        window.__atFirstRender = location.href;
+        watch.disconnect();
+      }
+    });
+    watch.observe(document, { childList: true, subtree: true });
   });
 }
 
