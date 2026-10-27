@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use holzwave_server::limits;
-use holzwave_server::proxy::{Admission, Mode, client_address};
+use holzwave_server::proxy::{Admission, Mode, TrustedProxies};
 use holzwave_server::tls::{self, FileResolver};
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ProtocolVersion, RootCertStore};
@@ -76,7 +76,7 @@ impl Drop for Server {
 async fn serve(resolver: Arc<FileResolver>, handshake_timeout: Duration) -> Server {
     let config = tls::server_config(resolver, &tls::ALPN).expect("server configuration");
     let acceptor = tls::acceptor(Arc::new(config));
-    let admission = Admission::with_defaults(Mode::Files);
+    let admission = Admission::with_defaults(Mode::Files, TrustedProxies::none()).expect("admission");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local address");
     let gate = admission.clone();
@@ -168,7 +168,7 @@ fn the_key_exchange_groups_are_the_ring_providers() {
 fn the_client_address_outside_the_proxy_mode_is_the_peer() {
     let peer: IpAddr = "203.0.113.9".parse().expect("address");
     for mode in [Mode::Files, Mode::Acme] {
-        assert_eq!(client_address(mode, peer, &["198.51.100.7"], &["https"]), Ok(peer));
+        assert_eq!(TrustedProxies::none().client_address(mode, peer, &["198.51.100.7"], &["https"]), Ok(peer));
     }
 }
 
