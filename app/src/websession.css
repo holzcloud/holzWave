@@ -1,0 +1,64 @@
+/* The marks of the session in the status line and the small dialogs of the browser build: unlock, the ended layer and
+   `Confirm it is you` (docs/design.md 6.28 to 6.30). Loaded with `loadStyles` by the layer that needs it; the status marks are
+   styled from chrome.css's segment and need only this file's `.web-mark` rules, which the page loads at start on the web backend.
+   Every colour is a `--hw-*` token, every size is in rem. A state is never colour alone: each mark has a glyph and a word,
+   and the two that say something is wrong are underlined. Nothing moves. */
+
+/* ---- the marks of the status line ---- */
+#status .seg.web { display: flex; align-items: center; gap: 0; padding: 0; }
+#status .seg.web:empty { display: none; }
+#status .web-mark { display: inline-flex; align-items: center; gap: .5rem; padding: 0 .833rem; white-space: nowrap; border-right: 1px solid var(--hw-line); }
+#status .web-mark:last-child { border-right: 0; }
+#status .web-mark[data-tone="plain"] { color: var(--hw-ink); }
+#status .web-mark[data-tone="warn"] { color: var(--hw-warn); }
+#status .web-mark[data-tone="danger"] { color: var(--hw-danger); }
+#status .web-mark[data-tone="danger"] .web-word { text-decoration: underline; }
+.web-glyph { display: inline-block; text-align: center; min-width: .8rem; }
+/* The lock: a small box with a shackle, drawn with borders so it is a shape and needs no icon font. */
+.web-glyph[data-glyph="lock"] { position: relative; box-sizing: border-box; width: .75rem; height: .5rem; min-width: 0; margin-top: .3rem;
+                                border: 1px solid currentColor; border-radius: .1rem; }
+.web-glyph[data-glyph="lock"]::before { content: ""; position: absolute; left: .125rem; bottom: 100%; box-sizing: border-box; width: .4rem; height: .3rem;
+                                        border: 1px solid currentColor; border-bottom: 0; border-radius: .2rem .2rem 0 0; }
+#status button.web-act { all: unset; box-sizing: border-box; display: inline-flex; align-items: center; min-height: 1.75rem; padding: 0 .25rem;
+                         cursor: pointer; color: var(--hw-ink-2); text-decoration: underline; text-transform: uppercase; letter-spacing: .1em;
+                         font-size: calc(11rem / 12); }
+#status button.web-act:hover { color: var(--hw-ink); background: var(--hw-rose-wash); }
+#status button.web-act:focus-visible { outline: 2px solid var(--hw-rose); outline-offset: -2px; }
+
+/* ---- the layers: unlock, the ended layer and `Confirm it is you` ---- */
+.dlg.settings.web-unlock, .dlg.settings.web-step { width: min(24rem, calc(100vw - 4rem)); }
+.dlg.settings.web-ended { width: min(24rem, calc(100vw - 4rem)); }
+.dlg.settings .web-lead { margin: 0 0 .833rem; color: var(--hw-ink-2); overflow-wrap: anywhere; }
+.dlg.settings .web-lead .web-name { color: var(--hw-ink); font-weight: 700; }
+.dlg.settings .web-field { display: flex; flex-direction: column; gap: .333rem; margin: 0 0 .5rem; min-width: 0; }
+.dlg.settings .web-label { color: var(--hw-dim); }
+.dlg.settings .web-input { box-sizing: border-box; width: 100%; min-width: 0; min-height: 2rem; margin: 0; padding: .25rem .667rem; font: inherit;
+                           color: var(--hw-ink); background: var(--hw-ground); border: 1px solid var(--hw-line); border-radius: .333rem; }
+.dlg.settings .web-input[readonly] { color: var(--hw-ink-2); }
+.dlg.settings .web-input[aria-invalid="true"] { border-color: var(--hw-danger); }
+.dlg.settings .web-input:focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 1px; }
+/* An error: the mark `!` and the underline are the second cue; an empty line takes no room. */
+.dlg.settings .web-err { margin: 0 0 .5rem; color: var(--hw-danger); text-decoration: underline; overflow-wrap: anywhere; }
+.dlg.settings .web-err:empty { display: none; }
+.dlg.settings .web-err::before { content: "! "; font-weight: 700; }
+.dlg.settings .web-btn { box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; min-height: 2rem; padding: .25rem 1rem;
+                         font-size: 1rem; letter-spacing: 0; text-transform: none; color: var(--hw-ink-2); background: none;
+                         border: 1px solid var(--hw-line); border-radius: .667rem; }
+.dlg.settings .web-btn:hover { color: var(--hw-ink); background: var(--hw-rose-wash); }
+.dlg.settings .web-btn:disabled { color: var(--hw-dim); cursor: default; background: none; }
+.dlg.settings .web-solid { color: var(--hw-on-accent); background: var(--hw-rose-deep); border-color: var(--hw-rose-deep); font-weight: 700; }
+.dlg.settings .web-solid:hover { color: var(--hw-on-accent); background: var(--hw-rose-deep); }
+.dlg.settings .web-tb { all: unset; box-sizing: border-box; display: inline-flex; align-items: center; min-height: 2rem; margin: .5rem 0 0; padding: 0 .25rem;
+                        font: inherit; color: var(--hw-ink-2); text-decoration: underline; cursor: pointer; }
+.dlg.settings .web-tb:hover { color: var(--hw-ink); }
+.dlg.settings :is(.web-btn, .web-tb):focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 1px; }
+.dlg.settings .web-note { margin: .833rem 0 0; color: var(--hw-dim); overflow-wrap: anywhere; }
+.dlg.settings a.web-tb { color: var(--hw-ink-2); }
+
+@media (forced-colors: active) {
+  .dlg.settings .web-input, .dlg.settings .web-btn { border-color: CanvasText; }
+  .dlg.settings .web-solid { outline: 1px solid ButtonText; }
+  .dlg.settings .web-input[aria-invalid="true"] { outline: 2px solid Mark; }
+  .dlg.settings :is(.web-btn, .web-tb, .web-input):focus-visible, #status button.web-act:focus-visible { outline-color: Highlight; }
+  .web-glyph[data-glyph="lock"], .web-glyph[data-glyph="lock"]::before { border-color: CanvasText; }
+}

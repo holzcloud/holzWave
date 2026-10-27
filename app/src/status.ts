@@ -9,6 +9,7 @@ import { el, setAttr, setText } from "./dom.js";
 import { contextSegments, followLayout, showContext } from "./integratecontext.js";
 import { NOTICE_MS, paneCountText, rendererText } from "./labels.js";
 import { state } from "./state.js";
+import { renderWeb } from "./websession.js";
 
 const strip = el("div", "", document.getElementById("app") ?? document.body);
 strip.id = "status";
@@ -18,12 +19,15 @@ const seg = (cls: string): HTMLElement => el("span", `seg label ${cls}`);
 const modeSeg = seg("mode");
 const noticeSeg = seg("notice");
 noticeSeg.setAttribute("role", "status");
+// The marks of the browser build (the session, the connection, the saved passwords); empty, so not shown, on the desktop.
+const webSeg = seg("web");
+webSeg.setAttribute("role", "status");
 const conns = seg("conns");
 const panes = seg("panes");
 const renderer = seg("renderer");
 const encoding = seg("encoding");
 const version = seg("version");
-strip.append(modeSeg, noticeSeg, conns, panes, renderer, encoding, version);
+strip.append(modeSeg, noticeSeg, webSeg, conns, panes, renderer, encoding, version);
 
 /** The segments of the Kubernetes context and the Azure subscription, made when the core has a value and removed when it has not. */
 const ctxSegs = new Map<string, HTMLButtonElement>();
@@ -49,6 +53,7 @@ export function renderStatus(): void {
   const copy = getCopyMode();
   setText(modeSeg, copy === "select" ? "SELECT" : copy === "copy" ? "COPY" : "");
   setText(noticeSeg, notice);
+  renderWeb(webSeg);
   setText(conns, connSummary(paneConns.values()));
   setText(panes, paneCountText(view?.panes.length ?? 0));
   setText(renderer, rendererText(state.renderer, state.stats.avgMs));
