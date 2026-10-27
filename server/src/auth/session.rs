@@ -3,6 +3,11 @@
 //! A session value is 32 random bytes written as 43 base64url characters. Only the SHA-256 of the 32 bytes is stored, so a
 //! copy of the database cannot be used to sign in. Every sign-in makes a new value; no function takes a value from a request
 //! and turns it into a session.
+//!
+//! The lifetimes are exact to the second. A session made at `t` with an idle time of `i` and an absolute time of `a` is valid
+//! at `last_seen + i` and refused one second later, and valid at `t + a` and refused one second later, whatever the activity.
+//! Lookups only read; the row is written when it ends, when it is touched (at most every 30 seconds) and when the person
+//! signs in again for a sensitive action.
 
 use std::fmt;
 use std::net::IpAddr;
@@ -14,7 +19,7 @@ use zeroize::Zeroizing;
 
 use crate::clock::Clock;
 use crate::config::Sessions;
-use crate::store::{AccountId, NewSession, Session, Store, StoreError, hash_token};
+use crate::store::{AccountId, AccountState, NewSession, Session, Store, StoreError, TokenHash, hash_token};
 use crate::unlock::random;
 
 pub use crate::store::SignInMethod as Method;
@@ -24,6 +29,12 @@ const TOKEN_BYTES: usize = 32;
 
 /// The characters of a session value.
 pub const TOKEN_CHARS: usize = 43;
+
+/// The most sessions an account has at once. A new one beyond that ends the one seen least recently.
+pub const MAX_SESSIONS_PER_ACCOUNT: usize = 20;
+
+/// The fewest seconds between two writes of `last_seen` for one session.
+pub const TOUCH_INTERVAL_SECS: i64 = 30;
 
 /// What the `Debug` text of a session value prints.
 const TOKEN_DEBUG: &str = "SessionToken(..)";
@@ -116,7 +127,12 @@ impl SessionManager {
         self.clock.unix()
     }
 
-    /// Makes a session for `account` after a sign-in by `method` at `now`.
+    /// Makes a session for `account` after a sign-in by `method` at `now`, with a new random value. `device` is a short
+    /// summary of the browser (control characters are dropped, it is cut to 64 characters); `addr` is the client address as the
+    /// edge parsed it. An account that already has [`MAX_SESSIONS_PER_ACCOUNT`] sessions loses the one it used least recently.
+    /// An account that is not active gets no session.
+    ///
+    /// This is the only way to make a session, and it takes no cookie value: a value a browser presents is never adopted.
     pub fn create(
         &self,
         account: AccountId,
@@ -125,10 +141,20 @@ impl SessionManager {
         device: &str,
         addr: Option<IpAddr>,
     ) -> Result<Created, SessionError> {
-        let bytes = Zeroizing::new(random::<TOKEN_BYTES>().map_err(|_| SessionError::Random)?);
-        let value = SessionToken(Zeroizing::new(URL_SAFE_NO_PAD.encode(&bytes[..])));
-        let session = self.store.write(|tx| {
-            tx.session_create(&NewSession {
+        let (value, bytes) = generate_token()?;
+        let made = self.store.write(|tx| {
+            match tx.account_get(account)? {
+                Some(found) if found.state == AccountState::Active => {}
+                _ => return Ok(Err(SessionError::AccountDisabled)),
+            }
+            let mut sessions = tx.session_list(account)?;
+            while sessions.len() >= MAX_SESSIONS_PER_ACCOUNT {
+                // The list is oldest first, so of equal times the older goes.
+                let Some(oldest) = (0..sessions.len()).min_by_key(|i| sessions[*i].last_seen) else { break };
+                let gone = sessions.remove(oldest);
+                tx.session_delete(&gone.id_hash)?;
+            }
+            let session = tx.session_create(&NewSession {
                 id_hash: hash_token(&bytes[..]),
                 account_id: account,
                 method,
@@ -136,26 +162,94 @@ impl SessionManager {
                 absolute_expires: expiry(now, self.lifetimes.absolute),
                 device,
                 addr: addr.unwrap_or(IpAddr::from([0u8; 4])),
-            })
-        })?;
-        Ok(Created { value, session })
+            })?;
+            Ok(Ok(session))
+        })??;
+        Ok(Created { value, session: made })
     }
 
-    /// The session behind a cookie value, if it is still alive at `now`.
+    /// The session behind a cookie value, if it is alive at `now`. A text that is not exactly 43 characters of the base64url
+    /// alphabet is refused without a call to the store. A session past its idle time or its absolute time, or whose account is
+    /// not active, is deleted and refused.
     pub fn lookup(&self, value: &str, now: i64) -> Result<Session, SessionError> {
         let hash = parse_token(value)?;
-        let session = self.store.read(|tx| tx.session_get(&hash))?.ok_or(SessionError::Unknown)?;
+        let (session, account) = self.store.read(|tx| {
+            let Some(session) = tx.session_get(&hash)? else { return Ok((None, None)) };
+            let account = tx.account_get(session.account_id)?;
+            Ok((Some(session), account))
+        })?;
+        let session = session.ok_or(SessionError::Unknown)?;
         let idle_ends = expiry(session.last_seen, self.lifetimes.idle);
         if now > idle_ends || now > session.absolute_expires {
+            self.store.write(|tx| tx.session_delete(&hash))?;
             return Err(SessionError::Expired);
+        }
+        if !matches!(account, Some(ref found) if found.state == AccountState::Active) {
+            self.store.write(|tx| tx.session_delete(&hash))?;
+            return Err(SessionError::AccountDisabled);
         }
         Ok(session)
     }
+
+    /// Records activity: writes `last_seen = now` when the stored value is at least 30 seconds old, and answers whether it
+    /// wrote. The session value is updated to match.
+    pub fn touch(&self, session: &mut Session, now: i64) -> Result<bool, SessionError> {
+        if now.saturating_sub(session.last_seen) < TOUCH_INTERVAL_SECS {
+            return Ok(false);
+        }
+        if !self.store.write(|tx| tx.session_touch(&session.id_hash, now))? {
+            return Err(SessionError::Unknown);
+        }
+        session.last_seen = session.last_seen.max(now);
+        Ok(true)
+    }
+
+    /// Whether the person signed in (or signed in again) recently enough for a sensitive action: `now - last_auth` is at most
+    /// the step-up time of the configuration.
+    pub fn step_up_fresh(&self, session: &Session, now: i64) -> bool {
+        let limit = i64::try_from(self.lifetimes.step_up.as_secs()).unwrap_or(i64::MAX);
+        now.saturating_sub(session.last_auth) <= limit
+    }
+
+    /// Records a fresh sign-in check at `now` (a step-up); `last_auth` only moves forward.
+    pub fn reauth(&self, session: &mut Session, now: i64) -> Result<(), SessionError> {
+        if !self.store.write(|tx| tx.session_set_last_auth(&session.id_hash, now))? {
+            return Err(SessionError::Unknown);
+        }
+        session.last_auth = session.last_auth.max(now);
+        Ok(())
+    }
+
+    /// Ends one session; answers whether it was still there.
+    pub fn end(&self, session: &Session) -> Result<bool, SessionError> {
+        Ok(self.store.write(|tx| tx.session_delete(&session.id_hash))?)
+    }
+
+    /// Ends every session of an account; answers how many there were.
+    pub fn end_all(&self, account: AccountId) -> Result<usize, SessionError> {
+        Ok(self.store.write(|tx| tx.session_delete_all(account))?)
+    }
+
+    /// Removes sessions that are past their idle or absolute time at `now`, at most `max_rows` of them; answers how many it
+    /// removed. A caller that gets `max_rows` back calls again.
+    pub fn purge(&self, now: i64, max_rows: usize) -> Result<usize, SessionError> {
+        let idle = i64::try_from(self.lifetimes.idle.as_secs()).unwrap_or(i64::MAX);
+        // The store removes a session at `time <= now`; a session here is still valid at its last second, so the store is
+        // asked about the second before.
+        Ok(self.store.write(|tx| tx.sessions_purge(now.saturating_sub(1), idle, max_rows))?)
+    }
 }
 
-/// The hash of a cookie value, or [`SessionError::Unknown`] for a text that is not exactly 43 characters of the base64url
-/// alphabet that decodes to 32 bytes.
-fn parse_token(value: &str) -> Result<[u8; 32], SessionError> {
+/// A new random value and its 32 bytes (wiped when dropped).
+pub fn generate_token() -> Result<(SessionToken, Zeroizing<[u8; TOKEN_BYTES]>), SessionError> {
+    let bytes = Zeroizing::new(random::<TOKEN_BYTES>().map_err(|_| SessionError::Random)?);
+    let value = SessionToken(Zeroizing::new(URL_SAFE_NO_PAD.encode(&bytes[..])));
+    Ok((value, bytes))
+}
+
+/// The hash a cookie value is stored under, or [`SessionError::Unknown`] for a text that is not exactly 43 characters of the
+/// base64url alphabet that decode to 32 bytes. It looks at nothing but the text.
+pub fn parse_token(value: &str) -> Result<TokenHash, SessionError> {
     if value.len() != TOKEN_CHARS || !value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
         return Err(SessionError::Unknown);
     }

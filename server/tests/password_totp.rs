@@ -13,7 +13,7 @@ use holzwave_server::auth::password::{
     derive_split, enrol_password, lookup_password, new_salt, params_text, parse_params, prepare_password, store_prepared,
     verify_password,
 };
-use holzwave_server::auth::totp::{self, TotpError};
+use holzwave_server::auth::totp::{self, TotpError, check_candidate, provisioning_uri, store_secret, well_formed};
 use holzwave_server::keyfile::ServerKey;
 use holzwave_server::sealed::Sealer;
 use holzwave_server::store::{AccountId, AccountState, NewAccount, PasswordCredential, Role, Store};
@@ -447,4 +447,272 @@ async fn debug_is_redacted() {
     assert_eq!(format!("{derived:?}"), "Derived(..)");
     assert_eq!(format!("{prepared:?}"), "Prepared(..)");
     assert_eq!(format!("{:?}", derived.kek()), "Kek(..)");
+}
+
+// ---- one-time codes ----
+
+/// The secret of the RFC 6238 test vectors.
+const RFC_SECRET: &[u8] = b"12345678901234567890";
+
+fn consume(store: &Store, sealer: &Sealer, account: AccountId, code: &str, now: i64) -> Result<(), TotpError> {
+    store.write(|tx| Ok(totp::verify_and_consume(tx, sealer, account, code, now))).expect("store")
+}
+
+/// An account with the RFC secret stored and `last_step` zero.
+fn account_with_secret(store: &Store, sealer: &Sealer, name: &str) -> AccountId {
+    let id = account(store, name);
+    store.write(|tx| store_secret(tx, sealer, id, RFC_SECRET, 0).map_err(|_| unreachable_store())).expect("secret");
+    id
+}
+
+#[test]
+fn rfc6238_vectors() {
+    let cases = [
+        (59, "287082"),
+        (1_111_111_109, "081804"),
+        (1_111_111_111, "050471"),
+        (1_234_567_890, "005924"),
+        (2_000_000_000, "279037"),
+        (20_000_000_000, "353130"),
+    ];
+    let mut shown = Vec::new();
+    for (time, expected) in cases {
+        let code = totp::code_at(RFC_SECRET, time).expect("code");
+        assert_eq!(&**code, expected, "at {time}");
+        shown.push(format!("{time} -> {}", &**code));
+    }
+    println!("Vectors: {}", shown.join(", "));
+    // The steps of a time: thirty seconds each, the second 59 still in step 1.
+    assert_eq!((totp::step_of(59), totp::step_of(60), totp::step_of(0)), (1, 2, 0));
+    assert_eq!((totp::DIGITS, totp::STEP_SECONDS, totp::SECRET_BYTES), (6, 30, 20));
+}
+
+#[test]
+fn window() {
+    let scratch = Scratch::new("totp-window");
+    let store = store_in(&scratch);
+    let sealer = sealer();
+    let step = totp::step_of(NOW);
+    let code = |offset: i64| totp::code_at(RFC_SECRET, (step + offset) * 30).expect("code").to_string();
+    let codes: HashSet<String> = (-2..=2).map(code).collect();
+    assert_eq!(codes.len(), 5, "the fixed secret gives five different codes around the test time");
+
+    // Without a store: one step either side, not two.
+    assert_eq!(check_candidate(RFC_SECRET, &code(-1), NOW).expect("before"), step - 1);
+    assert_eq!(check_candidate(RFC_SECRET, &code(0), NOW).expect("now"), step);
+    assert_eq!(check_candidate(RFC_SECRET, &code(1), NOW).expect("after"), step + 1);
+    assert_eq!(check_candidate(RFC_SECRET, &code(-2), NOW).expect_err("two before"), TotpError::InvalidCode);
+    assert_eq!(check_candidate(RFC_SECRET, &code(2), NOW).expect_err("two after"), TotpError::InvalidCode);
+
+    // With a store: the code of two steps away is refused, and then the account still works.
+    let alice = account_with_secret(&store, &sealer, "alice");
+    assert_eq!(consume(&store, &sealer, alice, &code(-2), NOW).expect_err("too old"), TotpError::InvalidCode);
+    assert_eq!(consume(&store, &sealer, alice, &code(2), NOW).expect_err("too new"), TotpError::InvalidCode);
+    consume(&store, &sealer, alice, &code(0), NOW).expect("accepted");
+    // After accepting step s, the code of s - 1 is a replay and the code of s + 1 is fine.
+    assert_eq!(consume(&store, &sealer, alice, &code(-1), NOW).expect_err("older"), TotpError::InvalidCode);
+    assert_eq!(consume(&store, &sealer, alice, &code(0), NOW).expect_err("the same"), TotpError::InvalidCode);
+    consume(&store, &sealer, alice, &code(1), NOW).expect("the next step");
+    assert_eq!(consume(&store, &sealer, alice, &code(0), NOW).expect_err("now behind"), TotpError::InvalidCode);
+    let row = store.read(|tx| tx.totp_get(alice)).expect("read").expect("row");
+    assert_eq!(row.last_step, step + 1);
+
+    // The previous step's code is fine as the first code, and a later one still follows it.
+    let bob = account_with_secret(&store, &sealer, "bob");
+    consume(&store, &sealer, bob, &code(-1), NOW).expect("the step before the clock's");
+    consume(&store, &sealer, bob, &code(0), NOW).expect("then the clock's own");
+}
+
+#[test]
+fn format() {
+    let scratch = Scratch::new("totp-format");
+    let store = store_in(&scratch);
+    let sealer = sealer();
+    let alice = account_with_secret(&store, &sealer, "alice");
+    let good = totp::code_at(RFC_SECRET, NOW).expect("code").to_string();
+    assert!(well_formed(&good));
+    for bad in ["12345", "1234567", " 123456", "123456 ", "12345a", "+12345", "-12345", "12 345", "١٢٣٤٥٦", "", "１２３４５６"] {
+        assert!(!well_formed(bad), "{bad:?}");
+        assert_eq!(check_candidate(RFC_SECRET, bad, NOW).expect_err("candidate"), TotpError::InvalidCode, "{bad:?}");
+        assert_eq!(consume(&store, &sealer, alice, bad, NOW).expect_err("sign-in"), TotpError::InvalidCode, "{bad:?}");
+    }
+    // A code with padding around it is not the code.
+    assert_eq!(consume(&store, &sealer, alice, &format!(" {good}"), NOW).expect_err("padded"), TotpError::InvalidCode);
+    let row = store.read(|tx| tx.totp_get(alice)).expect("read").expect("row");
+    assert_eq!(row.last_step, 0, "no refusal moved the counter");
+    consume(&store, &sealer, alice, &good, NOW).expect("the real one");
+}
+
+#[test]
+fn race_one_code() {
+    const THREADS: usize = 16;
+    let scratch = Scratch::new("totp-race");
+    let store = Arc::new(store_in(&scratch));
+    let sealer = Arc::new(sealer());
+    let alice = account_with_secret(&store, &sealer, "alice");
+    let code = totp::code_at(RFC_SECRET, NOW).expect("code").to_string();
+    let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+    let handles: Vec<_> = (0..THREADS)
+        .map(|_| {
+            let (store, sealer, barrier, code) = (store.clone(), sealer.clone(), barrier.clone(), code.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                consume(&store, &sealer, alice, &code, NOW)
+            })
+        })
+        .collect();
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().expect("thread")).collect();
+    let winners = results.iter().filter(|r| r.is_ok()).count();
+    println!("Race: {THREADS} threads, {winners} winner");
+    assert_eq!(winners, 1);
+    assert!(results.iter().filter(|r| r.is_err()).all(|r| *r == Err(TotpError::InvalidCode)));
+}
+
+#[test]
+fn states() {
+    let scratch = Scratch::new("totp-states");
+    let store = store_in(&scratch);
+    let sealer = sealer();
+    let code = totp::code_at(RFC_SECRET, NOW).expect("code").to_string();
+
+    let disabled = account_with_secret(&store, &sealer, "disabled-one");
+    store.write(|tx| tx.account_set_state(disabled, AccountState::Disabled)).expect("disable");
+    assert_eq!(consume(&store, &sealer, disabled, &code, NOW).expect_err("disabled"), TotpError::InvalidCode);
+    store.write(|tx| tx.account_set_state(disabled, AccountState::Active)).expect("enable");
+    consume(&store, &sealer, disabled, &code, NOW).expect("enabled again, and the refusal burned nothing");
+
+    let deleted = account_with_secret(&store, &sealer, "deleted-one");
+    store.write(|tx| tx.account_delete(deleted)).expect("delete");
+    assert_eq!(consume(&store, &sealer, deleted, &code, NOW).expect_err("deleted"), TotpError::InvalidCode);
+
+    let bare = account(&store, "bare-one");
+    assert_eq!(consume(&store, &sealer, bare, &code, NOW).expect_err("no secret"), TotpError::InvalidCode);
+    let unknown = AccountId::from_raw(99_999);
+    assert_eq!(consume(&store, &sealer, unknown, &code, NOW).expect_err("no account"), TotpError::InvalidCode);
+}
+
+#[test]
+fn uri() {
+    let secret = totp::generate_secret().expect("secret");
+    let link = provisioning_uri("holzWave", "alice smith@ex/ample", &secret[..]).expect("link");
+    println!("Uri shape: {}", link.replace(&link[link.find("secret=").expect("secret") + 7..link.find("&issuer").expect("issuer")], "<secret>"));
+    assert!(link.starts_with("otpauth://totp/"));
+    assert!(link.starts_with("otpauth://totp/holzWave:alice%20smith%40ex%2Fample?"), "{}", &link[..60]);
+    let query = &link[link.find('?').expect("query") + 1..];
+    let pairs: Vec<(&str, &str)> = query.split('&').map(|p| p.split_once('=').expect("pair")).collect();
+    let get = |name: &str| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| *v).unwrap_or_else(|| panic!("no {name}"));
+    assert_eq!(get("issuer"), "holzWave");
+    assert_eq!(get("algorithm"), "SHA1");
+    assert_eq!(get("digits"), "6");
+    assert_eq!(get("period"), "30");
+    assert_eq!(pairs.len(), 5);
+    let base32 = get("secret");
+    assert!(!base32.contains('='), "no padding");
+    assert!(base32.bytes().all(|b| matches!(b, b'A'..=b'Z' | b'2'..=b'7')));
+    let back = totp_rs::Secret::try_from_base32(base32).expect("base32");
+    assert_eq!(back.as_bytes(), &secret[..]);
+
+    // Every part is encoded: a hostile issuer or account name cannot add a parameter or leave the label.
+    let nasty = provisioning_uri("Holz Wave&digits=8", "a?b#c=d&e%f é", &secret[..]).expect("link");
+    assert!(nasty.starts_with("otpauth://totp/Holz%20Wave%26digits%3D8:a%3Fb%23c%3Dd%26e%25f%20%C3%A9?"), "{nasty:?}");
+    assert_eq!(nasty.matches('&').count(), 4, "only the four separators of the parameters");
+    // Names that cannot be told apart in the label are refused.
+    for (issuer, name) in [("", "alice"), ("holzWave", ""), ("holz:Wave", "alice"), ("holzWave", "al:ice"), (&"x".repeat(129)[..], "alice")] {
+        assert_eq!(provisioning_uri(issuer, name, &secret[..]).expect_err("label"), TotpError::BadLabel);
+    }
+    assert_eq!(provisioning_uri("holzWave", "alice", &secret[..19]).expect_err("short"), TotpError::BadSecret);
+}
+
+#[test]
+fn candidate() {
+    let scratch = Scratch::new("totp-candidate");
+    let store = store_in(&scratch);
+    let sealer = sealer();
+    let alice = account(&store, "alice");
+    let secret = totp::generate_secret().expect("secret");
+    let step = totp::step_of(NOW);
+    let code = totp::code_at(&secret[..], NOW).expect("code").to_string();
+
+    // Checking a candidate stores nothing.
+    let matched = check_candidate(&secret[..], &code, NOW).expect("candidate");
+    assert_eq!(matched, step);
+    assert!(store.read(|tx| tx.totp_get(alice)).expect("read").is_none());
+    assert_eq!(check_candidate(&secret[..], "000000x", NOW).expect_err("shape"), TotpError::InvalidCode);
+    assert_eq!(check_candidate(&secret[..19], &code, NOW).expect_err("short secret"), TotpError::BadSecret);
+
+    // Storing it records the step, so the code that proved the app works cannot sign in.
+    store.write(|tx| store_secret(tx, &sealer, alice, &secret[..], matched).map_err(|_| unreachable_store())).expect("store");
+    let row = store.read(|tx| tx.totp_get(alice)).expect("read").expect("row");
+    assert_eq!(row.last_step, step);
+    assert_eq!(consume(&store, &sealer, alice, &code, NOW).expect_err("used by the enrolment"), TotpError::InvalidCode);
+    let next = totp::code_at(&secret[..], NOW + 30).expect("code").to_string();
+    consume(&store, &sealer, alice, &next, NOW + 30).expect("the next code works");
+
+    // A second secret replaces the first completely, counter included.
+    let other = totp::generate_secret().expect("secret");
+    store.write(|tx| store_secret(tx, &sealer, alice, &other[..], 0).map_err(|_| unreachable_store())).expect("replace");
+    let row = store.read(|tx| tx.totp_get(alice)).expect("read").expect("row");
+    assert_eq!(row.last_step, 0);
+    let old_code = totp::code_at(&secret[..], NOW + 60).expect("code").to_string();
+    assert_eq!(consume(&store, &sealer, alice, &old_code, NOW + 60).expect_err("old secret"), TotpError::InvalidCode);
+    let new_code = totp::code_at(&other[..], NOW + 60).expect("code").to_string();
+    consume(&store, &sealer, alice, &new_code, NOW + 60).expect("new secret");
+    let refused = store.write(|tx| Ok(store_secret(tx, &sealer, alice, &secret[..5], 0))).expect("write");
+    assert_eq!(refused.expect_err("short"), TotpError::BadSecret);
+}
+
+#[test]
+fn secret_wiped_and_sealed() {
+    let scratch = Scratch::new("totp-sealed");
+    let store = store_in(&scratch);
+    let sealer = sealer();
+    let alice = account_with_secret(&store, &sealer, "alice");
+    let bob = account(&store, "bob");
+    let row = store.read(|tx| tx.totp_get(alice)).expect("read").expect("row");
+    assert!(!row.sealed_secret.windows(RFC_SECRET.len()).any(|w| w == RFC_SECRET), "the column holds no plaintext");
+    assert_ne!(&row.sealed_secret[..], RFC_SECRET);
+    // The sealed value opens for its own account's context and for no other.
+    assert!(sealer.open(&totp::seal_context(alice), &row.sealed_secret).is_ok());
+    assert!(sealer.open(&totp::seal_context(bob), &row.sealed_secret).is_err());
+    assert_eq!(totp::seal_context(alice), format!("totp:{}", alice.get()));
+    // A row copied to another account is useless there.
+    store.write(|tx| tx.totp_set(bob, &row.sealed_secret)).expect("copy");
+    let code = totp::code_at(RFC_SECRET, NOW).expect("code").to_string();
+    assert!(matches!(consume(&store, &sealer, bob, &code, NOW), Err(TotpError::Seal(_))));
+    // The sealed bytes of a secret differ every time (a new nonce).
+    let again = sealer.seal(&totp::seal_context(alice), RFC_SECRET).expect("seal");
+    assert_ne!(again, row.sealed_secret);
+}
+
+#[test]
+fn errors_and_secrets_print_no_code_or_secret() {
+    let secret = totp::generate_secret().expect("secret");
+    let link = provisioning_uri("holzWave", "alice", &secret[..]).expect("link");
+    let code = totp::code_at(&secret[..], NOW).expect("code").to_string();
+    let errors = [TotpError::InvalidCode, TotpError::Random, TotpError::BadSecret, TotpError::BadLabel];
+    for e in errors {
+        for text in [format!("{e}"), format!("{e:?}")] {
+            assert!(!text.contains(&code) && !text.contains(&*link), "{text}");
+        }
+    }
+    let _ = link;
+}
+
+#[test]
+fn the_start_of_time_and_the_comparison() {
+    // Near the epoch there is no step before step 0, and step 0 can never be accepted (the counter starts there).
+    let code0 = totp::code_at(RFC_SECRET, 0).expect("code").to_string();
+    assert_eq!(check_candidate(RFC_SECRET, &code0, 10).expect("step zero is a candidate"), 0);
+    let scratch = Scratch::new("totp-epoch");
+    let store = store_in(&scratch);
+    let sealer = sealer();
+    let alice = account_with_secret(&store, &sealer, "alice");
+    assert_eq!(consume(&store, &sealer, alice, &code0, 10).expect_err("step zero"), TotpError::InvalidCode);
+    let code1 = totp::code_at(RFC_SECRET, 30).expect("code").to_string();
+    consume(&store, &sealer, alice, &code1, 10).expect("step one, seen from step zero");
+
+    // The window is walked in full and compared with `subtle`; the crate's own `check` stops at the first match.
+    let source = include_str!("../src/auth/totp.rs");
+    assert!(source.contains("ct_eq") && source.contains("conditional_select"));
+    assert!(!source.contains(".check("), "the crate's early-exit check is not used");
 }
