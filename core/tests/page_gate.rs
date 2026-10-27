@@ -20,6 +20,7 @@ const CONF: &str = include_str!("../../app/src-tauri/tauri.conf.json");
 const LIB_RS: &str = include_str!("../../app/src-tauri/src/lib.rs");
 const BUILD_RS: &str = include_str!("../../app/src-tauri/build.rs");
 const COMMANDS_RS: &str = include_str!("../../app/src-tauri/src/commands.rs");
+const TABLE_RS: &str = include_str!("../../host/src/commands/table.rs");
 const CAPABILITY: &str = include_str!("../../app/src-tauri/capabilities/default.json");
 const IPC_RS: &str = include_str!("../../ipc/src/lib.rs");
 const INDEX_HTML: &str = include_str!("../../app/src/index.html");
@@ -50,6 +51,21 @@ fn handler_names(lib_rs: &str) -> Result<BTreeSet<String>, String> {
         }
     }
     Ok(names)
+}
+
+/// The commands whose shell wrapper is written from a row of the host's command table (`shell: generated`), with the text of
+/// their argument list (`pane: PaneId, text: String`). These are in the invoke handler without being in `lib.rs`.
+fn generated_rows(table_rs: &str) -> Vec<(String, String)> {
+    let mut rows = Vec::new();
+    for part in table_rs.split("name: ").skip(1) {
+        let name: String = part.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+        let Some(head) = part.split_once("args: [") else { continue };
+        let args = head.1.split(']').next().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ");
+        if part[name.len()..].starts_with(", shell: generated") && !name.is_empty() {
+            rows.push((name, args));
+        }
+    }
+    rows
 }
 
 /// The quoted names inside the manifest list of `build.rs` (`.commands(&["name", ...])`).
@@ -390,7 +406,9 @@ fn only_one_capability_exists_and_it_grants_the_app_windows_only() {
 
 #[test]
 fn every_ai_command_and_the_markdown_command_has_the_triple_and_a_golden_row() {
-    let handler = handler_names(LIB_RS).expect("handler list");
+    let mut handler = handler_names(LIB_RS).expect("handler list");
+    // A command whose wrapper is written from a row of the command table is in the handler through the table.
+    handler.extend(generated_rows(TABLE_RS).into_iter().map(|(name, _)| name));
     let manifest = manifest_names(BUILD_RS).expect("manifest list");
     let permissions = permissions(CAPABILITY).expect("permissions");
     let golden: BTreeSet<String> = golden_commands().keys().cloned().collect();
@@ -400,9 +418,11 @@ fn every_ai_command_and_the_markdown_command_has_the_triple_and_a_golden_row() {
         "the lists of AI commands disagree:\n  {}\nA new ai_ command goes into the invoke handler, the build manifest, the capability, the golden and, on purpose, the reviewed list AI_COMMANDS of app/src-tauri/tests/acl.rs.",
         found.join("\n  ")
     );
-    let sigs = command_signatures(COMMANDS_RS);
-    let markdown = sigs.iter().find(|s| s.name == "markdown_render").expect("markdown_render is a command function");
-    assert_eq!(markdown.params.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["text"]);
+    // The markdown command is a row of the table now: its one argument is the text, and nothing else is read from the page.
+    let rows = generated_rows(TABLE_RS);
+    let markdown = rows.iter().find(|(name, _)| name == "markdown_render").expect("markdown_render is a row of the command table");
+    assert_eq!(markdown.1, "text: String");
+    assert!(command_signatures(COMMANDS_RS).iter().all(|s| s.name != "markdown_render"), "a command is a row or a wrapper, not both");
     assert_eq!(golden_commands()["markdown_render"], serde_json::json!(["text"]));
 }
 
@@ -410,7 +430,10 @@ fn every_ai_command_and_the_markdown_command_has_the_triple_and_a_golden_row() {
 fn no_command_hands_a_key_or_a_secret_back() {
     let manifest = manifest_names(BUILD_RS).expect("manifest list");
     let sigs = command_signatures(COMMANDS_RS);
-    assert!(sigs.len() >= 60, "the scan found {} command functions", sigs.len());
+    // The terminal, layout, settings, file and other groups are rows of the command table; the wrappers still written out are
+    // the AI and integration commands and the three that need the window shell.
+    assert!(sigs.len() >= 30, "the scan found {} command functions", sigs.len());
+    assert!(generated_rows(TABLE_RS).len() >= 60, "the scan found {} rows of the command table", generated_rows(TABLE_RS).len());
     let found = key_problems(&sigs, &manifest);
     assert!(found.is_empty(), "a command could hand a key to the page:\n  {}", found.join("\n  "));
     for name in ["ai_key_set", "ai_key_clear", "ai_has_key"] {
