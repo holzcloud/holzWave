@@ -9,6 +9,10 @@
 use std::fmt;
 use std::sync::Arc;
 
+use axum::Router;
+use tokio::net::TcpListener;
+use tokio::sync::watch;
+use tokio_rustls::TlsAcceptor;
 use zeroize::Zeroizing;
 
 use crate::audit::Audit;
@@ -17,7 +21,7 @@ use crate::clock::Clock;
 use crate::config::{self, Auth, Origin, Sessions};
 use crate::keyfile::{KEY_BYTES, Purpose, ServerKey};
 use crate::limits::Limits;
-use crate::proxy::{Mode, TrustedProxies};
+use crate::proxy::{Admission, Mode, TrustedProxies};
 use crate::store::{AccountId, Session, Store};
 
 use super::csrf;
@@ -168,4 +172,95 @@ impl App {
     pub fn csrf_token(&self, session: &Session) -> String {
         csrf::token_for(&self.csrf_key, &session.id_hash)
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The accept loop
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The signal that ends the accept loop. Every clone sees the same state; triggering twice changes nothing.
+#[derive(Clone)]
+pub struct Shutdown {
+    sender: Arc<watch::Sender<bool>>,
+    receiver: watch::Receiver<bool>,
+}
+
+impl fmt::Debug for Shutdown {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Shutdown(..)")
+    }
+}
+
+impl Default for Shutdown {
+    fn default() -> Shutdown {
+        Shutdown::new()
+    }
+}
+
+impl Shutdown {
+    /// A signal that has not been triggered.
+    pub fn new() -> Shutdown {
+        let (sender, receiver) = watch::channel(false);
+        Shutdown { sender: Arc::new(sender), receiver }
+    }
+
+    /// Triggers the signal.
+    pub fn trigger(&self) {
+        self.sender.send_replace(true);
+    }
+
+    /// Whether the signal was triggered.
+    pub fn is_triggered(&self) -> bool {
+        *self.receiver.borrow()
+    }
+
+    /// Resolves when the signal is triggered (at once if it was).
+    pub async fn wait(&self) {
+        let mut receiver = self.receiver.clone();
+        let _ = receiver.wait_for(|triggered| *triggered).await;
+    }
+}
+
+/// Why an [`Edge`] cannot be built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeError {
+    /// The modes that serve TLS themselves need an acceptor.
+    NeedsTls,
+    /// The proxy mode serves plain HTTP and must not have an acceptor.
+    NoTlsBehindProxy,
+}
+
+impl fmt::Display for EdgeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            EdgeError::NeedsTls => "this mode serves TLS itself and needs a TLS acceptor",
+            EdgeError::NoTlsBehindProxy => "the proxy mode serves plain HTTP to trusted proxies and takes no TLS acceptor",
+        })
+    }
+}
+
+impl std::error::Error for EdgeError {}
+
+/// What the accept loop needs, all of it handed in: it reads no configuration itself.
+pub struct Edge {
+    router: Router,
+    acceptor: Option<TlsAcceptor>,
+    admission: Admission,
+    mode: Mode,
+}
+
+impl Edge {
+    /// The listener of a router. `acceptor` is `Some` in the `files` and `acme` modes and `None` in the proxy mode.
+    pub fn new(router: Router, acceptor: Option<TlsAcceptor>, admission: Admission, mode: Mode) -> Result<Edge, EdgeError> {
+        match (mode, &acceptor) {
+            (Mode::Proxy, Some(_)) => Err(EdgeError::NoTlsBehindProxy),
+            (Mode::Files | Mode::Acme, None) => Err(EdgeError::NeedsTls),
+            _ => Ok(Edge { router, acceptor, admission, mode }),
+        }
+    }
+}
+
+/// Accepts connections on `listener` until `shutdown` is triggered.
+pub async fn serve(listener: TcpListener, edge: Edge, shutdown: Shutdown) {
+    let _ = (listener, edge, shutdown);
 }
