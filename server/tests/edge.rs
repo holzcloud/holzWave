@@ -721,3 +721,1210 @@ fn verify_refuses_a_build_without_the_application_page_or_the_sign_in_page() {
 fn verify_accepts_the_page_this_build_embeds() {
     embed::verify().expect("the page is built");
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The accept loop under pressure, proxy mode, shutdown, the health socket and `healthcheck`
+// ---------------------------------------------------------------------------------------------------------------------
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+
+use axum::extract::{Query, State};
+use axum::routing::{get, post};
+use axum::{Extension, Json, Router};
+use edge_tls::{Opts, RawH2, Read, ShortDir, quick, start_with};
+use holzwave_server::http::app::{Shutdown, Timing, TransportKind};
+use holzwave_server::http::health::{self, Health, Readiness};
+use holzwave_server::http::router::{Access, ClientAddr, Part};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+
+type Hits = Arc<AtomicUsize>;
+
+async fn slow(State(hits): State<Hits>, Query(query): Query<HashMap<String, String>>) -> &'static str {
+    hits.fetch_add(1, Ordering::SeqCst);
+    let ms = query.get("ms").and_then(|v| v.parse().ok()).unwrap_or(1000);
+    tokio::time::sleep(Duration::from_millis(ms)).await;
+    "slow"
+}
+
+async fn hit(State(hits): State<Hits>) -> &'static str {
+    hits.fetch_add(1, Ordering::SeqCst);
+    "hit"
+}
+
+async fn panics() -> &'static str {
+    panic!("a handler that panics");
+}
+
+async fn echo(Extension(client): Extension<ClientAddr>, kind: Option<Extension<TransportKind>>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "client": client.0.to_string(), "transport": kind.map(|Extension(k)| format!("{k:?}")) }))
+}
+
+async fn until_signal(Extension(shutdown): Extension<Shutdown>) -> &'static str {
+    shutdown.wait().await;
+    "closing"
+}
+
+async fn is_signalled(Extension(shutdown): Extension<Shutdown>) -> &'static str {
+    if shutdown.is_triggered() { "yes" } else { "no" }
+}
+
+async fn body_length(body: axum::body::Bytes) -> String {
+    body.len().to_string()
+}
+
+/// Probe routes for the listener tests; `hits` counts the requests that reached a handler.
+fn routes(hits: &Hits) -> Vec<Part> {
+    let counted = Router::new().route("/t/slow", get(slow)).route("/t/hit", get(hit)).with_state(hits.clone());
+    let plain = Router::new()
+        .route("/t/panic", get(panics))
+        .route("/t/echo", get(echo))
+        .route("/t/signal", get(until_signal))
+        .route("/t/signalled", get(is_signalled))
+        .route("/t/body", post(body_length));
+    vec![Part { access: Access::Public, router: counted }, Part { access: Access::Public, router: plain }]
+}
+
+async fn quick_server(timing: Timing) -> (Started, Hits) {
+    let hits: Hits = Arc::default();
+    let server = start_with(Opts { extra: routes(&hits), timing: Some(timing), ..Opts::default() }).await;
+    (server, hits)
+}
+
+/// Polls `condition` until it holds or `within` has passed.
+async fn eventually(within: Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        if condition() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    condition()
+}
+
+/// Reads until the peer ends the stream (or fails), for at most `limit`. `None` when it did not end in time; otherwise the
+/// bytes that arrived before the end.
+async fn until_closed<S: AsyncRead + Unpin>(stream: &mut S, limit: Duration) -> Option<Vec<u8>> {
+    let mut seen = Vec::new();
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        let mut chunk = [0u8; 4096];
+        match tokio::time::timeout_at(deadline, stream.read(&mut chunk)).await {
+            Err(_) => return None,
+            Ok(Ok(n)) if n > 0 => seen.extend_from_slice(&chunk[..n]),
+            Ok(_) => return Some(seen),
+        }
+    }
+}
+
+// ---- slow and idle clients -------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn slow_headers_a_byte_at_a_time_are_cut_at_the_header_time() {
+    let (server, hits) = quick_server(quick()).await;
+    let tls = server.tls(&[b"http/1.1"]).await;
+    let (mut reader, mut writer) = tokio::io::split(tls);
+    let began = Instant::now();
+    tokio::spawn(async move {
+        let _ = writer.write_all(b"GET /t/hit HTTP/1.1\r\nHost: hw.example.test\r\n").await;
+        for byte in b"X-Slow: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".iter() {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            if writer.write_all(&[*byte]).await.is_err() {
+                return;
+            }
+        }
+    });
+    let seen = until_closed(&mut reader, Duration::from_secs(5)).await.expect("the server cut the connection");
+    let took = began.elapsed();
+    println!("Slow: header trickle cut after {took:?} (header time {:?})", quick().header);
+    assert!(took >= quick().header.mul_f32(0.8), "not before the header time: {took:?}");
+    assert!(took < quick().header + Duration::from_millis(1500), "not long after it: {took:?}");
+    assert!(!seen.starts_with(b"HTTP/"), "no answer to half a request");
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "the request never reached a handler");
+}
+
+#[tokio::test]
+async fn slow_a_tcp_connection_that_sends_nothing_is_cut_at_the_handshake_time() {
+    let (server, _) = quick_server(quick()).await;
+    let mut tcp = server.tcp().await;
+    let began = Instant::now();
+    let seen = until_closed(&mut tcp, Duration::from_secs(5)).await.expect("the server cut the connection");
+    let took = began.elapsed();
+    println!("Slow: silent TCP connection cut after {took:?} (handshake time {:?})", quick().handshake);
+    assert!(took >= quick().handshake.mul_f32(0.8) && took < quick().handshake + Duration::from_millis(1500), "{took:?}");
+    assert!(seen.is_empty(), "nothing was sent to a peer that said nothing");
+}
+
+#[tokio::test]
+async fn slow_a_handshake_that_trickles_is_cut_at_the_handshake_time() {
+    let (server, _) = quick_server(quick()).await;
+    let tcp = server.tcp().await;
+    let (mut reader, mut writer) = tokio::io::split(tcp);
+    let began = Instant::now();
+    tokio::spawn(async move {
+        // The start of a TLS record header, then one byte at a time.
+        for byte in [0x16u8, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00, 0x01, 0xfc, 0x03, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00] {
+            if writer.write_all(&[byte]).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    });
+    until_closed(&mut reader, Duration::from_secs(5)).await.expect("the server cut the connection");
+    let took = began.elapsed();
+    println!("Slow: trickled handshake cut after {took:?}");
+    assert!(took >= quick().handshake.mul_f32(0.8) && took < quick().handshake + Duration::from_millis(1500), "{took:?}");
+}
+
+#[tokio::test]
+async fn slow_a_tls_connection_that_never_sends_a_request_is_cut_at_the_header_time() {
+    let (server, _) = quick_server(quick()).await;
+    let mut tls = server.tls(&[b"http/1.1"]).await;
+    let began = Instant::now();
+    until_closed(&mut tls, Duration::from_secs(5)).await.expect("the server cut the connection");
+    let took = began.elapsed();
+    println!("Slow: TLS connection without a request cut after {took:?}");
+    assert!(took >= quick().header.mul_f32(0.8) && took < quick().header + Duration::from_millis(1500), "{took:?}");
+}
+
+#[tokio::test]
+async fn slow_in_proxy_mode_a_connection_that_sends_nothing_is_cut_at_the_header_time() {
+    let hits: Hits = Arc::default();
+    let server = start_with(Opts { extra: routes(&hits), timing: Some(quick()), trusted_proxies: Some("127.0.0.1/32"), ..Opts::default() }).await;
+    let mut tcp = server.tcp().await;
+    let began = Instant::now();
+    until_closed(&mut tcp, Duration::from_secs(5)).await.expect("the server cut the connection");
+    let took = began.elapsed();
+    println!("Slow: silent proxy connection cut after {took:?} (header time {:?})", quick().header);
+    assert!(took >= quick().header.mul_f32(0.8) && took < quick().header + Duration::from_millis(1500), "{took:?}");
+}
+
+#[tokio::test]
+async fn slow_an_idle_http_11_connection_is_closed_after_the_idle_time() {
+    let (server, _) = quick_server(quick()).await;
+    let mut conn = server.h1().await;
+    conn.send(&Request::get("/login.css").bytes()).await;
+    assert_eq!(conn.reply(false).await.expect("an answer").status, 200);
+    let began = Instant::now();
+    until_closed(&mut conn.stream, Duration::from_secs(6)).await.expect("the server closed the idle connection");
+    let took = began.elapsed();
+    println!("Slow: idle keep-alive connection closed after {took:?} (idle time {:?})", quick().idle);
+    assert!(took >= quick().idle.mul_f32(0.8), "it waited for the idle time and not the header time: {took:?}");
+    assert!(took < quick().idle + Duration::from_millis(2000), "{took:?}");
+}
+
+#[tokio::test]
+async fn slow_a_connection_that_keeps_asking_stays_open_past_the_idle_time() {
+    let (server, _) = quick_server(quick()).await;
+    let mut conn = server.h1().await;
+    let began = Instant::now();
+    let mut asked = 0;
+    while began.elapsed() < quick().idle * 2 {
+        conn.send(&Request::get("/login.css").bytes()).await;
+        assert_eq!(conn.reply(false).await.expect("the connection is still open").status, 200);
+        asked += 1;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    println!("Slow: {asked} requests in {:?} on one connection (idle time {:?})", began.elapsed(), quick().idle);
+    assert!(asked >= 6);
+}
+
+#[tokio::test]
+async fn slow_a_body_that_stops_arriving_is_cut_after_the_idle_time() {
+    let (server, hits) = quick_server(quick()).await;
+    let tls = server.tls(&[b"http/1.1"]).await;
+    let (mut reader, mut writer) = tokio::io::split(tls);
+    let head = "POST /t/body HTTP/1.1\r\nHost: hw.example.test\r\nOrigin: https://hw.example.test\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n0123456789";
+    writer.write_all(head.as_bytes()).await.expect("write");
+    let began = Instant::now();
+    until_closed(&mut reader, Duration::from_secs(6)).await.expect("the server cut the connection");
+    let took = began.elapsed();
+    println!("Slow: stalled body cut after {took:?} (idle time {:?})", quick().idle);
+    assert!(took >= quick().idle.mul_f32(0.8) && took < quick().idle + Duration::from_millis(2000), "{took:?}");
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn slow_a_client_that_stops_reading_a_large_answer_is_cut_after_the_idle_time() {
+    let (server, _) = quick_server(quick()).await;
+    let tls = server.tls(&[b"http/1.1"]).await;
+    let (mut reader, mut writer) = tokio::io::split(tls);
+    // Ask for the largest public file many times over and never read: the answers fill every buffer.
+    let big = "/fonts/Manrope-Variable-latin.woff2";
+    let mut burst = Vec::new();
+    for _ in 0..400 {
+        burst.extend_from_slice(&Request::get(big).bytes());
+    }
+    let began = Instant::now();
+    let _ = writer.write_all(&burst).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The server is stuck writing; it must not be stuck for ever. Reading now drains what is buffered and then sees the end.
+    let drained = until_closed(&mut reader, Duration::from_secs(8)).await;
+    let took = began.elapsed();
+    println!("Slow: a client that stopped reading was cut after {took:?}");
+    assert!(drained.is_some(), "the connection ended");
+}
+
+// ---- admission -------------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn admission_the_65th_connection_of_one_address_is_closed_before_any_read() {
+    let server = start().await;
+    let mut held = Vec::new();
+    for _ in 0..64 {
+        held.push(server.tcp().await);
+    }
+    assert!(eventually(Duration::from_secs(5), || server.admission.open_connections() == 64).await, "64 admitted");
+    let mut extra = server.tcp().await;
+    let seen = until_closed(&mut extra, Duration::from_secs(5)).await.expect("the 65th was closed");
+    assert!(seen.is_empty(), "no TLS record and no byte at all was sent back to the 65th connection");
+    println!("Admission: 64 held (open = {}), the 65th closed with {} bytes", server.admission.open_connections(), seen.len());
+    assert_eq!(server.admission.open_connections(), 64, "the 65th never held a slot");
+
+    // After one of the 64 closes, a new connection is served.
+    drop(held.pop());
+    assert!(eventually(Duration::from_secs(5), || server.admission.open_connections() == 63).await);
+    let reply = server.get("/login.css", None).await;
+    assert_eq!(reply.status, 200);
+    println!("Admission: after one closed, a new connection got {}", reply.status);
+}
+
+#[tokio::test]
+async fn admission_the_total_cap_is_enforced() {
+    let server = start_with(Opts { caps: Some((3, 64)), ..Opts::default() }).await;
+    let held = [server.tcp().await, server.tcp().await, server.tcp().await];
+    assert!(eventually(Duration::from_secs(5), || server.admission.open_connections() == 3).await);
+    let mut extra = server.tcp().await;
+    let seen = until_closed(&mut extra, Duration::from_secs(5)).await.expect("the 4th was closed");
+    assert!(seen.is_empty());
+    drop(held);
+}
+
+#[tokio::test]
+async fn admission_every_permit_comes_back_when_the_connections_close() {
+    let server = start().await;
+    let mut conns = Vec::new();
+    for _ in 0..10 {
+        conns.push(server.h1().await);
+    }
+    for conn in &mut conns {
+        conn.send(&Request::get("/login.css").bytes()).await;
+        assert_eq!(conn.reply(false).await.expect("an answer").status, 200);
+    }
+    assert_eq!(server.admission.open_connections(), 10);
+    drop(conns);
+    assert!(eventually(Duration::from_secs(5), || server.admission.open_connections() == 0 && server.admission.tracked_addresses() == 0).await);
+    println!("Admission: ten held, ten given back (open = {}, tracked = {})", server.admission.open_connections(), server.admission.tracked_addresses());
+}
+
+// ---- HTTP/2 ----------------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn h2_a_request_works_and_carries_the_same_headers_as_http_11() {
+    use http_body_util::BodyExt;
+    let server = start().await;
+    let mut sender = edge_tls::h2_client(&server).await;
+    let request = axum::http::Request::builder()
+        .uri("https://hw.example.test/login.js")
+        .body(http_body_util::Empty::<axum::body::Bytes>::new())
+        .expect("a request");
+    let response = sender.send_request(request).await.expect("an answer over h2");
+    let (parts, body) = response.into_parts();
+    let bytes = body.collect().await.expect("the body").to_bytes();
+    assert_eq!(parts.status, 200);
+    assert_eq!(bytes.as_ref(), dist("login.js").as_slice());
+    let h1 = server.get("/login.js", None).await;
+    for name in [
+        "content-type",
+        "cache-control",
+        "etag",
+        "content-length",
+        "content-security-policy",
+        "strict-transport-security",
+        "x-content-type-options",
+        "referrer-policy",
+        "cross-origin-opener-policy",
+        "cross-origin-resource-policy",
+        "permissions-policy",
+    ] {
+        let over_h2 = parts.headers.get(name).map(|v| v.to_str().expect("text").to_owned());
+        assert_eq!(over_h2.as_deref(), h1.header(name), "{name} is the same over h2 and http/1.1");
+    }
+    println!("H2: GET /login.js over h2 gave {} with {} header names", parts.status, parts.headers.len());
+}
+
+#[tokio::test]
+async fn h2_the_server_announces_its_stream_and_header_list_limits() {
+    let server = start().await;
+    let mut raw = RawH2::connect(&server).await;
+    let settings = raw.handshake().await;
+    println!("H2: server settings = {settings:?}");
+    assert!(settings.contains(&(0x3, 128)), "at most 128 concurrent streams: {settings:?}");
+    assert!(settings.contains(&(0x6, 64 * 1024)), "a header list of at most 64 KiB: {settings:?}");
+}
+
+#[tokio::test]
+async fn h2_the_129th_concurrent_stream_is_refused_by_the_protocol() {
+    let (server, hits) = quick_server(Timing { header: Duration::from_secs(30), idle: Duration::from_secs(30), ..quick() }).await;
+    let mut raw = RawH2::connect(&server).await;
+    raw.handshake().await;
+    for n in 0..129u32 {
+        raw.get(1 + 2 * n, "/t/slow?ms=2500").await;
+    }
+    let refused_stream = 1 + 2 * 128;
+    let mut refused = None;
+    let mut other_resets = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match raw.read_within(Duration::from_millis(300)).await {
+            Read::Frame(frame) if frame.kind == edge_tls::RST_STREAM => {
+                if frame.stream == refused_stream {
+                    refused = frame.error_code();
+                    break;
+                }
+                other_resets.push(frame.stream);
+            }
+            Read::Frame(_) => {}
+            Read::Quiet if hits.load(Ordering::SeqCst) >= 128 => break,
+            Read::Quiet => {}
+            Read::Ended => break,
+        }
+    }
+    println!("H2: stream cap: the 129th stream was reset with code {refused:?}, handlers reached = {}", hits.load(Ordering::SeqCst));
+    assert_eq!(refused, Some(0x7), "REFUSED_STREAM for the 129th stream");
+    assert!(other_resets.is_empty(), "the first 128 streams were not reset: {other_resets:?}");
+    assert_eq!(hits.load(Ordering::SeqCst), 128, "exactly 128 requests reached a handler");
+}
+
+#[tokio::test]
+async fn h2_a_header_list_over_64_kib_is_refused() {
+    let (server, hits) = quick_server(Timing { header: Duration::from_secs(30), idle: Duration::from_secs(30), ..quick() }).await;
+    let mut raw = RawH2::connect(&server).await;
+    raw.handshake().await;
+    let block = edge_tls::request_block("/t/hit", &[("x-big", &"a".repeat(70_000))]);
+    let mut chunks = block.chunks(16_000);
+    raw.send(edge_tls::HEADERS, edge_tls::END_STREAM, 1, chunks.next().expect("a first chunk")).await;
+    let rest: Vec<&[u8]> = chunks.collect();
+    for (n, chunk) in rest.iter().enumerate() {
+        let flags = if n + 1 == rest.len() { edge_tls::END_HEADERS } else { 0 };
+        if !raw.try_write(&edge_tls::frame_bytes(edge_tls::CONTINUATION, flags, 1, chunk)).await {
+            break;
+        }
+    }
+    let mut answer = None;
+    for _ in 0..20 {
+        match raw.read_within(Duration::from_millis(500)).await {
+            Read::Frame(frame) if frame.stream == 1 || frame.kind == edge_tls::GOAWAY => {
+                answer = Some(format!("frame type {} on stream {}", frame.kind, frame.stream));
+                break;
+            }
+            Read::Frame(_) | Read::Quiet => {}
+            Read::Ended => {
+                answer = Some("the connection was closed".to_owned());
+                break;
+            }
+        }
+    }
+    println!("H2: a 70,000 byte header was answered with: {answer:?}");
+    assert!(answer.is_some(), "the oversized request got an answer or the connection closed");
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "the request never reached a handler");
+}
+
+#[tokio::test]
+async fn h2_a_flood_of_stream_resets_ends_in_a_disconnect_and_the_server_stays_up() {
+    let (server, hits) = quick_server(Timing { header: Duration::from_secs(30), idle: Duration::from_secs(30), ..quick() }).await;
+    let mut raw = RawH2::connect(&server).await;
+    raw.handshake().await;
+    let mut sent = 0u32;
+    let mut cut = false;
+    'flood: for n in 0..5000u32 {
+        let id = 1 + 2 * n;
+        if !raw.try_write(&edge_tls::frame_bytes(edge_tls::HEADERS, edge_tls::END_HEADERS | edge_tls::END_STREAM, id, &edge_tls::request_block("/t/slow?ms=5000", &[]))).await
+            || !raw.try_write(&edge_tls::frame_bytes(edge_tls::RST_STREAM, 0, id, &8u32.to_be_bytes())).await
+        {
+            cut = true;
+            break;
+        }
+        sent += 1;
+        if n % 10 == 0 {
+            loop {
+                match raw.read_within(Duration::from_millis(1)).await {
+                    Read::Frame(frame) if frame.kind == edge_tls::GOAWAY => {
+                        println!("H2: GOAWAY with code {:?} after {sent} resets", frame.error_code());
+                        cut = true;
+                        break 'flood;
+                    }
+                    Read::Frame(_) => {}
+                    Read::Quiet => break,
+                    Read::Ended => {
+                        cut = true;
+                        break 'flood;
+                    }
+                }
+            }
+        }
+    }
+    println!("H2: {sent} streams opened and reset before the server cut the connection (cut = {cut}), handlers reached = {}", hits.load(Ordering::SeqCst));
+    assert!(cut, "5,000 opened and reset streams did not end in a disconnect");
+    assert!(sent <= 1500, "the server tolerated {sent} resets");
+    assert!(raw.ends_within(Duration::from_secs(5)).await, "the connection is closed");
+    let reply = server.get("/login.css", None).await;
+    assert_eq!(reply.status, 200, "the server answers a normal request afterwards");
+}
+
+#[tokio::test]
+async fn h2_a_flood_of_ping_frames_ends_in_a_disconnect() {
+    let (server, _) = quick_server(Timing { header: Duration::from_secs(30), idle: Duration::from_secs(30), ..quick() }).await;
+    let mut raw = RawH2::connect(&server).await;
+    raw.handshake().await;
+    let ping = edge_tls::frame_bytes(edge_tls::PING, 0, 0, &[1, 2, 3, 4, 5, 6, 7, 8]);
+    let batch = ping.repeat(1000);
+    let mut sent = 0;
+    let began = Instant::now();
+    while sent < 200_000 {
+        if !raw.try_write(&batch).await {
+            break;
+        }
+        sent += 1000;
+    }
+    let ended = raw.ends_within(Duration::from_secs(8)).await;
+    println!("H2: {sent} PING frames sent without reading; connection ended = {ended} after {:?}", began.elapsed());
+    assert!(ended, "the connection did not end");
+    let reply = server.get("/login.css", None).await;
+    assert_eq!(reply.status, 200, "the server answers a normal request afterwards");
+}
+
+#[tokio::test]
+async fn h2_a_flood_of_settings_frames_ends_in_a_disconnect() {
+    let (server, _) = quick_server(Timing { header: Duration::from_secs(30), idle: Duration::from_secs(30), ..quick() }).await;
+    let mut raw = RawH2::connect(&server).await;
+    raw.handshake().await;
+    let settings = edge_tls::frame_bytes(edge_tls::SETTINGS, 0, 0, &[]);
+    let batch = settings.repeat(1000);
+    let mut sent = 0;
+    let began = Instant::now();
+    while sent < 200_000 {
+        if !raw.try_write(&batch).await {
+            break;
+        }
+        sent += 1000;
+    }
+    let ended = raw.ends_within(Duration::from_secs(8)).await;
+    println!("H2: {sent} SETTINGS frames sent without reading; connection ended = {ended} after {:?}", began.elapsed());
+    assert!(ended, "the connection did not end");
+    assert_eq!(server.get("/login.css", None).await.status, 200);
+}
+
+#[tokio::test]
+async fn h2_a_peer_that_does_not_answer_the_keep_alive_ping_is_cut() {
+    let (server, _) = quick_server(Timing { header: Duration::from_secs(30), idle: Duration::from_secs(30), ..quick() }).await;
+    let mut raw = RawH2::connect(&server).await;
+    raw.handshake().await;
+    raw.get(1, "/t/slow?ms=6000").await;
+    let began = Instant::now();
+    // The raw client reads and discards every frame and never answers a ping.
+    assert!(raw.ends_within(Duration::from_secs(5)).await, "the connection was cut");
+    let took = began.elapsed();
+    println!("H2: unanswered keep-alive ping: connection cut after {took:?} (interval {:?}, timeout {:?})", quick().h2_ping_interval, quick().h2_ping_timeout);
+    assert!(took < Duration::from_secs(4));
+}
+
+#[tokio::test]
+async fn h2_a_connection_without_requests_is_closed_after_the_idle_time() {
+    let (server, _) = quick_server(quick()).await;
+    let mut raw = RawH2::connect(&server).await;
+    raw.handshake().await;
+    let began = Instant::now();
+    assert!(raw.ends_within(Duration::from_secs(5)).await, "the idle h2 connection was closed");
+    let took = began.elapsed();
+    println!("H2: connection with no request closed after {took:?}");
+    assert!(took >= quick().header.mul_f32(0.8) && took < quick().header + Duration::from_millis(1500));
+}
+
+// ---- HTTP/1.1 limits -------------------------------------------------------------------------------------------------
+
+/// A request with `count` headers in all, the `Host` and the `Connection` among them.
+fn with_headers(count: usize) -> Vec<u8> {
+    let mut request = Request::get("/login.css").close();
+    for n in 0..count - 2 {
+        request = request.header(&format!("X-H{n}"), "v");
+    }
+    request.bytes()
+}
+
+#[tokio::test]
+async fn h1_100_headers_are_accepted_and_101_are_refused() {
+    let server = start().await;
+    let mut conn = server.h1().await;
+    conn.send(&with_headers(100)).await;
+    assert_eq!(conn.reply(false).await.expect("an answer").status, 200, "100 headers");
+
+    let mut conn = server.h1().await;
+    conn.send(&with_headers(101)).await;
+    let reply = conn.reply(false).await;
+    println!("H1: 101 headers -> {:?}", reply.as_ref().map(|r| r.status));
+    assert!(reply.is_none_or(|r| r.status == 431), "101 headers are refused");
+}
+
+#[tokio::test]
+async fn h1_a_request_line_over_64_kib_is_refused() {
+    let server = start().await;
+    let mut conn = server.h1().await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), conn.stream.write_all(&Request::get(&format!("/{}", "a".repeat(70 * 1024))).close().bytes())).await;
+    let reply = conn.reply(false).await;
+    println!("H1: a request line of 70 KiB -> {:?}", reply.as_ref().map(|r| r.status));
+    assert!(reply.is_none_or(|r| r.status == 431 || r.status == 414 || r.status == 400), "it is refused, not served");
+}
+
+#[tokio::test]
+async fn h1_a_header_block_over_64_kib_is_refused() {
+    let server = start().await;
+    let mut conn = server.h1().await;
+    let mut request = Request::get("/login.css").close();
+    for n in 0..8 {
+        request = request.header(&format!("X-Big{n}"), &"b".repeat(9000));
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(5), conn.stream.write_all(&request.bytes())).await;
+    let reply = conn.reply(false).await;
+    println!("H1: 72 KB of headers -> {:?}", reply.as_ref().map(|r| r.status));
+    assert!(reply.is_none_or(|r| r.status == 431 || r.status == 400));
+}
+
+#[tokio::test]
+async fn h1_a_body_above_the_cap_is_refused_with_the_application_layers_400() {
+    let (server, _) = quick_server(Timing::DEFAULT).await;
+    let mut request = Request::new("POST", "/t/body").header("Origin", "https://hw.example.test").header("Content-Type", "application/json").close();
+    request.body = vec![b'x'; 70_000];
+    let reply = server.send(request).await;
+    assert_eq!(reply.status, 400);
+    assert_eq!(reply.json(), serde_json::json!({ "code": "bad_request" }));
+    let mut small = Request::new("POST", "/t/body").header("Origin", "https://hw.example.test").header("Content-Type", "application/json").close();
+    small.body = vec![b'x'; 65_536];
+    let reply = server.send(small).await;
+    assert_eq!((reply.status, reply.text()), (200, "65536".to_owned()), "the cap itself is allowed");
+}
+
+#[tokio::test]
+async fn h1_a_pipelined_burst_of_100_requests_is_answered_in_order() {
+    let server = start().await;
+    let mut conn = server.h1().await;
+    let mut burst = Vec::new();
+    for n in 0..100 {
+        let path = if n % 2 == 0 { "/login.js" } else { "/login.css" };
+        let request = Request::get(path);
+        burst.extend_from_slice(&if n == 99 { request.close() } else { request }.bytes());
+    }
+    conn.send(&burst).await;
+    for n in 0..100 {
+        let reply = conn.reply(false).await.unwrap_or_else(|| panic!("answer {n}"));
+        let (path, kind) = if n % 2 == 0 { ("login.js", "text/javascript; charset=utf-8") } else { ("login.css", "text/css; charset=utf-8") };
+        assert_eq!(reply.status, 200, "answer {n}");
+        assert_eq!(reply.header("content-type"), Some(kind), "answer {n} is for request {n}");
+        assert_eq!(reply.body, dist(path), "answer {n}");
+    }
+    println!("H1: 100 pipelined requests answered in order");
+}
+
+// ---- proxy mode ------------------------------------------------------------------------------------------------------
+
+async fn proxy_server() -> (Started, Hits) {
+    let hits: Hits = Arc::default();
+    let server = start_with(Opts { extra: routes(&hits), trusted_proxies: Some("127.0.0.1/32"), ..Opts::default() }).await;
+    (server, hits)
+}
+
+async fn plain(server: &Started, request: Request) -> Option<Reply> {
+    let mut conn = edge_tls::Conn::new(server.tcp().await);
+    conn.send(&request.close().bytes()).await;
+    conn.reply(false).await
+}
+
+#[tokio::test]
+async fn proxy_plain_http_from_a_trusted_peer_is_served() {
+    let (server, _) = proxy_server().await;
+    let reply = plain(&server, Request::get("/api/session").header("X-Forwarded-Proto", "https")).await.expect("an answer");
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.json()["state"], "anonymous");
+    let page = plain(&server, Request::get("/").header("X-Forwarded-Proto", "https")).await.expect("an answer");
+    assert_eq!((page.status, page.body), (200, dist("login.html")));
+    println!("Proxy: plain HTTP from the trusted peer 127.0.0.1 -> {}", reply.status);
+}
+
+#[tokio::test]
+async fn proxy_the_forwarded_address_is_the_client_address() {
+    let (server, _) = proxy_server().await;
+    let reply = plain(&server, Request::get("/t/echo").header("X-Forwarded-Proto", "https").header("X-Forwarded-For", "203.0.113.9"))
+        .await
+        .expect("an answer");
+    assert_eq!(reply.json(), serde_json::json!({ "client": "203.0.113.9", "transport": "Proxy" }));
+    let direct = plain(&server, Request::get("/t/echo").header("X-Forwarded-Proto", "https")).await.expect("an answer");
+    assert_eq!(direct.json()["client"], "127.0.0.1", "without a forwarded address the proxy itself is the client");
+    println!("Proxy: X-Forwarded-For 203.0.113.9 -> client {}", reply.json()["client"]);
+}
+
+#[tokio::test]
+async fn proxy_a_forwarded_scheme_of_http_or_none_is_400() {
+    let (server, _) = proxy_server().await;
+    for request in [
+        Request::get("/api/session").header("X-Forwarded-Proto", "http"),
+        Request::get("/api/session"),
+        Request::get("/api/session").header("X-Forwarded-Proto", "https").header("X-Forwarded-Proto", "https"),
+    ] {
+        let reply = plain(&server, request.clone()).await.expect("an answer");
+        assert_eq!(reply.status, 400, "{:?}", request.headers);
+    }
+    println!("Proxy: X-Forwarded-Proto http -> 400, none -> 400");
+}
+
+#[tokio::test]
+async fn proxy_a_peer_that_is_not_a_trusted_proxy_is_refused_before_a_byte_is_read() {
+    let hits: Hits = Arc::default();
+    let server = start_with(Opts { extra: routes(&hits), trusted_proxies: Some("192.0.2.0/24"), ..Opts::default() }).await;
+    let mut tcp = server.tcp().await;
+    let _ = tcp.write_all(&Request::get("/t/echo").header("X-Forwarded-Proto", "https").close().bytes()).await;
+    let seen = until_closed(&mut tcp, Duration::from_secs(5)).await.expect("the connection was closed");
+    assert!(seen.is_empty(), "an untrusted peer gets no answer");
+    assert_eq!(server.admission.open_connections(), 0);
+    println!("Proxy: a peer outside the trusted list was closed with {} bytes", seen.len());
+}
+
+#[tokio::test]
+async fn proxy_in_files_mode_forwarded_headers_are_ignored() {
+    let hits: Hits = Arc::default();
+    let server = start_with(Opts { extra: routes(&hits), ..Opts::default() }).await;
+    let reply = server.send(Request::get("/t/echo").header("X-Forwarded-For", "203.0.113.9").header("X-Forwarded-Proto", "http").close()).await;
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.json(), serde_json::json!({ "client": "127.0.0.1", "transport": "Tls" }));
+    println!("Proxy: files mode ignored X-Forwarded-For 203.0.113.9 -> client {}", reply.json()["client"]);
+}
+
+#[tokio::test]
+async fn proxy_in_files_mode_a_plain_http_client_never_gets_a_response() {
+    let (server, hits) = quick_server(quick()).await;
+    let mut tcp = server.tcp().await;
+    tcp.write_all(&Request::get("/t/hit").close().bytes()).await.expect("write");
+    let seen = until_closed(&mut tcp, Duration::from_secs(5)).await.expect("the connection was closed");
+    assert!(!seen.starts_with(b"HTTP/"), "no HTTP over a connection that has not completed TLS");
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn proxy_an_edge_needs_a_tls_acceptor_exactly_when_the_mode_serves_tls() {
+    use holzwave_server::http::app::{Edge, EdgeError};
+    use holzwave_server::proxy::{Admission, Mode, TrustedProxies};
+    let admission = Admission::with_defaults(Mode::Files, TrustedProxies::none()).expect("admission");
+    assert_eq!(Edge::new(Router::new(), None, admission, Mode::Files).err(), Some(EdgeError::NeedsTls));
+    let cidr = holzwave_server::config::Cidr::parse("127.0.0.1/32").expect("a network");
+    let proxies = TrustedProxies::new(&[cidr]).expect("proxies");
+    let admission = Admission::with_defaults(Mode::Proxy, proxies).expect("admission");
+    assert!(Edge::new(Router::new(), None, admission, Mode::Proxy).is_ok());
+}
+
+// ---- panic isolation -------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn panic_a_handler_that_panics_closes_that_connection_and_the_next_one_works() {
+    let (server, _) = quick_server(Timing::DEFAULT).await;
+    for _ in 0..20 {
+        let mut conn = server.h1().await;
+        conn.send(&Request::get("/t/panic").bytes()).await;
+        assert!(conn.reply(false).await.is_none(), "a panicking handler answers nothing and closes the connection");
+        assert_eq!(server.get("/login.css", None).await.status, 200, "the next connection works");
+    }
+    assert!(eventually(Duration::from_secs(5), || server.admission.open_connections() == 0).await, "no connection task is left behind");
+    println!("Panic: 20 panics, 20 later requests answered, open connections = {}", server.admission.open_connections());
+}
+
+#[tokio::test]
+async fn panic_over_http_2_ends_that_stream_and_the_server_goes_on() {
+    use http_body_util::BodyExt;
+    let (server, _) = quick_server(Timing::DEFAULT).await;
+    let mut sender = edge_tls::h2_client(&server).await;
+    let request = |path: &str| {
+        axum::http::Request::builder().uri(format!("https://hw.example.test{path}")).body(http_body_util::Empty::<axum::body::Bytes>::new()).expect("a request")
+    };
+    let first = sender.send_request(request("/t/panic")).await;
+    let failed = match first {
+        Err(_) => true,
+        Ok(response) => response.into_body().collect().await.is_err() || false,
+    };
+    assert!(failed, "the stream of a panicking handler ends without an answer");
+    assert_eq!(server.get("/login.css", None).await.status, 200, "another connection is served");
+    println!("Panic: over h2 the stream failed and a new connection was served");
+}
+
+// ---- shutdown --------------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn shutdown_stops_accepting_at_once() {
+    let (mut server, _) = quick_server(quick()).await;
+    server.shutdown.trigger();
+    let task = server.task.take().expect("the loop");
+    tokio::time::timeout(Duration::from_secs(3), task).await.expect("the loop ended").expect("no panic");
+    let refused = eventually(Duration::from_secs(2), || std::net::TcpStream::connect_timeout(&server.addr, Duration::from_millis(200)).is_err()).await;
+    assert!(refused, "a new connection is refused after the shutdown");
+    println!("Shutdown: after the signal a connect to the port fails: {refused}");
+}
+
+#[tokio::test]
+async fn shutdown_lets_a_request_in_flight_finish_inside_the_grace_time() {
+    let (server, hits) = quick_server(quick()).await;
+    let mut conn = server.h1().await;
+    conn.send(&Request::get("/t/slow?ms=600").bytes()).await;
+    assert!(eventually(Duration::from_secs(3), || hits.load(Ordering::SeqCst) == 1).await, "the request is in flight");
+    let began = Instant::now();
+    server.shutdown.trigger();
+    let reply = conn.reply(false).await.expect("the request in flight was answered");
+    assert_eq!((reply.status, reply.text()), (200, "slow".to_owned()));
+    let rest = until_closed(&mut conn.stream, Duration::from_secs(3)).await;
+    println!("Shutdown: in-flight request answered {} after {:?}, then the connection closed: {}", reply.status, began.elapsed(), rest.is_some());
+    assert!(rest.is_some(), "the connection is closed after the answer");
+    assert!(eventually(Duration::from_secs(3), || server.admission.open_connections() == 0).await);
+}
+
+#[tokio::test]
+async fn shutdown_drops_a_request_that_outlasts_the_grace_time() {
+    let grace = Duration::from_millis(500);
+    let (mut server, hits) = quick_server(Timing { grace, ..quick() }).await;
+    let mut conn = server.h1().await;
+    conn.send(&Request::get("/t/slow?ms=8000").bytes()).await;
+    assert!(eventually(Duration::from_secs(3), || hits.load(Ordering::SeqCst) == 1).await);
+    let began = Instant::now();
+    server.shutdown.trigger();
+    let seen = until_closed(&mut conn.stream, Duration::from_secs(5)).await.expect("the connection was dropped");
+    let took = began.elapsed();
+    println!("Shutdown: a request that outlasts the grace time was dropped after {took:?} (grace {grace:?})");
+    assert!(!seen.starts_with(b"HTTP/"), "no answer to a dropped request");
+    assert!(took >= grace.mul_f32(0.8) && took < grace + Duration::from_millis(1500), "{took:?}");
+    let task = server.task.take().expect("the loop");
+    tokio::time::timeout(Duration::from_secs(3), task).await.expect("the loop ended").expect("no panic");
+    assert_eq!(server.admission.open_connections(), 0, "all permits are released");
+}
+
+#[tokio::test]
+async fn shutdown_the_signal_is_a_request_extension_and_becomes_ready_on_trigger() {
+    let (server, _) = quick_server(quick()).await;
+    let before = server.send(Request::get("/t/signalled").close()).await;
+    assert_eq!(before.text(), "no");
+    let mut conn = server.h1().await;
+    conn.send(&Request::get("/t/signal").bytes()).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    server.shutdown.trigger();
+    let reply = conn.reply(false).await.expect("the handler saw the signal and answered");
+    assert_eq!((reply.status, reply.text()), (200, "closing".to_owned()));
+    println!("Shutdown: the handler's copy of the signal became ready on trigger");
+}
+
+#[tokio::test]
+async fn shutdown_a_second_trigger_changes_nothing() {
+    let (mut server, _) = quick_server(quick()).await;
+    server.shutdown.trigger();
+    server.shutdown.trigger();
+    assert!(server.shutdown.is_triggered());
+    let task = server.task.take().expect("the loop");
+    tokio::time::timeout(Duration::from_secs(3), task).await.expect("the loop ended").expect("no panic");
+    server.shutdown.trigger();
+    assert!(server.shutdown.is_triggered());
+    let copy = server.shutdown.clone();
+    tokio::time::timeout(Duration::from_secs(1), copy.wait()).await.expect("a copy is ready at once");
+}
+
+#[tokio::test]
+async fn shutdown_an_idle_keep_alive_connection_is_closed_at_once_and_every_permit_comes_back() {
+    let (mut server, _) = quick_server(Timing { grace: Duration::from_secs(5), idle: Duration::from_secs(30), ..quick() }).await;
+    let mut conns = Vec::new();
+    for _ in 0..3 {
+        let mut conn = server.h1().await;
+        conn.send(&Request::get("/login.css").bytes()).await;
+        assert_eq!(conn.reply(false).await.expect("an answer").status, 200);
+        conns.push(conn);
+    }
+    let began = Instant::now();
+    server.shutdown.trigger();
+    for conn in &mut conns {
+        until_closed(&mut conn.stream, Duration::from_secs(3)).await.expect("the idle connection was closed");
+    }
+    let task = server.task.take().expect("the loop");
+    tokio::time::timeout(Duration::from_secs(3), task).await.expect("the loop ended").expect("no panic");
+    println!("Shutdown: three idle connections closed within {:?}, open = {}", began.elapsed(), server.admission.open_connections());
+    assert!(began.elapsed() < Duration::from_secs(2), "they did not wait for the grace time");
+    assert_eq!(server.admission.open_connections(), 0);
+}
+
+#[test]
+fn shutdown_the_signal_is_shared_by_its_copies() {
+    let signal = Shutdown::new();
+    let copy = signal.clone();
+    assert!(!signal.is_triggered() && !copy.is_triggered());
+    copy.trigger();
+    copy.trigger();
+    assert!(signal.is_triggered() && copy.is_triggered());
+}
+
+// ---- the health socket -----------------------------------------------------------------------------------------------
+
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use tokio::net::{UnixListener, UnixStream};
+
+async fn health_request(dir: &std::path::Path, request: &str) -> Option<Reply> {
+    let stream = UnixStream::connect(dir.join(health::SOCKET_NAME)).await.ok()?;
+    let mut conn = edge_tls::Conn::new(stream);
+    conn.send(request.as_bytes()).await;
+    conn.reply(false).await
+}
+
+const HEALTHZ: &str = "GET /healthz HTTP/1.1\r\nHost: health\r\nConnection: close\r\n\r\n";
+
+#[tokio::test]
+async fn health_the_socket_is_a_private_file_in_the_runtime_directory_and_nothing_else_is_left() {
+    let dir = ShortDir::new();
+    let shutdown = Shutdown::new();
+    let server = health::serve(dir.path(), Arc::new(Readiness::new()), shutdown.clone()).await.expect("serve");
+    let path = dir.path().join(health::SOCKET_NAME);
+    assert_eq!(server.path(), path);
+    let meta = std::fs::symlink_metadata(&path).expect("the socket exists");
+    assert!(meta.file_type().is_socket());
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600, "mode 0600");
+    let names: Vec<String> = std::fs::read_dir(dir.path()).expect("list").map(|e| e.expect("entry").file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(names, [health::SOCKET_NAME], "no temporary file is left behind");
+    println!("Health: {} is a socket with mode {:o}", path.display(), meta.permissions().mode() & 0o777);
+    shutdown.trigger();
+    server.finished().await;
+}
+
+#[tokio::test]
+async fn health_200_ok_when_every_check_passes_and_503_not_ready_when_one_does_not() {
+    let dir = ShortDir::new();
+    let shutdown = Shutdown::new();
+    let readiness = Arc::new(Readiness::new());
+    let store = Arc::new(AtomicBool::new(true));
+    readiness.register("always", || true);
+    let flag = store.clone();
+    readiness.register("store", move || flag.load(Ordering::SeqCst));
+    let server = health::serve(dir.path(), readiness.clone(), shutdown.clone()).await.expect("serve");
+
+    let ok = health_request(dir.path(), HEALTHZ).await.expect("an answer");
+    assert_eq!((ok.status, ok.text()), (200, "ok".to_owned()));
+    store.store(false, Ordering::SeqCst);
+    let not_ready = health_request(dir.path(), HEALTHZ).await.expect("an answer");
+    assert_eq!((not_ready.status, not_ready.text()), (503, "not ready".to_owned()));
+    assert_eq!(readiness.failing(), ["store"]);
+    store.store(true, Ordering::SeqCst);
+    assert_eq!(health_request(dir.path(), HEALTHZ).await.expect("an answer").status, 200);
+    println!("Health: checks passing -> 200 ok, one failing -> 503 not ready");
+    shutdown.trigger();
+    server.finished().await;
+}
+
+#[tokio::test]
+async fn health_every_other_path_and_method_is_404_with_no_detail() {
+    let dir = ShortDir::new();
+    let shutdown = Shutdown::new();
+    let server = health::serve(dir.path(), Arc::new(Readiness::new()), shutdown.clone()).await.expect("serve");
+    for request in [
+        "GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n",
+        "GET /health HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n",
+        "GET /healthz/ HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n",
+        "GET /metrics HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n",
+        "GET /api/session HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n",
+        "POST /healthz HTTP/1.1\r\nHost: h\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        "DELETE /healthz HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n",
+    ] {
+        let reply = health_request(dir.path(), request).await.expect("an answer");
+        assert_eq!(reply.status, 404, "{request:?}");
+        assert!(reply.body.is_empty(), "{request:?}: no detail");
+    }
+    shutdown.trigger();
+    server.finished().await;
+}
+
+#[tokio::test]
+async fn health_a_ninth_simultaneous_connection_is_closed() {
+    let dir = ShortDir::new();
+    let shutdown = Shutdown::new();
+    let server = health::serve(dir.path(), Arc::new(Readiness::new()), shutdown.clone()).await.expect("serve");
+    let path = dir.path().join(health::SOCKET_NAME);
+    let mut held = Vec::new();
+    for _ in 0..8 {
+        held.push(UnixStream::connect(&path).await.expect("connect"));
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut ninth = UnixStream::connect(&path).await.expect("connect");
+    let seen = until_closed(&mut ninth, Duration::from_secs(2)).await.expect("the ninth connection was closed");
+    assert!(seen.is_empty());
+    println!("Health: 8 connections held, the 9th was closed with {} bytes", seen.len());
+    drop(held.pop());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(health_request(dir.path(), HEALTHZ).await.expect("an answer").status, 200, "a slot is free again");
+    shutdown.trigger();
+    server.finished().await;
+}
+
+#[tokio::test]
+async fn health_a_stale_socket_file_from_an_earlier_run_is_replaced() {
+    let dir = ShortDir::new();
+    let path = dir.path().join(health::SOCKET_NAME);
+    drop(std::os::unix::net::UnixListener::bind(&path).expect("a socket that nobody listens on"));
+    assert!(std::fs::symlink_metadata(&path).expect("it is left behind").file_type().is_socket());
+    let shutdown = Shutdown::new();
+    let server = health::serve(dir.path(), Arc::new(Readiness::new()), shutdown.clone()).await.expect("the stale file is replaced");
+    assert_eq!(health_request(dir.path(), HEALTHZ).await.expect("an answer").status, 200);
+    shutdown.trigger();
+    server.finished().await;
+}
+
+#[tokio::test]
+async fn health_a_regular_file_at_the_path_is_refused_with_a_sentence_and_left_alone() {
+    let dir = ShortDir::new();
+    let path = dir.path().join(health::SOCKET_NAME);
+    std::fs::write(&path, b"precious").expect("a file");
+    let error = health::serve(dir.path(), Arc::new(Readiness::new()), Shutdown::new()).await.err().expect("a refusal");
+    println!("Health: refusal for a regular file: {error}");
+    assert!(error.to_string().contains("not a socket") && error.to_string().contains(&path.display().to_string()), "{error}");
+    assert_eq!(std::fs::read(&path).expect("still there"), b"precious");
+    // A directory and a link are refused the same way.
+    std::fs::remove_file(&path).expect("remove");
+    std::fs::create_dir(&path).expect("a directory");
+    assert!(health::serve(dir.path(), Arc::new(Readiness::new()), Shutdown::new()).await.is_err());
+    std::fs::remove_dir(&path).expect("remove");
+    std::os::unix::fs::symlink("/etc/hosts", &path).expect("a link");
+    assert!(health::serve(dir.path(), Arc::new(Readiness::new()), Shutdown::new()).await.is_err());
+    assert!(std::fs::symlink_metadata(&path).expect("the link is still there").file_type().is_symlink());
+}
+
+#[tokio::test]
+async fn health_a_socket_that_another_server_listens_on_is_not_replaced() {
+    let dir = ShortDir::new();
+    let path = dir.path().join(health::SOCKET_NAME);
+    let _other = UnixListener::bind(&path).expect("another server's socket");
+    let error = health::serve(dir.path(), Arc::new(Readiness::new()), Shutdown::new()).await.err().expect("a refusal");
+    println!("Health: refusal for a live socket: {error}");
+    assert!(UnixStream::connect(&path).await.is_ok(), "the other socket still accepts");
+}
+
+#[tokio::test]
+async fn health_the_runtime_directory_is_checked_before_the_socket_is_made() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = ShortDir::new();
+    let missing = dir.path().join("missing");
+    let error = health::serve(&missing, Arc::new(Readiness::new()), Shutdown::new()).await.err().expect("a refusal");
+    assert!(error.to_string().contains(&missing.display().to_string()), "{error}");
+
+    let open = dir.path().join("open");
+    std::fs::create_dir(&open).expect("dir");
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+    let error = health::serve(&open, Arc::new(Readiness::new()), Shutdown::new()).await.err().expect("a refusal");
+    println!("Health: refusal for a world-writable directory: {error}");
+    assert!(error.to_string().contains("writable"), "{error}");
+    assert!(!open.join(health::SOCKET_NAME).exists(), "no socket was made in it");
+
+    let file = dir.path().join("file");
+    std::fs::write(&file, b"x").expect("file");
+    assert!(health::serve(&file, Arc::new(Readiness::new()), Shutdown::new()).await.is_err());
+}
+
+#[tokio::test]
+async fn health_the_socket_file_is_removed_on_shutdown() {
+    let dir = ShortDir::new();
+    let shutdown = Shutdown::new();
+    let server = health::serve(dir.path(), Arc::new(Readiness::new()), shutdown.clone()).await.expect("serve");
+    let path = dir.path().join(health::SOCKET_NAME);
+    assert!(path.exists());
+    shutdown.trigger();
+    tokio::time::timeout(Duration::from_secs(3), server.finished()).await.expect("the health server ended");
+    assert!(!path.exists(), "the socket file is gone");
+    println!("Health: the socket file was removed on shutdown");
+}
+
+#[test]
+fn health_there_is_no_network_port_in_the_health_code() {
+    let source = include_str!("../src/http/health.rs");
+    for word in ["TcpListener", "TcpStream", "0.0.0.0", "127.0.0.1", "SocketAddr"] {
+        assert!(!source.contains(word), "health.rs has no network port ({word})");
+    }
+}
+
+// ---- the healthcheck command -----------------------------------------------------------------------------------------
+
+struct Ran {
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    took: Duration,
+}
+
+/// Runs `holzwave-server healthcheck` with a configuration file that names `runtime_dir` (and some other keys it ignores).
+async fn healthcheck(runtime_dir: &std::path::Path, config: &std::path::Path) -> Ran {
+    let began = Instant::now();
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_holzwave-server"))
+            .arg("healthcheck")
+            .env_clear()
+            .env("HOLZWAVE_SERVER_CONFIG", config)
+            .output(),
+    )
+    .await
+    .expect("the command ended")
+    .expect("the command ran");
+    let _ = runtime_dir;
+    Ran {
+        code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        took: began.elapsed(),
+    }
+}
+
+fn config_file(dir: &ShortDir, runtime_dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.path().join("server.json");
+    let text = serde_json::json!({
+        "runtime_dir": runtime_dir,
+        "public_url": "https://hw.example.test",
+        "listen": "0.0.0.0:8443",
+        "tls": { "mode": "files" },
+        "unknown_future_key": [1, 2, 3],
+    });
+    std::fs::write(&path, text.to_string()).expect("write the configuration");
+    path
+}
+
+#[tokio::test]
+async fn healthcheck_prints_healthy_and_exits_0_when_the_server_is_ready() {
+    let dir = ShortDir::new();
+    let runtime = dir.path().join("run");
+    std::fs::create_dir(&runtime).expect("dir");
+    let shutdown = Shutdown::new();
+    let server = health::serve(&runtime, Arc::new(Readiness::new()), shutdown.clone()).await.expect("serve");
+    let ran = healthcheck(&runtime, &config_file(&dir, &runtime)).await;
+    println!("Health: healthcheck on a ready server: exit {:?}, stdout {:?}, {:?}", ran.code, ran.stdout, ran.took);
+    assert_eq!((ran.code, ran.stdout.as_str(), ran.stderr.as_str()), (Some(0), "healthy\n", ""));
+    shutdown.trigger();
+    server.finished().await;
+}
+
+#[tokio::test]
+async fn healthcheck_exits_1_with_one_sentence_when_a_check_fails() {
+    let dir = ShortDir::new();
+    let runtime = dir.path().join("run");
+    std::fs::create_dir(&runtime).expect("dir");
+    let shutdown = Shutdown::new();
+    let readiness = Arc::new(Readiness::new());
+    readiness.register("store", || false);
+    let server = health::serve(&runtime, readiness, shutdown.clone()).await.expect("serve");
+    let ran = healthcheck(&runtime, &config_file(&dir, &runtime)).await;
+    println!("Health: healthcheck on a server that is not ready: exit {:?}, stderr {:?}", ran.code, ran.stderr);
+    assert_eq!(ran.code, Some(1));
+    assert_eq!(ran.stdout, "");
+    assert_eq!(ran.stderr.lines().count(), 1, "one sentence: {:?}", ran.stderr);
+    assert!(ran.stderr.contains("not ready"));
+    shutdown.trigger();
+    server.finished().await;
+}
+
+#[tokio::test]
+async fn healthcheck_exits_1_with_one_sentence_when_there_is_no_socket() {
+    let dir = ShortDir::new();
+    let runtime = dir.path().join("run");
+    std::fs::create_dir(&runtime).expect("dir");
+    let ran = healthcheck(&runtime, &config_file(&dir, &runtime)).await;
+    println!("Health: healthcheck without a socket: exit {:?}, stderr {:?}", ran.code, ran.stderr);
+    assert_eq!(ran.code, Some(1));
+    assert_eq!(ran.stderr.lines().count(), 1, "{:?}", ran.stderr);
+    assert!(ran.stderr.contains(&runtime.display().to_string()), "it names the directory: {:?}", ran.stderr);
+}
+
+#[tokio::test]
+async fn healthcheck_exits_1_on_an_answer_that_is_not_the_servers() {
+    let dir = ShortDir::new();
+    let runtime = dir.path().join("run");
+    std::fs::create_dir(&runtime).expect("dir");
+    let listener = UnixListener::bind(runtime.join(health::SOCKET_NAME)).expect("a fake server");
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else { return };
+            let mut sink = [0u8; 512];
+            let _ = stream.read(&mut sink).await;
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nall is well").await;
+        }
+    });
+    let ran = healthcheck(&runtime, &config_file(&dir, &runtime)).await;
+    println!("Health: healthcheck on a garbled answer: exit {:?}, stderr {:?}", ran.code, ran.stderr);
+    assert_eq!(ran.code, Some(1));
+    assert_eq!(ran.stdout, "");
+    assert_eq!(ran.stderr.lines().count(), 1);
+}
+
+#[tokio::test]
+async fn healthcheck_returns_within_3_seconds_when_the_server_accepts_and_never_answers() {
+    let dir = ShortDir::new();
+    let runtime = dir.path().join("run");
+    std::fs::create_dir(&runtime).expect("dir");
+    let listener = UnixListener::bind(runtime.join(health::SOCKET_NAME)).expect("a fake server");
+    let _holder = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+    let ran = healthcheck(&runtime, &config_file(&dir, &runtime)).await;
+    println!("Health: healthcheck against a server that never answers: exit {:?} after {:?}", ran.code, ran.took);
+    assert_eq!(ran.code, Some(1));
+    assert!(ran.took < Duration::from_millis(3600), "{:?}", ran.took);
+    assert!(ran.took >= Duration::from_millis(2500), "it waited for the answer: {:?}", ran.took);
+    assert_eq!(ran.stderr.lines().count(), 1);
+}
+
+#[tokio::test]
+async fn healthcheck_reads_only_the_runtime_directory_and_survives_a_missing_or_broken_file() {
+    let dir = ShortDir::new();
+    // No file at all: the default directory is asked, and nothing listens there.
+    let ran = healthcheck(dir.path(), &dir.path().join("none.json")).await;
+    assert_eq!(ran.code, Some(1));
+    assert!(ran.stderr.contains("/run/holzwave"), "{:?}", ran.stderr);
+    // A file that is not JSON is a sentence, not a guess.
+    let broken = dir.path().join("broken.json");
+    std::fs::write(&broken, b"runtime_dir = nope").expect("write");
+    let ran = healthcheck(dir.path(), &broken).await;
+    assert_eq!(ran.code, Some(1));
+    assert_eq!(ran.stderr.lines().count(), 1);
+    assert!(ran.stderr.contains("not valid"), "{:?}", ran.stderr);
+    // A file without the key uses the default directory.
+    let bare = dir.path().join("bare.json");
+    std::fs::write(&bare, br#"{"listen": "0.0.0.0:1"}"#).expect("write");
+    let ran = healthcheck(dir.path(), &bare).await;
+    assert!(ran.stderr.contains("/run/holzwave"), "{:?}", ran.stderr);
+    println!("Health: a missing file, a broken file and a file without the key were each one sentence");
+}
+
+#[tokio::test]
+async fn healthcheck_takes_no_arguments() {
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_holzwave-server"))
+        .args(["healthcheck", "--now"])
+        .env_clear()
+        .output()
+        .await
+        .expect("the command ran");
+    assert_eq!(output.status.code(), Some(2), "a call the server does not understand");
+}
+
+#[tokio::test]
+async fn health_the_probe_tells_the_four_outcomes_apart() {
+    let dir = ShortDir::new();
+    let runtime = dir.path().to_path_buf();
+    let ask = |runtime: std::path::PathBuf| async move {
+        tokio::task::spawn_blocking(move || health::probe(&runtime, health::PROBE_TIMEOUT)).await.expect("the probe ran")
+    };
+    assert_eq!(ask(runtime.clone()).await, Health::Unreachable, "no socket");
+    let shutdown = Shutdown::new();
+    let readiness = Arc::new(Readiness::new());
+    let server = health::serve(&runtime, readiness.clone(), shutdown.clone()).await.expect("serve");
+    assert_eq!(ask(runtime.clone()).await, Health::Healthy);
+    readiness.register("later", || false);
+    assert_eq!(ask(runtime.clone()).await, Health::NotReady);
+    shutdown.trigger();
+    server.finished().await;
+}

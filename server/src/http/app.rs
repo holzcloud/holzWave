@@ -251,12 +251,68 @@ impl fmt::Display for EdgeError {
 
 impl std::error::Error for EdgeError {}
 
+/// How the bytes of a request reached the server, put into every request as an extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportKind {
+    /// Over TLS that this server terminated.
+    Tls,
+    /// Plain HTTP from a trusted proxy.
+    Proxy,
+}
+
+/// The admission slot of the connection a request came in on, put into every request as an extension. A handler that keeps
+/// the connection after the request (the WebSocket upgrade) keeps this too, so the slot is given back when the connection
+/// really ends.
+#[derive(Clone)]
+pub struct ConnectionPermit(pub Arc<Permit>);
+
+impl fmt::Debug for ConnectionPermit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ConnectionPermit(..)")
+    }
+}
+
+/// Every wait of the accept loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timing {
+    /// The whole TLS handshake.
+    pub handshake: Duration,
+    /// The head of a request, from its first byte to its last, and the first request of a new connection.
+    pub header: Duration,
+    /// A connection with no request in progress, between two requests.
+    pub idle: Duration,
+    /// How long requests in flight may finish after the shutdown signal, before the rest is dropped.
+    pub grace: Duration,
+    /// How often an HTTP/2 connection is asked whether the peer is still there.
+    pub h2_ping_interval: Duration,
+    /// How long the answer to that question may take.
+    pub h2_ping_timeout: Duration,
+}
+
+impl Timing {
+    /// The waits of the contract: 10 s for the handshake and for a request head, 60 s idle, 10 s of grace.
+    pub const DEFAULT: Timing = Timing {
+        handshake: limits::HANDSHAKE_TIMEOUT,
+        header: limits::HEADER_TIMEOUT,
+        idle: Duration::from_secs(60),
+        grace: Duration::from_secs(10),
+        h2_ping_interval: Duration::from_secs(20),
+        h2_ping_timeout: Duration::from_secs(10),
+    };
+
+    /// The defaults with the handshake and header times of the resolved limits.
+    pub fn from_limits(limits: &Limits) -> Timing {
+        Timing { handshake: limits.handshake_timeout, header: limits.header_timeout, ..Timing::DEFAULT }
+    }
+}
+
 /// What the accept loop needs, all of it handed in: it reads no configuration itself.
 pub struct Edge {
     router: Router,
     acceptor: Option<TlsAcceptor>,
     admission: Admission,
     mode: Mode,
+    timing: Timing,
 }
 
 impl Edge {
@@ -265,8 +321,14 @@ impl Edge {
         match (mode, &acceptor) {
             (Mode::Proxy, Some(_)) => Err(EdgeError::NoTlsBehindProxy),
             (Mode::Files | Mode::Acme, None) => Err(EdgeError::NeedsTls),
-            _ => Ok(Edge { router, acceptor, admission, mode }),
+            _ => Ok(Edge { router, acceptor, admission, mode, timing: Timing::DEFAULT }),
         }
+    }
+
+    /// The same edge with other waits.
+    pub fn with_timing(mut self, timing: Timing) -> Edge {
+        self.timing = timing;
+        self
     }
 }
 
