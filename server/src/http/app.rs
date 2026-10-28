@@ -7,12 +7,20 @@
 //! account's secret store is open or locked, and the worker side implements it when it exists.
 
 use std::fmt;
+use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
-use tokio::net::TcpListener;
+use hyper::body::Incoming;
+use hyper::server::conn::{http1, http2};
+use hyper::service::service_fn;
+use hyper::Request;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
+use tower::ServiceExt as _;
 use zeroize::Zeroizing;
 
 use crate::audit::Audit;
@@ -20,11 +28,13 @@ use crate::auth::session::SessionManager;
 use crate::clock::Clock;
 use crate::config::{self, Auth, Origin, Sessions};
 use crate::keyfile::{KEY_BYTES, Purpose, ServerKey};
-use crate::limits::Limits;
-use crate::proxy::{Admission, Mode, TrustedProxies};
+use crate::limits::{self, Limits};
+use crate::proxy::{Admission, Mode, Permit, TrustedProxies};
+use crate::tls;
 use crate::store::{AccountId, Session, Store};
 
 use super::csrf;
+use super::router::PeerAddr;
 
 /// The address people type in the browser, as the HTTP side compares it: the exact `Origin` text, the authority a `Host`
 /// header must name, the host name and the port. The default port is never part of the authority text.
@@ -260,7 +270,50 @@ impl Edge {
     }
 }
 
-/// Accepts connections on `listener` until `shutdown` is triggered.
+/// How long the loop waits after the system refuses to accept a connection (for example when it is out of descriptors).
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
+
+/// Accepts connections on `listener` until `shutdown` is triggered. This is the only place the server accepts connections: a
+/// connection is admitted before one byte is read, completes the TLS handshake within the handshake time, and is then served
+/// as HTTP/1.1 or, when the peer chose it, HTTP/2.
 pub async fn serve(listener: TcpListener, edge: Edge, shutdown: Shutdown) {
-    let _ = (listener, edge, shutdown);
+    let edge = Arc::new(edge);
+    loop {
+        tokio::select! {
+            () = shutdown.wait() => return,
+            accepted = listener.accept() => {
+                let Ok((stream, peer)) = accepted else {
+                    tokio::time::sleep(ACCEPT_BACKOFF).await;
+                    continue;
+                };
+                // A connection over the limit is closed at once: the stream is dropped before a byte is read.
+                let Ok(permit) = edge.admission.try_admit(peer.ip().to_canonical()) else { continue };
+                tokio::spawn(connection(stream, peer.ip().to_canonical(), permit, edge.clone()));
+            }
+        }
+    }
+}
+
+/// One connection, from the handshake to its close. The admission permit is held until it ends.
+async fn connection(stream: TcpStream, peer: IpAddr, permit: Permit, edge: Arc<Edge>) {
+    let _permit = permit;
+    let _ = stream.set_nodelay(true);
+    let Some(acceptor) = &edge.acceptor else { return };
+    let Ok(tls) = tls::accept_tls(acceptor, stream, limits::HANDSHAKE_TIMEOUT).await else { return };
+    let http2 = tls.get_ref().1.alpn_protocol() == Some(b"h2".as_slice());
+    let router = edge.router.clone();
+    let service = service_fn(move |mut request: Request<Incoming>| {
+        request.extensions_mut().insert(PeerAddr(peer));
+        router.clone().oneshot(request)
+    });
+    let io = TokioIo::new(tls);
+    if http2 {
+        let mut builder = http2::Builder::new(TokioExecutor::new());
+        builder.timer(TokioTimer::new());
+        let _ = builder.serve_connection(io, service).await;
+    } else {
+        let mut builder = http1::Builder::new();
+        builder.timer(TokioTimer::new()).header_read_timeout(limits::HEADER_TIMEOUT);
+        let _ = builder.serve_connection(io, service).with_upgrades().await;
+    }
 }
