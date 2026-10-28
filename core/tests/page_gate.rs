@@ -173,6 +173,44 @@ fn command_signatures(commands_rs: &str) -> Vec<Sig> {
     sigs
 }
 
+/// The signature of every command that is a generated row of the command table, written the way a hand-written wrapper
+/// would have had it: the parameters the page fills (a window-scoped row's calling window is injected) and the answer as
+/// `Result<answer, error>`, or the answer alone for a row that cannot fail. A row that answers nothing and cannot fail has
+/// an empty return type, as a function does. These commands have no wrapper in `commands.rs`.
+fn row_signatures(table_rs: &str) -> Vec<Sig> {
+    let mut sigs = Vec::new();
+    for part in table_rs.split("name: ").skip(1) {
+        let name: String = part.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+        if name.is_empty() || !part[name.len()..].starts_with(", shell: generated") {
+            continue;
+        }
+        let Some((_, after_args)) = part.split_once("args: [") else { continue };
+        let Some((args, after)) = after_args.split_once(']') else { continue };
+        let params = split_top_level(args)
+            .into_iter()
+            .filter_map(|p| p.split_once(':').map(|(n, t)| (n.trim().to_owned(), t.trim().to_owned())))
+            .collect();
+        let Some((answers, _)) = after.split_once("run:") else { continue };
+        let answers = answers.trim().trim_start_matches(',').trim().trim_start_matches("answers:").trim();
+        let parts = split_top_level(answers);
+        let ok = parts.first().map_or("", |p| p.trim_start_matches("raw ")).to_owned();
+        let ret = match parts.get(1).and_then(|p| p.strip_prefix("fails:")) {
+            Some(error) => format!("Result<{ok}, {}>", error.trim()),
+            None if ok == "()" => String::new(),
+            None => ok,
+        };
+        sigs.push(Sig { name, params, ret });
+    }
+    sigs
+}
+
+/// Every command signature there is: the wrappers that are written out in `commands.rs` and the rows of the table.
+fn all_signatures() -> Vec<Sig> {
+    let mut sigs = command_signatures(COMMANDS_RS);
+    sigs.extend(row_signatures(TABLE_RS));
+    sigs
+}
+
 /// The variant names inside `pub enum Cmd { ... }` of the socket's library.
 fn cmd_variants(ipc_rs: &str) -> Vec<String> {
     let Some(at) = ipc_rs.find("pub enum Cmd {") else { return Vec::new() };
@@ -429,9 +467,9 @@ fn every_ai_command_and_the_markdown_command_has_the_triple_and_a_golden_row() {
 #[test]
 fn no_command_hands_a_key_or_a_secret_back() {
     let manifest = manifest_names(BUILD_RS).expect("manifest list");
-    let sigs = command_signatures(COMMANDS_RS);
-    // The terminal, layout, settings, file and other groups are rows of the command table; the wrappers still written out are
-    // the AI and integration commands and the three that need the window shell.
+    let sigs = all_signatures();
+    // The commands are rows of the command table, except the ones that still have a wrapper written out in `commands.rs`;
+    // both are read.
     assert!(sigs.len() >= 30, "the scan found {} command functions", sigs.len());
     assert!(generated_rows(TABLE_RS).len() >= 60, "the scan found {} rows of the command table", generated_rows(TABLE_RS).len());
     let found = key_problems(&sigs, &manifest);
@@ -444,7 +482,7 @@ fn no_command_hands_a_key_or_a_secret_back() {
 
 #[test]
 fn ai_commands_take_ids_and_typed_text_only() {
-    let sigs = command_signatures(COMMANDS_RS);
+    let sigs = all_signatures();
     let found = argument_problems(&sigs, &golden_commands());
     assert!(found.is_empty(), "an AI command takes something that is not an id or typed text:\n  {}", found.join("\n  "));
     assert!(sigs.iter().filter(|s| s.name.starts_with("ai_")).count() >= 19, "the scan found fewer than 19 AI commands");

@@ -25,7 +25,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use holzwave_core::ai::profiles::KeySlot;
-use holzwave_core::ai::service::events::ChatState;
 use holzwave_core::ai::service::{AskView, ContextState, OfferView};
 use holzwave_core::ai::types::ContextKind;
 use holzwave_core::integrate::service::{ProfilesView, RunAnswer, SelectionView, ToolView};
@@ -35,7 +34,7 @@ use holzwave_core::layout::PaneId;
 use serde_json::Value;
 use tauri::{State, WebviewWindow};
 
-use holzwave_host::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, RemovalView, TicketView};
+use holzwave_host::ai_host::{AiFault, ConversationList, ProfileInputMsg, RemovalView, TicketView};
 use crate::clipboard;
 use holzwave_host::integrate_host::{ConfirmAnswer, ContextAnswer, IntegrationFault, LaunchAnswer};
 use holzwave_host::state::AppCore;
@@ -165,13 +164,6 @@ pub fn ai_context_preview(
     core.ai_context_preview(&conversation, pane, profile, model, kinds)
 }
 
-/// The state of a chat right now: what a page that saw every `ai` event of it holds. The page asks for it when it
-/// opens a chat and when it misses an event.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn ai_turn_snapshot(core: State<Arc<AppCore>>, conversation: String) -> Result<ChatState, AiFault> {
-    core.ai().snapshot(&conversation)
-}
-
 /// A fresh chat id. No file is made until the first message is sent.
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn ai_conversation_new(core: State<Arc<AppCore>>) -> Result<String, AiFault> {
@@ -246,13 +238,6 @@ pub fn ai_ask_answer(core: State<Arc<AppCore>>, ask: String, verdict: String, se
     core.ai_ask_answer(&ask, &verdict, &seal)
 }
 
-/// The profiles with the state of each key (never a key). This reads the keychain, so the settings dialog calls it
-/// when it opens and not before.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn ai_profiles(core: State<Arc<AppCore>>) -> AiProfiles {
-    core.ai().profiles()
-}
-
 /// Make a profile or change one. Answers its id. The input has no member for a key.
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn ai_profile_save(core: State<Arc<AppCore>>, input: ProfileInputMsg) -> Result<String, AiFault> {
@@ -265,28 +250,10 @@ pub fn ai_profile_remove(core: State<Arc<AppCore>>, profile: String) -> Result<R
     core.ai().profile_remove(&profile)
 }
 
-/// Save a key in the system keychain: it is written and never read back. A profile's address is part of the saved
-/// record, so a key is used only for the address it was saved for. Answers nothing.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn ai_key_set(
-    core: State<Arc<AppCore>>,
-    profile: String,
-    slot: KeySlot,
-    api_key: String,
-) -> Result<(), AiFault> {
-    core.ai().key_set(&profile, slot, api_key)
-}
-
 /// Remove a key from the system keychain and stop the turns that use the profile. Answers nothing.
 #[tauri::command(async, rename_all = "snake_case")]
 pub fn ai_key_clear(core: State<Arc<AppCore>>, profile: String, slot: KeySlot) -> Result<(), AiFault> {
     core.ai().key_clear(&profile, slot)
-}
-
-/// Whether a usable key is saved for the profile. Answers a flag, never the key.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn ai_has_key(core: State<Arc<AppCore>>, profile: String, slot: KeySlot) -> Result<bool, AiFault> {
-    core.ai().has_key(&profile, slot)
 }
 
 // ---- the integrations ----------------------------------------------------------------------------------------------
@@ -294,14 +261,6 @@ pub fn ai_has_key(core: State<Arc<AppCore>>, profile: String, slot: KeySlot) -> 
 // The page sends facts (a tool, a verb, a pane, names, a selection) and the core builds everything else: no command takes
 // a program, an argument list or a shell string. A refusal reaches the page as the object `{code, reason, text}`
 // (`IntegrationFault`). Nothing of this exists on the local socket of `wsh`.
-
-/// The four tools and where each stands on this computer: found (with its path and version), not found (with the places
-/// that were looked in), unusable or unsupported in this build, and the verbs each has. It looks for the programs and asks
-/// a found one for its version, so it is async.
-#[tauri::command(async, rename_all = "snake_case")]
-pub fn integration_tools(core: State<Arc<AppCore>>) -> Vec<ToolView> {
-    core.integration_tools()
-}
 
 /// One read of a verb that only reads and shows a view, for `pane` (or for the tool's own selection when `pane` is null).
 /// `args` is an object of strings; the core checks each value by the kind of the verb's argument. The answer is the view

@@ -134,10 +134,10 @@ fn every_row_of_the_table_is_in_the_handler_the_manifest_and_the_capability() {
         assert!(manifest.contains(row.name), "the row {} is not in the manifest of build.rs", row.name);
         assert!(permissions.contains(&permission_of(row.name)), "the row {} is not granted by the capability", row.name);
     }
-    // 85 rows of the table and the 34 commands of the AI and the integrations that are still written out.
-    assert_eq!(COMMANDS.len(), 85);
+    // The rows of the table and the commands of the AI and the integrations that are still written out.
+    assert_eq!(COMMANDS.len(), 90);
     assert_eq!(handler.len(), 119);
-    assert_eq!(handler.iter().filter(|name| lookup(name).is_none()).count(), 34);
+    assert_eq!(handler.iter().filter(|name| lookup(name).is_none()).count(), 29);
 }
 
 /// The window labels the capability grants: `main` and the pattern of the windows the app makes itself. Nothing else,
@@ -443,6 +443,12 @@ fn the_ai_commands_are_exactly_the_reviewed_list() {
     }
 }
 
+/// A type as the table spells it, written the way a person writes it: the macro that records the text of a type puts a
+/// space inside every angle bracket (`Vec < ToolView >`), and the reviewed lists below are written without.
+fn tidy(ty: &str) -> String {
+    ty.replace(" < ", "<").replace(" <", "<").replace("< ", "<").replace(" >", ">")
+}
+
 /// The answer type of the command `name`: the text between `->` and the body of its function in `source`, empty for a
 /// function that returns nothing. A command that is a row of the host's table has no function in `source`; its answer is
 /// written from the row in the same shape. `None` when there is no such command.
@@ -450,9 +456,9 @@ fn return_type(source: &str, name: &str) -> Option<String> {
     return_type_in_text(source, name).or_else(|| {
         let row = lookup(name)?;
         Some(match row.error {
-            Some(error) => format!("Result<{}, {}>", row.answer, error),
+            Some(error) => format!("Result<{}, {}>", tidy(row.answer), tidy(error)),
             None if row.answer == "()" => String::new(),
-            None => row.answer.to_owned(),
+            None => tidy(row.answer),
         })
     })
 }
@@ -571,7 +577,7 @@ fn arguments(source: &str, name: &str) -> Option<Vec<(String, String)>> {
         let row = lookup(name)?;
         let window = (row.scope == holzwave_host::commands::registry::Scope::Window)
             .then(|| ("window".to_owned(), "WebviewWindow".to_owned()));
-        Some(window.into_iter().chain(row.args.iter().map(|arg| (arg.name.to_owned(), arg.ty.to_owned()))).collect())
+        Some(window.into_iter().chain(row.args.iter().map(|arg| (arg.name.to_owned(), tidy(arg.ty)))).collect())
     })
 }
 

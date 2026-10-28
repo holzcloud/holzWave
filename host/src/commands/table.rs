@@ -553,6 +553,36 @@ macro_rules! host_commands {
                 answers: (), fails: String,
                 run: history_sync::local_network_open_settings, web: unavailable
             }
+            {
+                name: ai_turn_snapshot, shell: generated, group: ai, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [conversation: String],
+                answers: ChatState, fails: AiFault,
+                run: ai::ai_turn_snapshot, web: same
+            }
+            {
+                name: ai_profiles, shell: generated, group: ai, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: AiProfiles,
+                run: ai::ai_profiles, web: same
+            }
+            {
+                name: ai_key_set, shell: generated, group: ai, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [profile: String, slot: KeySlot, api_key: String],
+                answers: (), fails: AiFault,
+                run: ai::ai_key_set, web: same
+            }
+            {
+                name: ai_has_key, shell: generated, group: ai, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [profile: String, slot: KeySlot],
+                answers: bool, fails: AiFault,
+                run: ai::ai_has_key, web: same
+            }
+            {
+                name: integration_tools, shell: generated, group: integrations, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: Vec<ToolView>,
+                run: integrations::integration_tools, web: same
+            }
         }
     };
 }

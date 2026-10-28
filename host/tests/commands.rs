@@ -658,6 +658,7 @@ fn sample(ty: &str) -> Option<&'static str> {
         "BlockKind" => r#""files""#,
         "Profile" => r#"{"id":"a","name":"A","host":"h"}"#,
         "SecretChange" => r#"{"kind":"keep"}"#,
+        "KeySlot" => r#""provider""#,
         _ => return None,
     })
 }
@@ -775,7 +776,17 @@ fn error_text_is_bounded() {
     // and not the registry's, so only its length is held to the limit for a row whose first argument is a text.)
     let check = |row: &Command, outcome: Outcome, what: &str| {
         let Outcome::Err(json) = outcome else { return };
-        let text: String = serde_json::from_str(&json).unwrap_or_else(|_| panic!("{} {what}: {json:.100}", row.name));
+        // The error of a command of the assistant or the tools is the object `{code, reason, text}`; its text is what is bounded.
+        let text: String = match serde_json::from_str::<serde_json::Value>(&json) {
+            Ok(serde_json::Value::String(text)) => text,
+            Ok(serde_json::Value::Object(fault)) => {
+                let mut members: Vec<&str> = fault.keys().map(String::as_str).collect();
+                members.sort_unstable();
+                assert_eq!(members, ["code", "reason", "text"], "{} {what}: {json:.100}", row.name);
+                fault["text"].as_str().unwrap_or_else(|| panic!("{} {what}: {json:.100}", row.name)).to_owned()
+            }
+            _ => panic!("{} {what}: {json:.100}", row.name),
+        };
         // A refusal of the registry is cut to the limit. An error of the core for a text it took may quote the text, as
         // the error of `connection_delete` quotes the id: that is bounded by what was sent and no longer.
         let refusal = ["missing field", "unknown field", "duplicate field", "invalid argument", "the arguments are not valid"]
@@ -1562,8 +1573,8 @@ fn the_sync_starts_off_and_keeps_no_secret_when_it_cannot_reach_the_server() {
 
 // ---- guards over all the rows of the two table plans ---------------------------------------------------------------------
 
-/// The number of rows the table has after the second table plan.
-const ROWS: usize = 85;
+/// The number of rows the table has after the first task of the third table plan.
+const ROWS: usize = 90;
 
 /// The 13 commands the browser build does not have: eight of the first table plan, five of the second.
 const THE_UNAVAILABLE: [&str; 13] = [
@@ -1586,7 +1597,7 @@ const THE_UNAVAILABLE: [&str; 13] = [
 const THE_LARGE: [&str; 3] = ["file_save", "markdown_render", "widget_note_save"];
 
 #[test]
-fn the_table_has_85_rows_and_the_unavailable_set_is_pinned_by_name() {
+fn the_table_has_its_rows_and_the_unavailable_set_is_pinned_by_name() {
     assert_eq!(COMMANDS.len(), ROWS);
     let mut unavailable: Vec<&str> = COMMANDS.iter().filter(|row| row.web == Web::Unavailable).map(|row| row.name).collect();
     unavailable.sort_unstable();
@@ -1727,9 +1738,6 @@ fn coverage_problems(commands: &[&str], rows: &BTreeSet<&str>, hand_rows: &BTree
             if written.contains(name) && !hand_rows.contains(name) {
                 problems.push(format!("{name} is a row and still has a wrapper in commands.rs"));
             }
-            if still_written(name) {
-                problems.push(format!("{name} is a row, but the ai_ and integration_ commands are the table's next plan"));
-            }
         } else if !still_written(name) {
             problems.push(format!("{name} is neither a row of the table nor an ai_ or integration_ wrapper"));
         } else if !written.contains(name) {
@@ -1760,10 +1768,11 @@ fn only_the_ai_and_integration_commands_are_still_written_out_and_every_other_co
     assert!(problems.is_empty(), "{problems:#?}");
     assert_eq!(hand.iter().copied().collect::<Vec<_>>(), ["clipboard_text", "copy_selection", "window_ready"]);
     let not_rows: BTreeSet<&str> = commands.iter().copied().filter(|name| !rows.contains(name)).collect();
-    assert_eq!(not_rows.iter().filter(|name| name.starts_with("ai_")).count(), 19);
-    assert_eq!(not_rows.iter().filter(|name| name.starts_with("integration_")).count(), 15);
-    assert_eq!(not_rows.len(), 34, "only the 34 commands of the next table plan are left");
-    assert_eq!(rows.len() + not_rows.len(), 119);
+    // The assistant and the tools move into the table in three tasks; these are the ones that are not rows yet.
+    assert_eq!(not_rows.iter().filter(|name| name.starts_with("ai_")).count(), 15);
+    assert_eq!(not_rows.iter().filter(|name| name.starts_with("integration_")).count(), 14);
+    assert_eq!(not_rows.len(), 29, "the commands of the rest of the third table plan are left");
+    assert_eq!(rows.len() + not_rows.len(), commands.len());
 }
 
 #[test]
@@ -2067,11 +2076,11 @@ fn tracer_a_key_goes_into_the_injected_store_and_comes_out_of_no_answer() {
     let listed = answer(profiles.clone());
     assert_eq!(listed["profiles"][0]["id"], id.as_str());
     assert_eq!(listed["profiles"][0]["key"], "present", "the state of the key is a word");
-    let cleared = world.call("ai_key_clear", &key_args(&id, ""));
-    assert_eq!(cleared, Outcome::Ok("null".into()));
+    // `ai_key_clear` is the next task's row; the core clears the key here.
+    world.core.ai().key_clear(&id, holzwave_core::ai::profiles::KeySlot::Provider).expect("the key is cleared");
     let gone = world.call("ai_has_key", &key_args(&id, ""));
     assert_eq!(gone, Outcome::Ok("false".into()));
-    answers.extend([before, set, has, profiles, cleared, gone]);
+    answers.extend([before, set, has, profiles, gone]);
 
     for outcome in &answers {
         assert!(!format!("{outcome:?}").contains(API_KEY), "an answer holds the key: {outcome:?}");
@@ -2080,7 +2089,7 @@ fn tracer_a_key_goes_into_the_injected_store_and_comes_out_of_no_answer() {
     assert_eq!(written.len(), 1, "one write to the injected store: {:?}", written.iter().map(|(account, _)| account).collect::<Vec<_>>());
     assert!(written[0].1.contains(API_KEY), "the key lives in the injected store");
     assert_nothing_below_holds(&world.dir, API_KEY);
-    println!("Tracer: key of {} bytes set, has_key true, profile key state present, cleared, has_key false; answers: null true present null false", API_KEY.len());
+    println!("Tracer: key of {} bytes set, has_key true, profile key state present, cleared, has_key false; answers: null true present false", API_KEY.len());
 }
 
 #[test]
@@ -2093,7 +2102,6 @@ fn tracer_a_locked_store_reaches_the_page_as_the_fault_text_secrets_are_locked()
 
     for (name, args) in [
         ("ai_key_set", key_args(&id, r#","api_key":"another-key-9""#)),
-        ("ai_key_clear", key_args(&id, "")),
         ("ai_has_key", key_args(&id, "")),
     ] {
         let outcome = world.call(name, &args);
@@ -2117,7 +2125,7 @@ fn tracer_a_locked_store_reaches_the_page_as_the_fault_text_secrets_are_locked()
     vault.unlock();
     assert_eq!(world.call("ai_has_key", &key_args(&id, "")), Outcome::Ok("true".into()));
     assert_eq!(vault.written().len(), 1, "the refused write reached nothing");
-    println!("Tracer: locked store answers the fault text {:?} for set, clear and has_key; ai_profiles answers key state unreadable", "secrets are locked");
+    println!("Tracer: locked store answers the fault text {:?} for set and has_key; ai_profiles answers key state unreadable", "secrets are locked");
 }
 
 #[test]

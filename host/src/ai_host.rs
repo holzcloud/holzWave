@@ -39,6 +39,7 @@ use crate::ai_ask::ShellAskNotify;
 use crate::ai_device::{DEVICE_ID, DEVICE_MODEL, DeviceSource, DeviceState, DeviceView, fill_model};
 use crate::ai_tools::{CoreTargets, ShellTools};
 use crate::ai_write::UndoFault;
+use crate::locked::{SECRETS_LOCKED, Watched, watching};
 use crate::state::{AppCore, Out, Sink, Target};
 
 /// The folder of the data directory that holds one file per chat.
@@ -69,7 +70,7 @@ impl AiParts {
 
     /// The keys of the profiles live in `secrets`; the system clock.
     pub fn with_secrets(secrets: Arc<dyn SecretStore>) -> AiParts {
-        AiParts { vault: KeyVault::new(secrets), clock: None, protected: Vec::new() }
+        AiParts { vault: KeyVault::new(Watched::wrap(secrets)), clock: None, protected: Vec::new() }
     }
 
     /// The same parts with `dirs` added to the places no tool may touch. The deny list of the service, of the tools
@@ -184,6 +185,11 @@ impl AiFault {
         AiFault { code: "undo", reason: Some(fault.reason()), text: fault.to_string() }
     }
 
+    /// The secret store is locked: the person has not unlocked it yet. The text is the one sentence the page knows.
+    pub fn locked() -> AiFault {
+        AiFault { code: "key", reason: Some("locked"), text: SECRETS_LOCKED.to_owned() }
+    }
+
     /// A profile id that no profile has.
     pub fn unknown_profile() -> AiFault {
         AiFault { code: "profile", reason: Some("unknown_profile"), text: "there is no such profile".to_owned() }
@@ -224,6 +230,15 @@ impl AiFault {
             | ServiceError::IdTaken => None,
         };
         AiFault { code: error.code(), reason, text: error.to_string() }
+    }
+}
+
+/// The fault of a refused key operation. A refusal of the keychain that happened because the store is locked says so;
+/// every other refusal is the service's own.
+fn key_fault(error: &ServiceError, locked: bool) -> AiFault {
+    match error {
+        ServiceError::Key(KeyError::Store) if locked => AiFault::locked(),
+        other => AiFault::from_service(other),
     }
 }
 
@@ -621,18 +636,24 @@ impl AiHost {
     /// stays here, and nothing is answered but whether it worked: no call of the shell returns a key.
     pub fn key_set(&self, profile: &str, slot: KeySlot, key: String) -> Result<(), AiFault> {
         let key = ApiKey::new(key);
-        self.service.set_key(profile, slot, key).map_err(|e| AiFault::from_service(&e))
+        let (saved, locked) = watching(|| self.service.set_key(profile, slot, key));
+        saved.map_err(|e| key_fault(&e, locked))
     }
 
     /// Removes a key from the keychain and stops the turns that use the profile.
     pub fn key_clear(&self, profile: &str, slot: KeySlot) -> Result<(), AiFault> {
-        self.service.clear_key(profile, slot).map_err(|e| AiFault::from_service(&e))
+        let (cleared, locked) = watching(|| self.service.clear_key(profile, slot));
+        cleared.map_err(|e| key_fault(&e, locked))
     }
 
     /// Whether a usable key is saved in `slot` of `profile`: the status of the slot is the present one. The status is
-    /// read once for every profile, which reads the keychain.
+    /// read once for every profile, which reads the keychain; a keychain that is locked is the fault `key` / `locked`
+    /// and not the answer `false`.
     pub fn has_key(&self, profile: &str, slot: KeySlot) -> Result<bool, AiFault> {
-        let views = self.service.profiles();
+        let (views, locked) = watching(|| self.service.profiles());
+        if locked {
+            return Err(AiFault::locked());
+        }
         let view = views.iter().find(|view| view.id == profile).ok_or_else(AiFault::unknown_profile)?;
         let status = match slot {
             KeySlot::Provider => Some(view.key),

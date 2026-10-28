@@ -28,6 +28,7 @@ use holzwave_core::platform::ShellLaunch;
 use holzwave_core::secrets::SecretStore;
 use serde::{Deserialize, Serialize};
 
+use crate::locked::{SECRETS_LOCKED, Watched, watching};
 use crate::state::{Out, Sink, Target, View};
 
 /// How long the file of the pane selections waits after the first change of a burst.
@@ -71,6 +72,11 @@ impl IntegrationFault {
         IntegrationFault { code: FaultCode::Refused, reason, text: text.to_owned() }
     }
 
+    /// The secret store is locked: the person has not unlocked it yet. The text is the one sentence the page knows.
+    pub fn locked() -> Self {
+        IntegrationFault { code: FaultCode::Profile, reason: "locked", text: SECRETS_LOCKED.to_owned() }
+    }
+
     /// The pane of a launch could not be made ready. The sentences of the shell hold nothing of the request.
     pub(crate) fn launch(text: &str) -> Self {
         let mut chars = text.chars();
@@ -101,6 +107,15 @@ fn wipe(value: String) {
     let mut bytes = value.into_bytes();
     bytes.fill(0);
     std::hint::black_box(&bytes);
+}
+
+/// The fault of a refused secret operation: a keychain that is locked says so, and any other refusal is the service's own.
+fn secret_fault(fault: Fault, locked: bool) -> IntegrationFault {
+    if locked && fault.code == FaultCode::Profile && fault.reason == "secret" {
+        IntegrationFault::locked()
+    } else {
+        IntegrationFault::from(fault)
+    }
 }
 
 impl From<Fault> for IntegrationFault {
@@ -234,7 +249,8 @@ impl IntegrationHost {
         if let Err(error) = kube::sweep_overlays(&parts.facts.data_dir, live_panes) {
             eprintln!("holzwave: the overlays of closed panes were not all removed: {error}");
         }
-        let service = IntegrationService::new(dir, parts.secrets, parts.facts, live_panes).with_deferred_pane_saves();
+        let service =
+            IntegrationService::new(dir, Watched::wrap(parts.secrets), parts.facts, live_panes).with_deferred_pane_saves();
         for note in service.notes() {
             eprintln!("holzwave: {note}");
         }
@@ -416,16 +432,17 @@ impl IntegrationHost {
     /// Stores the value of one secret variable of a profile in the keychain. Write-only: no answer, event or note ever
     /// holds the value, and the copy this process owns is overwritten when the call is over.
     pub fn secret_set(&self, profile: &str, name: &str, value: String) -> Result<(), IntegrationFault> {
-        let stored = self.service.set_secret(profile, name, &value);
+        let (stored, locked) = watching(|| self.service.set_secret(profile, name, &value));
         wipe(value);
-        stored?;
+        stored.map_err(|fault| secret_fault(fault, locked))?;
         self.event(IntegrationChange::Profiles, None, None, None);
         Ok(())
     }
 
     /// Removes the value of one secret variable of a profile from the keychain.
     pub fn secret_clear(&self, profile: &str, name: &str) -> Result<(), IntegrationFault> {
-        self.service.clear_secret(profile, name)?;
+        let (cleared, locked) = watching(|| self.service.clear_secret(profile, name));
+        cleared.map_err(|fault| secret_fault(fault, locked))?;
         self.event(IntegrationChange::Profiles, None, None, None);
         Ok(())
     }

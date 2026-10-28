@@ -14,6 +14,7 @@ pub mod ai_write;
 pub mod commands;
 pub mod integrate_host;
 pub mod local_network;
+pub mod locked;
 pub mod login_prompt;
 pub mod ranges;
 pub mod seams;
