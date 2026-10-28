@@ -638,7 +638,8 @@ async fn assert_not_found(server: &Started, cookie: &str, target: &str) {
         assert_eq!(reply.status, 404, "{target} {how}");
         assert_eq!(reply.json(), serde_json::json!({ "code": "not_found" }), "{target} {how}: the standard 404 body");
     }
-    println!("Paths: {target:?} -> {} / {}", without.status, with.status);
+    let shown: String = target.chars().take(40).collect();
+    println!("Paths: {shown:?} ({} bytes) -> {} / {}", target.len(), without.status, with.status);
 }
 
 #[tokio::test]
