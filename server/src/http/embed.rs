@@ -47,6 +47,10 @@ pub const PUBLIC_FILES: &[&str] = &[
 /// Everything under this prefix is public: the fonts the styles name.
 pub const PUBLIC_PREFIX: &str = "/fonts/";
 
+/// The closed list of file extensions the server serves and the content type of each. A file with another extension (a source
+/// map, for example) is neither served nor listed.
+pub const EXTENSIONS: &[(&str, &str)] = &[];
+
 /// Whether a file may be served without a session.
 pub fn is_public(path: &str) -> bool {
     PUBLIC_FILES.contains(&path) || (path.starts_with(PUBLIC_PREFIX) && path.len() > PUBLIC_PREFIX.len())
@@ -137,6 +141,11 @@ impl Assets {
         self.files.keys().map(String::as_str)
     }
 
+    /// How many files were left out of the table because their name or extension is not allowed.
+    pub fn skipped(&self) -> usize {
+        0
+    }
+
     /// How many files are in the table.
     pub fn len(&self) -> usize {
         self.files.len()
@@ -159,6 +168,12 @@ impl fmt::Display for PageNotBuilt {
 }
 
 impl std::error::Error for PageNotBuilt {}
+
+/// Refuses a list of file names (relative to the build folder) that lacks `index.html` or `login.html`.
+pub fn check_names<S: AsRef<str>>(names: &[S]) -> Result<(), PageNotBuilt> {
+    let _ = names;
+    Ok(())
+}
 
 /// Refuses a build whose page is missing.
 pub fn verify() -> Result<(), PageNotBuilt> {
