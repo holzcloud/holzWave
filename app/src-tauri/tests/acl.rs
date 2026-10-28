@@ -135,9 +135,9 @@ fn every_row_of_the_table_is_in_the_handler_the_manifest_and_the_capability() {
         assert!(permissions.contains(&permission_of(row.name)), "the row {} is not granted by the capability", row.name);
     }
     // The rows of the table and the commands of the AI and the integrations that are still written out.
-    assert_eq!(COMMANDS.len(), 90);
+    assert_eq!(COMMANDS.len(), 119);
     assert_eq!(handler.len(), 119);
-    assert_eq!(handler.iter().filter(|name| lookup(name).is_none()).count(), 29);
+    assert_eq!(handler.iter().filter(|name| lookup(name).is_none()).count(), 0);
 }
 
 /// The window labels the capability grants: `main` and the pattern of the windows the app makes itself. Nothing else,

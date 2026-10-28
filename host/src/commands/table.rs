@@ -583,6 +583,180 @@ macro_rules! host_commands {
                 answers: Vec<ToolView>,
                 run: integrations::integration_tools, web: same
             }
+            {
+                name: ai_send, shell: generated, group: ai, scope: none, mode: async, cap: CAP_LARGE,
+                args: [conversation: String, text: String, pane: PaneId, profile: Option<String>, model: Option<String>, offer: Option<String>, picked: Option<Vec<u32>>],
+                answers: TicketView, fails: AiFault,
+                run: ai::ai_send, web: same
+            }
+            {
+                name: ai_context_state, shell: generated, group: ai, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [conversation: String, pane: PaneId, profile: Option<String>, model: Option<String>],
+                answers: ContextState, fails: AiFault,
+                run: ai::ai_context_state, web: same
+            }
+            {
+                name: ai_context_share, shell: generated, group: ai, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [conversation: String, pane: PaneId, profile: Option<String>, model: Option<String>, shared: bool],
+                answers: ContextState, fails: AiFault,
+                run: ai::ai_context_share, web: same
+            }
+            {
+                name: ai_context_preview, shell: generated, group: ai, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [conversation: String, pane: PaneId, profile: Option<String>, model: Option<String>, kinds: Vec<ContextKind>],
+                answers: OfferView, fails: AiFault,
+                run: ai::ai_context_preview, web: same
+            }
+            {
+                name: ai_conversation_new, shell: generated, group: ai, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: String, fails: AiFault,
+                run: ai::ai_conversation_new, web: same
+            }
+            {
+                name: ai_conversation_list, shell: generated, group: ai, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: ConversationList, fails: AiFault,
+                run: ai::ai_conversation_list, web: same
+            }
+            {
+                name: ai_conversation_delete, shell: generated, group: ai, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [conversation: String],
+                answers: bool, fails: AiFault,
+                run: ai::ai_conversation_delete, web: same
+            }
+            {
+                name: ai_cancel, shell: generated, group: ai, scope: none, mode: sync, cap: CAP_DEFAULT,
+                args: [conversation: String],
+                answers: bool, fails: AiFault,
+                run: ai::ai_cancel, web: same
+            }
+            {
+                name: ai_decide, shell: generated, group: ai, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [conversation: String, call_id: String, decision: String, hash: String],
+                answers: (), fails: AiFault,
+                run: ai::ai_decide, web: same
+            }
+            {
+                name: ai_undo, shell: generated, group: ai, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [conversation: String, call_id: String],
+                answers: (), fails: AiFault,
+                run: ai::ai_undo, web: same
+            }
+            {
+                name: ai_ask_pending, shell: generated, group: ai, scope: window, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: Vec<AskView>, fails: AiFault,
+                run: ai::ai_ask_pending, web: same
+            }
+            {
+                name: ai_ask_answer, shell: generated, group: ai, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [ask: String, verdict: String, seal: String],
+                answers: (), fails: AiFault,
+                run: ai::ai_ask_answer, web: same
+            }
+            {
+                name: ai_profile_save, shell: generated, group: ai, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [input: ProfileInputMsg],
+                answers: String, fails: AiFault,
+                run: ai::ai_profile_save, web: same
+            }
+            {
+                name: ai_profile_remove, shell: generated, group: ai, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [profile: String],
+                answers: RemovalView, fails: AiFault,
+                run: ai::ai_profile_remove, web: same
+            }
+            {
+                name: ai_key_clear, shell: generated, group: ai, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [profile: String, slot: KeySlot],
+                answers: (), fails: AiFault,
+                run: ai::ai_key_clear, web: same
+            }
+            {
+                name: integration_run, shell: generated, group: integrations, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [tool: String, verb: String, pane: Option<PaneId>, args: BTreeMap<String, String>],
+                answers: RunAnswer, fails: IntegrationFault,
+                run: integrations::integration_run, web: same
+            }
+            {
+                name: integration_select, shell: generated, group: integrations, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [tool: String, pane: Option<PaneId>, selection: Selection],
+                answers: SelectionView, fails: IntegrationFault,
+                run: integrations::integration_select, web: same
+            }
+            {
+                name: integration_context, shell: generated, group: integrations, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [pane: Option<PaneId>, refresh: bool],
+                answers: ContextAnswer,
+                run: integrations::integration_context, web: same
+            }
+            {
+                name: integration_prepare, shell: generated, group: integrations, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [tool: String, verb: String, pane: Option<PaneId>, args: BTreeMap<String, String>],
+                answers: Card, fails: IntegrationFault,
+                run: integrations::integration_prepare, web: same
+            }
+            {
+                name: integration_confirm, shell: generated, group: integrations, scope: window, mode: async, cap: CAP_DEFAULT,
+                args: [ticket: String, hash: String],
+                answers: ConfirmAnswer, fails: IntegrationFault,
+                run: integrations::integration_confirm, web: same
+            }
+            {
+                name: integration_cancel, shell: generated, group: integrations, scope: none, mode: sync, cap: CAP_DEFAULT,
+                args: [ticket: String],
+                answers: (), fails: IntegrationFault,
+                run: integrations::integration_cancel, web: same
+            }
+            {
+                name: integration_launch, shell: generated, group: integrations, scope: window, mode: async, cap: CAP_DEFAULT,
+                args: [tool: String, verb: String, pane: Option<PaneId>, args: BTreeMap<String, String>, placement: String],
+                answers: LaunchAnswer, fails: IntegrationFault,
+                run: integrations::integration_launch, web: same
+            }
+            {
+                name: integration_binary_set, shell: generated, group: integrations, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [tool: String, path: String],
+                answers: Vec<ToolView>, fails: IntegrationFault,
+                run: integrations::integration_binary_set, web: same
+            }
+            {
+                name: integration_binary_clear, shell: generated, group: integrations, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [tool: String],
+                answers: Vec<ToolView>, fails: IntegrationFault,
+                run: integrations::integration_binary_clear, web: same
+            }
+            {
+                name: integration_profiles, shell: generated, group: integrations, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: ProfilesView,
+                run: integrations::integration_profiles, web: same
+            }
+            {
+                name: integration_profile_save, shell: generated, group: integrations, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [profile: Value],
+                answers: ProfilesView, fails: IntegrationFault,
+                run: integrations::integration_profile_save, web: same
+            }
+            {
+                name: integration_profile_remove, shell: generated, group: integrations, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [id: String],
+                answers: ProfilesView, fails: IntegrationFault,
+                run: integrations::integration_profile_remove, web: same
+            }
+            {
+                name: integration_secret_set, shell: generated, group: integrations, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [profile: String, name: String, value: String],
+                answers: (), fails: IntegrationFault,
+                run: integrations::integration_secret_set, web: same
+            }
+            {
+                name: integration_secret_clear, shell: generated, group: integrations, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [profile: String, name: String],
+                answers: (), fails: IntegrationFault,
+                run: integrations::integration_secret_clear, web: same
+            }
         }
     };
 }

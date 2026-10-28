@@ -1687,11 +1687,11 @@ mod tests {
         assert_eq!(core.view_in("main").expect("the main window").panes.len(), panes_now);
 
         // The confirm of an exec card opens its pane in the calling window and answers that window's layout.
-        let card = row_ok(row(&core, "integration_prepare", serde_json::json!({"tool": "kube", "verb": "exec", "pane": 3, "args": {"pod": "api-0"}})));
-        let ticket_hash = serde_json::json!({"ticket": card["ticket"], "hash": card["hash"]});
-        let elsewhere = row_in(&core, "window-77", "integration_confirm", ticket_hash.clone());
+        let prepare = || row_ok(row(&core, "integration_prepare", serde_json::json!({"tool": "kube", "verb": "exec", "pane": 3, "args": {"pod": "api-0"}})));
+        let (first, card) = (prepare(), prepare());
+        let elsewhere = row_in(&core, "window-77", "integration_confirm", serde_json::json!({"ticket": first["ticket"], "hash": first["hash"]}));
         assert!(matches!(elsewhere, Outcome::Err(_)), "{elsewhere:?}");
-        let done = row_ok(row(&core, "integration_confirm", ticket_hash));
+        let done = row_ok(row(&core, "integration_confirm", serde_json::json!({"ticket": card["ticket"], "hash": card["hash"]})));
         assert_eq!(done["kind"], "launched");
         let (exec_pane, view) = (done["pane"].as_u64().expect("the new pane"), &done["view"]);
         assert_eq!(view["focus"], serde_json::json!(exec_pane));

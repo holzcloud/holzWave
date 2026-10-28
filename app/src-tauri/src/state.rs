@@ -838,7 +838,14 @@ mod protocol {
     #[test]
     fn protocol_commands_match_source() {
         let commands = parse_commands(COMMANDS_SRC);
-        assert!(commands.len() >= 20, "the scanner found only {} commands", commands.len());
+        // Every command is a row of the table now; `commands.rs` holds only the wrappers that need the window shell.
+        assert!(COMMANDS.len() >= 20, "the table has only {} commands", COMMANDS.len());
+        assert_eq!(
+            commands.len(),
+            COMMANDS.iter().filter(|row| row.shell == holzwave_host::commands::registry::Shell::Hand).count(),
+            "the scanner found {} wrappers in commands.rs",
+            commands.len()
+        );
         for command in &commands {
             assert!(
                 command.snake_case,

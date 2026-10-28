@@ -38,17 +38,23 @@ pub mod prelude {
         CopyOpMsg, CopyStateMsg, EditActionMsg, GrantAnswer, MouseActionMsg, MouseButtonMsg, PasteOutcomeMsg,
         SearchOpMsg, SelectOpMsg,
     };
-    pub use crate::ai_host::{AiFault, AiProfiles};
+    pub use crate::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, RemovalView, TicketView};
+    pub use crate::integrate_host::{ConfirmAnswer, ContextAnswer, IntegrationFault, LaunchAnswer};
     pub use crate::state::{AppInfo, Released, SettingsView, View};
     pub use crate::windows::DropKind;
     pub use holzwave_core::ai::profiles::KeySlot;
     pub use holzwave_core::ai::service::events::ChatState;
+    pub use holzwave_core::ai::service::{AskView, ContextState, OfferView};
+    pub use holzwave_core::ai::types::ContextKind;
     pub use holzwave_core::blocks::{BlockKind, BlockView, Opened, Saved};
     pub use holzwave_core::connections::{ConnView, ProfileView, SecretChange};
     pub use holzwave_core::files::{Entry, Listing};
-    pub use holzwave_core::integrate::service::ToolView;
+    pub use holzwave_core::integrate::service::{ProfilesView, RunAnswer, SelectionView, ToolView};
+    pub use holzwave_core::integrate::ticket::Card;
+    pub use holzwave_core::integrate::Selection;
     pub use holzwave_core::layout::{Edge, PaneId, SplitId};
     pub use holzwave_core::profiles::Profile;
     pub use holzwave_core::wire::SearchMsg;
     pub use serde_json::Value;
+    pub use std::collections::BTreeMap;
 }

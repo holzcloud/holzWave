@@ -659,6 +659,9 @@ fn sample(ty: &str) -> Option<&'static str> {
         "Profile" => r#"{"id":"a","name":"A","host":"h"}"#,
         "SecretChange" => r#"{"kind":"keep"}"#,
         "KeySlot" => r#""provider""#,
+        "Vec<ContextKind>" => "[]",
+        "Selection" | "BTreeMap<String,String>" => "{}",
+        "ProfileInputMsg" => r#"{"name":"x","preset":"ollama"}"#,
         _ => return None,
     })
 }
@@ -698,7 +701,7 @@ fn table_caps_follow_the_limits() {
     for row in COMMANDS {
         let want = match row.name {
             "key" | "mouse" | "wheel" | "resize" => 4 * 1024,
-            "paste" | "file_save" | "widget_note_save" | "markdown_render" => 8 * 1024 * 1024,
+            "paste" | "file_save" | "widget_note_save" | "markdown_render" | "ai_send" => 8 * 1024 * 1024,
             _ => 64 * 1024,
         };
         assert_eq!(row.cap, want, "{}", row.name);
@@ -1573,8 +1576,8 @@ fn the_sync_starts_off_and_keeps_no_secret_when_it_cannot_reach_the_server() {
 
 // ---- guards over all the rows of the two table plans ---------------------------------------------------------------------
 
-/// The number of rows the table has after the first task of the third table plan.
-const ROWS: usize = 90;
+/// The number of rows the table has once the assistant and the tools are in it: every command of the desktop.
+const ROWS: usize = 119;
 
 /// The 13 commands the browser build does not have: eight of the first table plan, five of the second.
 const THE_UNAVAILABLE: [&str; 13] = [
@@ -1593,8 +1596,8 @@ const THE_UNAVAILABLE: [&str; 13] = [
     "tear_off_tab",
 ];
 
-/// The three commands that carry a document and so take a larger argument text.
-const THE_LARGE: [&str; 3] = ["file_save", "markdown_render", "widget_note_save"];
+/// The four commands that carry a document or a long typed message and so take a larger argument text.
+const THE_LARGE: [&str; 4] = ["ai_send", "file_save", "markdown_render", "widget_note_save"];
 
 #[test]
 fn the_table_has_its_rows_and_the_unavailable_set_is_pinned_by_name() {
@@ -1613,7 +1616,7 @@ fn the_table_has_its_rows_and_the_unavailable_set_is_pinned_by_name() {
 }
 
 #[test]
-fn the_caps_are_64_kib_and_the_three_document_commands_take_8_mib() {
+fn the_caps_are_64_kib_and_the_four_document_commands_take_8_mib() {
     let mut large: Vec<&str> = COMMANDS.iter().filter(|row| row.cap == 8 * 1024 * 1024).map(|row| row.name).collect();
     large.retain(|name| *name != "paste");
     large.sort_unstable();
@@ -1768,11 +1771,9 @@ fn only_the_ai_and_integration_commands_are_still_written_out_and_every_other_co
     assert!(problems.is_empty(), "{problems:#?}");
     assert_eq!(hand.iter().copied().collect::<Vec<_>>(), ["clipboard_text", "copy_selection", "window_ready"]);
     let not_rows: BTreeSet<&str> = commands.iter().copied().filter(|name| !rows.contains(name)).collect();
-    // The assistant and the tools move into the table in three tasks; these are the ones that are not rows yet.
-    assert_eq!(not_rows.iter().filter(|name| name.starts_with("ai_")).count(), 15);
-    assert_eq!(not_rows.iter().filter(|name| name.starts_with("integration_")).count(), 14);
-    assert_eq!(not_rows.len(), 29, "the commands of the rest of the third table plan are left");
-    assert_eq!(rows.len() + not_rows.len(), commands.len());
+    // The assistant and the tools are rows now: nothing but the three hand wrappers is written out.
+    assert!(not_rows.is_empty(), "{not_rows:?}");
+    assert_eq!(rows.len(), commands.len());
 }
 
 #[test]
@@ -2076,8 +2077,7 @@ fn tracer_a_key_goes_into_the_injected_store_and_comes_out_of_no_answer() {
     let listed = answer(profiles.clone());
     assert_eq!(listed["profiles"][0]["id"], id.as_str());
     assert_eq!(listed["profiles"][0]["key"], "present", "the state of the key is a word");
-    // `ai_key_clear` is the next task's row; the core clears the key here.
-    world.core.ai().key_clear(&id, holzwave_core::ai::profiles::KeySlot::Provider).expect("the key is cleared");
+    assert_eq!(world.call("ai_key_clear", &key_args(&id, "")), Outcome::Ok("null".into()), "a key goes out of the store and nothing comes out");
     let gone = world.call("ai_has_key", &key_args(&id, ""));
     assert_eq!(gone, Outcome::Ok("false".into()));
     answers.extend([before, set, has, profiles, gone]);
@@ -2207,5 +2207,9 @@ fn key_clear_removes_the_key_from_the_injected_store_and_a_locked_store_says_sec
     assert_eq!((fault["text"].as_str(), fault["code"].as_str(), fault["reason"].as_str()), (Some("secrets are locked"), Some("key"), Some("locked")));
     assert!(!format!("{locked:?}").contains(API_KEY));
     vault.unlock();
-    assert_eq!(world.call("ai_has_key", &key_args(&id, "")), Outcome::Ok("true".into()), "the refused clear removed nothing");
+    // The core notes the slot as empty before it asks the store, so a refused delete leaves the secret in the store and
+    // the marker says there is none; the store is the place to look.
+    let account = holzwave_core::ai::profiles::account(&id, holzwave_core::ai::profiles::KeySlot::Provider);
+    let held = holzwave_core::secrets::SecretStore::get(&*vault, &account).expect("unlocked").expect("the record is still there");
+    assert!(held.contains(API_KEY), "a refused delete removed nothing");
 }
