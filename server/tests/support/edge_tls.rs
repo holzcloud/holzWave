@@ -60,6 +60,7 @@ pub fn quick() -> Timing {
         handshake: Duration::from_millis(700),
         header: Duration::from_millis(500),
         idle: Duration::from_millis(1500),
+        stall: Duration::from_millis(1500),
         grace: Duration::from_millis(1500),
         h2_ping_interval: Duration::from_millis(400),
         h2_ping_timeout: Duration::from_millis(400),
@@ -524,7 +525,11 @@ impl RawH2 {
 
     /// Writes bytes; a failed write (the server closed) is returned as false.
     pub async fn try_write(&mut self, bytes: &[u8]) -> bool {
-        matches!(tokio::time::timeout(PATIENCE, self.writer.write_all(bytes)).await, Ok(Ok(())))
+        let written = async {
+            self.writer.write_all(bytes).await?;
+            self.writer.flush().await
+        };
+        matches!(tokio::time::timeout(PATIENCE, written).await, Ok(Ok(())))
     }
 
     pub async fn write(&mut self, bytes: &[u8]) {

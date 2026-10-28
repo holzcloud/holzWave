@@ -787,6 +787,12 @@ fn routes(hits: &Hits) -> Vec<Part> {
     vec![Part { access: Access::Public, router: counted }, Part { access: Access::Public, router: plain }]
 }
 
+/// Waits that leave only the protocol itself to end a connection: no header, idle or ping time runs out during a test that
+/// uses a raw client, which never answers a ping.
+fn calm() -> Timing {
+    Timing { header: Duration::from_secs(30), idle: Duration::from_secs(30), h2_ping_interval: Duration::from_secs(60), h2_ping_timeout: Duration::from_secs(60), ..quick() }
+}
+
 async fn quick_server(timing: Timing) -> (Started, Hits) {
     let hits: Hits = Arc::default();
     let server = start_with(Opts { extra: routes(&hits), timing: Some(timing), ..Opts::default() }).await;
@@ -1068,7 +1074,7 @@ async fn h2_the_server_announces_its_stream_and_header_list_limits() {
 
 #[tokio::test]
 async fn h2_the_129th_concurrent_stream_is_refused_by_the_protocol() {
-    let (server, hits) = quick_server(Timing { header: Duration::from_secs(30), idle: Duration::from_secs(30), ..quick() }).await;
+    let (server, hits) = quick_server(calm()).await;
     let mut raw = RawH2::connect(&server).await;
     raw.handshake().await;
     for n in 0..129u32 {
@@ -1093,6 +1099,8 @@ async fn h2_the_129th_concurrent_stream_is_refused_by_the_protocol() {
             Read::Ended => break,
         }
     }
+    assert!(eventually(Duration::from_secs(3), || hits.load(Ordering::SeqCst) == 128).await, "128 requests reach a handler");
+    tokio::time::sleep(Duration::from_millis(200)).await;
     println!("H2: stream cap: the 129th stream was reset with code {refused:?}, handlers reached = {}", hits.load(Ordering::SeqCst));
     assert_eq!(refused, Some(0x7), "REFUSED_STREAM for the 129th stream");
     assert!(other_resets.is_empty(), "the first 128 streams were not reset: {other_resets:?}");
@@ -1101,7 +1109,7 @@ async fn h2_the_129th_concurrent_stream_is_refused_by_the_protocol() {
 
 #[tokio::test]
 async fn h2_a_header_list_over_64_kib_is_refused() {
-    let (server, hits) = quick_server(Timing { header: Duration::from_secs(30), idle: Duration::from_secs(30), ..quick() }).await;
+    let (server, hits) = quick_server(calm()).await;
     let mut raw = RawH2::connect(&server).await;
     raw.handshake().await;
     let block = edge_tls::request_block("/t/hit", &[("x-big", &"a".repeat(70_000))]);
@@ -1135,7 +1143,7 @@ async fn h2_a_header_list_over_64_kib_is_refused() {
 
 #[tokio::test]
 async fn h2_a_flood_of_stream_resets_ends_in_a_disconnect_and_the_server_stays_up() {
-    let (server, hits) = quick_server(Timing { header: Duration::from_secs(30), idle: Duration::from_secs(30), ..quick() }).await;
+    let (server, hits) = quick_server(calm()).await;
     let mut raw = RawH2::connect(&server).await;
     raw.handshake().await;
     let mut sent = 0u32;
@@ -1177,7 +1185,7 @@ async fn h2_a_flood_of_stream_resets_ends_in_a_disconnect_and_the_server_stays_u
 
 #[tokio::test]
 async fn h2_a_flood_of_ping_frames_ends_in_a_disconnect() {
-    let (server, _) = quick_server(Timing { header: Duration::from_secs(30), idle: Duration::from_secs(30), ..quick() }).await;
+    let (server, _) = quick_server(calm()).await;
     let mut raw = RawH2::connect(&server).await;
     raw.handshake().await;
     let ping = edge_tls::frame_bytes(edge_tls::PING, 0, 0, &[1, 2, 3, 4, 5, 6, 7, 8]);
@@ -1199,7 +1207,7 @@ async fn h2_a_flood_of_ping_frames_ends_in_a_disconnect() {
 
 #[tokio::test]
 async fn h2_a_flood_of_settings_frames_ends_in_a_disconnect() {
-    let (server, _) = quick_server(Timing { header: Duration::from_secs(30), idle: Duration::from_secs(30), ..quick() }).await;
+    let (server, _) = quick_server(calm()).await;
     let mut raw = RawH2::connect(&server).await;
     raw.handshake().await;
     let settings = edge_tls::frame_bytes(edge_tls::SETTINGS, 0, 0, &[]);

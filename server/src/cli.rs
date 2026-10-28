@@ -12,6 +12,7 @@ use crate::accounts::{self, Accounts};
 use crate::audit::Audit;
 use crate::clock::{Clock, SystemClock};
 use crate::config::{self, ENV_KEY_FILE, Env, RealProbe};
+use crate::http::health::{self, Health};
 use crate::keyfile;
 use crate::store::Store;
 
@@ -23,6 +24,7 @@ subcommands:
   keygen [--out FILE]   create the server key file (FILE, or the file named by HOLZWAVE_SERVER_KEY_FILE)
   check-config          check the configuration file and the key file, then exit
   bootstrap             print a one-time token that creates the first administrator (only while no account exists)
+  healthcheck           ask the running server whether it is ready: prints healthy and exits 0, or one sentence and exits 1
 ";
 
 /// The exit status for a call the server does not understand.
@@ -45,6 +47,7 @@ fn run(args: &[String], env: &Env) -> u8 {
         Some("keygen") => keygen(&args[1..], env),
         Some("check-config") => check_config(&args[1..], env),
         Some("bootstrap") => bootstrap(&args[1..], env),
+        Some("healthcheck") => healthcheck(&args[1..], env),
         Some(name) => usage_error(&format!("unknown subcommand {name:?}")),
         None => {
             eprint!("{USAGE}");
@@ -147,6 +150,63 @@ fn bootstrap(args: &[String], env: &Env) -> u8 {
         }
         Err(refusal) => {
             eprintln!("holzwave-server: {refusal}");
+            FAILURE_STATUS
+        }
+    }
+}
+
+/// The one key of the configuration file that `healthcheck` reads. The check is run by a container runtime with a short timeout,
+/// so it does not check the whole configuration (that is `check-config`) and does not refuse a file for keys it does not know.
+#[derive(serde::Deserialize)]
+struct RuntimeDirOnly {
+    runtime_dir: Option<std::path::PathBuf>,
+}
+
+/// The runtime directory the server was configured with: the key `runtime_dir` of the configuration file, or the default when
+/// the file is not there or does not name it.
+fn runtime_dir(env: &Env) -> Result<std::path::PathBuf, String> {
+    let file = env
+        .get(config::ENV_CONFIG)
+        .filter(|name| !name.is_empty())
+        .map_or_else(|| std::path::PathBuf::from(config::DEFAULT_CONFIG_PATH), std::path::PathBuf::from);
+    let default = || std::path::PathBuf::from(config::DEFAULT_RUNTIME_DIR);
+    let bytes = match config::Probe::read_config(&RealProbe, &file) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(default()),
+        Err(error) => return Err(format!("the configuration file {} cannot be read ({error})", file.display())),
+    };
+    if bytes.len() > config::MAX_CONFIG_BYTES {
+        return Err(format!("the configuration file {} is larger than {} bytes", file.display(), config::MAX_CONFIG_BYTES));
+    }
+    let parsed: RuntimeDirOnly = serde_json::from_slice(&bytes)
+        .map_err(|_| format!("the configuration file {} is not valid JSON with an object at the top", file.display()))?;
+    match parsed.runtime_dir {
+        Some(dir) if !dir.is_absolute() => Err(format!("runtime_dir {} must be an absolute path", dir.display())),
+        Some(dir) => Ok(dir),
+        None => Ok(default()),
+    }
+}
+
+/// `healthcheck`: asks the running server on its health socket. Prints `healthy` and exits 0 when it answers that it is ready,
+/// otherwise one sentence on standard error and exit status 1. It never takes longer than the probe time.
+fn healthcheck(args: &[String], env: &Env) -> u8 {
+    if let Some(arg) = args.first() {
+        return usage_error(&format!("healthcheck takes no arguments, got {arg:?}"));
+    }
+    let dir = match runtime_dir(env) {
+        Ok(dir) => dir,
+        Err(sentence) => {
+            eprintln!("holzwave-server: {sentence}");
+            return FAILURE_STATUS;
+        }
+    };
+    match health::probe(&dir, health::PROBE_TIMEOUT) {
+        Health::Healthy => {
+            println!("healthy");
+            0
+        }
+        other => {
+            eprintln!("holzwave-server: {}", other.sentence(&dir));
             FAILURE_STATUS
         }
     }
