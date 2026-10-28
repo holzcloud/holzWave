@@ -4026,4 +4026,301 @@ mod tests {
         assert!(core.ai().context_state(&chat, pane, Some("apple".to_owned()), None).is_err());
         assert_eq!(json_of(&core.ai().profiles()).as_object().expect("an object").len(), 2);
     }
+
+    // ---- the rows of the command table ------------------------------------------------------------------------------
+
+    use crate::commands::registry::{Outcome, lookup};
+
+    /// The command `name` through the registry, for the window `window`.
+    fn row_in(core: &AppCore, window: &str, name: &str, request: Value) -> Outcome {
+        lookup(name).unwrap_or_else(|| panic!("{name} is not a row")).call(core, window, &request.to_string())
+    }
+
+    fn row(core: &AppCore, name: &str, request: Value) -> Outcome {
+        row_in(core, MAIN_WINDOW, name, request)
+    }
+
+    /// The JSON value of an answer that must be an `Ok`.
+    fn row_ok(outcome: Outcome) -> Value {
+        match outcome {
+            Outcome::Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| panic!("{text:.200} is not JSON: {e}")),
+            other => panic!("expected an answer, got {other:?}"),
+        }
+    }
+
+    /// The error value of a call that must have failed with the object `{code, reason, text}`.
+    fn row_fault(outcome: &Outcome) -> Value {
+        let Outcome::Err(text) = outcome else { panic!("expected a fault, got {outcome:?}") };
+        let fault: Value = serde_json::from_str(text).unwrap_or_else(|e| panic!("{text:.200} is not JSON: {e}"));
+        let mut members: Vec<&str> = fault.as_object().unwrap_or_else(|| panic!("{text:.200} is no object")).keys().map(String::as_str).collect();
+        members.sort_unstable();
+        assert_eq!(members, ["code", "reason", "text"], "{text:.200}");
+        fault
+    }
+
+    /// The outcome the registry gives for the fault `fault` of the core.
+    fn as_fault(fault: &AiFault) -> Outcome {
+        Outcome::Err(serde_json::to_string(fault).expect("a fault is JSON"))
+    }
+
+    /// The outcome the registry gives for the answer `value` of the core.
+    fn as_answer<T: Serialize>(value: &T) -> Outcome {
+        Outcome::Ok(serde_json::to_string(value).expect("an answer is JSON"))
+    }
+
+    #[test]
+    fn row_the_chat_commands_answer_an_id_a_list_and_flags_as_the_core_does() {
+        let scratch = Scratch::new("row-chats");
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        register(&core, "scripted", scripted("scripted", Locality::OnDevice).with_turn(Script::reply("ok")));
+        let pane = pane_of(&core);
+
+        let made = row_ok(row(&core, "ai_conversation_new", json!({})));
+        let chat = made.as_str().expect("an id").to_owned();
+        assert!(ConversationId::parse(&chat).is_ok());
+        assert_ne!(made, row_ok(row(&core, "ai_conversation_new", json!({}))), "every call is a new id");
+        let empty = row(&core, "ai_conversation_list", json!({}));
+        assert_eq!(empty, as_answer(&core.ai().conversation_list().expect("a list")));
+        assert_eq!(row_ok(empty)["chats"], json!([]), "a new id makes no file, so the list is empty");
+
+        let ticket = row_ok(row(&core, "ai_send", json!({"conversation": chat, "text": "hello", "pane": pane, "profile": "scripted"})));
+        assert_eq!(ticket["conversation"], json!(chat));
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&chat)), "the turn ends");
+        let list = row_ok(row(&core, "ai_conversation_list", json!({})));
+        assert_eq!(list["chats"].as_array().map(Vec::len), Some(1), "the list holds the chat after a message");
+        assert_eq!(list["chats"][0]["id"], json!(chat));
+
+        assert_eq!(row(&core, "ai_cancel", json!({"conversation": chat})), Outcome::Ok("false".into()), "no turn is running");
+        assert_eq!(row(&core, "ai_conversation_delete", json!({"conversation": chat})), Outcome::Ok("true".into()));
+        assert_eq!(row(&core, "ai_conversation_delete", json!({"conversation": chat})), Outcome::Ok("false".into()));
+        let own = core.ai().conversation_delete("../x").expect_err("a bad id");
+        assert_eq!(row(&core, "ai_conversation_delete", json!({"conversation": "../x"})), as_fault(&own));
+        assert_eq!(row_fault(&row(&core, "ai_cancel", json!({"conversation": ""})))["code"], "invalid_conversation");
+    }
+
+    #[test]
+    fn row_a_profile_is_saved_and_removed_and_a_bad_one_is_the_fault_of_the_core() {
+        let scratch = Scratch::new("row-profiles");
+        let (core, _rec) = core_with(&scratch.0, KeyVault::new(Arc::new(MemoryStore::default())));
+
+        let id = row_ok(row(&core, "ai_profile_save", json!({"input": {"name": "Local model", "preset": "ollama"}})));
+        let id = id.as_str().expect("the id of the profile").to_owned();
+        let listed = row_ok(row(&core, "ai_profiles", json!({})));
+        assert!(listed["profiles"].as_array().expect("profiles").iter().any(|profile| profile["id"] == json!(id)), "{listed}");
+
+        // An input the core refuses is its fault, as an object, and nothing is saved.
+        let own = core.ai().profile_save(profile_msg("", Preset::Ollama)).expect_err("a profile needs a name");
+        let refused = row(&core, "ai_profile_save", json!({"input": {"name": "", "preset": "ollama"}}));
+        assert_eq!(refused, as_fault(&own));
+        let fault = row_fault(&refused);
+        assert_eq!((fault["code"].as_str(), fault["reason"].as_str()), (Some(own.code), own.reason));
+        // A member that could carry a key is not a member of the input: it is refused by name and runs nothing.
+        let strict = row(&core, "ai_profile_save", json!({"input": {"name": "Other", "preset": "ollama", "api_key": "sk-row-9"}}));
+        let Outcome::Err(text) = &strict else { panic!("{strict:?}") };
+        assert!(text.contains("unknown field") && text.contains("api_key") && !text.contains("sk-row-9"), "{text}");
+        assert_eq!(row_ok(row(&core, "ai_profiles", json!({}))), listed, "nothing was saved");
+
+        let removed = row(&core, "ai_profile_remove", json!({"profile": id}));
+        assert_eq!(row_ok(removed), json!({"removed": true, "key_deleted": true}));
+        let again = row(&core, "ai_profile_remove", json!({"profile": id}));
+        assert_eq!(again, match core.ai().profile_remove(&id) {
+            Ok(view) => as_answer(&view),
+            Err(fault) => as_fault(&fault),
+        });
+        assert_eq!(row_ok(row(&core, "ai_profiles", json!({})))["profiles"], json!([]));
+    }
+
+    #[test]
+    fn row_a_send_answers_a_ticket_at_once_and_the_turn_reaches_every_window_as_ai_events() {
+        let scratch = Scratch::new("row-send");
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        let provider = register(&core, "scripted", scripted("scripted", Locality::OnDevice).with_turn(Script::reply("Hello there")));
+        let chat = new_chat();
+        let pane = pane_of(&core);
+
+        let started = Instant::now();
+        let ticket = row_ok(row(&core, "ai_send", json!({"conversation": chat, "text": format!("hello {TEXT_CANARY}"), "pane": pane, "profile": "scripted"})));
+        assert!(started.elapsed() < Duration::from_secs(1), "a send returns at once");
+        assert_eq!(ticket["conversation"], json!(chat));
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&chat)), "the turn ends");
+        let events = rec.ai_events();
+        let kinds: Vec<&str> = events.iter().map(|(_, payload)| payload.0.kind.name()).collect();
+        assert_eq!((kinds.first(), kinds.last()), (Some(&"turn_started"), Some(&"turn_ended")));
+        for (target, payload) in &events {
+            assert_eq!(*target, Target::All, "every ai event is for every window, which is the one window main in the browser");
+            assert_eq!(json!(payload.0.turn), ticket["turn"]);
+        }
+        assert_eq!(provider.calls(), 1);
+
+        // A pane that is not open is refused before anything is stored or started.
+        let refused = row(&core, "ai_send", json!({"conversation": chat, "text": "again", "pane": 999_999_999u64, "profile": "scripted"}));
+        assert_eq!(row_fault(&refused)["code"], "no_such_pane");
+        assert_eq!(refused, as_fault(&AiFault::no_such_pane()));
+        // An offer without picked items, and picked items without an offer, are refused and nothing is stored.
+        let fresh = new_chat();
+        for lone in [json!({"offer": "a".repeat(32)}), json!({"picked": [1]})] {
+            let mut request = json!({"conversation": fresh, "text": "hi", "pane": pane, "profile": "scripted"});
+            request.as_object_mut().expect("an object").extend(lone.as_object().expect("an object").clone());
+            let fault = row_fault(&row(&core, "ai_send", request));
+            assert_eq!((fault["code"].as_str(), fault["reason"].as_str()), (Some("context"), Some("bad_pick")));
+        }
+        assert!(!scratch.chats().join(format!("{fresh}.json")).exists(), "nothing was stored");
+        assert_eq!(provider.calls(), 1, "the provider was not called again");
+        // A member the row does not have is refused by name, and the typed text is not repeated.
+        let Outcome::Err(text) = row(&core, "ai_send", json!({"conversation": fresh, "text": format!("x {TEXT_CANARY}"), "pane": pane, "context": "all of it"})) else {
+            panic!("a member that is not there")
+        };
+        assert!(text.contains("unknown field") && text.contains("context") && !text.contains(TEXT_CANARY), "{text}");
+    }
+
+    #[test]
+    fn row_the_context_commands_follow_the_core_and_the_preview_answers_labels_and_sizes_and_no_text() {
+        let scratch = Scratch::new("row-context");
+        let (core, _rec, pane, _provider) = core_showing(&scratch.0, "printf 'on screen zq-row-context\\r\\n'; sleep 30");
+        let chat = new_chat();
+        let route = json!({"conversation": chat, "pane": pane, "profile": "scripted", "model": null});
+
+        let state = row(&core, "ai_context_state", route.clone());
+        let own = core.ai_context_state(&chat, pane, Some("scripted".to_owned()), None).expect("a state");
+        assert_eq!(state, as_answer(&own));
+        assert_eq!(row_ok(state)["shared"], json!(false));
+        let shared = row_ok(row(
+            &core,
+            "ai_context_share",
+            json!({"conversation": chat, "pane": pane, "profile": "scripted", "model": null, "shared": true}),
+        ));
+        assert_eq!(shared["shared"], json!(true));
+
+        // The preview holds a label and a size for the screen, and no text; the program that draws the pane needs a moment.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let preview = loop {
+            let mut request = route.clone();
+            request["kinds"] = json!(["screen"]);
+            let outcome = row(&core, "ai_context_preview", request);
+            if let Outcome::Ok(text) = &outcome {
+                let view: Value = serde_json::from_str(text).expect("JSON");
+                if view["items"].as_array().is_some_and(|items| items.iter().any(|item| item["bytes"].as_u64().unwrap_or(0) > 0)) {
+                    break view;
+                }
+            }
+            assert!(Instant::now() < deadline, "no preview with a size: {outcome:?}");
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let item = &preview["items"][0];
+        assert_eq!(item["kind"], "screen");
+        assert!(item["label"].as_str().is_some_and(|label| !label.is_empty()), "{item}");
+        assert!(!preview.to_string().contains("zq-row-context"), "the preview carries no text: {preview}");
+        assert!(item.get("text").is_none() && item.get("content").is_none(), "{item}");
+
+        // A pane that is not open is refused as the core refuses it.
+        let gone = row(&core, "ai_context_state", json!({"conversation": chat, "pane": 999_999_999u64, "profile": "scripted", "model": null}));
+        assert_eq!(gone, as_fault(&AiFault::no_such_pane()));
+    }
+
+    #[test]
+    fn row_a_decision_is_refused_for_a_wrong_hash_or_verdict_and_released_by_the_right_hash() {
+        let tree = Scratch::new("row-tool-tree");
+        let scratch = Scratch::new("row-decide");
+        let notes = tool_tree(&tree.0);
+        let (core, rec) = core_with(&scratch.0, KeyVault::unavailable());
+        let provider = register(
+            &core,
+            "scripted",
+            scripted_tools("scripted")
+                .with_turn(tool_call_turn("call_1", "read_file", json!({"path": notes})))
+                .with_turn(text_turn("Done.")),
+        );
+        let chat = new_chat();
+        let pane = pane_of(&core);
+        row_ok(row(&core, "ai_send", json!({"conversation": chat, "text": "read my notes", "pane": pane, "profile": "scripted"})));
+        let proposed = event_of(&rec, &chat, "tool_proposed");
+        let hash = proposed["pending"]["hash"].as_str().expect("a hash").to_owned();
+        let decide = |verdict: &str, hash: &str| {
+            row(&core, "ai_decide", json!({"conversation": chat, "call_id": "call_1", "decision": verdict, "hash": hash}))
+        };
+
+        let wrong = decide("allow", &"0".repeat(64));
+        let odd = decide("maybe", &hash);
+        for (outcome, reason) in [(&wrong, "hash_mismatch"), (&odd, "invalid_decision")] {
+            let fault = row_fault(outcome);
+            assert_eq!((fault["code"].as_str(), fault["reason"].as_str()), (Some("tool"), Some(reason)));
+            assert!(!format!("{outcome:?}").contains(&hash), "a fault shows a hash");
+        }
+        assert_eq!(wrong, as_fault(&core.ai_decide(&chat, "call_1", "allow", &"0".repeat(64)).expect_err("a wrong hash")));
+        let waiting = row_ok(row(&core, "ai_turn_snapshot", json!({"conversation": chat})));
+        assert_eq!(waiting["pending"], json!([proposed["pending"]]), "the card stays after every refusal");
+        assert_eq!(provider.calls(), 1, "the model waits for the result");
+        assert!(events_of(&rec, &chat, "tool_result").is_empty(), "nothing ran");
+
+        assert_eq!(decide("allow", &hash), Outcome::Ok("null".into()), "the right hash releases the call");
+        let result = event_of(&rec, &chat, "tool_result");
+        assert_eq!(result["is_error"], json!(false));
+        assert!(result["content"].as_str().is_some_and(|content| content.contains(TOOL_TEXT)), "{result}");
+        assert!(wait_for(Duration::from_secs(5), || rec.ended(&chat)), "the turn ends");
+        let spent = decide("allow", &hash);
+        assert_eq!((row_fault(&spent)["code"].as_str(), row_fault(&spent)["reason"].as_str()), (Some("tool"), Some("unknown_call")));
+        println!("Approvals: hash_mismatch, invalid_decision, unknown_call");
+    }
+
+    #[test]
+    fn row_an_undo_of_a_change_nobody_made_is_the_fault_undo_unknown_change() {
+        let scratch = Scratch::new("row-undo");
+        let (core, _rec) = core_with(&scratch.0, KeyVault::unavailable());
+        let chat = new_chat();
+
+        let outcome = row(&core, "ai_undo", json!({"conversation": chat, "call_id": "call_9"}));
+
+        let fault = row_fault(&outcome);
+        assert_eq!((fault["code"].as_str(), fault["reason"].as_str()), (Some("undo"), Some("unknown_change")));
+        assert_eq!(outcome, as_fault(&core.ai_undo(&chat, "call_9").expect_err("an unknown change")));
+        assert_eq!(row_fault(&row(&core, "ai_undo", json!({"conversation": "../x", "call_id": "call_9"})))["code"], "invalid_conversation");
+    }
+
+    #[test]
+    fn row_a_request_of_wsh_ai_waits_in_its_window_and_only_its_seal_releases_it() {
+        use holzwave_core::ai::service::AskEvent;
+
+        let scratch = Scratch::new("row-ask");
+        let (core, rec, device) = core_with_device(&scratch.0, "available", "none");
+        let pane = pane_of(&core);
+        core.ai().device_ready_for_ask();
+        let asking = core.clone();
+        let worker = std::thread::spawn(move || {
+            let (gone, mut out) = (holzwave_ipc::Gone::new(), AskCollect::default());
+            asking.ai_ask(Some(pane), "what is this".to_owned(), String::new(), &gone, &mut out)
+        });
+        assert!(wait_for(Duration::from_secs(5), || !ask_events(&rec).is_empty()), "the card is shown");
+        let view = match ask_events(&rec).remove(0) {
+            AskEvent::Waiting { view } => view,
+            other => panic!("the first event is a waiting card, not {other:?}"),
+        };
+
+        // The card waits in the window main and in no other.
+        let pending = row_ok(row(&core, "ai_ask_pending", json!({})));
+        assert_eq!(pending.as_array().map(Vec::len), Some(1), "{pending}");
+        assert_eq!(pending[0]["ask"], json!(view.ask));
+        assert_eq!(row_in(&core, "window-9", "ai_ask_pending", json!({})), Outcome::Ok("[]".into()));
+
+        // A wrong seal, a verdict that is neither word and an unknown request are refused, and the card stays.
+        let answer = |ask: &str, verdict: &str, seal: &str| row(&core, "ai_ask_answer", json!({"ask": ask, "verdict": verdict, "seal": seal}));
+        let wrong_seal = "0".repeat(view.seal.len());
+        for (outcome, reason) in [
+            (answer(&view.ask, "send", &wrong_seal), "seal_mismatch"),
+            (answer(&view.ask, "maybe", &view.seal), "bad_verdict"),
+            (answer(&"0".repeat(view.ask.len()), "send", &view.seal), "unknown_ask"),
+        ] {
+            let fault = row_fault(&outcome);
+            assert_eq!((fault["code"].as_str(), fault["reason"].as_str()), (Some("ask"), Some(reason)), "{outcome:?}");
+            assert!(!format!("{outcome:?}").contains(&view.seal), "a fault shows no seal");
+        }
+        assert_eq!(row_ok(row(&core, "ai_ask_pending", json!({}))).as_array().map(Vec::len), Some(1), "the card is still waiting");
+
+        // Its own seal releases it; here the person refuses, and nothing reached the stand-in.
+        assert_eq!(answer(&view.ask, "refuse", &view.seal), Outcome::Ok("null".into()));
+        let ended = worker.join().expect("the ask ends");
+        assert!(ended.is_err(), "a refused ask ends with its sentence: {ended:?}");
+        assert_eq!(device.scripted().calls(), 0, "no request reached the stand-in");
+        assert_eq!(row(&core, "ai_ask_pending", json!({})), Outcome::Ok("[]".into()));
+        println!("Approvals: seal_mismatch, bad_verdict, unknown_ask");
+    }
 }

@@ -2183,3 +2183,29 @@ fn tracer_the_tool_list_is_the_answer_of_the_core() {
     let extra = error_text(&world.call("integration_tools", r#"{"zz_extra":1}"#));
     assert!(extra.contains("unknown field") && extra.contains("zz_extra"), "{extra}");
 }
+
+#[test]
+fn key_clear_removes_the_key_from_the_injected_store_and_a_locked_store_says_secrets_are_locked() {
+    let (world, vault) = vaulted("key-clear");
+    let id = make_profile(&world);
+    let key = format!(r#","api_key":"{API_KEY}""#);
+    assert_eq!(world.call("ai_key_set", &key_args(&id, &key)), Outcome::Ok("null".into()));
+    assert_eq!(world.call("ai_has_key", &key_args(&id, "")), Outcome::Ok("true".into()));
+
+    let cleared = world.call("ai_key_clear", &key_args(&id, ""));
+
+    assert_eq!(cleared, Outcome::Ok("null".into()));
+    assert_eq!(world.call("ai_has_key", &key_args(&id, "")), Outcome::Ok("false".into()));
+    assert_eq!(world.call("ai_key_clear", &key_args(&id, "")), Outcome::Ok("null".into()), "clearing a key that is not there is no problem");
+    let extra = error_text(&world.call("ai_key_clear", &key_args(&id, r#","zz_extra":1"#)));
+    assert!(extra.contains("unknown field") && extra.contains("zz_extra"), "{extra}");
+
+    assert_eq!(world.call("ai_key_set", &key_args(&id, &key)), Outcome::Ok("null".into()));
+    vault.lock();
+    let locked = world.call("ai_key_clear", &key_args(&id, ""));
+    let fault = fault_object(&locked);
+    assert_eq!((fault["text"].as_str(), fault["code"].as_str(), fault["reason"].as_str()), (Some("secrets are locked"), Some("key"), Some("locked")));
+    assert!(!format!("{locked:?}").contains(API_KEY));
+    vault.unlock();
+    assert_eq!(world.call("ai_has_key", &key_args(&id, "")), Outcome::Ok("true".into()), "the refused clear removed nothing");
+}

@@ -1536,4 +1536,315 @@ mod tests {
         let own = answer.panes.iter().find(|entry| entry.pane == pane).expect("the new block has an entry");
         assert_eq!(own.context.as_deref(), Some("dev"), "the new block starts from the pick the rows gave");
     }
+
+    // ---- the rows of the command table ------------------------------------------------------------------------------
+
+    use crate::commands::registry::{Outcome, lookup};
+
+    /// The command `name` through the registry, for the window `window`.
+    fn row_in(core: &AppCore, window: &str, name: &str, request: serde_json::Value) -> Outcome {
+        lookup(name).unwrap_or_else(|| panic!("{name} is not a row")).call(core, window, &request.to_string())
+    }
+
+    fn row(core: &AppCore, name: &str, request: serde_json::Value) -> Outcome {
+        row_in(core, "main", name, request)
+    }
+
+    /// The JSON value of an answer that must be an `Ok`.
+    fn row_ok(outcome: Outcome) -> serde_json::Value {
+        match outcome {
+            Outcome::Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| panic!("{text:.200} is not JSON: {e}")),
+            other => panic!("expected an answer, got {other:?}"),
+        }
+    }
+
+    /// The error value of a call that must have failed with the object `{code, reason, text}`.
+    fn row_fault(outcome: &Outcome) -> serde_json::Value {
+        let Outcome::Err(text) = outcome else { panic!("expected a fault, got {outcome:?}") };
+        let fault: serde_json::Value = serde_json::from_str(text).unwrap_or_else(|e| panic!("{text:.200} is not JSON: {e}"));
+        assert_eq!(keys_of(&fault), ["code", "reason", "text"], "{text:.200}");
+        fault
+    }
+
+    /// The outcome the registry gives for the fault `fault` of the core.
+    fn as_fault(fault: &IntegrationFault) -> Outcome {
+        Outcome::Err(serde_json::to_string(fault).expect("a fault is JSON"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn row_the_reads_the_selection_and_the_context_answer_what_the_core_answers_and_a_refusal_is_the_fault_object() {
+        let machine = Machine::new("row-reads");
+        let _fake = fake_cli::FakeCli::new(&machine.bin, "kubectl").prints(&fixture("kubectl/config_view.json"));
+        let (core, _rec) = machine.core();
+
+        let read = row_ok(row(&core, "integration_run", serde_json::json!({"tool": "kube", "verb": "contexts", "pane": null, "args": {}})));
+        let own = serde_json::to_value(core.integration_run("kube", "contexts", None, &args(&[])).expect("a read")).expect("JSON");
+        assert_eq!(read["view"], own["view"], "the view model of the read");
+        assert_eq!(keys_of(&read), keys_of(&own), "the members of the answer");
+
+        let selected = row(&core, "integration_select", serde_json::json!({"tool": "kube", "pane": 3, "selection": {"context": "dev"}}));
+        let own = core.integration_select("kube", Some(3), &with_context("dev")).expect("a selection");
+        assert_eq!(selected, Outcome::Ok(serde_json::to_string(&own).expect("JSON")));
+        let pick = row(&core, "integration_select", serde_json::json!({"tool": "kube", "pane": null, "selection": {"context": "kind-test"}}));
+        assert!(matches!(pick, Outcome::Ok(_)), "the pick of the tool: {pick:?}");
+
+        let context = row_ok(row(&core, "integration_context", serde_json::json!({"pane": 3, "refresh": false})));
+        assert_eq!(keys_of(&context), ["panes", "rows"]);
+        assert_eq!(context["rows"].as_array().map(Vec::len), Some(4), "one row for each of the four tools");
+        let panes = serde_json::to_value(core.integration_context(Some(3), false).panes).expect("JSON");
+        assert_eq!(context["panes"], panes);
+        assert_eq!(context["panes"][0]["pane"], serde_json::json!(3));
+
+        for (name, request) in [
+            ("integration_run", serde_json::json!({"tool": "nonesuch", "verb": "contexts", "pane": null, "args": {}})),
+            ("integration_select", serde_json::json!({"tool": "nonesuch", "pane": null, "selection": {}})),
+        ] {
+            let fault = row_fault(&row(&core, name, request));
+            assert_eq!((fault["code"].as_str(), fault["text"].as_str().map(|text| text.ends_with('.'))), (Some("refused"), Some(true)), "{name}");
+        }
+        let own = core.integration_run("kube", "nonesuch", None, &args(&[])).expect_err("no such verb");
+        assert_eq!(row(&core, "integration_run", serde_json::json!({"tool": "kube", "verb": "nonesuch", "pane": null, "args": {}})), as_fault(&own));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn row_a_card_is_prepared_confirmed_once_and_cancelled_and_a_wrong_hash_runs_nothing() {
+        let machine = Machine::new("row-card");
+        let fake = counted(fake_cli::FakeCli::new(&machine.bin, "kubectl").prints("pod \"api-0\" deleted\n"));
+        let (core, _rec) = machine.core();
+        let pod = serde_json::json!({"tool": "kube", "verb": "delete_pod", "pane": 3, "args": {"pod": "api-0"}});
+
+        let card = row_ok(row(&core, "integration_prepare", pod.clone()));
+        let (ticket, hash) = (card["ticket"].as_str().expect("a ticket").to_owned(), card["hash"].as_str().expect("a hash").to_owned());
+        assert_eq!((card["tool"].as_str(), card["verb"].as_str()), (Some("kube"), Some("delete_pod")));
+        assert_eq!(hash.len(), 64);
+        assert_eq!(runs(&fake), 0, "preparing a card starts nothing");
+        // A verb that only reads needs no card.
+        let read = row(&core, "integration_prepare", serde_json::json!({"tool": "kube", "verb": "pods", "pane": null, "args": {}}));
+        assert_eq!(row_fault(&read)["code"], "refused");
+
+        // A wrong hash is the fault of a ticket with the core's stable reason and runs nothing; the card stays.
+        let wrong = "0".repeat(64);
+        let own = core.integration_confirm("main", &ticket, &wrong).expect_err("a wrong hash");
+        let refused = row(&core, "integration_confirm", serde_json::json!({"ticket": ticket, "hash": wrong}));
+        assert_eq!(refused, as_fault(&own));
+        assert_eq!(row_fault(&refused)["code"], "ticket");
+        assert!(!format!("{refused:?}").contains(&hash), "a fault shows no hash");
+        assert_eq!(runs(&fake), 0);
+
+        // The right hash runs the verb once, with the argument list of the card; a replay runs nothing.
+        let done = row_ok(row(&core, "integration_confirm", serde_json::json!({"ticket": ticket, "hash": hash})));
+        assert_eq!((done["kind"].as_str(), done["note"].as_str()), (Some("ran"), Some("pod \"api-0\" deleted")));
+        assert_eq!(runs(&fake), 1);
+        assert_eq!(argv(&fake), card["argv"].as_array().expect("an argument list").iter().map(|a| a.as_str().expect("text").to_owned()).collect::<Vec<_>>());
+        let replay = row(&core, "integration_confirm", serde_json::json!({"ticket": ticket, "hash": hash}));
+        assert_eq!(row_fault(&replay)["code"], "ticket");
+        assert_eq!(runs(&fake), 1, "a ticket is good once");
+
+        // Cancel ends a ticket, and a ticket that is not there is no problem.
+        let second = row_ok(row(&core, "integration_prepare", pod));
+        let (ticket, hash) = (second["ticket"].as_str().expect("a ticket").to_owned(), second["hash"].as_str().expect("a hash").to_owned());
+        for id in [ticket.as_str(), ticket.as_str(), "no-such-ticket"] {
+            assert_eq!(row(&core, "integration_cancel", serde_json::json!({"ticket": id})), Outcome::Ok("null".into()));
+        }
+        let after = row(&core, "integration_confirm", serde_json::json!({"ticket": ticket, "hash": hash}));
+        assert_eq!(row_fault(&after)["code"], "ticket");
+        assert_eq!(runs(&fake), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn row_a_confirm_and_a_launch_work_on_the_layout_of_the_calling_window() {
+        let machine = Machine::new("row-launch");
+        let kubectl = fake_cli::FakeCli::new(&machine.bin, "kubectl");
+        let (core, _rec) = machine.core();
+        let before = core.view_in("main").expect("the main window");
+        core.integration_select("kube", Some(3), &with_context("dev")).expect("a selection of the pane the person is in");
+
+        // A read terminal opens in a tab of the window main, and starts nothing until the page starts it.
+        let logs = serde_json::json!({"tool": "kube", "verb": "logs", "pane": null, "args": {"pod": "api-0"}, "placement": "tab"});
+        let launched = row_ok(row(&core, "integration_launch", logs.clone()));
+        let pane = launched["pane"].as_u64().expect("the new pane");
+        assert_eq!(launched["view"]["focus"], serde_json::json!(pane));
+        assert_eq!(launched["view"]["tabs"].as_array().map(Vec::len), Some(before.tabs.len() + 1));
+        assert!(!kubectl.started(), "a launch registers and starts nothing");
+        core.start_pane(pane, 80, 24, 0, 0).expect("the pane starts");
+        assert!(wait_until(std::time::Duration::from_secs(20), || ran(&kubectl)), "the page starts the tool");
+        assert_eq!(argv(&kubectl), ["logs", "--follow", "--tail=200", "--", "api-0"].map(String::from).to_vec());
+
+        // A verb that needs a card, and a tool that is not one, are refused and leave no pane.
+        let panes_now = core.view_in("main").expect("the main window").panes.len();
+        for (verb, tool) in [("exec", "kube"), ("delete_pod", "kube"), ("logs", "nonesuch")] {
+            let refused = row(&core, "integration_launch", serde_json::json!({"tool": tool, "verb": verb, "pane": null, "args": {"pod": "api-0"}, "placement": "tab"}));
+            assert_eq!(row_fault(&refused)["code"], "refused", "{tool} {verb}");
+        }
+        assert_eq!(core.view_in("main").expect("the main window").panes.len(), panes_now);
+
+        // A window that does not exist gets no pane.
+        let elsewhere = row_in(&core, "window-77", "integration_launch", logs);
+        assert!(matches!(elsewhere, Outcome::Err(_)), "{elsewhere:?}");
+        assert_eq!(core.view_in("main").expect("the main window").panes.len(), panes_now);
+
+        // The confirm of an exec card opens its pane in the calling window and answers that window's layout.
+        let card = row_ok(row(&core, "integration_prepare", serde_json::json!({"tool": "kube", "verb": "exec", "pane": 3, "args": {"pod": "api-0"}})));
+        let ticket_hash = serde_json::json!({"ticket": card["ticket"], "hash": card["hash"]});
+        let elsewhere = row_in(&core, "window-77", "integration_confirm", ticket_hash.clone());
+        assert!(matches!(elsewhere, Outcome::Err(_)), "{elsewhere:?}");
+        let done = row_ok(row(&core, "integration_confirm", ticket_hash));
+        assert_eq!(done["kind"], "launched");
+        let (exec_pane, view) = (done["pane"].as_u64().expect("the new pane"), &done["view"]);
+        assert_eq!(view["focus"], serde_json::json!(exec_pane));
+        assert_eq!(done["note"], "Exec in pod api-0");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn row_a_binary_is_set_when_it_is_the_tools_own_executable_and_cleared_again() {
+        let machine = Machine::new("row-binary");
+        let found = fake_cli::FakeCli::new(&machine.bin, "kubectl");
+        let (core, _rec) = machine.core();
+        let kube = |tools: &serde_json::Value| tools.as_array().expect("the tools").iter().find(|tool| tool["id"] == "kube").expect("an entry").clone();
+        let other_dir = machine.root.join("other");
+        std::fs::create_dir_all(&other_dir).expect("a directory");
+        let mine = fake_cli::FakeCli::new(&other_dir, "kubectl");
+        let mine_path = mine.path().to_str().expect("a path").to_owned();
+
+        let tools = row_ok(row(&core, "integration_binary_set", serde_json::json!({"tool": "kube", "path": mine_path})));
+        assert_eq!(tools.as_array().map(Vec::len), Some(4), "the four tools again");
+        assert_eq!((kube(&tools)["binary"].as_str(), kube(&tools)["path"].as_str()), (Some(mine_path.as_str()), Some(mine_path.as_str())));
+        let relative = row(&core, "integration_binary_set", serde_json::json!({"tool": "kube", "path": "bin/kubectl"}));
+        assert_eq!(row_fault(&relative)["code"], "refused");
+        let evil = fake_cli::FakeCli::new(&other_dir, "kubectl-evil");
+        let named = row(&core, "integration_binary_set", serde_json::json!({"tool": "kube", "path": evil.path().to_str().expect("a path")}));
+        assert_eq!(row_fault(&named)["code"], "refused");
+        let own = core.integration_binary_set("nonesuch", &mine_path).expect_err("no such tool");
+        assert_eq!(row(&core, "integration_binary_set", serde_json::json!({"tool": "nonesuch", "path": mine_path})), as_fault(&own));
+        assert_eq!(kube(&row_ok(row(&core, "integration_tools", serde_json::json!({}))))["binary"].as_str(), Some(mine_path.as_str()), "a refusal changes nothing");
+
+        let cleared = row_ok(row(&core, "integration_binary_clear", serde_json::json!({"tool": "kube"})));
+        assert_eq!((kube(&cleared)["binary"].is_null(), kube(&cleared)["path"].as_str()), (true, found.path().to_str()));
+        let own = core.integration_binary_clear("nonesuch").expect_err("no such tool");
+        assert_eq!(row(&core, "integration_binary_clear", serde_json::json!({"tool": "nonesuch"})), as_fault(&own));
+    }
+
+    #[test]
+    fn row_a_profile_round_trips_and_its_secret_lives_in_the_store_and_in_no_answer_or_file() {
+        let machine = Machine::new("row-profiles");
+        let (core, _rec) = machine.core();
+        let mut answers = Vec::new();
+
+        let saved = row(&core, "integration_profile_save", serde_json::json!({"profile": production_profile()}));
+        assert_eq!(row_ok(saved.clone())["profiles"][0]["id"], "prod");
+        let set = row(&core, "integration_secret_set", serde_json::json!({"profile": "prod", "name": "AWS_SECRET_ACCESS_KEY", "value": CANARY}));
+        assert_eq!(set, Outcome::Ok("null".into()), "a value goes in and nothing comes out");
+        let listed = row(&core, "integration_profiles", serde_json::json!({}));
+        assert_eq!(row_ok(listed.clone())["profiles"][0]["secret_env"], serde_json::json!([{"name": "AWS_SECRET_ACCESS_KEY", "has_value": true}]));
+        assert_eq!(machine.store.get("int:prod:AWS_SECRET_ACCESS_KEY").expect("the store").as_deref(), Some(CANARY), "the injected store has it");
+        let cleared = row(&core, "integration_secret_clear", serde_json::json!({"profile": "prod", "name": "AWS_SECRET_ACCESS_KEY"}));
+        assert_eq!(cleared, Outcome::Ok("null".into()));
+        assert_eq!(machine.store.get("int:prod:AWS_SECRET_ACCESS_KEY").expect("the store"), None);
+        let refused = row(&core, "integration_secret_set", serde_json::json!({"profile": "prod", "name": "OTHER", "value": CANARY}));
+        assert_eq!((row_fault(&refused)["code"].as_str(), row_fault(&refused)["reason"].as_str()), (Some("profile"), Some("secret")));
+        let bad_profile = row(&core, "integration_profile_save", serde_json::json!({"profile": {"id": "Prod!", "tool": "kube", "name": CANARY}}));
+        assert_eq!(row_fault(&bad_profile)["code"], "profile");
+        let gone = row(&core, "integration_profile_remove", serde_json::json!({"id": "prod"}));
+        assert_eq!(row_ok(gone.clone())["profiles"], serde_json::json!([]));
+        let unknown = row(&core, "integration_profile_remove", serde_json::json!({"id": "Not A Valid Id"}));
+        assert_eq!(row_fault(&unknown)["code"], "profile");
+        answers.extend([saved, set, listed, cleared, refused, bad_profile, gone, unknown]);
+
+        for answer in &answers {
+            assert!(!format!("{answer:?}").contains(CANARY), "an answer holds the secret: {answer:?}");
+        }
+        for file in std::fs::read_dir(&machine.data).expect("the data directory").flatten() {
+            if file.path().is_file() {
+                let text = String::from_utf8_lossy(&std::fs::read(file.path()).expect("a file")).into_owned();
+                assert!(!text.contains(CANARY), "{} holds the secret", file.path().display());
+            }
+        }
+    }
+
+    /// A secret store that can be locked, with the error the server's store gives.
+    struct Lockable {
+        inner: MemoryStore,
+        locked: std::sync::atomic::AtomicBool,
+    }
+
+    #[derive(Debug)]
+    struct LockedError;
+
+    impl std::fmt::Display for LockedError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("secrets are locked")
+        }
+    }
+
+    impl std::error::Error for LockedError {}
+
+    impl Lockable {
+        fn check(&self) -> holzwave_core::Result<()> {
+            if self.locked.load(std::sync::atomic::Ordering::SeqCst) {
+                Err(holzwave_core::Error::Io(std::io::Error::other(LockedError)))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl SecretStore for Lockable {
+        fn get(&self, account: &str) -> holzwave_core::Result<Option<String>> {
+            self.check()?;
+            self.inner.get(account)
+        }
+
+        fn set(&self, account: &str, secret: &str) -> holzwave_core::Result<()> {
+            self.check()?;
+            self.inner.set(account, secret)
+        }
+
+        fn delete(&self, account: &str) -> holzwave_core::Result<()> {
+            self.check()?;
+            self.inner.delete(account)
+        }
+    }
+
+    #[test]
+    fn row_a_locked_store_reaches_the_page_as_the_fault_text_secrets_are_locked_for_the_tool_secrets() {
+        let machine = Machine::new("row-locked");
+        let store = Arc::new(Lockable { inner: MemoryStore::default(), locked: std::sync::atomic::AtomicBool::new(false) });
+        let rec = Arc::new(Rec::default());
+        let core = AppCore::new_with_parts(
+            machine.data.clone(),
+            rec,
+            ShellSpec::new("/bin/sh", &["-c", "cat"]),
+            AiParts::system(),
+            Some(IntegrationParts::new(machine.facts(), store.clone())),
+        );
+        row_ok(row(&core, "integration_profile_save", serde_json::json!({"profile": production_profile()})));
+        let value = |text: &str| serde_json::json!({"profile": "prod", "name": "AWS_SECRET_ACCESS_KEY", "value": text});
+        assert_eq!(row(&core, "integration_secret_set", value(CANARY)), Outcome::Ok("null".into()));
+
+        store.locked.store(true, std::sync::atomic::Ordering::SeqCst);
+        let set = row(&core, "integration_secret_set", value("second-canary-value"));
+        let clear = row(&core, "integration_secret_clear", serde_json::json!({"profile": "prod", "name": "AWS_SECRET_ACCESS_KEY"}));
+        for outcome in [&set, &clear] {
+            let fault = row_fault(outcome);
+            assert_eq!(fault["text"], "secrets are locked", "{outcome:?}");
+            assert_eq!((fault["code"].as_str(), fault["reason"].as_str()), (Some("profile"), Some("locked")));
+        }
+        // The list still answers, and says there is no value it can see.
+        let listed = row(&core, "integration_profiles", serde_json::json!({}));
+        assert!(matches!(listed, Outcome::Ok(_)), "{listed:?}");
+        for outcome in [&set, &clear, &listed] {
+            let text = format!("{outcome:?}");
+            assert!(!text.contains(CANARY) && !text.contains("second-canary-value"), "{text}");
+        }
+        // Nothing changed: after the unlock the first value is the one that is there.
+        store.locked.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(store.get("int:prod:AWS_SECRET_ACCESS_KEY").expect("the store").as_deref(), Some(CANARY));
+        // A refusal that is not a lock keeps the core's own words.
+        let refused = row(&core, "integration_secret_set", serde_json::json!({"profile": "prod", "name": "OTHER", "value": CANARY}));
+        assert_eq!(row_fault(&refused)["reason"], "secret");
+    }
 }
