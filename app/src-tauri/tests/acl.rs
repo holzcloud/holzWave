@@ -43,12 +43,14 @@ fn handler_commands(lib_rs: &str) -> Result<BTreeSet<String>, String> {
     Ok(names)
 }
 
-/// Every command the invoke handler answers: the ones `lib.rs` lists and the ones the shell writes from the host's command
-/// table. A name in both is an error, as a name twice in the list is.
+/// Every command the invoke handler answers: every row of the host's command table, the generated wrappers and the three
+/// that need the window shell. `lib.rs` lists nothing (a list there would be a second source, and the scan below fails
+/// when one appears), and a name twice in the table is an error.
 fn handler_names() -> BTreeSet<String> {
-    let mut names = handler_commands(LIB_RS).expect("handler list");
-    for row in COMMANDS.iter().filter(|row| row.shell == Shell::Generated) {
-        assert!(names.insert(row.name.to_owned()), "{} is generated from the table and listed in lib.rs as well", row.name);
+    assert!(handler_commands(LIB_RS).is_err(), "lib.rs lists commands by hand: the handler comes from the table alone");
+    let mut names = BTreeSet::new();
+    for row in COMMANDS {
+        assert!(names.insert(row.name.to_owned()), "{} is a row twice", row.name);
     }
     names
 }

@@ -854,8 +854,8 @@ mod protocol {
                 command.name
             );
             assert!(
-                LIB_SRC.contains(&format!("commands::{},", command.name)),
-                "{} is not registered in generate_handler!",
+                crate::desktop_table::HANDLED.contains(&command.name.as_str()),
+                "{} is not registered in the handler the table writes",
                 command.name
             );
         }

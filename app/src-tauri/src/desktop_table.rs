@@ -18,7 +18,6 @@
 use std::sync::Arc;
 
 use holzwave_host::commands::prelude::*;
-use holzwave_host::commands::registry::{Shell, lookup};
 use holzwave_host::state::AppCore;
 use tauri::ipc::Invoke;
 use tauri::{DynRuntime, State, WebviewWindow};
@@ -114,17 +113,26 @@ macro_rules! desktop_wrapper {
     };
 }
 
-/// The handler of the generated wrappers: the names of the rows whose shell part is `generated`, in a list that the
-/// shell's handler macro takes.
-macro_rules! generated_handler {
-    ([$($done:ident),*];) => {
-        tauri::generate_handler![$($done),*]
+/// The handler of every row: the names of the rows, each with the path of its wrapper (a generated one is in this
+/// module, a hand-written one in `commands.rs`), collected and then written once as the names `HANDLED` and the
+/// shell's invoke handler. Nothing else lists a command.
+macro_rules! table_handler {
+    ([$(($name:ident, $path:path))*];) => {
+        /// The names of the commands the handler answers, in the order of the table.
+        #[cfg(test)]
+        pub(crate) const HANDLED: &[&str] = &[$(stringify!($name)),*];
+
+        /// The invoke handler of the app: the generated wrappers and the hand-written ones, from the table alone. It
+        /// answers `false` for a name that is not a row.
+        pub fn handler() -> impl Fn(Invoke<DynRuntime>) -> bool + Send + Sync + 'static {
+            tauri::generate_handler![$($path),*]
+        }
     };
-    ([$($done:ident),*]; { name: $name:ident, shell: generated, $($more:tt)* } $($rest:tt)*) => {
-        generated_handler! { [$($done,)* $name]; $($rest)* }
+    ([$($done:tt)*]; { name: $name:ident, shell: generated, $($more:tt)* } $($rest:tt)*) => {
+        table_handler! { [$($done)* ($name, $name)]; $($rest)* }
     };
-    ([$($done:ident),*]; { name: $name:ident, shell: hand, $($more:tt)* } $($rest:tt)*) => {
-        generated_handler! { [$($done),*]; $($rest)* }
+    ([$($done:tt)*]; { name: $name:ident, shell: hand, $($more:tt)* } $($rest:tt)*) => {
+        table_handler! { [$($done)* ($name, crate::commands::$name)]; $($rest)* }
     };
 }
 
@@ -133,25 +141,25 @@ macro_rules! desktop_commands {
     ($({ $($row:tt)* })*) => {
         $(desktop_wrapper! { $($row)* })*
 
-        /// The invoke handler of the generated wrappers. It answers `false` for a name that is not one of them.
-        fn handler() -> impl Fn(Invoke<DynRuntime>) -> bool + Send + Sync + 'static {
-            generated_handler! { []; $({ $($row)* })* }
-        }
+        table_handler! { []; $({ $($row)* })* }
     };
 }
 
 holzwave_host::host_commands!(desktop_commands);
 
-/// Whether the wrapper of `name` is generated from a row of the table.
-fn generated(name: &str) -> bool {
-    lookup(name).is_some_and(|command| command.shell == Shell::Generated)
-}
+#[cfg(test)]
+mod tests {
+    use holzwave_host::commands::registry::COMMANDS;
 
-/// One invoke handler for the generated wrappers and the hand-written ones: a call whose name is a generated row goes to
-/// the generated handler and every other call to `rest`. The join stays until the hand-written list is empty.
-pub fn join(
-    rest: impl Fn(Invoke<DynRuntime>) -> bool + Send + Sync + 'static,
-) -> impl Fn(Invoke<DynRuntime>) -> bool + Send + Sync + 'static {
-    let table = handler();
-    move |invoke| if generated(invoke.message.command()) { table(invoke) } else { rest(invoke) }
+    use super::HANDLED;
+
+    #[test]
+    fn the_handler_answers_every_row_of_the_table_once_and_nothing_else() {
+        let rows: Vec<&str> = COMMANDS.iter().map(|row| row.name).collect();
+        assert_eq!(HANDLED, rows.as_slice(), "the handler is the table, in its order");
+        let mut sorted = rows.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), rows.len(), "a name twice");
+    }
 }

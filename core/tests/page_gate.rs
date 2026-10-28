@@ -444,9 +444,11 @@ fn only_one_capability_exists_and_it_grants_the_app_windows_only() {
 
 #[test]
 fn every_ai_command_and_the_markdown_command_has_the_triple_and_a_golden_row() {
-    let mut handler = handler_names(LIB_RS).expect("handler list");
-    // A command whose wrapper is written from a row of the command table is in the handler through the table.
-    handler.extend(generated_rows(TABLE_RS).into_iter().map(|(name, _)| name));
+    // The handler is written from the command table alone: lib.rs lists no command, and the commands in the handler are the
+    // generated rows and the wrappers that stay in commands.rs for the window shell (the table names them).
+    assert!(handler_names(LIB_RS).is_err(), "lib.rs lists commands by hand: the handler comes from the table alone");
+    let mut handler: BTreeSet<String> = generated_rows(TABLE_RS).into_iter().map(|(name, _)| name).collect();
+    handler.extend(command_signatures(COMMANDS_RS).into_iter().map(|s| s.name));
     let manifest = manifest_names(BUILD_RS).expect("manifest list");
     let permissions = permissions(CAPABILITY).expect("permissions");
     let golden: BTreeSet<String> = golden_commands().keys().cloned().collect();

@@ -440,12 +440,10 @@ pub fn run() {
                 responder.respond(response);
             });
         })
-        // The generated wrappers of the command table and the hand-written ones answer through one handler.
-        .invoke_handler(desktop_table::join(tauri::generate_handler![
-            commands::copy_selection,
-            commands::clipboard_text,
-            commands::window_ready,
-        ]))
+        // Every command comes from the one table in the host crate: `desktop_table` expands it with
+        // `tauri::generate_handler!` into the handler (the generated wrappers and the three that need the window shell),
+        // and there is no hand-written list.
+        .invoke_handler(desktop_table::handler())
         .build(tauri::generate_context!())
         .expect("error while building holzWave")
         .run(move |app, event| {
