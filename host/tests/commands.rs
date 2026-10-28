@@ -1895,3 +1895,283 @@ fn a_hand_written_row_has_its_wrapper_in_the_app_and_a_generated_row_has_none() 
 fn the_sentence_for_a_missing_command_is_the_one_the_page_shows() {
     assert_eq!(NOT_IN_BROWSER, "Not available in the browser.");
 }
+
+// ---- the third group: the assistant and the external tools -----------------------------------------------------------
+
+/// The error a locked store gives: the text of the server's `secrets are locked`, wrapped the way the server wraps it.
+#[derive(Debug)]
+struct LockedError;
+
+impl std::fmt::Display for LockedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("secrets are locked")
+    }
+}
+
+impl std::error::Error for LockedError {}
+
+/// A secret store in memory that can be locked, and that remembers every secret that was written to it. This is the
+/// injected store of the tests: the host hands it to the assistant and to the tools.
+#[derive(Default)]
+struct Vault {
+    inner: holzwave_core::secrets::MemoryStore,
+    locked: std::sync::atomic::AtomicBool,
+    written: Mutex<Vec<(String, String)>>,
+}
+
+impl Vault {
+    fn lock(&self) {
+        self.locked.store(true, Ordering::SeqCst);
+    }
+
+    fn unlock(&self) {
+        self.locked.store(false, Ordering::SeqCst);
+    }
+
+    fn refuse(&self) -> holzwave_core::Result<()> {
+        if self.locked.load(Ordering::SeqCst) { Err(holzwave_core::Error::Io(std::io::Error::other(LockedError))) } else { Ok(()) }
+    }
+
+    /// Every (account, secret) that was written, in order.
+    fn written(&self) -> Vec<(String, String)> {
+        self.written.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+}
+
+impl holzwave_core::secrets::SecretStore for Vault {
+    fn get(&self, account: &str) -> holzwave_core::Result<Option<String>> {
+        self.refuse()?;
+        self.inner.get(account)
+    }
+
+    fn set(&self, account: &str, secret: &str) -> holzwave_core::Result<()> {
+        self.refuse()?;
+        self.written.lock().unwrap_or_else(PoisonError::into_inner).push((account.to_owned(), secret.to_owned()));
+        self.inner.set(account, secret)
+    }
+
+    fn delete(&self, account: &str) -> holzwave_core::Result<()> {
+        self.refuse()?;
+        self.inner.delete(account)
+    }
+}
+
+/// A host that is the neutral one in everything but its store of secrets.
+struct Stored {
+    base: NeutralHost,
+    secrets: Arc<Vault>,
+}
+
+impl Host for Stored {
+    fn platform(&self) -> Platform {
+        self.base.platform()
+    }
+
+    fn secrets(&self) -> Arc<dyn holzwave_core::secrets::SecretStore> {
+        self.secrets.clone()
+    }
+
+    fn local_network(&self) -> Arc<dyn holzwave_host::local_network::Source> {
+        self.base.local_network()
+    }
+
+    fn text_scale(&self) -> u32 {
+        self.base.text_scale()
+    }
+
+    fn limits(&self) -> HostLimits {
+        self.base.limits()
+    }
+}
+
+/// A core over a store that the test keeps a handle to.
+fn vaulted(tag: &str) -> (World, Arc<Vault>) {
+    let vault = Arc::new(Vault::default());
+    let host: Arc<dyn Host> = Arc::new(Stored { base: NeutralHost::new(), secrets: vault.clone() });
+    (World::hosted(tag, host), vault)
+}
+
+/// A key that appears in tests only: a hit anywhere else is a leak.
+const API_KEY: &str = "sk-test-123";
+
+/// Make a profile of the assistant through the core, and answer its id.
+fn make_profile(world: &World) -> String {
+    let input = holzwave_host::ai_host::ProfileInputMsg {
+        id: None,
+        name: "tracer".to_owned(),
+        preset: holzwave_core::ai::profiles::Preset::OpenAi,
+        wire: None,
+        base_url: String::new(),
+        model: String::new(),
+        allow_lan_http: false,
+        acknowledge_gateway: false,
+    };
+    world.core.ai().profile_save(input).expect("a profile")
+}
+
+/// The arguments of a key command: the profile and the slot, then `more`.
+fn key_args(profile: &str, more: &str) -> String {
+    format!(r#"{{"profile":{},"slot":"provider"{more}}}"#, json_string(profile))
+}
+
+/// The error value of a call that must have failed with an object (`{code, reason, text}`).
+fn fault_object(outcome: &Outcome) -> serde_json::Value {
+    match outcome {
+        Outcome::Err(json) => {
+            let value: serde_json::Value = serde_json::from_str(json).unwrap_or_else(|e| panic!("{json:.200} is not JSON: {e}"));
+            assert!(value.is_object(), "the fault is an object, not {json:.200}");
+            value
+        }
+        other => panic!("expected a fault, got {other:?}"),
+    }
+}
+
+#[test]
+fn tracer_the_five_rows_have_the_scope_mode_cap_and_types_of_their_old_wrappers() {
+    let facts = |name: &str| {
+        let row = lookup(name).unwrap_or_else(|| panic!("{name} is not a row"));
+        let args: Vec<(&str, &str)> = row.args.iter().map(|arg| (arg.name, arg.ty)).collect();
+        (row.scope, row.mode, row.cap, row.shell, row.web, args, row.answer.replace(' ', ""), row.error)
+    };
+    let (none, asyncs, cap, generated, same) = (Scope::None, Mode::Async, CAP_DEFAULT, Shell::Generated, Web::Same);
+
+    assert_eq!(facts("ai_profiles"), (none, asyncs, cap, generated, same, vec![], "AiProfiles".to_owned(), None));
+    assert_eq!(
+        facts("ai_key_set"),
+        (none, asyncs, cap, generated, same, vec![("profile", "String"), ("slot", "KeySlot"), ("api_key", "String")], "()".to_owned(), Some("AiFault"))
+    );
+    assert_eq!(
+        facts("ai_has_key"),
+        (none, asyncs, cap, generated, same, vec![("profile", "String"), ("slot", "KeySlot")], "bool".to_owned(), Some("AiFault"))
+    );
+    assert_eq!(
+        facts("ai_turn_snapshot"),
+        (none, asyncs, cap, generated, same, vec![("conversation", "String")], "ChatState".to_owned(), Some("AiFault"))
+    );
+    assert_eq!(facts("integration_tools"), (none, asyncs, cap, generated, same, vec![], "Vec<ToolView>".to_owned(), None));
+}
+
+#[test]
+fn tracer_a_key_goes_into_the_injected_store_and_comes_out_of_no_answer() {
+    let (world, vault) = vaulted("tracer-key");
+    let id = make_profile(&world);
+    let mut answers = Vec::new();
+
+    let before = world.call("ai_has_key", &key_args(&id, ""));
+    assert_eq!(before, Outcome::Ok("false".into()));
+    let set = world.call("ai_key_set", &key_args(&id, &format!(r#","api_key":"{API_KEY}""#)));
+    assert_eq!(set, Outcome::Ok("null".into()), "a key goes in and nothing comes out");
+    let has = world.call("ai_has_key", &key_args(&id, ""));
+    assert_eq!(has, Outcome::Ok("true".into()));
+    let profiles = world.call("ai_profiles", "{}");
+    let listed = answer(profiles.clone());
+    assert_eq!(listed["profiles"][0]["id"], id.as_str());
+    assert_eq!(listed["profiles"][0]["key"], "present", "the state of the key is a word");
+    let cleared = world.call("ai_key_clear", &key_args(&id, ""));
+    assert_eq!(cleared, Outcome::Ok("null".into()));
+    let gone = world.call("ai_has_key", &key_args(&id, ""));
+    assert_eq!(gone, Outcome::Ok("false".into()));
+    answers.extend([before, set, has, profiles, cleared, gone]);
+
+    for outcome in &answers {
+        assert!(!format!("{outcome:?}").contains(API_KEY), "an answer holds the key: {outcome:?}");
+    }
+    let written = vault.written();
+    assert_eq!(written.len(), 1, "one write to the injected store: {:?}", written.iter().map(|(account, _)| account).collect::<Vec<_>>());
+    assert!(written[0].1.contains(API_KEY), "the key lives in the injected store");
+    assert_nothing_below_holds(&world.dir, API_KEY);
+    println!("Tracer: key of {} bytes set, has_key true, profile key state present, cleared, has_key false; answers: null true present null false", API_KEY.len());
+}
+
+#[test]
+fn tracer_a_locked_store_reaches_the_page_as_the_fault_text_secrets_are_locked() {
+    let (world, vault) = vaulted("tracer-locked");
+    let id = make_profile(&world);
+    assert_eq!(world.call("ai_key_set", &key_args(&id, &format!(r#","api_key":"{API_KEY}""#))), Outcome::Ok("null".into()));
+    vault.lock();
+    let mut answers = Vec::new();
+
+    for (name, args) in [
+        ("ai_key_set", key_args(&id, r#","api_key":"another-key-9""#)),
+        ("ai_key_clear", key_args(&id, "")),
+        ("ai_has_key", key_args(&id, "")),
+    ] {
+        let outcome = world.call(name, &args);
+        let fault = fault_object(&outcome);
+        assert_eq!(fault["text"], "secrets are locked", "{name}: {outcome:?}");
+        assert_eq!(fault["code"], "key", "{name}");
+        assert_eq!(fault["reason"], "locked", "{name}");
+        assert_eq!(fault.as_object().map(|object| object.len()), Some(3), "{name}: code, reason and text");
+        answers.push(outcome);
+    }
+    // The list of the profiles still answers; the state of the key is what the core says of a keychain that fails.
+    let profiles = world.call("ai_profiles", "{}");
+    assert_eq!(answer(profiles.clone())["profiles"][0]["key"], "unreadable");
+    answers.push(profiles);
+
+    for outcome in &answers {
+        let text = format!("{outcome:?}");
+        assert!(!text.contains(API_KEY) && !text.contains("another-key-9"), "an answer holds a key: {text}");
+    }
+    // Nothing changed: after the unlock the key that was saved first is still the one that is there.
+    vault.unlock();
+    assert_eq!(world.call("ai_has_key", &key_args(&id, "")), Outcome::Ok("true".into()));
+    assert_eq!(vault.written().len(), 1, "the refused write reached nothing");
+    println!("Tracer: locked store answers the fault text {:?} for set, clear and has_key; ai_profiles answers key state unreadable", "secrets are locked");
+}
+
+#[test]
+fn tracer_a_refusal_of_the_assistant_is_the_object_code_reason_text() {
+    let world = World::new("tracer-fault");
+    let own = world.core.ai().snapshot("../etc").expect_err("a chat id that is no chat id is refused");
+
+    let outcome = world.call("ai_turn_snapshot", r#"{"conversation":"../etc"}"#);
+
+    assert_eq!(outcome, Outcome::Err(serde_json::to_string(&own).expect("a fault is JSON")), "the text of the core's fault");
+    let fault = fault_object(&outcome);
+    let mut members: Vec<&str> = fault.as_object().expect("an object").keys().map(String::as_str).collect();
+    members.sort_unstable();
+    assert_eq!(members, ["code", "reason", "text"]);
+    assert_eq!((fault["code"].as_str(), fault["reason"].is_null()), (Some("invalid_conversation"), true));
+    assert_eq!(fault["text"], "that chat id is not valid");
+    // A chat nobody has written to is the empty state and no refusal.
+    let chat = world.core.ai().conversation_new().expect("an id");
+    let state = answer(world.call("ai_turn_snapshot", &format!(r#"{{"conversation":{}}}"#, json_string(&chat))));
+    assert_eq!((state["running"].as_bool(), state["turn"].as_u64()), (Some(false), Some(0)));
+    println!("Tracer: fault object {fault}");
+}
+
+#[test]
+fn tracer_a_key_command_reads_its_arguments_strictly_and_runs_nothing_when_it_refuses() {
+    let (world, vault) = vaulted("tracer-strict-key");
+    let id = make_profile(&world);
+    let before = world.events();
+    let key = format!(r#","api_key":"{API_KEY}""#);
+
+    let slot = error_text(&world.call("ai_key_set", &format!(r#"{{"profile":{},"slot":"nope"{key}}}"#, json_string(&id))));
+    assert!(slot.contains("unknown variant") && !slot.contains("nope"), "{slot}");
+    let extra = error_text(&world.call("ai_key_set", &key_args(&id, &format!(r#"{key},"zz_extra":1"#))));
+    assert!(extra.contains("unknown field") && extra.contains("zz_extra") && !extra.contains(API_KEY), "{extra}");
+    let missing = error_text(&world.call("ai_key_set", &key_args(&id, "")));
+    assert!(missing.contains("missing field") && missing.contains("api_key"), "{missing}");
+    let long = "Q".repeat(100 * 1024);
+    let cut = error_text(&world.call("ai_key_set", &format!(r#"{{"{long}":1}}"#)));
+    assert!(cut.chars().count() <= ERROR_TEXT_LIMIT, "{} characters", cut.chars().count());
+
+    assert!(vault.written().is_empty(), "nothing reached the store");
+    assert_eq!(world.events(), before);
+    assert_eq!(world.call("ai_has_key", &key_args(&id, "")), Outcome::Ok("false".into()));
+}
+
+#[test]
+fn tracer_the_tool_list_is_the_answer_of_the_core() {
+    let world = World::new("tracer-tools");
+
+    let outcome = world.call("integration_tools", "{}");
+
+    assert_eq!(outcome, Outcome::Ok(serde_json::to_string(&world.core.integration_tools()).expect("the tools are JSON")));
+    let tools = answer(outcome);
+    assert!(tools.as_array().is_some_and(|list| !list.is_empty()), "{tools}");
+    let extra = error_text(&world.call("integration_tools", r#"{"zz_extra":1}"#));
+    assert!(extra.contains("unknown field") && extra.contains("zz_extra"), "{extra}");
+}
