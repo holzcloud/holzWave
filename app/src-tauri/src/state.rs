@@ -65,6 +65,7 @@ mod protocol {
 
     const COMMANDS_SRC: &str = include_str!("commands.rs");
     const LIB_SRC: &str = include_str!("lib.rs");
+    const DESKTOP_TABLE_SRC: &str = include_str!("desktop_table.rs");
 
     /// Serialises the writers of the golden: both tests write the same bytes in update mode.
     static GOLDEN: Mutex<()> = Mutex::new(());
@@ -901,6 +902,22 @@ mod protocol {
         assert_eq!(table["window_ready"], json!([]));
 
         check(|doc| doc["commands"].clone(), "the command argument names");
+    }
+
+    #[test]
+    fn the_commands_are_registered_by_the_table_and_by_no_list_in_lib_rs() {
+        let code = |source: &str| -> String {
+            source.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n")
+        };
+        let (lib, table) = (code(LIB_SRC), code(DESKTOP_TABLE_SRC));
+        assert!(!lib.contains("generate_handler"), "lib.rs lists commands by hand");
+        assert!(lib.contains("desktop_table::handler()"), "lib.rs installs the handler of the table");
+        // The wrappers that stay in commands.rs are named by the table's expansion, once each, from their rows.
+        assert!(table.contains("crate::commands::$name"), "the expansion names the hand wrappers from their rows");
+        for command in parse_commands(COMMANDS_SRC) {
+            let row = COMMANDS.iter().find(|row| row.name == command.name).expect("a wrapper of commands.rs is a row");
+            assert_eq!(row.shell, holzwave_host::commands::registry::Shell::Hand, "{}", command.name);
+        }
     }
 
     #[test]

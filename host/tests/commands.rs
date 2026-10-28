@@ -1576,8 +1576,25 @@ fn the_sync_starts_off_and_keeps_no_secret_when_it_cannot_reach_the_server() {
 
 // ---- guards over all the rows of the two table plans ---------------------------------------------------------------------
 
-/// The number of rows the table has once the assistant and the tools are in it: every command of the desktop.
-const ROWS: usize = 119;
+/// The commands of the protocol golden: name to the argument names in order. The golden is the page's contract, and the
+/// table is held to it; no count in this file is a literal.
+fn golden_commands() -> Vec<(String, Vec<String>)> {
+    let golden: serde_json::Value = serde_json::from_str(GOLDEN).expect("the golden is JSON");
+    golden["commands"]
+        .as_object()
+        .expect("the golden has commands")
+        .iter()
+        .map(|(name, args)| {
+            let args = args.as_array().expect("an argument list").iter().map(|a| a.as_str().expect("a name").to_owned()).collect();
+            (name.clone(), args)
+        })
+        .collect()
+}
+
+/// The number of rows the table must have: one for each command of the golden.
+fn rows_expected() -> usize {
+    golden_commands().len()
+}
 
 /// The 13 commands the browser build does not have: eight of the first table plan, five of the second.
 const THE_UNAVAILABLE: [&str; 13] = [
@@ -1601,7 +1618,7 @@ const THE_LARGE: [&str; 4] = ["ai_send", "file_save", "markdown_render", "widget
 
 #[test]
 fn the_table_has_its_rows_and_the_unavailable_set_is_pinned_by_name() {
-    assert_eq!(COMMANDS.len(), ROWS);
+    assert_eq!(COMMANDS.len(), rows_expected());
     let mut unavailable: Vec<&str> = COMMANDS.iter().filter(|row| row.web == Web::Unavailable).map(|row| row.name).collect();
     unavailable.sort_unstable();
 
@@ -1667,7 +1684,7 @@ fn every_row_refuses_an_unknown_field_by_name_before_anything_runs() {
         checked += 1;
     }
 
-    assert_eq!(checked, ROWS - THE_UNAVAILABLE.len(), "every row that reads its arguments was held to this");
+    assert_eq!(checked, rows_expected() - THE_UNAVAILABLE.len(), "every row that reads its arguments was held to this");
     assert_eq!(fingerprint(&world, &source), before, "a refused call changed something");
 }
 
@@ -1730,21 +1747,18 @@ fn no_row_but_file_range_ever_answers_raw_bytes() {
     assert_eq!(raw, ["file_range"], "the one raw row answered raw bytes once");
 }
 
-/// The problems of the split between the table and the wrappers that are still written out in the app: a command that is
-/// neither a row nor a wrapper of the AI or integration groups, a row that is also a wrapper without being a hand row, a
-/// wrapper for a command that does not exist, and a wrapper of the AI or integration groups that is also a row.
+/// The problems of the split between the table and the wrappers that are written out in the app: a command that is not a
+/// row, a row that is also a wrapper without being a hand row, a hand row without its wrapper, and a wrapper for a command
+/// that does not exist.
 fn coverage_problems(commands: &[&str], rows: &BTreeSet<&str>, hand_rows: &BTreeSet<&str>, written: &BTreeSet<&str>) -> Vec<String> {
-    let still_written = |name: &str| name.starts_with("ai_") || name.starts_with("integration_");
     let mut problems = Vec::new();
     for name in commands {
-        if rows.contains(name) {
-            if written.contains(name) && !hand_rows.contains(name) {
-                problems.push(format!("{name} is a row and still has a wrapper in commands.rs"));
-            }
-        } else if !still_written(name) {
-            problems.push(format!("{name} is neither a row of the table nor an ai_ or integration_ wrapper"));
-        } else if !written.contains(name) {
-            problems.push(format!("{name} is not a row and has no wrapper"));
+        if !rows.contains(name) {
+            problems.push(format!("{name} is not a row of the table"));
+        } else if written.contains(name) && !hand_rows.contains(name) {
+            problems.push(format!("{name} is a row and still has a wrapper in commands.rs"));
+        } else if hand_rows.contains(name) && !written.contains(name) {
+            problems.push(format!("{name} is a hand row and has no wrapper in commands.rs"));
         }
     }
     for name in written {
@@ -1760,7 +1774,7 @@ fn names<'a>(items: &[&'a str]) -> BTreeSet<&'a str> {
 }
 
 #[test]
-fn only_the_ai_and_integration_commands_are_still_written_out_and_every_other_command_is_a_row() {
+fn every_command_is_a_row_and_only_the_three_hand_rows_are_written_out() {
     let commands: Vec<&str> = surface_lines().iter().map(|(name, _)| *name).collect();
     let rows: BTreeSet<&str> = COMMANDS.iter().map(|row| row.name).collect();
     let hand: BTreeSet<&str> = COMMANDS.iter().filter(|row| row.shell == Shell::Hand).map(|row| row.name).collect();
@@ -1770,37 +1784,67 @@ fn only_the_ai_and_integration_commands_are_still_written_out_and_every_other_co
 
     assert!(problems.is_empty(), "{problems:#?}");
     assert_eq!(hand.iter().copied().collect::<Vec<_>>(), ["clipboard_text", "copy_selection", "window_ready"]);
-    let not_rows: BTreeSet<&str> = commands.iter().copied().filter(|name| !rows.contains(name)).collect();
-    // The assistant and the tools are rows now: nothing but the three hand wrappers is written out.
-    assert!(not_rows.is_empty(), "{not_rows:?}");
-    assert_eq!(rows.len(), commands.len());
+    assert_eq!(written, hand, "commands.rs writes out exactly the hand rows");
+    assert_eq!(rows.len(), commands.len(), "every command of the desktop is a row and no row is another");
 }
 
 #[test]
-fn the_coverage_rule_fails_for_a_command_that_is_neither_and_for_a_row_that_is_also_written() {
+fn the_coverage_rule_fails_for_a_command_that_is_no_row_and_for_a_row_that_is_also_written() {
     let rows = names(&["get_settings", "copy_selection", "set_setting"]);
     let hand = names(&["copy_selection"]);
-    let commands = ["get_settings", "copy_selection", "set_setting", "ai_send", "integration_run"];
-    let written = names(&["copy_selection", "ai_send", "integration_run"]);
+    let commands = ["get_settings", "copy_selection", "set_setting"];
+    let written = names(&["copy_selection"]);
     assert_eq!(coverage_problems(&commands, &rows, &hand, &written), Vec::<String>::new());
 
-    // A command that is neither a row nor a wrapper of the two groups.
-    let more = ["get_settings", "copy_selection", "set_setting", "ai_send", "integration_run", "brand_new"];
-    let problems = coverage_problems(&more, &rows, &hand, &written);
-    assert_eq!(problems, ["brand_new is neither a row of the table nor an ai_ or integration_ wrapper"]);
-    // A row of the table that is still written out as a wrapper (not a hand row).
-    let both = names(&["copy_selection", "ai_send", "integration_run", "set_setting"]);
-    let problems = coverage_problems(&commands, &rows, &hand, &both);
-    assert_eq!(problems, ["set_setting is a row and still has a wrapper in commands.rs"]);
-    // A wrapper of another group, written out and not a row.
-    let rows_without = names(&["get_settings", "copy_selection"]);
-    let problems = coverage_problems(&commands, &rows_without, &hand, &written);
-    assert_eq!(problems, ["set_setting is neither a row of the table nor an ai_ or integration_ wrapper"]);
-    // An ai_ command that is missing a wrapper, and a wrapper nobody declared.
-    let thin = names(&["copy_selection", "integration_run"]);
-    assert_eq!(coverage_problems(&commands, &rows, &hand, &thin), ["ai_send is not a row and has no wrapper"]);
-    let extra = names(&["copy_selection", "ai_send", "integration_run", "ai_ghost"]);
+    // A command that is not a row.
+    let more = ["get_settings", "copy_selection", "set_setting", "brand_new"];
+    assert_eq!(coverage_problems(&more, &rows, &hand, &written), ["brand_new is not a row of the table"]);
+    // A command of the old groups that someone writes out again, and so is not a row either.
+    let again = ["get_settings", "copy_selection", "set_setting", "ai_send"];
+    assert_eq!(coverage_problems(&again, &rows, &hand, &written), ["ai_send is not a row of the table"]);
+    // A row of the table that is also written out as a wrapper (not a hand row).
+    let both = names(&["copy_selection", "set_setting"]);
+    assert_eq!(coverage_problems(&commands, &rows, &hand, &both), ["set_setting is a row and still has a wrapper in commands.rs"]);
+    // A hand row whose wrapper is gone.
+    let none = names(&[]);
+    assert_eq!(coverage_problems(&commands, &rows, &hand, &none), ["copy_selection is a hand row and has no wrapper in commands.rs"]);
+    // A wrapper nobody declared.
+    let extra = names(&["copy_selection", "ai_ghost"]);
     assert_eq!(coverage_problems(&commands, &rows, &hand, &extra), ["ai_ghost has a wrapper but is no command of the desktop"]);
+}
+
+#[test]
+fn total_cover_the_table_is_the_golden_and_the_recorded_surface_and_nothing_else() {
+    let golden = golden_commands();
+    let golden_names: BTreeSet<&str> = golden.iter().map(|(name, _)| name.as_str()).collect();
+    let row_names: Vec<&str> = COMMANDS.iter().map(|row| row.name).collect();
+    let row_set: BTreeSet<&str> = row_names.iter().copied().collect();
+    let lines = surface_lines();
+
+    assert_eq!(row_set.len(), row_names.len(), "no name twice");
+    assert_eq!(row_set, golden_names, "the rows are the commands of the golden, as sets");
+    assert_eq!(COMMANDS.len(), golden.len(), "as many rows as commands of the golden");
+    assert_eq!(COMMANDS.len(), lines.len(), "as many rows as lines of the recorded surface");
+    for (name, args) in &golden {
+        let row = lookup(name).unwrap_or_else(|| panic!("{name} is in the golden and not in the table"));
+        let have: Vec<&str> = row.args.iter().map(|arg| arg.name).collect();
+        assert_eq!(have, args.iter().map(String::as_str).collect::<Vec<_>>(), "{name}: the argument names, in order");
+    }
+    for row in COMMANDS {
+        let (_, recorded) = lines.iter().find(|(name, _)| *name == row.name).unwrap_or_else(|| panic!("{} has no recorded line", row.name));
+        assert_eq!(surface_line(row), *recorded, "{}", row.name);
+    }
+    println!("Total cover: {} rows, {} golden commands, {} recorded lines (all read from files)", COMMANDS.len(), golden.len(), lines.len());
+}
+
+#[test]
+fn the_groups_of_the_table_are_exactly_the_nine_the_table_plans_made() {
+    let groups: BTreeSet<&str> = COMMANDS.iter().map(|row| row.group).collect();
+
+    assert_eq!(
+        groups.into_iter().collect::<Vec<_>>(),
+        ["ai", "blocks", "connections", "files", "history_sync", "integrations", "layout", "settings", "terminal"]
+    );
 }
 
 // ---- the recorded surface -----------------------------------------------------------------------------------------------

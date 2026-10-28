@@ -9,6 +9,7 @@ use holzwave_host::commands::registry::{COMMANDS, Shell, lookup};
 
 const LIB_RS: &str = include_str!("../src/lib.rs");
 const COMMANDS_RS: &str = include_str!("../src/commands.rs");
+const DESKTOP_TABLE_RS: &str = include_str!("../src/desktop_table.rs");
 const HOST_RS: &str = include_str!("../../../host/src/ai_host.rs");
 const INTEGRATE_HOST_RS: &str = include_str!("../../../host/src/integrate_host.rs");
 const IPC_RS: &str = include_str!("../../../ipc/src/lib.rs");
@@ -50,6 +51,28 @@ fn handler_names() -> BTreeSet<String> {
         assert!(names.insert(row.name.to_owned()), "{} is generated from the table and listed in lib.rs as well", row.name);
     }
     names
+}
+
+/// The number of times `needle` is in the code lines (comments left out) of `source`.
+fn code_count(source: &str, needle: &str) -> usize {
+    source.lines().filter(|line| !line.trim_start().starts_with("//")).map(|line| line.matches(needle).count()).sum()
+}
+
+#[test]
+fn the_invoke_handler_is_generated_from_the_table_alone() {
+    // lib.rs hands the shell the handler of the table and lists no command; there is no join with a second list.
+    assert_eq!(code_count(LIB_RS, ".invoke_handler(desktop_table::handler())"), 1, "lib.rs installs the handler of the table");
+    assert_eq!(code_count(LIB_RS, "generate_handler"), 0, "lib.rs writes no handler list of its own");
+    assert_eq!(code_count(LIB_RS, "desktop_table::join"), 0, "there is no second list to join with");
+    assert_eq!(code_count(LIB_RS, "commands::"), 0, "lib.rs names no command of commands.rs");
+    assert_eq!(code_count(COMMANDS_RS, "generate_handler"), 0);
+    // The one expansion of the shell's handler macro is in the table's expansion, and it has no join.
+    assert_eq!(code_count(DESKTOP_TABLE_RS, "tauri::generate_handler!"), 1, "one expansion point");
+    assert_eq!(code_count(DESKTOP_TABLE_RS, "fn join"), 0, "the join is deleted");
+    // Every row is in that handler, the three that need the window shell included.
+    assert_eq!(handler_names().len(), COMMANDS.len());
+    let hand: Vec<&str> = COMMANDS.iter().filter(|row| row.shell == Shell::Hand).map(|row| row.name).collect();
+    assert_eq!(hand, ["copy_selection", "clipboard_text", "window_ready"]);
 }
 
 /// The quoted names inside the manifest list of `build.rs` (`.commands(&["name", ...])`).
