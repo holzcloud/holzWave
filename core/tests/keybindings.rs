@@ -715,3 +715,30 @@ fn the_three_existing_tables_are_what_they_were() {
     }
     assert_eq!(pinned.len(), now.len(), "the number of rows differs from the pinned file");
 }
+
+/// The name of the browser build's table.
+const WEB: &str = "web";
+
+#[test]
+fn web_table_is_the_linux_table_with_the_same_rows_in_the_same_order() {
+    let web = actions_for(WEB);
+    let linux = actions_for("linux");
+    assert_eq!(web.len(), linux.len());
+    for (w, l) in web.iter().zip(linux) {
+        assert_eq!((w.id, w.title), (l.id, l.title));
+    }
+}
+
+#[test]
+fn web_table_moves_close_pane_new_tab_and_new_workspace_to_alt_shift() {
+    assert_eq!(default_of(WEB, "pane.close"), Some("Alt+Shift+W"));
+    assert_eq!(default_of(WEB, "tab.new"), Some("Alt+Shift+T"));
+    assert_eq!(default_of(WEB, "workspace.new"), Some("Alt+Shift+N"));
+}
+
+#[test]
+fn web_table_resolves_to_its_own_chords() {
+    let kb = Keybindings::default_for(WEB);
+    assert_eq!(kb.chord_of("pane.close").map(ToString::to_string), Some("Alt+Shift+W".to_string()));
+    assert_eq!(kb.chord_of("palette.open").map(ToString::to_string), Some("Ctrl+Shift+P".to_string()));
+}
