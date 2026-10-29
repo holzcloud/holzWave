@@ -5,7 +5,7 @@
 
 use std::io::BufWriter;
 use std::os::unix::net::UnixStream;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread::JoinHandle;
 
@@ -27,18 +27,18 @@ pub enum Item {
     Stop,
 }
 
-/// The sink of the core: events become `Evt` frames for the writer thread.
-pub struct ServerSink {
+/// The first form of the sink: events become `Evt` frames for the writer thread through a channel.
+pub struct ChannelSink {
     out: Sender<Item>,
 }
 
-impl ServerSink {
-    pub fn new(out: Sender<Item>) -> ServerSink {
-        ServerSink { out }
+impl ChannelSink {
+    pub fn new(out: Sender<Item>) -> ChannelSink {
+        ChannelSink { out }
     }
 }
 
-impl Sink for ServerSink {
+impl Sink for ChannelSink {
     fn send(&self, _target: Target, out: Out) {
         if matches!(out, Out::Exit) {
             return;
@@ -58,8 +58,145 @@ impl Sink for ServerSink {
     }
 }
 
+/// Where the soft cap of the outbound queue is: over it, frame events are dropped.
+pub const SOFT_CAP: usize = 8 * 1024 * 1024;
+
+/// Where the hard cap of the outbound queue is: over it, the link is declared dead.
+pub const HARD_CAP: usize = 64 * 1024 * 1024;
+
+/// Where the queue is low again: under it, a full frame is asked for every pane that lost one.
+pub const LOW_WATER: usize = 1024 * 1024;
+
+/// The three marks of the outbound queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueueLimits {
+    pub soft: usize,
+    pub hard: usize,
+    pub low: usize,
+}
+
+impl Default for QueueLimits {
+    fn default() -> QueueLimits {
+        QueueLimits { soft: SOFT_CAP, hard: HARD_CAP, low: LOW_WATER }
+    }
+}
+
+/// What became of a frame offered to the queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pushed {
+    Queued,
+    Dropped,
+    Dead,
+}
+
+/// The queue between everything that produces frames and the writer thread.
+pub struct Outbound {
+    limits: QueueLimits,
+}
+
+impl Outbound {
+    pub fn new(limits: QueueLimits) -> Arc<Outbound> {
+        Arc::new(Outbound { limits })
+    }
+
+    pub fn limits(&self) -> QueueLimits {
+        self.limits
+    }
+
+    pub fn push(&self, _frame: Frame) -> Pushed {
+        Pushed::Queued
+    }
+
+    pub fn set_repair(&self, _repair: impl Fn(u64) + Send + Sync + 'static) {}
+
+    pub fn close(&self) {}
+
+    pub fn queued_bytes(&self) -> usize {
+        0
+    }
+
+    pub fn dropped_frames(&self) -> u64 {
+        0
+    }
+
+    pub fn is_dead(&self) -> bool {
+        false
+    }
+}
+
+/// The sink of the core over the outbound queue.
+pub struct ServerSink {
+    queue: Arc<Outbound>,
+}
+
+impl ServerSink {
+    pub fn new(queue: Arc<Outbound>) -> ServerSink {
+        ServerSink { queue }
+    }
+}
+
+impl Sink for ServerSink {
+    fn send(&self, _target: Target, _out: Out) {
+        let _ = &self.queue;
+    }
+
+    fn close_window(&self, _label: &str) {}
+
+    fn open_window(&self, _label: &str, _place: &Place) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn cursor_spot(&self, _source: &str) -> CursorSpot {
+        CursorSpot::Nothing
+    }
+}
+
+/// A gate the writer thread waits at: closed by [`Gate::hold`], opened by [`Gate::release`]. A test closes it to stand in
+/// for a supervisor that does not read.
+#[derive(Debug, Default)]
+pub struct Gate {
+    held: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl Gate {
+    /// An open gate.
+    pub fn new() -> Arc<Gate> {
+        Arc::new(Gate::default())
+    }
+
+    /// Close the gate: the writer stops before its next frame.
+    pub fn hold(&self) {
+        *self.held.lock().unwrap_or_else(PoisonError::into_inner) = true;
+    }
+
+    /// Open the gate.
+    pub fn release(&self) {
+        *self.held.lock().unwrap_or_else(PoisonError::into_inner) = false;
+        self.changed.notify_all();
+    }
+
+    /// Wait until the gate is open.
+    pub fn pass(&self) {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        while *held {
+            held = self.changed.wait(held).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+/// The writer thread over the outbound queue: writes every frame to `link` until the queue is closed and empty, or dead.
+pub fn spawn_writer(link: UnixStream, queue: Arc<Outbound>, gate: Option<Arc<Gate>>) -> JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("hw-writer".into())
+        .spawn(move || {
+            let _ = (&link, &queue, &gate);
+        })
+        .expect("the writer thread starts")
+}
+
 /// Writes the frames of `items` to `link` until `Stop` or until the link fails.
-pub fn spawn_writer(link: UnixStream, items: Receiver<Item>) -> JoinHandle<()> {
+pub fn spawn_item_writer(link: UnixStream, items: Receiver<Item>) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name("hw-writer".into())
         .spawn(move || {

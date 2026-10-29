@@ -14,7 +14,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use holzwave_host::state::ShellSpec;
-use holzwave_server::wire::{CmdFrame, Ctl, Evt, Frame, Note, PROTOCOL_VERSION, Res, ResBody, read_frame, write_frame};
+use holzwave_server::wire::{
+    CmdFrame, Ctl, CtlOutcome, Evt, Frame, Note, PROTOCOL_VERSION, Res, ResBody, StoreState, read_frame, write_frame,
+};
 use holzwave_server::worker::runtime::{RunEnd, TestHooks, WorkerEnv, run_with};
 use serde_json::{Value, json};
 
@@ -218,6 +220,47 @@ impl Rig {
             thread.join().expect("the worker thread joined");
         }
         end
+    }
+
+    /// Sends a control that has a control id and waits for the `CtlDone` note that names it.
+    pub fn control(&mut self, ctl: Ctl, id: u64) -> CtlOutcome {
+        self.send(Frame::Ctl(ctl));
+        match self.wait_for(&format!("the CtlDone of control {id}"), PATIENCE, |f| {
+            matches!(f, Frame::Note(Note::CtlDone { ctl, .. }) if *ctl == id)
+        }) {
+            Frame::Note(Note::CtlDone { outcome, .. }) => outcome,
+            other => unreachable!("{other:?}"),
+        }
+    }
+
+    /// Every store state the worker announced, in order.
+    pub fn store_states(&self) -> Vec<StoreState> {
+        self.seen
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Note(Note::StoreState(state)) => Some(*state),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every pane count the worker announced, in order.
+    pub fn pane_counts(&self) -> Vec<u32> {
+        self.seen
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Note(Note::PaneCount(n)) => Some(*n),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The text of an error answer, parsed as JSON.
+    pub fn err(&mut self, socket: u32, name: &str, args: Value) -> Value {
+        match self.call(socket, name, args).body {
+            ResBody::Err(text) => serde_json::from_str(&text).expect("an error value is JSON"),
+            other => panic!("{name} did not fail: {other:?}"),
+        }
     }
 
     /// One line for every frame seen: the kind, the ids and the size of the text, never the text itself.

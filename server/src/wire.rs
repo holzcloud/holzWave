@@ -69,8 +69,12 @@
 use std::fmt;
 use std::io::{self, Read, Write};
 
+use subtle::ConstantTimeEq;
 use tokio_util::codec::LengthDelimitedCodec;
-use zeroize::Zeroizing;
+use zeroize::{ZeroizeOnDrop, Zeroizing};
+
+use crate::unlock::{KEY_BYTES, Kek};
+use crate::worker::secretstore::SlotKind;
 
 /// The most bytes of payload a frame carries: the largest command message (8 MiB for a paste, doubled for the JSON
 /// escaping of a document) is below 16 MiB, plus room for the fixed head.
@@ -203,13 +207,148 @@ pub struct Evt {
     pub text: String,
 }
 
-/// A control from the supervisor.
+/// The bytes of a slot id.
+pub const SLOT_ID_BYTES: usize = 16;
+
+/// The most slot keys one `Provision` carries.
+pub const MAX_PROVISION_SLOTS: usize = 4;
+
+/// A 32-byte key as it travels: wiped when dropped, a marker for `Debug`, compared in constant time.
+#[derive(Clone)]
+pub struct Key(Zeroizing<[u8; KEY_BYTES]>);
+
+impl Key {
+    /// A key from 32 bytes. The caller wipes its own copy.
+    pub fn from_bytes(bytes: &[u8; KEY_BYTES]) -> Key {
+        Key(Zeroizing::new(*bytes))
+    }
+
+    /// The bytes, for the code that uses the key and nothing else.
+    pub fn expose(&self) -> &[u8; KEY_BYTES] {
+        &self.0
+    }
+
+    /// The same bytes as a key-encryption key.
+    pub fn to_kek(&self) -> Kek {
+        Kek::from_bytes(&self.0)
+    }
+}
+
+impl ZeroizeOnDrop for Key {}
+
+impl fmt::Debug for Key {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Key(..)")
+    }
+}
+
+impl PartialEq for Key {
+    fn eq(&self, other: &Key) -> bool {
+        self.0.ct_eq(&*other.0).into()
+    }
+}
+
+impl Eq for Key {}
+
+/// A key with the kind and the id of the slot it opens: 49 bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SlotKey {
+    pub kind: SlotKind,
+    pub id: [u8; SLOT_ID_BYTES],
+    pub key: Key,
+}
+
+/// A key that opens a locked store for one change: its kind and the key, 33 bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpeningKey {
+    pub kind: SlotKind,
+    pub key: Key,
+}
+
+/// A control from the supervisor.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Ctl {
     /// The first frame: the protocol version and the caps of this person (0 is no cap).
     Init { version: u16, max_panes: u32, max_scrollback_lines: u32 },
     /// A browser connection is attached: it gets the replay of titles and working directories.
     Attach { socket: u32 },
+    /// A browser connection is gone.
+    Detach { socket: u32 },
+    /// Open the store with the key of a slot of `kind`.
+    Unlock { ctl: u64, kind: SlotKind, key: Key },
+    /// Close the store and wipe its data key.
+    Lock { ctl: u64 },
+    /// Close every pane, save the layout, say `Exiting` and end.
+    Shutdown,
+    /// Remove the store file and its siblings and wipe the key.
+    ResetSecrets { ctl: u64 },
+    /// Create the store with these slots (one to four).
+    Provision { ctl: u64, slots: Vec<SlotKey> },
+    /// Add or replace one slot; a store with none is created with it; a locked store is opened for the change with
+    /// `opening` and is locked again afterwards.
+    SetSlot { ctl: u64, slot: SlotKey, opening: Option<OpeningKey> },
+    /// Remove one slot.
+    RemoveSlot { ctl: u64, kind: SlotKind, id: [u8; SLOT_ID_BYTES] },
+}
+
+/// What a frame that holds a key prints: its name and nothing of its content.
+impl fmt::Debug for Ctl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Ctl::Init { version, max_panes, max_scrollback_lines } => f
+                .debug_struct("Init")
+                .field("version", version)
+                .field("max_panes", max_panes)
+                .field("max_scrollback_lines", max_scrollback_lines)
+                .finish(),
+            Ctl::Attach { socket } => f.debug_struct("Attach").field("socket", socket).finish(),
+            Ctl::Detach { socket } => f.debug_struct("Detach").field("socket", socket).finish(),
+            Ctl::Lock { ctl } => f.debug_struct("Lock").field("ctl", ctl).finish(),
+            Ctl::Shutdown => f.write_str("Shutdown"),
+            Ctl::ResetSecrets { ctl } => f.debug_struct("ResetSecrets").field("ctl", ctl).finish(),
+            Ctl::RemoveSlot { ctl, .. } => f.debug_struct("RemoveSlot").field("ctl", ctl).finish_non_exhaustive(),
+            Ctl::Unlock { ctl, .. } => f.debug_struct("Unlock").field("ctl", ctl).finish_non_exhaustive(),
+            Ctl::Provision { ctl, slots } => {
+                f.debug_struct("Provision").field("ctl", ctl).field("slots", &slots.len()).finish_non_exhaustive()
+            }
+            Ctl::SetSlot { ctl, .. } => f.debug_struct("SetSlot").field("ctl", ctl).finish_non_exhaustive(),
+        }
+    }
+}
+
+/// What the store is, as the worker tells the supervisor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreState {
+    /// There is no store file.
+    Absent = 0,
+    /// There is a store and the data key is not held.
+    Locked = 1,
+    /// The data key is held.
+    Unlocked = 2,
+}
+
+/// Why the worker ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitReason {
+    /// The supervisor asked for it.
+    Clean = 0,
+    /// The worker cannot go on.
+    Failure = 1,
+}
+
+/// What a control came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CtlOutcome {
+    /// It was done.
+    Done = 0,
+    /// The store is locked or the key does not open it; nothing changed.
+    Locked = 1,
+    /// The worker will not do it (a store exists already, the last slot, no such slot).
+    Refused = 2,
+    /// It could not be done (the file system failed).
+    Failed = 3,
+    /// There is no store.
+    Absent = 4,
 }
 
 /// A note from the worker.
@@ -217,6 +356,14 @@ pub enum Ctl {
 pub enum Note {
     /// The core is built and the worker answers commands.
     Ready,
+    /// The store changed.
+    StoreState(StoreState),
+    /// The number of panes in all windows changed.
+    PaneCount(u32),
+    /// The worker is ending.
+    Exiting(ExitReason),
+    /// The answer to the control `ctl`.
+    CtlDone { ctl: u64, outcome: CtlOutcome },
 }
 
 /// One frame.
@@ -351,6 +498,7 @@ impl Frame {
                 out.extend_from_slice(&nonzero(*socket)?.to_be_bytes());
             }
             Frame::Note(Note::Ready) => out.extend_from_slice(&[KIND_NOTE, NOTE_READY]),
+            Frame::Ctl(_) | Frame::Note(_) => return Err(WireError::BadValue("this frame is not written yet")),
         }
         if out.len() - start > MAX_PAYLOAD {
             return Err(WireError::TooLarge(out.len() - start));

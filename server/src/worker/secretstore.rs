@@ -85,7 +85,8 @@ pub enum SlotKind {
 }
 
 impl SlotKind {
-    fn from_byte(byte: u8) -> Option<SlotKind> {
+    /// The kind a byte of the file or of a frame names.
+    pub fn from_byte(byte: u8) -> Option<SlotKind> {
         match byte {
             1 => Some(SlotKind::Password),
             2 => Some(SlotKind::Passphrase),
@@ -93,6 +94,11 @@ impl SlotKind {
             4 => Some(SlotKind::Recovery),
             _ => None,
         }
+    }
+
+    /// The byte the file and the frames spell the kind with.
+    pub fn byte(self) -> u8 {
+        self as u8
     }
 }
 
@@ -659,4 +665,87 @@ impl SecretStore for EncryptedFileStore {
     fn delete(&self, account: &str) -> Result<()> {
         Ok(self.delete_inner(account)?)
     }
+}
+
+/// The directory of the worker inside the person's home.
+pub const DATA_DIR: &str = ".holzwave";
+
+/// The name of the store file inside the data directory.
+pub const STORE_FILE: &str = "secrets.store";
+
+/// Where the store of the person with the home `home` is: fixed, nothing a frame can change.
+pub fn store_path(home: &Path) -> PathBuf {
+    home.join(DATA_DIR).join(STORE_FILE)
+}
+
+/// The person's store as the worker holds it: absent, locked or open. It is the one secret store of the web host, and the
+/// controls of the supervisor change it.
+pub struct SecretsHandle {
+    path: PathBuf,
+}
+
+impl SecretsHandle {
+    /// The handle for the home `home`: a store file that is there is found locked.
+    pub fn open(home: &Path) -> SecretsHandle {
+        SecretsHandle { path: store_path(home) }
+    }
+
+    /// What the store is now.
+    pub fn state(&self) -> crate::wire::StoreState {
+        crate::wire::StoreState::Absent
+    }
+
+    pub fn provision(&self, _slots: &[(SlotKind, [u8; ID_BYTES], Kek)]) -> crate::wire::CtlOutcome {
+        crate::wire::CtlOutcome::Failed
+    }
+
+    pub fn set_slot(
+        &self,
+        _kind: SlotKind,
+        _id: [u8; ID_BYTES],
+        _kek: &Kek,
+        _opening: Option<(SlotKind, &Kek)>,
+    ) -> crate::wire::CtlOutcome {
+        crate::wire::CtlOutcome::Failed
+    }
+
+    pub fn remove_slot(&self, _kind: SlotKind, _id: [u8; ID_BYTES]) -> crate::wire::CtlOutcome {
+        crate::wire::CtlOutcome::Failed
+    }
+
+    pub fn unlock(&self, _kind: SlotKind, _kek: &Kek) -> crate::wire::CtlOutcome {
+        crate::wire::CtlOutcome::Failed
+    }
+
+    pub fn lock(&self) -> crate::wire::CtlOutcome {
+        crate::wire::CtlOutcome::Failed
+    }
+
+    pub fn reset(&self) -> crate::wire::CtlOutcome {
+        crate::wire::CtlOutcome::Failed
+    }
+
+    /// The path of the store file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl SecretStore for SecretsHandle {
+    fn get(&self, _account: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    fn set(&self, _account: &str, _secret: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn delete(&self, _account: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Removes the store file and every file the store makes beside it.
+pub fn remove_store_files(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
