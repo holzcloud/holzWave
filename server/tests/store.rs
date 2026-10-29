@@ -77,7 +77,7 @@ fn the_files_are_private_and_the_connection_is_set_up() {
     assert!(!d.trusted_schema);
     assert_eq!(d.busy_timeout_ms, 5000);
     assert_eq!(d.application_id, holzwave_server::store::APPLICATION_ID);
-    assert_eq!(d.user_version, 1);
+    assert_eq!(d.user_version, 2);
 }
 
 #[test]
@@ -719,8 +719,8 @@ fn a_write_that_fails_changes_nothing() {
 
 // ---- schema, versions, damaged files, links ----
 
-/// The schema of version 1 as a literal: table, then `(column, declared type)` sorted by column.
-const SCHEMA_V1: &[(&str, &[(&str, &str)])] = &[
+/// The schema of version 2 as a literal: table, then `(column, declared type)` sorted by column.
+const SCHEMA_V2: &[(&str, &[(&str, &str)])] = &[
     (
         "accounts",
         &[
@@ -728,6 +728,7 @@ const SCHEMA_V1: &[(&str, &[(&str, &str)])] = &[
             ("display_name", "TEXT"),
             ("handle", "BLOB"),
             ("id", "INTEGER"),
+            ("last_signin", "INTEGER"),
             ("role", "TEXT"),
             ("state", "TEXT"),
             ("uid", "INTEGER"),
@@ -801,19 +802,19 @@ const SCHEMA_V1: &[(&str, &[(&str, &str)])] = &[
 ];
 
 #[test]
-fn schema_v1_is_pinned() {
+fn schema_v2_is_pinned() {
     let (_scratch, store) = open("store-schema");
     let found = store.read(|tx| tx.schema()).expect("schema");
     let found: Vec<(String, Vec<(String, String)>)> = found.into_iter().map(|t| (t.name, t.columns)).collect();
-    let expected: Vec<(String, Vec<(String, String)>)> = SCHEMA_V1
+    let expected: Vec<(String, Vec<(String, String)>)> = SCHEMA_V2
         .iter()
         .map(|(table, columns)| {
             (table.to_string(), columns.iter().map(|(c, t)| (c.to_string(), t.to_string())).collect())
         })
         .collect();
     assert_eq!(found, expected);
-    let columns: usize = SCHEMA_V1.iter().map(|(_, c)| c.len()).sum();
-    println!("Schema pin: {} tables, {columns} columns", SCHEMA_V1.len());
+    let columns: usize = SCHEMA_V2.iter().map(|(_, c)| c.len()).sum();
+    println!("Schema pin: {} tables, {columns} columns", SCHEMA_V2.len());
 }
 
 /// Makes `<dir>/server/server.sqlite3` by hand with `setup` and returns the data directory.
@@ -846,14 +847,14 @@ fn a_database_with_a_newer_schema_is_refused_and_left_as_it_was() {
     let scratch = hand_made("store-newer", |conn| {
         conn.execute_batch("CREATE TABLE future (x INTEGER); INSERT INTO future VALUES (1);").expect("table");
         conn.pragma_update(None, "application_id", holzwave_server::store::APPLICATION_ID).expect("id");
-        conn.pragma_update(None, "user_version", 2).expect("version");
+        conn.pragma_update(None, "user_version", 3).expect("version");
     });
     let before = db_bytes(&scratch);
     let refused = Store::open(scratch.path()).expect_err("must refuse");
-    assert_eq!(refused, StoreError::NewerSchema { found: 2, supported: 1 });
+    assert_eq!(refused, StoreError::NewerSchema { found: 3, supported: 2 });
     let sentence = refused.to_string();
     println!("Newer schema sentence: {sentence}");
-    assert!(sentence.contains("version 2") && sentence.contains("up to 1"), "{sentence}");
+    assert!(sentence.contains("version 3") && sentence.contains("up to 2"), "{sentence}");
     assert_eq!(db_bytes(&scratch), before, "the bytes are unchanged");
     assert_eq!(siblings(&scratch), ["server.sqlite3"], "no -wal or -shm file was left behind");
 }
@@ -902,6 +903,54 @@ fn a_file_that_is_not_ours_is_refused_and_left_untouched() {
     );
 }
 
+/// Turns the database of a closed store back into one of schema version 1: no `last_signin` column and `user_version` 1.
+fn downgrade_to_v1(scratch: &Scratch) {
+    let conn = rusqlite::Connection::open(scratch.join("server/server.sqlite3")).expect("a second connection");
+    conn.execute_batch("ALTER TABLE accounts DROP COLUMN last_signin;").expect("drop the column");
+    conn.pragma_update(None, "user_version", 1).expect("version");
+}
+
+fn columns_of_accounts(scratch: &Scratch) -> Vec<(String, String, bool)> {
+    let conn = rusqlite::Connection::open(scratch.join("server/server.sqlite3")).expect("a second connection");
+    let mut stmt = conn.prepare("SELECT name, type, \"notnull\" FROM pragma_table_info('accounts') ORDER BY cid").expect("prepare");
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)))
+        .expect("query")
+        .collect::<rusqlite::Result<_>>()
+        .expect("rows")
+}
+
+#[test]
+fn tracer_migration_a_version_1_database_gets_a_nullable_last_signin_and_keeps_its_rows() {
+    let scratch = Scratch::new("store-migrate-2");
+    let (alice, bob) = {
+        let store = Store::open(scratch.path()).expect("open");
+        let alice = make(&store, "alice", Role::Admin);
+        let bob = make(&store, "bob", Role::Member);
+        (alice, bob)
+    };
+    downgrade_to_v1(&scratch);
+    assert!(!columns_of_accounts(&scratch).iter().any(|(name, _, _)| name == "last_signin"), "the file is a version 1 file");
+
+    let store = Store::open(scratch.path()).expect("a version 1 file opens and is migrated");
+    assert_eq!(store.read(|tx| tx.diagnostics()).expect("diagnostics").user_version, 2);
+    let columns = columns_of_accounts(&scratch);
+    let added = columns.iter().find(|(name, _, _)| name == "last_signin").expect("the column exists");
+    assert_eq!(added, &("last_signin".to_owned(), "INTEGER".to_owned(), false), "nullable INTEGER: {columns:?}");
+    assert_eq!(columns.last().map(|c| c.0.as_str()), Some("last_signin"), "added at the end");
+
+    // The rows are as they were; nobody has signed in.
+    assert_eq!(store.account_get(alice.id).expect("read"), Some(alice.clone()));
+    assert_eq!(store.account_get(bob.id).expect("read"), Some(bob.clone()));
+    for id in [alice.id, bob.id] {
+        assert_eq!(store.read(|tx| tx.account_last_signin(id)).expect("read"), None);
+    }
+    // And it is a forward-only step: open again does nothing more, and the second open sees version 2.
+    drop(store);
+    let again = Store::open(scratch.path()).expect("open again");
+    assert_eq!(again.read(|tx| tx.diagnostics()).expect("diagnostics").user_version, 2);
+    println!("Migration: version 1 -> 2, accounts.last_signin INTEGER NULL added at the end, 2 rows kept, no value");
+}
+
 #[test]
 fn an_empty_file_is_made_into_a_database_and_tightened() {
     let scratch = Scratch::new("store-empty-file");
@@ -922,7 +971,7 @@ fn a_database_that_carries_our_id_but_no_version_is_migrated() {
         conn.pragma_update(None, "application_id", holzwave_server::store::APPLICATION_ID).expect("id");
     });
     let store = Store::open(scratch.path()).expect("open");
-    assert_eq!(store.read(|tx| tx.diagnostics()).expect("diagnostics").user_version, 1);
+    assert_eq!(store.read(|tx| tx.diagnostics()).expect("diagnostics").user_version, 2);
     make(&store, "alice", Role::Admin);
 }
 

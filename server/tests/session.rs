@@ -453,3 +453,51 @@ fn make_with(f: &Fixture, account: AccountId, method: Method) -> (String, Sessio
     let created = f.manager.create(account, method, NOW, "x", Some(ADDR)).expect("create");
     (created.value.expose().to_owned(), created.session)
 }
+
+fn last_signin(f: &Fixture, account: AccountId) -> Option<i64> {
+    f.store.read(|tx| tx.account_last_signin(account)).expect("read the last sign-in")
+}
+
+#[test]
+fn tracer_the_last_sign_in_is_stamped_when_a_session_is_made_and_by_nothing_else() {
+    let (f, alice) = fixture("session-last-signin");
+    assert_eq!(last_signin(&f, alice), None, "nobody has signed in yet");
+
+    let (value, mut session) = make(&f, alice, NOW);
+    assert_eq!(last_signin(&f, alice), Some(NOW), "stamped by the creation");
+
+    // A touch, a lookup and a step-up are not a sign-in.
+    f.clock.advance(60);
+    let mut found = f.manager.lookup(&value, NOW + 60).expect("lookup");
+    f.manager.touch(&mut found, NOW + 60).expect("touch");
+    f.manager.reauth(&mut session, NOW + 120).expect("reauth");
+    assert_eq!(last_signin(&f, alice), Some(NOW), "touch, lookup and step-up leave it alone");
+
+    // A second session moves it forward; the stamp is the time of the newest one.
+    let (_, second) = make(&f, alice, NOW + 600);
+    assert_eq!(last_signin(&f, alice), Some(NOW + 600));
+    assert_eq!(second.created_at, NOW + 600);
+
+    // Ending sessions does not clear it.
+    f.manager.end_all(alice).expect("end all");
+    assert_eq!(last_signin(&f, alice), Some(NOW + 600), "the stamp outlives the sessions");
+    println!("Tracer: last_signin None -> {NOW} -> {} (touch, lookup, step-up and logout leave it)", NOW + 600);
+}
+
+#[test]
+fn a_session_that_cannot_be_made_leaves_the_last_sign_in_as_it_was() {
+    let (f, alice) = fixture("session-last-signin-fail");
+    let bob = account(&f.store, "bob");
+    make(&f, bob, NOW);
+    f.store.write(|tx| tx.account_set_state(bob, AccountState::Disabled)).expect("disable");
+    assert!(f.manager.create(bob, Method::Passkey, NOW + 5, "x", None).is_err());
+    assert_eq!(last_signin(&f, bob), Some(NOW), "the refused creation did not move it");
+    assert_eq!(last_signin(&f, alice), None, "and nobody else changed");
+
+    // A creation that fails inside the transaction (a trigger on the table) is rolled back with its stamp.
+    let conn = rusqlite::Connection::open(f.store.path()).expect("a second connection");
+    conn.execute_batch("CREATE TRIGGER hw_broken BEFORE INSERT ON sessions BEGIN SELECT RAISE(ABORT, 'broken'); END;")
+        .expect("trigger");
+    assert!(f.manager.create(alice, Method::Passkey, NOW + 9, "x", None).is_err());
+    assert_eq!(last_signin(&f, alice), None, "the rolled-back creation left no stamp");
+}

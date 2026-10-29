@@ -1165,6 +1165,11 @@ impl Tx<'_> {
         Ok(optional(stmt.query_row(params![i64::from(uid)], account_from_row))?)
     }
 
+    /// The time of the last sign-in of an account, or `None` when it never signed in.
+    pub fn account_last_signin(&self, _id: AccountId) -> Result<Option<i64>> {
+        Ok(None)
+    }
+
     /// The number of administrators who can sign in.
     pub fn admin_count_active(&self) -> Result<i64> {
         Ok(self.conn.query_row(
