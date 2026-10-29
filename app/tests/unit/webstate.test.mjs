@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { actionIdFor, chordFor, setBindingTable, setOs } from "../../dist/chords.js";
-import { CLIPBOARD_REFUSED } from "../../dist/webstate.js";
+import { CLIPBOARD_REFUSED, FULLSCREEN_NOTICE, LOCK_KEYS, canLockKeys } from "../../dist/webstate.js";
 
 const CLIPBOARD = [
   ["Ctrl+Shift+C", "edit.copy"],
@@ -51,4 +51,26 @@ test("with the core's table set the fixed clipboard chords of the web stay fixed
 
 test("the refused-read sentence is the one the design gives", () => {
   assert.equal(CLIPBOARD_REFUSED, "The browser did not allow reading the clipboard.");
+});
+
+test("the keys locked in full screen are the six a browser keeps and Escape, in this order", () => {
+  assert.deepEqual([...LOCK_KEYS], ["KeyW", "KeyT", "KeyN", "Tab", "PageUp", "PageDown", "Escape"]);
+  assert.equal(new Set(LOCK_KEYS).size, 7, "no code twice");
+});
+
+test("canLockKeys is true only for a navigator whose keyboard has a lock function", () => {
+  assert.equal(canLockKeys({ keyboard: { lock() {}, unlock() {} } }), true);
+  assert.equal(canLockKeys({ keyboard: { lock: async () => {} } }), true);
+  assert.equal(canLockKeys({}), false, "no keyboard object");
+  assert.equal(canLockKeys({ keyboard: {} }), false, "a keyboard without lock");
+  assert.equal(canLockKeys({ keyboard: { lock: "yes" } }), false, "a lock that is not a function");
+  assert.equal(canLockKeys({ keyboard: { lock: null } }), false);
+  assert.equal(canLockKeys({ keyboard: null }), false);
+  assert.equal(canLockKeys(null), false);
+  assert.equal(canLockKeys(undefined), false);
+  assert.equal(canLockKeys("keyboard"), false);
+});
+
+test("the full-screen notice is the sentence the design gives", () => {
+  assert.equal(FULLSCREEN_NOTICE, "Browser shortcuts are off in full screen. Hold Escape to leave.");
 });
