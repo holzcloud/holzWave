@@ -737,15 +737,15 @@ const status=(extra='',k8s=cseg('⎈ talos-prod/kube-system'))=>`<div class="sta
 
 
 const OSK={mac:{n:'⌘',s:'⇧',a:'⌥'},win:{n:'Ctrl',s:'Shift',a:'Alt'},lin:{n:'Ctrl',s:'Shift',a:'Alt'}};
-/* The web build has the Windows and Linux labels, without the chords a browser keeps for itself (docs/design.md section 7): those show a dash until the web table gives them another chord. */
+/* The web build has the Windows and Linux labels, except where a pair has a third member for the browser: close pane, new tab and new workspace, whose Ctrl+Shift chords a browser keeps for itself (docs/design.md section 7). A chord a browser keeps and that has no third member shows a dash. */
 const WEBRESERVED=['Ctrl+W','Ctrl+T','Ctrl+N','Ctrl+Tab','Ctrl+Shift+W','Ctrl+Shift+T','Ctrl+Shift+N','Ctrl+PageUp','Ctrl+PageDown'];
-function chord(os,c){ // c: mac string, w: win/lin string
-  const k=c[os==='mac'?0:1];
+function chord(os,c){ // c: mac string, win/lin string, and for the browser a third string where it differs
+  const k=c[os==='mac'?0:os==='web'&&c[2]?2:1];
   return k&&!(os==='web'&&WEBRESERVED.includes(k))?k:'<span class="dim">–</span>';}
 const KEYS=[
- ['Pane',[['Split pane right','pane.split_right',['⌘D','Ctrl+Shift+D']],['Split pane down','pane.split_down',['⇧⌘D','Ctrl+Shift+O']],['Close pane','pane.close',['⌘W','Ctrl+Shift+W']],['Next pane','pane.focus_next',['⌘]','Ctrl+Shift+]']],['Previous pane','pane.focus_prev',['⌘[','Ctrl+Shift+[']],['Move pane to new window','pane.move_to_new_window',['','']]]],
- ['Tab',[['New tab','tab.new',['⌘T','Ctrl+Shift+T']],['Tab 1 to 9','tab.select_1…9',['⌘1 … ⌘9','Alt+Shift+1 … 9']],['Rename tab','tab.rename',['','']]]],
- ['Workspace',[['New workspace','workspace.new',['⇧⌘N','Ctrl+Shift+N']],['Workspace 1 to 9','workspace.select_1…9',['⌥⌘1 … 9','Ctrl+Shift+1 … 9']]]],
+ ['Pane',[['Split pane right','pane.split_right',['⌘D','Ctrl+Shift+D']],['Split pane down','pane.split_down',['⇧⌘D','Ctrl+Shift+O']],['Close pane','pane.close',['⌘W','Ctrl+Shift+W','Alt+Shift+W']],['Next pane','pane.focus_next',['⌘]','Ctrl+Shift+]']],['Previous pane','pane.focus_prev',['⌘[','Ctrl+Shift+[']],['Move pane to new window','pane.move_to_new_window',['','']]]],
+ ['Tab',[['New tab','tab.new',['⌘T','Ctrl+Shift+T','Alt+Shift+T']],['Tab 1 to 9','tab.select_1…9',['⌘1 … ⌘9','Alt+Shift+1 … 9']],['Rename tab','tab.rename',['','']]]],
+ ['Workspace',[['New workspace','workspace.new',['⇧⌘N','Ctrl+Shift+N','Alt+Shift+N']],['Workspace 1 to 9','workspace.select_1…9',['⌥⌘1 … 9','Ctrl+Shift+1 … 9']]]],
  ['View and tools',[['Palette','palette.open',['⌘K','Ctrl+Shift+P']],['Search scrollback','search.open',['⌘F','Ctrl+Shift+F']],['Copy mode','copy_mode.enter',['⇧⌘X','Ctrl+Shift+X']],['Hints','hints.open',['⇧⌘Space','Ctrl+Shift+Space']],['History','history.open',['⇧⌘H','Ctrl+Shift+H']],['Increase font','font.increase',['⌘=','Ctrl+Shift+=']],['Settings','settings.open',['⌘,','Ctrl+Shift+,']]]],
  ['Line editing (normal screen only)',[['Word back','edit.word_back',['⌥←','']],['Line start','edit.line_start',['⌘←','']]]]
 ];

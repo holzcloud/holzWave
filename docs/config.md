@@ -341,6 +341,21 @@ GNOME's input method takes for emoji.
 | `ai.new_chat` | none | none | none |
 | `integration.context`, `integration.profiles` | none | none | none |
 
+**The browser build.** A browser keeps some chords for itself and never hands them to a page: `Ctrl+W`, `Ctrl+T`, `Ctrl+N`,
+`Ctrl+Tab`, `Ctrl+PageUp` and `Ctrl+PageDown`, and the same with `Shift` for `W`, `T` and `N` (close window, reopen tab,
+private window). The browser build therefore has its own column, which is the Linux column except for three rows, with
+`Alt+Shift` and the same letter next to the tab numbers:
+
+| Action id | Browser | Linux |
+|---|---|---|
+| `pane.close` | `Alt+Shift+W` | `Ctrl+Shift+W` |
+| `tab.new` | `Alt+Shift+T` | `Ctrl+Shift+T` |
+| `workspace.new` | `Alt+Shift+N` | `Ctrl+Shift+N` |
+
+Every chord of the browser column can be changed in the settings like any other, and a chord that a browser keeps is not
+refused if you choose it yourself (the page may not receive it). The `keybindings` of a person who uses the browser belong to
+the server's settings for that person and do not travel to a desktop, as they do not travel between the desktop platforms.
+
 `integration.context` shows the sidebar and brings its Context section into view; `integration.profiles` opens the dialog of the
 integration profiles. Neither has a default chord, so no chord of another action is taken; give one in the key binding editor if
 you want it. The views of Kubernetes, Talos, Azure and GAM and their terminals that need no argument are in the command palette
