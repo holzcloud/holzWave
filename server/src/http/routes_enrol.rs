@@ -44,7 +44,7 @@ use serde_json::Value;
 use zeroize::Zeroizing;
 
 use crate::accounts::{AccountError, Accounts, InviteTarget, NewAccount};
-use crate::auth::passkey::{ChallengeToken, RegistrationSubject, VerifiedPasskey};
+use crate::auth::passkey::{ChallengeToken, PasskeyError, RegistrationSubject, VerifiedPasskey};
 use crate::auth::password::{ArgonGate, PasswordError, Prepared, check_policy, prepare_password, store_prepared};
 use crate::auth::session::{generate_token, parse_token};
 use crate::auth::throttle::{Policy, Throttle, scoped_key};
@@ -750,7 +750,12 @@ impl Enrol {
                     (Proof::Passkey { .. }, Verified::Passkey { verified }) => {
                         let row = passkeys
                             .store_verified(tx, account.id, verified, "")
-                            .map_err(|_| AccountError::Enrolment("passkey"))?;
+                            .map_err(|error| match error {
+                                // A credential the store refuses (it exists already, or the account has too many) is the
+                                // person's to fix; a store that fails is not.
+                                PasskeyError::Internal => fault("the passkey could not be stored"),
+                                _ => AccountError::Enrolment("passkey"),
+                            })?;
                         if let Some(output) = verified.prf() {
                             let kek = kek_from_prf(output.expose(), &row.prf_salt)
                                 .map_err(|_| fault("the unlock methods could not be stored"))?;

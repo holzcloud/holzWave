@@ -1448,9 +1448,9 @@ async fn pending_a_cookie_of_the_other_route_is_refused_and_the_entry_survives()
     assert_eq!(env.enrol.pending_count(), 1, "the entry was not removed by the other route");
     let accepted = env.finish_code(BOOTSTRAP, &cookie, &code).await;
     assert_eq!(accepted.status, 200, "{}", accepted.text());
-    // And the sign-in's own pending cookie is the same name but a different store: it finds nothing here.
-    let sign_in_cookie = format!("{}", "A".repeat(43));
-    assert_invalid(&env.finish_code(BOOTSTRAP, &sign_in_cookie, &code).await, "a cookie that belongs to nothing");
+    // A cookie that belongs to no entry finds nothing.
+    let unknown = "A".repeat(43);
+    assert_invalid(&env.finish_code(BOOTSTRAP, &unknown, &code).await, "a cookie that belongs to nothing");
 }
 
 #[tokio::test]
