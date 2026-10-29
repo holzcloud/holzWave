@@ -149,6 +149,7 @@ enum Stage {
     Password,
     Totp,
     StepUp,
+    Change,
 }
 
 impl Stage {
@@ -157,6 +158,7 @@ impl Stage {
             Stage::Password => "password",
             Stage::Totp => "totp",
             Stage::StepUp => "step_up",
+            Stage::Change => "change",
         }
     }
 }
@@ -290,9 +292,10 @@ impl SignIn {
         };
         let reason = if error == SignInError::Busy { "busy" } else { "invalid" };
         let action = if locked { Action::SigninLocked } else { Action::SigninFail };
-        // A step-up is made by someone who is signed in; the other steps are made by nobody yet.
+        // A step-up and a check of the current password are made by someone who is signed in; the other steps are made by
+        // nobody yet.
         let actor = match (step, target) {
-            (Stage::StepUp, Some(account)) => Actor::Account(account),
+            (Stage::StepUp | Stage::Change, Some(account)) => Actor::Account(account),
             _ => Actor::Anonymous,
         };
         let mut event = Event::new(action, Outcome::Fail, actor, Some(who.addr))
@@ -537,6 +540,42 @@ impl SignIn {
                 .detail(DetailKey::Method, DetailValue::Text(PASSWORD_METHOD.as_str())),
         );
         Ok(())
+    }
+
+    // ---- the current password ----
+
+    /// Checks the password a signed-in person types as the current one before a change of the password: the same gate, the
+    /// same throttle (under the name and the address) and the same single answer as the first step of a sign-in. A right
+    /// password answers the key of the old password, so that the caller can re-wrap the secret store with it. A wrong one
+    /// writes `signin.fail` with the step `change` and counts; it never writes `session.step_up`, and no session is touched
+    /// either way. The caller has checked that the account has a password; an account that has none is answered like a wrong
+    /// password (after the same derivation).
+    pub async fn verify_current(
+        &self,
+        account: AccountId,
+        username: &str,
+        password: &str,
+        addr: IpAddr,
+    ) -> Result<UnlockMaterial, SignInError> {
+        let now = self.clock.unix();
+        let stored = self.store.read(|tx| Ok(lookup_password(tx, username)?.filter(|found| found.account() == account)))?;
+        let key = account_key(username);
+        let address = address_key(addr);
+        let who = Who { account: Some(&key), address: &address, addr };
+        self.locked(who.account, who.address, now)?;
+        if password.is_empty() || password.len() > MAX_PASSWORD_BYTES {
+            return Err(self.fail(Stage::Change, Some(account), who, now, SignInError::Invalid));
+        }
+        match verify_password(&self.gate, stored, password).await {
+            Ok(verified) if verified.account == account => {
+                Ok(UnlockMaterial { kek: verified.kek, wiped: self.wiped.clone() })
+            }
+            Ok(_) | Err(PasswordError::InvalidCredentials) => {
+                Err(self.fail(Stage::Change, Some(account), who, now, SignInError::Invalid))
+            }
+            Err(PasswordError::Busy) => Err(self.fail(Stage::Change, None, who, now, SignInError::Busy)),
+            Err(_) => Err(SignInError::Internal),
+        }
     }
 
     // ---- locks ----

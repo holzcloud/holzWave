@@ -543,10 +543,11 @@ async fn password_an_account_without_a_password_is_not_found_and_nothing_is_deri
     let env = ApiEnv::new();
     let (pk, _key) = env.member_with_passkey("pk");
     let derivations = env.argon.derivations();
+    let lines = env.audit_lines().len();
     let response = env.send(env.post_json("/api/me/password", &change_body(PASSWORD, NEW_PASSWORD), &pk)).await;
     assert_code(&response, 404, json!({"code": "not_found"}), "no password");
     assert_eq!(env.argon.derivations(), derivations);
-    assert!(env.audit_lines().is_empty());
+    assert_eq!(env.audit_lines().len(), lines, "nothing was written down");
 }
 
 #[tokio::test]

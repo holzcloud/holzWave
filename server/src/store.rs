@@ -1609,6 +1609,43 @@ impl Tx<'_> {
         Ok(stmt.query_map(params![id.0], unlock_from_row)?.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Replaces the unlock method of `kind` (and of the credential, for a PRF key) with a new one in this transaction: the rows
+    /// that match go, a row with the new salt and parameters comes. An account has at most one such row afterwards.
+    pub fn unlock_replace(
+        &self,
+        id: AccountId,
+        kind: UnlockKind,
+        salt: &[u8],
+        params_text: &str,
+        credential_id: Option<&[u8]>,
+    ) -> Result<UnlockMethod> {
+        self.live_account(id)?;
+        self.conn
+            .prepare_cached("DELETE FROM unlock_methods WHERE account_id = ?1 AND kind = ?2 AND credential_id IS ?3")?
+            .execute(params![id.0, kind.as_str(), credential_id])?;
+        self.unlock_add(id, kind, salt, params_text, credential_id)
+    }
+
+    /// Removes every unlock method of the account whose kind is in `kinds`; answers how many rows went.
+    pub fn unlock_remove_kinds(&self, id: AccountId, kinds: &[UnlockKind]) -> Result<usize> {
+        let mut removed = 0;
+        for kind in kinds {
+            removed += self
+                .conn
+                .prepare_cached("DELETE FROM unlock_methods WHERE account_id = ?1 AND kind = ?2")?
+                .execute(params![id.0, kind.as_str()])?;
+        }
+        Ok(removed)
+    }
+
+    /// Removes the unlock methods of the account that belong to a credential; answers how many rows went.
+    pub fn unlock_remove_credential(&self, id: AccountId, credential_id: &[u8]) -> Result<usize> {
+        Ok(self
+            .conn
+            .prepare_cached("DELETE FROM unlock_methods WHERE account_id = ?1 AND credential_id = ?2")?
+            .execute(params![id.0, credential_id])?)
+    }
+
     /// Removes an unlock method of the owning account.
     pub fn unlock_remove(&self, id: AccountId, method_id: i64) -> Result<()> {
         let changed = self
@@ -1690,6 +1727,16 @@ impl Tx<'_> {
         let changed =
             self.conn.prepare_cached("DELETE FROM sessions WHERE id_hash = ?1")?.execute(params![&id_hash[..]])?;
         Ok(changed == 1)
+    }
+
+    /// Ends the session of `id` whose stored hash starts with `prefix`, in one statement that matches the account and the
+    /// prefix together; answers whether one went. Another account's session never matches.
+    pub fn session_delete_by_prefix(&self, id: AccountId, prefix: &[u8; 12]) -> Result<bool> {
+        let changed = self
+            .conn
+            .prepare_cached("DELETE FROM sessions WHERE account_id = ?1 AND substr(id_hash, 1, 12) = ?2")?
+            .execute(params![id.0, &prefix[..]])?;
+        Ok(changed > 0)
     }
 
     /// Ends every session of an account; answers how many there were.

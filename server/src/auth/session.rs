@@ -33,6 +33,12 @@ pub const TOKEN_CHARS: usize = 43;
 /// The most sessions an account has at once. A new one beyond that ends the one seen least recently.
 pub const MAX_SESSIONS_PER_ACCOUNT: usize = 20;
 
+/// The bytes of a session handle: the first bytes of the stored hash.
+pub const HANDLE_BYTES: usize = 12;
+
+/// The characters of a session handle.
+pub const HANDLE_CHARS: usize = 16;
+
 /// The fewest seconds between two writes of `last_seen` for one session.
 pub const TOUCH_INTERVAL_SECS: i64 = 30;
 
@@ -191,6 +197,23 @@ impl SessionManager {
         Ok(session)
     }
 
+    /// The sessions of an account that are alive at `now`, oldest first. A session past its idle or its absolute time is left
+    /// out (it is removed the next time it is looked up, or by a purge).
+    pub fn list_live(&self, account: AccountId, now: i64) -> Result<Vec<Session>, SessionError> {
+        let rows = self.store.read(|tx| tx.session_list(account))?;
+        Ok(rows
+            .into_iter()
+            .filter(|session| now <= expiry(session.last_seen, self.lifetimes.idle) && now <= session.absolute_expires)
+            .collect())
+    }
+
+    /// Ends the session of `account` that `handle` names; answers whether there was one. A text that is not a handle, and a
+    /// handle of another account's session, are `false` and change nothing. One statement matches the account and the handle.
+    pub fn end_by_handle(&self, account: AccountId, handle: &str) -> Result<bool, SessionError> {
+        let Some(prefix) = parse_handle(handle) else { return Ok(false) };
+        Ok(self.store.write(|tx| tx.session_delete_by_prefix(account, &prefix))?)
+    }
+
     /// Records activity: writes `last_seen = now` when the stored value is at least 30 seconds old, and answers whether it
     /// wrote. The session value is updated to match.
     pub fn touch(&self, session: &mut Session, now: i64) -> Result<bool, SessionError> {
@@ -238,6 +261,22 @@ impl SessionManager {
         // asked about the second before.
         Ok(self.store.write(|tx| tx.sessions_purge(now.saturating_sub(1), idle, max_rows))?)
     }
+}
+
+/// The handle of a session: the first 12 bytes of its stored hash in 16 base64url characters. It names a row of one account
+/// and cannot be used as the cookie value (which is 43 characters and the preimage of the hash).
+pub fn handle_of(session: &Session) -> String {
+    URL_SAFE_NO_PAD.encode(&session.id_hash[..HANDLE_BYTES])
+}
+
+/// The 12 bytes a handle text stands for, or `None` for a text that is not exactly 16 characters of the base64url alphabet.
+pub fn parse_handle(text: &str) -> Option<[u8; HANDLE_BYTES]> {
+    if text.len() != HANDLE_CHARS || !text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        return None;
+    }
+    let mut bytes = [0u8; HANDLE_BYTES];
+    let written = URL_SAFE_NO_PAD.decode_slice(text.as_bytes(), &mut bytes).ok()?;
+    (written == HANDLE_BYTES).then_some(bytes)
 }
 
 /// A new random value and its 32 bytes (wiped when dropped).

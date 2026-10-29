@@ -21,7 +21,7 @@ use zeroize::Zeroizing;
 
 use crate::limits::ARGON2_CONCURRENCY;
 use crate::store::{AccountId, AccountState, PasswordCredential, Store, StoreError, Tx};
-use crate::unlock::{Kdf, Kek, SALT_BYTES, UnlockError, argon2id_into, random};
+use crate::unlock::{Kdf, Kek, SALT_BYTES, UnlockError, argon2id_into, kek_from_passphrase, random};
 
 /// The length of the verifier in bytes: the first half of the derivation.
 pub const VERIFIER_BYTES: usize = 32;
@@ -343,6 +343,27 @@ impl ArgonGate {
                 hook();
             }
             derive_split(&bytes, &salt, &kdf)
+        });
+        work.await.map_err(|_| PasswordError::Derive)?
+    }
+}
+
+impl ArgonGate {
+    /// One derivation of the key of a passphrase through the gate, on a blocking thread: the same permits, the same queue and
+    /// the same bound on the waiting as for a password, with the passphrase used as typed and `salt` and `kdf` as given.
+    pub async fn derive_passphrase(&self, passphrase: &str, salt: [u8; SALT_BYTES], kdf: Kdf) -> Result<Kek, PasswordError> {
+        let permit = self.acquire().await?;
+        let bytes = Zeroizing::new(passphrase.as_bytes().to_vec());
+        let inner = self.inner.clone();
+        let hook = self.hook.clone();
+        let work = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            inner.derivations.fetch_add(1, Ordering::SeqCst);
+            if let Some(hook) = &hook {
+                hook();
+            }
+            let text = std::str::from_utf8(&bytes).map_err(|_| PasswordError::Derive)?;
+            kek_from_passphrase(text, &salt, &kdf).map_err(PasswordError::from)
         });
         work.await.map_err(|_| PasswordError::Derive)?
     }

@@ -53,6 +53,7 @@ pub enum Action {
     AuthPasskeyRemove,
     AuthPassphraseSet,
     RecoveryUse,
+    RecoveryReplace,
     SecretsReset,
     SecretsUnlock,
     SecretsLock,
@@ -60,7 +61,7 @@ pub enum Action {
 
 impl Action {
     /// Every action, in the order of the vocabulary.
-    pub const ALL: [Action; 25] = [
+    pub const ALL: [Action; 26] = [
         Action::BootstrapRedeem,
         Action::SigninOk,
         Action::SigninFail,
@@ -83,6 +84,7 @@ impl Action {
         Action::AuthPasskeyRemove,
         Action::AuthPassphraseSet,
         Action::RecoveryUse,
+        Action::RecoveryReplace,
         Action::SecretsReset,
         Action::SecretsUnlock,
         Action::SecretsLock,
@@ -113,6 +115,7 @@ impl Action {
             Action::AuthPasskeyRemove => "auth.passkey.remove",
             Action::AuthPassphraseSet => "auth.passphrase.set",
             Action::RecoveryUse => "recovery.use",
+            Action::RecoveryReplace => "recovery.replace",
             Action::SecretsReset => "secrets.reset",
             Action::SecretsUnlock => "secrets.unlock",
             Action::SecretsLock => "secrets.lock",
