@@ -85,6 +85,9 @@ pub const WORKER_QUEUE_BYTES: usize = 32 * 1024 * 1024;
 /// worker that has stopped reading.
 pub const WORKER_QUEUE_CONTROL_RESERVE: usize = 256;
 
+/// How many bytes of control frames may queue beyond [`WORKER_QUEUE_BYTES`] for a worker that has stopped reading.
+pub const WORKER_QUEUE_CONTROL_BYTES: usize = 64 * 1024;
+
 /// The most sizes the supervisor remembers for panes that another socket owns, over all panes of one person.
 pub const REMEMBERED_SIZES: usize = 512;
 

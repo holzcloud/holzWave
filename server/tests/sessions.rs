@@ -289,7 +289,7 @@ fn args_for_frame(frame: usize) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn order_a_worker_that_stops_reading_gets_1024_frames_and_the_next_one_is_busy() {
     let env = ScriptEnv::start().await;
-    env.launcher.set_send_buffer(1);
+    env.launcher.set_send_buffer(8192);
     let client = env.client(one()).await;
     let mut script = env.launcher.script(PATIENCE);
     script.wait_for("Attach", PATIENCE, |f| matches!(f, Frame::Ctl(Ctl::Attach { .. })));
@@ -327,12 +327,15 @@ async fn order_a_worker_that_stops_reading_gets_1024_frames_and_the_next_one_is_
 #[tokio::test(flavor = "multi_thread")]
 async fn order_a_worker_that_stops_reading_gets_32_mib_in_four_frames_and_the_fifth_is_busy() {
     let env = ScriptEnv::start().await;
-    env.launcher.set_send_buffer(1);
+    env.launcher.set_send_buffer(16 * 1024);
     let client = env.client(one()).await;
     let mut script = env.launcher.script(PATIENCE);
     script.wait_for("Attach", PATIENCE, |f| matches!(f, Frame::Ctl(Ctl::Attach { .. })));
     script.pause();
     let args = args_for_frame(8 * 1024 * 1024);
+    // The script is already inside its read of the next frame, so one small frame goes through before it stops.
+    client.handle.submit(100, "get_layout", "{}").expect("the small frame");
+    script.wait_for("the small frame", PATIENCE, |f| matches!(f, Frame::Cmd(c) if c.request == 100));
     for i in 0..4u64 {
         client.handle.submit(i, "get_layout", &args).unwrap_or_else(|e| panic!("frame {i} of 8 MiB: {e:?}"));
     }
@@ -343,7 +346,7 @@ async fn order_a_worker_that_stops_reading_gets_32_mib_in_four_frames_and_the_fi
         script.wait_for("a big command", PATIENCE, |f| matches!(f, Frame::Cmd(c) if c.request == i));
     }
     script.settle(Duration::from_millis(200));
-    assert_eq!(script.cmds().len(), 4, "the refused calls queued nothing");
+    assert_eq!(script.cmds().len(), 5, "the small frame and the four big ones arrived, the refused calls queued nothing");
     // With the queue empty again a call is accepted.
     client.handle.submit(9, "get_layout", "{}").expect("accepted after the queue drained");
 }
@@ -496,7 +499,7 @@ async fn hostile_case(what: &str, hostile: impl FnOnce(&ScriptHandle)) {
     assert_eq!(rig.env.launcher.launches(), 1, "{what}: nothing was started again by itself");
     wait_until("the account to have no sockets", || rig.env.supervisor.account_stats(one()).sockets == 0).await;
     assert!(!rig.env.supervisor.account_stats(one()).worker_running, "{what}: the worker is declared dead");
-    assert!(rig.env.launcher.kills().contains(&ONE), "{what}: the processes of the person are killed");
+    wait_until("the kill", || rig.env.launcher.kills().contains(&ONE)).await;
     let again = rig.env.client(one()).await;
     assert_eq!(rig.env.launcher.launches(), 2, "{what}: the next attach starts a new worker");
     drop(again);

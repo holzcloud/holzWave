@@ -9,6 +9,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::Notify;
 
+/// The close code for a socket whose queue overflowed.
+pub const CLOSE_OVERFLOW: u16 = 1013;
+
 /// Something that leaves for a browser socket.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outbound {
@@ -74,11 +77,14 @@ struct QueueState {
 pub(super) struct Queue {
     state: Mutex<QueueState>,
     ready: Notify,
+    /// The bytes that may wait.
+    cap: usize,
 }
 
 impl Queue {
-    pub(super) fn new() -> Queue {
+    pub(super) fn new(cap: usize) -> Queue {
         Queue {
+            cap,
             state: Mutex::new(QueueState {
                 items: VecDeque::new(),
                 bytes: 0,
@@ -94,17 +100,30 @@ impl Queue {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Queues `message`. `droppable` marks a frame event.
-    pub(super) fn push(&self, message: Outbound, _droppable: bool) -> Push {
+    /// Queues `message`. `droppable` marks a frame event, which is dropped when it does not fit; any other message that does
+    /// not fit closes the queue with 1013. A message larger than the whole cap fits only an empty queue.
+    pub(super) fn push(&self, message: Outbound, droppable: bool) -> Push {
         let mut state = self.lock();
         if state.closed || state.abandoned {
             return Push::Gone;
         }
-        state.bytes += message.cost();
-        state.items.push_back(message);
+        let cost = message.cost();
+        let fits = state.bytes + cost <= self.cap || (cost > self.cap && state.items.is_empty());
+        if fits {
+            state.bytes += cost;
+            state.items.push_back(message);
+            drop(state);
+            self.ready.notify_one();
+            return Push::Queued;
+        }
+        if droppable {
+            return Push::DroppedFrame;
+        }
+        state.closed = true;
+        state.items.push_back(Outbound::Close { code: CLOSE_OVERFLOW, reason: "too many messages waiting" });
         drop(state);
         self.ready.notify_one();
-        Push::Queued
+        Push::Overflow
     }
 
     /// Queues a close message, whatever the size of the queue, and accepts nothing after it.
@@ -162,8 +181,8 @@ pub(super) struct SocketCore {
 }
 
 impl SocketCore {
-    pub(super) fn new(id: u32) -> SocketCore {
-        SocketCore { id, queue: Queue::new(), detached: AtomicBool::new(false) }
+    pub(super) fn new(id: u32, queue_bytes: usize) -> SocketCore {
+        SocketCore { id, queue: Queue::new(queue_bytes), detached: AtomicBool::new(false) }
     }
 
     /// True the first time it is asked, so that the socket leaves its worker once.

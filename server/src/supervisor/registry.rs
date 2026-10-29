@@ -24,10 +24,10 @@ use crate::clock::Clock;
 use crate::limits;
 use crate::log::{self, Level};
 use crate::store::AccountId;
-use crate::supervisor::fanout::{self, Counters};
+use crate::supervisor::fanout::{self, Counters, Fault, Owners, Synthetic};
 use crate::supervisor::launcher::{LaunchRequest, LaunchedWorker, WorkerLauncher};
 use crate::supervisor::socket::{self, Attached, SocketCore, SocketHandle, SocketRx, SubmitError};
-use crate::wire::{self, Ctl, Frame, Note, PROTOCOL_VERSION, StoreState};
+use crate::wire::{self, CmdFrame, Ctl, Frame, Note, PROTOCOL_VERSION, StoreState};
 use crate::worker::runtime::WorkerMode;
 
 /// The close code for a socket whose worker ended.
@@ -147,10 +147,13 @@ pub struct AccountStats {
 struct WorkQueueState {
     /// Whole frames, length prefix included.
     items: VecDeque<Zeroizing<Vec<u8>>>,
+    /// The frames and bytes queued or being written (counted until the write is done).
+    frames: usize,
+    bytes: usize,
     closed: bool,
 }
 
-/// The frames waiting for the single writer of a worker.
+/// The frames waiting for the single writer of a worker, bounded in frames and in bytes.
 struct WorkQueue {
     state: Mutex<WorkQueueState>,
     ready: Notify,
@@ -158,28 +161,65 @@ struct WorkQueue {
 
 impl WorkQueue {
     fn new() -> WorkQueue {
-        WorkQueue { state: Mutex::new(WorkQueueState { items: VecDeque::new(), closed: false }), ready: Notify::new() }
+        WorkQueue {
+            state: Mutex::new(WorkQueueState { items: VecDeque::new(), frames: 0, bytes: 0, closed: false }),
+            ready: Notify::new(),
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, WorkQueueState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn push(&self, frame: Zeroizing<Vec<u8>>) -> Result<(), SubmitError> {
+    /// Queues commands together, or none of them: `Busy` when they do not fit.
+    fn push_commands(&self, frames: Vec<Zeroizing<Vec<u8>>>) -> Result<(), SubmitError> {
+        let total: usize = frames.iter().map(|f| f.len()).sum();
         let mut state = self.lock();
         if state.closed {
             return Err(SubmitError::Closed);
         }
+        if state.frames + frames.len() > limits::WORKER_QUEUE_FRAMES || state.bytes + total > limits::WORKER_QUEUE_BYTES {
+            return Err(SubmitError::Busy);
+        }
+        state.frames += frames.len();
+        state.bytes += total;
+        state.items.extend(frames);
+        drop(state);
+        self.ready.notify_one();
+        Ok(())
+    }
+
+    /// Queues a control frame, which may use a small reserve beyond the bounds of the commands.
+    fn push_control(&self, frame: Zeroizing<Vec<u8>>) -> Result<(), SubmitError> {
+        let mut state = self.lock();
+        if state.closed {
+            return Err(SubmitError::Closed);
+        }
+        if state.frames + 1 > limits::WORKER_QUEUE_FRAMES + limits::WORKER_QUEUE_CONTROL_RESERVE
+            || state.bytes + frame.len() > limits::WORKER_QUEUE_BYTES + limits::WORKER_QUEUE_CONTROL_BYTES
+        {
+            return Err(SubmitError::Busy);
+        }
+        state.frames += 1;
+        state.bytes += frame.len();
         state.items.push_back(frame);
         drop(state);
         self.ready.notify_one();
         Ok(())
     }
 
+    /// The frames and bytes that wait or are being written.
+    fn load(&self) -> (usize, usize) {
+        let state = self.lock();
+        (state.frames, state.bytes)
+    }
+
     fn close(&self) {
         let mut state = self.lock();
         state.closed = true;
         state.items.clear();
+        state.frames = 0;
+        state.bytes = 0;
         drop(state);
         self.ready.notify_one();
     }
@@ -198,6 +238,13 @@ impl WorkQueue {
             self.ready.notified().await;
         }
     }
+
+    /// A frame of `len` bytes was written.
+    fn done(&self, len: usize) {
+        let mut state = self.lock();
+        state.frames = state.frames.saturating_sub(1);
+        state.bytes = state.bytes.saturating_sub(len);
+    }
 }
 
 /// The frame as it goes on the link: the length prefix and the payload. The buffer is wiped when it is dropped.
@@ -212,6 +259,10 @@ fn encode(frame: &Frame) -> Result<Zeroizing<Vec<u8>>, SubmitError> {
 struct WorkerState {
     sockets: HashMap<u32, Arc<SocketCore>>,
     next_socket: u32,
+    /// Who owns the size of each pane.
+    owners: Owners,
+    /// The last request number the supervisor made up itself, counted from [`limits::SYNTHETIC_REQUEST_BASE`].
+    synthetic: u64,
     /// When the last socket left (or the worker became ready with none), in unix seconds.
     idle_since: Option<i64>,
 }
@@ -237,7 +288,15 @@ impl Worker {
     }
 
     fn push_control(&self, control: Ctl) -> Result<(), SubmitError> {
-        self.out.push(encode(&Frame::Ctl(control))?)
+        self.out.push_control(encode(&Frame::Ctl(control))?)
+    }
+
+    /// The frame of a `resize` the supervisor makes itself.
+    fn synthetic_frame(state: &mut WorkerState, resize: &Synthetic) -> Result<Zeroizing<Vec<u8>>, SubmitError> {
+        state.synthetic += 1;
+        let json = fanout::command_json("resize", &resize.args());
+        let request = limits::SYNTHETIC_REQUEST_BASE + state.synthetic;
+        encode(&Frame::Cmd(CmdFrame { socket: resize.socket, request, json }))
     }
 
     /// The worker is gone: its sockets close, its record leaves the table and its tasks stop.
@@ -245,6 +304,7 @@ impl Worker {
         if self.dead.swap(true, Ordering::SeqCst) {
             return;
         }
+        Counters::bump(&self.shared.counters.worker_deaths);
         self.cancel.cancel();
         self.out.close();
         let sockets: Vec<Arc<SocketCore>> = self.lock().sockets.drain().map(|(_, s)| s).collect();
@@ -262,67 +322,134 @@ impl Worker {
     }
 
     /// Joins a new socket to this worker.
-    fn add_socket(self: &Arc<Self>) -> Result<(SocketHandle, SocketRx), SubmitError> {
+    fn add_socket(self: &Arc<Self>) -> Result<(SocketHandle, SocketRx), AttachError> {
         let mut state = self.lock();
         if self.is_dead() {
-            return Err(SubmitError::Closed);
+            return Err(AttachError::Launch("the worker ended while the socket attached".into()));
+        }
+        if state.sockets.len() >= self.shared.settings.sockets_per_person {
+            return Err(AttachError::TooManySockets);
         }
         state.next_socket += 1;
         let id = state.next_socket;
-        let core = Arc::new(SocketCore::new(id));
+        let core = Arc::new(SocketCore::new(id, self.shared.settings.socket_queue_bytes));
         state.sockets.insert(id, core.clone());
         state.idle_since = None;
-        self.push_control(Ctl::Attach { socket: id })?;
+        if self.push_control(Ctl::Attach { socket: id }).is_err() {
+            state.sockets.remove(&id);
+            return Err(AttachError::Launch("the worker is not taking frames".into()));
+        }
         drop(state);
         let worker: Arc<dyn Attached> = self.clone();
         Ok(socket::halves(core, worker))
     }
 
-    /// A frame from the worker, already decoded.
-    fn handle(self: &Arc<Self>, frame: Frame, ready: &mut Option<oneshot::Sender<()>>) {
-        match frame {
-            Frame::Res(res) => {
-                let state = self.lock();
-                fanout::deliver_res(res, &state.sockets, &self.shared.counters);
+    /// Takes sockets out of the table, tells the worker, and hands the panes they owned on. A socket that is not in the
+    /// table (it left already) is skipped.
+    fn drop_sockets(&self, state: &mut WorkerState, sockets: &[u32]) {
+        for &socket in sockets {
+            if state.sockets.remove(&socket).is_none() {
+                continue;
             }
-            Frame::Evt(evt) => {
-                let state = self.lock();
-                fanout::deliver_evt(evt, &state.sockets, &self.shared.counters);
+            if state.sockets.is_empty() {
+                state.idle_since = Some(self.shared.clock.unix());
             }
-            Frame::Note(Note::Ready) => {
-                if let Some(ready) = ready.take() {
-                    let _ = ready.send(());
+            let _ = self.push_control(Ctl::Detach { socket });
+            // The panes the socket owned go to the socket with the latest size, and that size is applied.
+            for resize in state.owners.left(socket) {
+                if let Ok(frame) = Self::synthetic_frame(state, &resize) {
+                    let _ = self.out.push_commands(vec![frame]);
                 }
             }
+        }
+    }
+
+    /// A frame from the worker, already decoded. The error says what was wrong with it.
+    fn handle(self: &Arc<Self>, frame: Frame, ready: &mut Option<oneshot::Sender<()>>) -> Result<(), Fault> {
+        // Until the worker says it is ready it may only say that, or that it is ending.
+        if ready.is_some() && !matches!(frame, Frame::Note(Note::Ready | Note::Exiting(_))) {
+            return Err(Fault::OutOfOrder);
+        }
+        match frame {
+            Frame::Cmd(_) | Frame::Ctl(_) => return Err(Fault::WrongDirection),
+            Frame::Res(res) => {
+                let mut state = self.lock();
+                let overflowed = fanout::deliver_res(res, &state.sockets, &self.shared.counters);
+                self.drop_sockets(&mut state, &overflowed);
+            }
+            Frame::Evt(evt) => {
+                fanout::check_event_name(&evt.name)?;
+                let mut state = self.lock();
+                let overflowed = fanout::deliver_evt(evt, &state.sockets, &self.shared.counters);
+                self.drop_sockets(&mut state, &overflowed);
+            }
+            Frame::Note(Note::Ready) => match ready.take() {
+                Some(ready) => {
+                    let _ = ready.send(());
+                }
+                None => return Err(Fault::OutOfOrder),
+            },
             Frame::Note(Note::StoreState(state)) => {
                 self.slot.store.send_replace(Some(state));
             }
             Frame::Note(Note::Exiting(_)) => self.die(),
-            Frame::Note(Note::PaneCount(_) | Note::CtlDone { .. }) | Frame::Cmd(_) | Frame::Ctl(_) => {}
+            Frame::Note(Note::PaneCount(_) | Note::CtlDone { .. }) => {}
         }
+        Ok(())
+    }
+
+    /// The worker broke the rules of the link: the person's processes are killed and the worker is declared dead, without
+    /// letting a new worker start in between.
+    async fn violation(self: &Arc<Self>, fault: Fault) {
+        log::event(
+            Level::Warn,
+            "supervisor.worker_fault",
+            &[("account", &self.slot.key.id.to_string()), ("fault", fault.word())],
+        );
+        // Held when no worker is being started, so that a new worker is not killed by this clean-up.
+        let launching = self.slot.launch.try_lock().ok();
+        self.die();
+        let _ = self.shared.launcher.kill_uid(self.slot.key.uid).await;
+        drop(launching);
     }
 }
 
 impl Attached for Worker {
     fn submit(&self, socket: u32, request: u64, command: &str, args: &str) -> Result<(), SubmitError> {
-        let json = if args.trim().is_empty() {
-            format!("{{\"cmd\":\"{command}\"}}")
-        } else {
-            format!("{{\"cmd\":\"{command}\",\"args\":{args}}}")
-        };
-        let frame = Frame::Cmd(wire::CmdFrame { socket, request, json });
-        self.out.push(encode(&frame)?)
+        if !fanout::check_command_name(command) {
+            return Err(SubmitError::BadCommand);
+        }
+        if request >= limits::SYNTHETIC_REQUEST_BASE {
+            return Err(SubmitError::BadRequest);
+        }
+        let mut state = self.lock();
+        let Some(origin) = state.sockets.get(&socket).cloned() else { return Err(SubmitError::Closed) };
+        let plan = state.owners.assess(socket, command, args);
+        if plan.answer {
+            // A resize from a socket that does not own the pane is answered here and goes no further.
+            state.owners.commit(socket, &plan);
+            if self.shared.counters.push(&origin, fanout::null_answer(request)) {
+                self.drop_sockets(&mut state, &[socket]);
+            }
+            return Ok(());
+        }
+        let mut frames = Vec::with_capacity(3);
+        if let Some(resize) = &plan.before {
+            frames.push(Self::synthetic_frame(&mut state, resize)?);
+        }
+        let json = fanout::command_json(command, args);
+        frames.push(encode(&Frame::Cmd(CmdFrame { socket, request, json }))?);
+        if let Some(resize) = &plan.after {
+            frames.push(Self::synthetic_frame(&mut state, resize)?);
+        }
+        self.out.push_commands(frames)?;
+        state.owners.commit(socket, &plan);
+        Ok(())
     }
 
     fn detach(&self, socket: u32) {
         let mut state = self.lock();
-        if state.sockets.remove(&socket).is_none() {
-            return;
-        }
-        if state.sockets.is_empty() {
-            state.idle_since = Some(self.shared.clock.unix());
-        }
-        let _ = self.push_control(Ctl::Detach { socket });
+        self.drop_sockets(&mut state, &[socket]);
     }
 }
 
@@ -332,25 +459,38 @@ async fn read_loop(worker: Arc<Worker>, mut read: OwnedReadHalf, ready: oneshot:
     let mut buf = Default::default();
     let mut ready = Some(ready);
     loop {
-        let payload = loop {
+        // `Ok(None)` is the end of the link, `Err` is a frame the layout does not allow.
+        let next: Result<Option<_>, Fault> = loop {
             match codec.decode(&mut buf) {
-                Ok(Some(payload)) => break Some(payload),
+                Ok(Some(payload)) => break Ok(Some(payload)),
                 Ok(None) => {}
-                Err(_) => break None,
+                Err(_) => break Err(Fault::Malformed),
             }
             let read_some = tokio::select! {
                 () = worker.cancel.cancelled() => return,
                 n = read.read_buf(&mut buf) => n,
             };
             match read_some {
-                Ok(0) | Err(_) => break None,
+                Ok(0) => match codec.decode_eof(&mut buf) {
+                    Ok(Some(payload)) => break Ok(Some(payload)),
+                    Ok(None) => break Ok(None),
+                    Err(_) => break Err(Fault::Malformed),
+                },
+                Err(_) => break Ok(None),
                 Ok(_) => {}
             }
         };
-        let Some(payload) = payload else { break };
-        match Frame::from_payload(&payload) {
-            Ok(frame) => worker.handle(frame, &mut ready),
-            Err(_) => break,
+        let outcome = match next {
+            Ok(Some(payload)) => match Frame::from_payload(&payload) {
+                Ok(frame) => worker.handle(frame, &mut ready),
+                Err(_) => Err(Fault::Malformed),
+            },
+            Ok(None) => break,
+            Err(fault) => Err(fault),
+        };
+        if let Err(fault) = outcome {
+            worker.violation(fault).await;
+            return;
         }
     }
     worker.die();
@@ -365,7 +505,7 @@ async fn write_loop(worker: Arc<Worker>, mut write: OwnedWriteHalf) {
         };
         let Some(frame) = frame else { return };
         match tokio::time::timeout(limits::WORKER_WRITE_TIMEOUT, write.write_all(&frame)).await {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => worker.out.done(frame.len()),
             Ok(Err(_)) | Err(_) => break,
         }
     }
@@ -485,7 +625,13 @@ impl Supervisor {
         let worker = Arc::new(Worker {
             shared: shared.clone(),
             slot: slot.clone(),
-            state: Mutex::new(WorkerState { sockets: HashMap::new(), next_socket: 0, idle_since: None }),
+            state: Mutex::new(WorkerState {
+                sockets: HashMap::new(),
+                next_socket: 0,
+                owners: Owners::default(),
+                synthetic: 0,
+                idle_since: None,
+            }),
             out: WorkQueue::new(),
             cancel: CancellationToken::new(),
             dead: AtomicBool::new(false),
@@ -517,29 +663,45 @@ impl Supervisor {
 
     /// Attaches a new browser socket of `account`, starting the person's worker if there is none.
     pub async fn attach(&self, account: AccountKey) -> Result<(SocketHandle, SocketRx), AttachError> {
+        let mut last = AttachError::Launch("the worker ended while the socket attached".into());
         for _ in 0..3 {
             let worker = self.ensure_worker(account).await?;
-            if let Ok(halves) = worker.add_socket() {
-                return Ok(halves);
+            match worker.add_socket() {
+                Ok(halves) => return Ok(halves),
+                Err(AttachError::TooManySockets) => return Err(AttachError::TooManySockets),
+                Err(other) => last = other,
             }
         }
-        Err(AttachError::Launch("the worker ended while the socket attached".into()))
+        Err(last)
     }
 
     /// What the supervisor knows about `account`.
     pub fn account_stats(&self, account: AccountKey) -> AccountStats {
         let slot = self.shared.slots().get(&account.id).cloned();
-        match slot.and_then(|slot| slot.live()) {
-            Some(worker) => AccountStats { worker_running: true, sockets: worker.lock().sockets.len(), ..AccountStats::default() },
-            None => AccountStats::default(),
+        let Some(worker) = slot.and_then(|slot| slot.live()) else { return AccountStats::default() };
+        let (worker_queue_frames, worker_queue_bytes) = worker.out.load();
+        let state = worker.lock();
+        AccountStats {
+            worker_running: true,
+            sockets: state.sockets.len(),
+            queued_bytes: state.sockets.values().map(|s| s.queue.bytes()).sum(),
+            worker_queue_frames,
+            worker_queue_bytes,
+            remembered_sizes: state.owners.remembered(),
+            owned_panes: state.owners.owned(),
         }
     }
 
     /// The totals.
     pub fn stats(&self) -> Stats {
         let slots: Vec<Arc<Slot>> = self.shared.slots().values().cloned().collect();
+        let counters = &self.shared.counters;
         let mut stats = Stats {
-            dropped_unknown_socket: self.shared.counters.dropped_unknown_socket.load(Ordering::Relaxed),
+            dropped_unknown_socket: Counters::get(&counters.dropped_unknown_socket),
+            dropped_frames: Counters::get(&counters.dropped_frames),
+            dropped_synthetic: Counters::get(&counters.dropped_synthetic),
+            overflow_closes: Counters::get(&counters.overflow_closes),
+            worker_deaths: Counters::get(&counters.worker_deaths),
             ..Stats::default()
         };
         for worker in slots.iter().filter_map(|slot| slot.live()) {
