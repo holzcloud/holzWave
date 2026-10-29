@@ -194,7 +194,10 @@ struct Inner {
     bytes: usize,
     lost: BTreeSet<u64>,
     dropped: u64,
+    /// Over the hard cap: the supervisor does not keep up, and the worker ends as a failure.
     dead: bool,
+    /// The writer could not write: the supervisor is gone, which is how a run ends and not a failure of the worker.
+    broken: bool,
     closed: bool,
 }
 
@@ -245,6 +248,7 @@ impl Outbound {
                 lost: BTreeSet::new(),
                 dropped: 0,
                 dead: false,
+                broken: false,
                 closed: false,
             }),
             ready: Condvar::new(),
@@ -329,12 +333,13 @@ impl Outbound {
         inner.closed = true;
     }
 
-    /// Declares the link dead without a note (the writer could not write).
+    /// The writer could not write: whatever is queued is of no use any more, and nothing more is accepted.
     pub fn fail(&self) {
         let mut inner = self.inner();
         inner.items.clear();
+        inner.lost.clear();
         inner.bytes = 0;
-        inner.dead = true;
+        inner.broken = true;
         inner.closed = true;
         drop(inner);
         self.ready.notify_all();
@@ -388,6 +393,11 @@ impl Outbound {
     pub fn is_dead(&self) -> bool {
         self.inner().dead
     }
+
+    /// Whether the writer gave up on the link.
+    pub fn is_broken(&self) -> bool {
+        self.inner().broken
+    }
 }
 
 /// The writer thread over the outbound queue: writes every frame to `link` until the queue is closed and empty, or dead.
@@ -409,7 +419,7 @@ pub fn spawn_writer(link: UnixStream, queue: Arc<Outbound>, gate: Option<Arc<Gat
                 }
             }
             let _ = out.flush();
-            if queue.is_dead() {
+            if queue.is_dead() || queue.is_broken() {
                 let _ = out.get_ref().shutdown(std::net::Shutdown::Both);
             }
         })

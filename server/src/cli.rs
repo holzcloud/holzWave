@@ -4,6 +4,7 @@
 //! does not understand.
 
 use std::io::Write;
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -15,6 +16,9 @@ use crate::config::{self, ENV_KEY_FILE, Env, RealProbe};
 use crate::http::health::{self, Health};
 use crate::keyfile;
 use crate::store::Store;
+use crate::worker::runtime::WorkerMode;
+#[cfg(target_os = "linux")]
+use crate::worker::runtime::{self, RunEnd, WorkerEnv};
 
 /// What the server prints when it is called without a known subcommand.
 pub const USAGE: &str = "\
@@ -25,6 +29,7 @@ subcommands:
   check-config          check the configuration file and the key file, then exit
   bootstrap             print a one-time token that creates the first administrator (only while no account exists)
   healthcheck           ask the running server whether it is ready: prints healthy and exits 0, or one sentence and exits 1
+  worker --mode MODE    one person's process (serve, wipe_secrets or wipe_home); the server's helper starts it, not a person
 ";
 
 /// The exit status for a call the server does not understand.
@@ -34,13 +39,78 @@ const USAGE_STATUS: u8 = 2;
 const FAILURE_STATUS: u8 = 1;
 
 /// The arguments after `worker`: exactly `--mode <serve|wipe_secrets|wipe_home>`.
-pub fn parse_worker_args(_args: &[String]) -> Result<crate::worker::runtime::WorkerMode, String> {
-    Err("not built".into())
+pub fn parse_worker_args(args: &[String]) -> Result<WorkerMode, String> {
+    match args {
+        [flag, value] if flag == "--mode" => WorkerMode::parse(value)
+            .ok_or_else(|| "worker: the mode is none of serve, wipe_secrets and wipe_home".to_owned()),
+        [] => Err("worker needs --mode serve, --mode wipe_secrets or --mode wipe_home".into()),
+        _ => Err("worker takes --mode with one value and nothing else".into()),
+    }
 }
 
-/// The `worker` subcommand. `link` is the socket the binary root claimed from descriptor 3, if it was one.
-pub fn worker_main(_args: &[String], _link: Option<std::os::unix::net::UnixStream>) -> u8 {
-    FAILURE_STATUS
+/// Prints one sentence for a worker that cannot run and returns the status for a call the server does not understand.
+fn worker_refusal(sentence: &str) -> u8 {
+    eprintln!("holzwave-server: {sentence}");
+    USAGE_STATUS
+}
+
+/// The `worker` subcommand: one person's process, started by the server's helper with the socket on descriptor 3, which the
+/// binary root claimed and passes in as `link`. The checks of its own isolation come before anything else.
+pub fn worker_main(args: &[String], link: Option<UnixStream>) -> u8 {
+    match parse_worker_args(args) {
+        Ok(mode) => worker_run(mode, link),
+        Err(problem) => worker_refusal(&problem),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn worker_run(_mode: WorkerMode, _link: Option<UnixStream>) -> u8 {
+    worker_refusal("the worker runs on Linux only")
+}
+
+/// A panic of the worker tells where it happened and nothing of what it held: a payload could carry a secret.
+#[cfg(target_os = "linux")]
+fn quiet_panics() {
+    std::panic::set_hook(Box::new(|info| {
+        let place = info.location().map_or_else(String::new, |l| format!(" at {}:{}", l.file(), l.line()));
+        eprintln!("holzwave-server: the worker panicked{place}");
+    }));
+}
+
+#[cfg(target_os = "linux")]
+fn worker_run(mode: WorkerMode, link: Option<UnixStream>) -> u8 {
+    quiet_panics();
+    let identity = match runtime::self_check() {
+        Ok(identity) => identity,
+        Err(sentence) => return worker_refusal(&sentence),
+    };
+    let env = match WorkerEnv::from_process() {
+        Ok(env) => env,
+        Err(sentence) => return worker_refusal(&sentence),
+    };
+    if let Err(sentence) = runtime::check_home(&env.home, identity.uid) {
+        return worker_refusal(&sentence);
+    }
+    let wiped = |result: Result<(), String>| match result {
+        Ok(()) => 0,
+        Err(sentence) => {
+            eprintln!("holzwave-server: {sentence}");
+            FAILURE_STATUS
+        }
+    };
+    match mode {
+        WorkerMode::Serve => {
+            let Some(link) = link else {
+                return worker_refusal("the worker needs the socket on descriptor 3");
+            };
+            match runtime::run(link, env) {
+                RunEnd::Failed => FAILURE_STATUS,
+                RunEnd::LinkClosed | RunEnd::Shutdown => 0,
+            }
+        }
+        WorkerMode::WipeSecrets => wiped(runtime::wipe_secrets(&env.home, identity.uid)),
+        WorkerMode::WipeHome => wiped(runtime::wipe_home(&env.home, identity.uid)),
+    }
 }
 
 /// Prints a problem with the call and the usage, and returns the usage status.
@@ -58,6 +128,7 @@ fn run(args: &[String], env: &Env) -> u8 {
         Some("check-config") => check_config(&args[1..], env),
         Some("bootstrap") => bootstrap(&args[1..], env),
         Some("healthcheck") => healthcheck(&args[1..], env),
+        Some("worker") => worker_main(&args[1..], None),
         Some(name) => usage_error(&format!("unknown subcommand {name:?}")),
         None => {
             eprint!("{USAGE}");

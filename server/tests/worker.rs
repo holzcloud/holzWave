@@ -852,6 +852,17 @@ fn end_a_shutdown_control_says_clean_ends_the_run_and_the_shell() {
 }
 
 #[test]
+fn end_a_link_that_closes_while_a_pane_is_still_writing_is_the_end_of_the_link_and_not_a_failure() {
+    let mut rig = rig_with_shell("while true; do echo tick; done");
+    rig.init();
+    let first = first_pane(&rig.ok(2, "get_layout", json!({})));
+    rig.ok(2, "start_pane", json!({"pane": first, "cols": 80, "rows": 24, "cell_w": 8, "cell_h": 16}));
+    rig.wait_event("frame", |_, payload| payload["pane"] == json!(first));
+    // The supervisor goes away while frames are on their way to it.
+    assert_eq!(rig.finish(), RunEnd::LinkClosed);
+}
+
+#[test]
 fn end_a_second_init_a_frame_that_belongs_to_the_worker_and_a_bad_frame_end_it_with_a_failure_note() {
     let cases: Vec<Frame> = vec![
         Frame::Ctl(Ctl::Init { version: PROTOCOL_VERSION, max_panes: 0, max_scrollback_lines: 0 }),

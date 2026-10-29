@@ -275,21 +275,108 @@ pub struct Identity {
     pub gid: u32,
 }
 
+/// The text after `name` (such as `Uid:`) on the line of `text` that starts with it.
+fn status_field<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    text.lines().find_map(|line| line.strip_prefix(name))
+}
+
+/// Four ids that all name the same user or group: real, effective, saved and file system. `what` is `user` or `group`.
+fn same_ids(text: &str, name: &str, what: &str, zero: &str) -> Result<u32, String> {
+    let ids: Vec<u32> = status_field(text, name)
+        .map(|rest| rest.split_whitespace().map(str::parse).collect::<Result<Vec<u32>, _>>())
+        .and_then(Result::ok)
+        .filter(|ids| ids.len() == 4)
+        .ok_or_else(|| format!("the status has no readable {what} ids"))?;
+    if ids[0] != ids[1] {
+        return Err(format!("the real and effective {what} ids differ"));
+    }
+    if ids[2] != ids[1] || ids[3] != ids[1] {
+        return Err(format!("the saved or file system {what} id differs from the effective one"));
+    }
+    if ids[1] == 0 {
+        return Err(zero.to_owned());
+    }
+    Ok(ids[1])
+}
+
+/// One capability set, which must be empty.
+fn empty_capabilities(text: &str, name: &str, what: &str) -> Result<(), String> {
+    let value = status_field(text, name)
+        .map(str::trim)
+        .filter(|v| v.len() == 16 && v.bytes().all(|b| b.is_ascii_hexdigit()))
+        .and_then(|v| u64::from_str_radix(v, 16).ok())
+        .ok_or_else(|| format!("the status has no readable {what} capability set"))?;
+    if value == 0 { Ok(()) } else { Err(format!("the worker holds {what} capabilities")) }
+}
+
 /// Reads the text of `/proc/self/status`: the worker runs only as its person with nothing but its own ids, no group, no
 /// capability and with `no_new_privs`. The error is one sentence, and no sentence repeats a byte of the text.
-pub fn check_status(_text: &str) -> Result<Identity, String> {
-    Err("not built".into())
+pub fn check_status(text: &str) -> Result<Identity, String> {
+    let uid = same_ids(text, "Uid:", "user", "the worker runs as the superuser")?;
+    let gid = same_ids(text, "Gid:", "group", "the worker runs with the root group")?;
+    let groups = status_field(text, "Groups:").ok_or("the status has no group list")?;
+    let mut listed = 0usize;
+    for group in groups.split_whitespace() {
+        group.parse::<u32>().map_err(|_| "the group list is not readable")?;
+        listed += 1;
+    }
+    if listed > 0 {
+        return Err("the worker has supplementary groups".into());
+    }
+    empty_capabilities(text, "CapInh:", "inheritable")?;
+    empty_capabilities(text, "CapPrm:", "permitted")?;
+    empty_capabilities(text, "CapEff:", "effective")?;
+    empty_capabilities(text, "CapAmb:", "ambient")?;
+    match status_field(text, "NoNewPrivs:").map(str::trim) {
+        Some("1") => {}
+        Some("0") => return Err("no_new_privs is not set".into()),
+        _ => return Err("the status has no readable no_new_privs line".into()),
+    }
+    Ok(Identity { uid, gid })
 }
 
 /// The descriptors the worker may have: 0, 1, 2 and the link on 3, and the directory descriptor `own` that the list was
 /// read through.
-pub fn check_descriptors(_open: &[u32], _own: Option<u32>) -> Result<(), String> {
-    Err("not built".into())
+pub fn check_descriptors(open: &[u32], own: Option<u32>) -> Result<(), String> {
+    if !open.contains(&LINK_DESCRIPTOR) {
+        return Err(format!("descriptor {LINK_DESCRIPTOR}, the link, is not open"));
+    }
+    for descriptor in open {
+        if *descriptor <= LINK_DESCRIPTOR || Some(*descriptor) == own {
+            continue;
+        }
+        return Err(format!("descriptor {descriptor} is open; only 0, 1, 2 and the link on {LINK_DESCRIPTOR} may be"));
+    }
+    Ok(())
 }
 
+/// The descriptor the helper passes the socket on.
+pub const LINK_DESCRIPTOR: u32 = 3;
+
 /// The home must be an absolute path to a real directory, owned by `uid`, with mode 0700.
-pub fn check_home(_home: &Path, _uid: u32) -> Result<(), String> {
-    Err("not built".into())
+pub fn check_home(home: &Path, uid: u32) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    if !home.is_absolute() {
+        return Err("HOME is not an absolute path".into());
+    }
+    let meta = std::fs::symlink_metadata(home).map_err(|_| "HOME cannot be read".to_owned())?;
+    if meta.file_type().is_symlink() {
+        return Err("HOME is a link".into());
+    }
+    if !meta.is_dir() {
+        return Err("HOME is not a directory".into());
+    }
+    if meta.uid() != uid {
+        return Err("HOME does not belong to the worker's user".into());
+    }
+    let mode = meta.mode() & 0o7777;
+    if mode & 0o077 != 0 {
+        return Err("HOME is open to the group or to others".into());
+    }
+    if mode != 0o700 {
+        return Err("HOME does not have mode 0700".into());
+    }
+    Ok(())
 }
 
 /// What a worker process is asked to do.
@@ -305,24 +392,120 @@ pub enum WorkerMode {
 
 impl WorkerMode {
     /// The mode a `--mode` value names.
-    pub fn parse(_name: &str) -> Option<WorkerMode> {
-        None
+    pub fn parse(name: &str) -> Option<WorkerMode> {
+        match name {
+            "serve" => Some(WorkerMode::Serve),
+            "wipe_secrets" => Some(WorkerMode::WipeSecrets),
+            "wipe_home" => Some(WorkerMode::WipeHome),
+            _ => None,
+        }
     }
 }
 
-/// Removes the store file and its siblings.
-pub fn wipe_secrets(_home: &Path, _uid: u32) -> Result<(), String> {
-    Err("not built".into())
+/// Removes the store file and its siblings. The home must pass [`check_home`]; a data directory that is a link is refused,
+/// so nothing outside the home is touched.
+pub fn wipe_secrets(home: &Path, uid: u32) -> Result<(), String> {
+    check_home(home, uid)?;
+    let data = home.join(DATA_DIR);
+    match std::fs::symlink_metadata(&data) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("the data directory cannot be read".into()),
+        Ok(meta) if meta.file_type().is_symlink() => return Err("the data directory is a link".into()),
+        Ok(meta) if !meta.is_dir() => return Err("the data directory is not a directory".into()),
+        Ok(_) => {}
+    }
+    crate::worker::secretstore::remove_store_files(&crate::worker::secretstore::store_path(home))
+        .map_err(|_| "the secret store files could not all be removed".to_owned())
 }
 
-/// Removes everything inside the home and leaves the home.
-pub fn wipe_home(_home: &Path, _uid: u32) -> Result<(), String> {
-    Err("not built".into())
+/// Removes everything inside the home and leaves the home. Links are removed as links; nothing is followed.
+pub fn wipe_home(home: &Path, uid: u32) -> Result<(), String> {
+    check_home(home, uid)?;
+    let entries = std::fs::read_dir(home).map_err(|_| "HOME cannot be listed".to_owned())?;
+    let mut failed = 0usize;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            failed += 1;
+            continue;
+        };
+        let path = entry.path();
+        let removed = match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&path),
+            Ok(_) => std::fs::remove_file(&path),
+            Err(e) => Err(e),
+        };
+        if removed.is_err() {
+            failed += 1;
+        }
+    }
+    if failed == 0 { Ok(()) } else { Err(format!("{failed} entries in HOME could not be removed")) }
+}
+
+/// The longest user name taken from the environment.
+const MAX_USER_BYTES: usize = 64;
+
+fn absolute(get: &dyn Fn(&str) -> Option<String>, name: &str) -> Result<PathBuf, String> {
+    let value = get(name).filter(|v| !v.is_empty()).ok_or_else(|| format!("{name} is not set"))?;
+    let path = PathBuf::from(value);
+    if path.is_absolute() { Ok(path) } else { Err(format!("{name} is not an absolute path")) }
 }
 
 impl WorkerEnv {
     /// The environment the helper set, read through `get`. Anything missing or malformed is a refusal.
-    pub fn from_vars(_get: &dyn Fn(&str) -> Option<String>) -> Result<WorkerEnv, String> {
-        Err("not built".into())
+    pub fn from_vars(get: &dyn Fn(&str) -> Option<String>) -> Result<WorkerEnv, String> {
+        let home = absolute(get, "HOME")?;
+        let tmp = absolute(get, "TMPDIR")?;
+        absolute(get, "SHELL")?;
+        let user = get("USER").filter(|u| !u.is_empty()).ok_or("USER is not set")?;
+        if user.len() > MAX_USER_BYTES || user.bytes().any(|b| b.is_ascii_control() || b == b'/' || b == b' ') {
+            return Err("USER is not a user name".into());
+        }
+        Ok(WorkerEnv { home, tmp, shell: ShellSpec::System, user })
     }
+
+    /// The environment of this process.
+    pub fn from_process() -> Result<WorkerEnv, String> {
+        WorkerEnv::from_vars(&|name| std::env::var(name).ok())
+    }
+}
+
+/// The numbers of the open descriptors of this process, and the number of the directory descriptor the list was read
+/// through.
+#[cfg(target_os = "linux")]
+fn open_descriptors() -> Result<(Vec<u32>, u32), String> {
+    use std::os::fd::AsRawFd;
+    let unreadable = || "the open descriptors cannot be listed".to_owned();
+    let handle = rustix::fs::open(
+        "/proc/self/fd",
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|_| unreadable())?;
+    let own = u32::try_from(handle.as_raw_fd()).map_err(|_| unreadable())?;
+    let mut dir = rustix::fs::Dir::new(handle).map_err(|_| unreadable())?;
+    let mut open = Vec::new();
+    while let Some(entry) = dir.read() {
+        let entry = entry.map_err(|_| unreadable())?;
+        if let Some(number) = entry.file_name().to_str().ok().and_then(|n| n.parse::<u32>().ok()) {
+            open.push(number);
+        }
+    }
+    Ok((open, own))
+}
+
+/// The checks the worker makes before anything else: its ids, groups, capabilities and `no_new_privs` from the kernel's own
+/// account, the descriptors it holds, and that it cannot be dumped or traced. Returns its ids for the check of the home.
+#[cfg(target_os = "linux")]
+pub fn self_check() -> Result<Identity, String> {
+    use rustix::process::{DumpableBehavior, dumpable_behavior, set_dumpable_behavior};
+    let status = std::fs::read_to_string("/proc/self/status").map_err(|_| "the process status cannot be read".to_owned())?;
+    let identity = check_status(&status)?;
+    let (open, own) = open_descriptors()?;
+    check_descriptors(&open, Some(own))?;
+    // The exec that started this process reset the state, so it is set here and read back.
+    set_dumpable_behavior(DumpableBehavior::NotDumpable).map_err(|_| "the process cannot be made undumpable".to_owned())?;
+    if dumpable_behavior() != Ok(DumpableBehavior::NotDumpable) {
+        return Err("the process is dumpable".into());
+    }
+    Ok(identity)
 }
