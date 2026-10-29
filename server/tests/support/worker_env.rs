@@ -64,7 +64,7 @@ impl Rig {
             ShellSpec::new("/bin/sh", &["-c", &script])
         });
         let (ours, theirs) = UnixStream::pair().expect("a socket pair");
-        let env = WorkerEnv { home: home.path().to_path_buf(), tmp, shell };
+        let env = WorkerEnv { home: home.path().to_path_buf(), tmp, shell, user: "tester".into() };
         let hooks = options.hooks;
         let (ended_tx, ended) = channel();
         let thread = std::thread::Builder::new()
@@ -215,7 +215,7 @@ impl Rig {
     /// Closes the supervisor's end and waits for the worker thread to return; the end of the run.
     pub fn finish(mut self) -> RunEnd {
         let _ = self.writer.shutdown(std::net::Shutdown::Both);
-        let end = self.ended.recv_timeout(Duration::from_secs(5)).expect("the worker returned within five seconds");
+        let end = self.ended.recv_timeout(PATIENCE).expect("the worker returned in time");
         if let Some(thread) = self.thread.take() {
             thread.join().expect("the worker thread joined");
         }

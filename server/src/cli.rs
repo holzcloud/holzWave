@@ -33,6 +33,16 @@ const USAGE_STATUS: u8 = 2;
 /// The exit status for a refusal or a failure.
 const FAILURE_STATUS: u8 = 1;
 
+/// The arguments after `worker`: exactly `--mode <serve|wipe_secrets|wipe_home>`.
+pub fn parse_worker_args(_args: &[String]) -> Result<crate::worker::runtime::WorkerMode, String> {
+    Err("not built".into())
+}
+
+/// The `worker` subcommand. `link` is the socket the binary root claimed from descriptor 3, if it was one.
+pub fn worker_main(_args: &[String], _link: Option<std::os::unix::net::UnixStream>) -> u8 {
+    FAILURE_STATUS
+}
+
 /// Prints a problem with the call and the usage, and returns the usage status.
 fn usage_error(problem: &str) -> u8 {
     eprintln!("holzwave-server: {problem}");

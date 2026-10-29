@@ -8,7 +8,7 @@ use std::fmt;
 use std::fs::DirBuilder;
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use holzwave_core::secrets::SecretStore;
@@ -35,6 +35,8 @@ pub struct WorkerEnv {
     pub tmp: PathBuf,
     /// The program a pane runs.
     pub shell: ShellSpec,
+    /// The name of the person's account, as the helper set it.
+    pub user: String,
 }
 
 /// Switches of the integration tests, passed to [`run_with`]; the product passes the default, which changes nothing.
@@ -262,4 +264,65 @@ fn start(
     let dispatcher =
         Dispatcher::start(&core, &sink, queue, hooks.rows.clone(), hooks.probe.clone(), log.clone(), REPLAY_COMMAND);
     Some(Running { core, sink, secrets, dispatcher, told: StoreState::Absent })
+}
+
+// ---- the self-check, the modes and the wipes ----------------------------------------------------------------------------
+
+/// The ids the worker runs with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Identity {
+    pub uid: u32,
+    pub gid: u32,
+}
+
+/// Reads the text of `/proc/self/status`: the worker runs only as its person with nothing but its own ids, no group, no
+/// capability and with `no_new_privs`. The error is one sentence, and no sentence repeats a byte of the text.
+pub fn check_status(_text: &str) -> Result<Identity, String> {
+    Err("not built".into())
+}
+
+/// The descriptors the worker may have: 0, 1, 2 and the link on 3, and the directory descriptor `own` that the list was
+/// read through.
+pub fn check_descriptors(_open: &[u32], _own: Option<u32>) -> Result<(), String> {
+    Err("not built".into())
+}
+
+/// The home must be an absolute path to a real directory, owned by `uid`, with mode 0700.
+pub fn check_home(_home: &Path, _uid: u32) -> Result<(), String> {
+    Err("not built".into())
+}
+
+/// What a worker process is asked to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkerMode {
+    /// Serve the person's core on the link.
+    Serve,
+    /// Remove the person's secret store and exit.
+    WipeSecrets,
+    /// Remove everything in the person's home and exit.
+    WipeHome,
+}
+
+impl WorkerMode {
+    /// The mode a `--mode` value names.
+    pub fn parse(_name: &str) -> Option<WorkerMode> {
+        None
+    }
+}
+
+/// Removes the store file and its siblings.
+pub fn wipe_secrets(_home: &Path, _uid: u32) -> Result<(), String> {
+    Err("not built".into())
+}
+
+/// Removes everything inside the home and leaves the home.
+pub fn wipe_home(_home: &Path, _uid: u32) -> Result<(), String> {
+    Err("not built".into())
+}
+
+impl WorkerEnv {
+    /// The environment the helper set, read through `get`. Anything missing or malformed is a refusal.
+    pub fn from_vars(_get: &dyn Fn(&str) -> Option<String>) -> Result<WorkerEnv, String> {
+        Err("not built".into())
+    }
 }
