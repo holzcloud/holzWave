@@ -509,10 +509,41 @@ impl Accounts {
     }
 
     /// Looks at an invitation without spending it: the role, and for an invitation to an existing account that account's facts.
-    /// An unknown, expired and spent token, and one whose administrator is no longer active, are the one
-    /// [`AccountError::NotRedeemable`]. Not implemented yet.
-    pub fn peek_invite(&self, _token: &str) -> Result<InvitePeek, AccountError> {
-        Err(AccountError::NotRedeemable)
+    /// It asks the question of [`Accounts::redeem_invite`] with the very same query and the same checks, in a transaction that
+    /// is rolled back, so nothing is spent, created or audited. An unknown, expired and spent token, and one whose
+    /// administrator is no longer active, are the one [`AccountError::NotRedeemable`].
+    pub fn peek_invite(&self, token: &str) -> Result<InvitePeek, AccountError> {
+        let hash = presented_hash(INVITE_PREFIX, token).ok_or(AccountError::NotRedeemable)?;
+        let now = self.clock.unix();
+        self.peek(|tx| {
+            let invite = tx.invite_redeem(&hash, now)?;
+            require_admin(tx, invite.created_by).map_err(|_| AccountError::NotRedeemable)?;
+            let Some(id) = invite.account_id else { return Ok(InvitePeek { role: invite.role, account: None }) };
+            let account = match tx.account_get(id)? {
+                Some(account) if account.state == AccountState::Active => account,
+                _ => return Err(AccountError::NotRedeemable),
+            };
+            let has_method = Accounts::has_method(tx, account.id)?;
+            Ok(InvitePeek {
+                role: account.role,
+                account: Some(InviteTarget {
+                    id: account.id,
+                    username: account.username,
+                    display_name: account.display_name,
+                    handle: account.handle,
+                    has_method,
+                }),
+            })
+        })
+    }
+
+    /// Whether an account can sign in already: it has a password, an authenticator, a passkey or a single sign-on identity.
+    /// An invitation to such an account is not accepted, so that an invitation cannot be used to add a second way in.
+    pub fn has_method(tx: &Tx<'_>, id: AccountId) -> Result<bool, AccountError> {
+        Ok(tx.password_get(id)?.is_some()
+            || tx.totp_get(id)?.is_some()
+            || !tx.passkey_list(id)?.is_empty()
+            || !tx.oidc_list(id)?.is_empty())
     }
 
     // ---- single sign-on ----
