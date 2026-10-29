@@ -19,6 +19,7 @@ use axum::http::Method;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use edge::{Resp, Signed};
+use holzwave_server::accounts::Ending;
 use holzwave_server::auth::password::params_text;
 use holzwave_server::auth::session::parse_token;
 use holzwave_server::auth::totp;
@@ -27,6 +28,7 @@ use holzwave_server::http::routes_me::SecretsError;
 use holzwave_server::store::{AccountId, AccountState, PasswordCredential, Role, UnlockKind};
 use holzwave_server::unlock::{kek_from_passphrase, kek_from_prf, kek_from_recovery, parse_recovery_code};
 use serde_json::{Value, json};
+use std::sync::Arc;
 use webauthn_rs::prelude::Url;
 
 const SESSION: &str = "__Host-hw_session";
@@ -1564,4 +1566,1049 @@ async fn gates_each_person_changes_only_their_own_account() {
     assert_eq!(env.send(env.put_json("/api/me/passphrase", &body, &bob)).await.status, 400, "no member names another account");
     assert_eq!(env.credential_dump(carol.account), carol_before);
     assert!(env.secrets.sets().iter().all(|(account, _, _)| *account == bob.account));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The changes an administrator makes: roles, states, the reset of secrets, the sign-in lock and deletion
+// ---------------------------------------------------------------------------------------------------------------------
+
+fn id_of(env: &ApiEnv, name: &str) -> AccountId {
+    env.store.account_by_username(name).expect("read").expect("the account exists").id
+}
+
+/// Everything about an account that a change could touch, as a text, to see that a refused call left it alone.
+fn account_text(env: &ApiEnv, id: AccountId) -> String {
+    format!(
+        "{:?}|{}|{}",
+        env.store.read(|tx| tx.account_get(id)).expect("read"),
+        env.credential_dump(id),
+        env.session_rows(id)
+    )
+}
+
+fn role_now(env: &ApiEnv, id: AccountId) -> Role {
+    env.store.read(|tx| tx.account_get(id)).expect("read").expect("an account").role
+}
+
+fn state_now(env: &ApiEnv, id: AccountId) -> AccountState {
+    env.store.read(|tx| tx.account_get(id)).expect("read").expect("an account").state
+}
+
+/// An administrator with a password whose sign-in is `age` seconds old.
+async fn admin_with_password(env: &ApiEnv, name: &str, age: i64) -> Signed {
+    let id = env.person(name).await;
+    env.store.write(|tx| tx.account_set_role(id, Role::Admin)).expect("promote");
+    env.signed_aged(name, age)
+}
+
+/// The six changes of one account with a body that would be valid: name, method, path, body.
+fn admin_changes(id: AccountId) -> Vec<(&'static str, Method, String, Value)> {
+    let base = format!("/api/admin/accounts/{}", id.get());
+    vec![
+        ("role", Method::POST, format!("{base}/role"), json!({"role": "admin"})),
+        ("disable", Method::POST, format!("{base}/disable"), json!({})),
+        ("enable", Method::POST, format!("{base}/enable"), json!({})),
+        ("reset-secrets", Method::POST, format!("{base}/reset-secrets"), json!({})),
+        ("unlock-signin", Method::POST, format!("{base}/unlock-signin"), json!({})),
+        ("delete", Method::DELETE, base, json!({})),
+    ]
+}
+
+fn request_of(env: &ApiEnv, method: &Method, path: &str, body: &Value, who: &Signed) -> edge::Req {
+    if *method == Method::DELETE { env.delete_as(path, who) } else { env.change_as(method.clone(), path, body, who) }
+}
+
+async fn change_role(env: &ApiEnv, who: &Signed, target: AccountId, role: &str) -> Resp {
+    let path = format!("/api/admin/accounts/{}/role", target.get());
+    env.send(env.post_json(&path, &json!({"role": role}), who)).await
+}
+
+async fn admin_post(env: &ApiEnv, who: &Signed, target: AccountId, tail: &str) -> Resp {
+    let path = format!("/api/admin/accounts/{}/{tail}", target.get());
+    env.send(env.post_json(&path, &json!({}), who)).await
+}
+
+async fn delete_account(env: &ApiEnv, who: &Signed, target: AccountId) -> Resp {
+    env.send(env.delete_as(&format!("/api/admin/accounts/{}", target.get()), who)).await
+}
+
+#[tokio::test]
+async fn roles_a_member_becomes_an_administrator_and_the_audit_line_says_which_role() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    env.member("bob");
+    let bob = id_of(&env, "bob");
+    let response = change_role(&env, &alice, bob, "admin").await;
+    assert_no_content(&response, "the promotion");
+    assert_eq!(role_now(&env, bob), Role::Admin);
+    let lines = lines_of(&env, "account.role");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["result"], "ok");
+    assert_eq!(lines[0]["actor"], alice.account.get().to_string());
+    assert_eq!(lines[0]["target"], bob.get().to_string());
+    assert_eq!(lines[0]["detail"]["role"], "admin");
+    assert_eq!(env.send(env.get_as("/api/admin/accounts", &env.signed_aged("bob", 0))).await.status, 200, "bob is one now");
+
+    // The same role again is not an error and is written down once more.
+    assert_no_content(&change_role(&env, &alice, bob, "admin").await, "the same role");
+    assert_eq!(env.count("account.role"), 2);
+    println!("Roles: member -> admin 204, account.role ok actor=alice target=bob detail role=admin, 1 line per call");
+}
+
+#[tokio::test]
+async fn roles_an_administrator_becomes_a_member_when_another_one_is_left() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    env.admin_fresh("bob");
+    let bob = id_of(&env, "bob");
+    assert_no_content(&change_role(&env, &alice, bob, "member").await, "the demotion");
+    assert_eq!(role_now(&env, bob), Role::Member);
+    // Bob's session is alive, but it is a member's session now.
+    let refused = env.send(env.get_as("/api/admin/accounts", &env.signed_aged("bob", 0))).await;
+    assert_code(&refused, 403, json!({"code": "forbidden"}), "a demoted administrator");
+    let own = change_role(&env, &alice, alice.account, "member").await;
+    assert_code(&own, 409, json!({"code": "conflict", "field": "role"}), "the last administrator demotes themselves");
+    assert_eq!(role_now(&env, alice.account), Role::Admin);
+    let lines = lines_of(&env, "account.role");
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[1]["result"], "fail", "the refusal is written down once: {lines:?}");
+}
+
+#[tokio::test]
+async fn roles_a_role_the_body_does_not_name_is_a_400_on_role_and_changes_nothing() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    env.member("bob");
+    let bob = id_of(&env, "bob");
+    let before = account_text(&env, bob);
+    let path = format!("/api/admin/accounts/{}/role", bob.get());
+    for (what, body) in [
+        ("missing", json!({})),
+        ("null", json!({"role": null})),
+        ("a number", json!({"role": 1})),
+        ("a list", json!({"role": ["admin"]})),
+        ("an unknown role", json!({"role": "root"})),
+        ("another case", json!({"role": "Admin"})),
+        ("spaces", json!({"role": " admin"})),
+        ("empty", json!({"role": ""})),
+    ] {
+        let response = env.send(env.post_json(&path, &body, &alice)).await;
+        assert_code(&response, 400, json!({"code": "bad_request", "field": "role"}), what);
+    }
+    let extra = env.send(env.post_json(&path, &json!({"role": "admin", "actor": 1}), &alice)).await;
+    assert_code(&extra, 400, json!({"code": "bad_request"}), "an unknown member");
+    assert_eq!(account_text(&env, bob), before);
+    assert_eq!(env.count("account.role"), 0, "a body that never reached the service writes no line");
+}
+
+#[tokio::test]
+async fn states_a_disabled_account_has_no_session_cannot_sign_in_and_the_worker_is_told() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    let bob = env.member_with_password("bob").await;
+    let second = env.another_session("bob");
+    let uid = env.store.read(|tx| tx.account_get(bob.account)).expect("read").expect("account").uid;
+
+    let response = admin_post(&env, &alice, bob.account, "disable").await;
+    assert_no_content(&response, "the disabling");
+    assert_eq!(state_now(&env, bob.account), AccountState::Disabled);
+    assert_eq!(env.session_rows(bob.account), 0, "every session is gone");
+    assert_eq!(env.me_of(&bob).await.status, 401);
+    assert_eq!(env.me_of(&second).await.status, 401);
+    assert_eq!(password_status(&env, "bob", PASSWORD).await, 401, "the password path says what it says to a wrong password");
+    assert_eq!(env.observer.ended(), [(bob.account, uid, Ending::Disabled)]);
+    let lines = lines_of(&env, "account.disable");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["detail"]["state"], "disabled");
+    let list = env.send(env.get_as("/api/admin/accounts", &alice)).await.json();
+    assert_eq!(by_name(&list, "bob")["state"], "disabled");
+    println!("Roles: disable 204, state disabled, every session gone, worker told (Disabled), 1 account.disable line");
+}
+
+#[tokio::test]
+async fn states_enabling_an_account_lets_the_person_sign_in_again() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    let bob = env.member_with_password("bob").await;
+    assert_no_content(&admin_post(&env, &alice, bob.account, "disable").await, "disable");
+    assert_no_content(&admin_post(&env, &alice, bob.account, "enable").await, "enable");
+    assert_eq!(state_now(&env, bob.account), AccountState::Active);
+    assert_eq!(password_status(&env, "bob", PASSWORD).await, 200);
+    let lines = lines_of(&env, "account.enable");
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["detail"]["state"], "active");
+    assert_eq!(env.observer.ended().len(), 1, "enabling tells no one that anything ended");
+}
+
+#[tokio::test]
+async fn states_the_last_administrator_can_be_neither_disabled_nor_deleted() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    let before = account_text(&env, alice.account);
+    let disable = admin_post(&env, &alice, alice.account, "disable").await;
+    assert_code(&disable, 409, json!({"code": "conflict", "field": "role"}), "disable");
+    let delete = delete_account(&env, &alice, alice.account).await;
+    assert_code(&delete, 409, json!({"code": "conflict", "field": "role"}), "delete");
+    assert_eq!(account_text(&env, alice.account), before);
+    assert!(env.observer.ended().is_empty());
+    assert_eq!(env.me_of(&alice).await.status, 200);
+    // With another administrator the same calls work, on either of them.
+    env.admin_fresh("bob");
+    assert_no_content(&delete_account(&env, &alice, id_of(&env, "bob")).await, "bob goes");
+}
+
+#[tokio::test]
+async fn states_a_deleted_account_loses_its_credentials_and_sessions_and_keeps_its_name() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    let bob = env.member_with_password("bob").await;
+    let second = env.another_session("bob");
+    let uid = env.store.read(|tx| tx.account_get(bob.account)).expect("read").expect("account").uid;
+    env.store.write(|tx| tx.unlock_add(bob.account, UnlockKind::Recovery, &[1; 16], HKDF, None)).expect("a row");
+
+    assert_no_content(&delete_account(&env, &alice, bob.account).await, "the deletion");
+    assert_eq!(state_now(&env, bob.account), AccountState::Deleted);
+    assert_eq!(env.session_rows(bob.account), 0);
+    assert_eq!(env.me_of(&bob).await.status, 401);
+    assert_eq!(env.me_of(&second).await.status, 401);
+    assert!(env.unlock_kinds(bob.account).is_empty());
+    assert_eq!(env.credential_dump(bob.account).trim(), "", "no credential is left");
+    assert_eq!(env.observer.ended(), [(bob.account, uid, Ending::Deleted)]);
+    let lines = lines_of(&env, "account.delete");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let list = env.send(env.get_as("/api/admin/accounts", &alice)).await.json();
+    assert!(list["accounts"].as_array().expect("a list").iter().all(|a| a["username"] != "bob"));
+    // The name is not given to anybody else.
+    let again = env.send(env.post_json("/api/admin/invitations", &json!({"role": "member", "username": "bob"}), &alice)).await;
+    assert_code(&again, 409, json!({"code": "conflict", "field": "username"}), "the name stays reserved");
+    // A deleted account is no target for anything.
+    for (name, method, path, body) in admin_changes(bob.account) {
+        let response = env.send(request_of(&env, &method, &path, &body, &alice)).await;
+        assert_code(&response, 404, json!({"code": "not_found"}), name);
+    }
+}
+
+#[tokio::test]
+async fn reset_secrets_removes_the_three_unlock_kinds_and_keeps_the_password() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    let bob = env.member_with_password("bob").await;
+    env.store
+        .write(|tx| {
+            tx.unlock_add(bob.account, UnlockKind::Password, &[1; 16], &params_text(&env.argon.kdf()), None)?;
+            tx.unlock_add(bob.account, UnlockKind::Passphrase, &[2; 16], &params_text(&env.argon.kdf()), None)?;
+            tx.unlock_add(bob.account, UnlockKind::Prf, &[3; 32], HKDF, Some(&[4; 16]))?;
+            tx.unlock_add(bob.account, UnlockKind::Recovery, &[5; 16], HKDF, None)?;
+            Ok(())
+        })
+        .expect("rows");
+    let other = env.member_with_password("carol").await;
+    env.store.write(|tx| tx.unlock_add(other.account, UnlockKind::Recovery, &[6; 16], HKDF, None)).expect("a row");
+    let others = account_text(&env, other.account);
+
+    let response = admin_post(&env, &alice, bob.account, "reset-secrets").await;
+    assert_no_content(&response, "the reset");
+    assert_eq!(env.secrets.resets(), [bob.account], "the seam was asked once, for that account");
+    let kinds: Vec<UnlockKind> = env.unlock_kinds(bob.account).into_iter().map(|(kind, _)| kind).collect();
+    assert_eq!(kinds, [UnlockKind::Password], "only the way in by password is left");
+    assert_eq!(account_text(&env, other.account), others, "another person's rows are not touched");
+    assert_eq!(password_status(&env, "bob", PASSWORD).await, 200, "the password itself works");
+    assert_eq!(env.session_rows(bob.account), 1, "no session is ended");
+    let lines = lines_of(&env, "secrets.reset");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["result"], "ok");
+    assert_eq!(lines[0]["actor"], alice.account.get().to_string());
+    assert_eq!(lines[0]["target"], bob.account.get().to_string());
+    println!("Reset: reset-secrets 204, seam reset(bob) once, passphrase/prf/recovery rows gone, password row kept, 1 secrets.reset line");
+}
+
+#[tokio::test]
+async fn reset_secrets_leaves_the_rows_and_the_audit_alone_when_the_seam_cannot() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    let bob = env.member_with_password("bob").await;
+    env.store.write(|tx| tx.unlock_add(bob.account, UnlockKind::Recovery, &[5; 16], HKDF, None)).expect("a row");
+    let before = account_text(&env, bob.account);
+    for (error, status, body) in [
+        (SecretsError::Unavailable, 503, json!({"code": "busy"})),
+        (SecretsError::Locked, 423, json!({"code": "locked"})),
+        (SecretsError::Refused, 409, json!({"code": "conflict", "field": "method"})),
+    ] {
+        env.secrets.fail_reset(Some(error));
+        let response = admin_post(&env, &alice, bob.account, "reset-secrets").await;
+        assert_code(&response, status, body, &format!("{error:?}"));
+        assert_eq!(account_text(&env, bob.account), before);
+    }
+    assert_eq!(env.count("secrets.reset"), 0, "a reset that did not happen is not written down as one");
+
+    env.secrets.fail_reset(None);
+    env.break_writes("hw_broken", "DELETE", "unlock_methods", "");
+    let broken = admin_post(&env, &alice, bob.account, "reset-secrets").await;
+    assert_code(&broken, 503, json!({"code": "busy"}), "the rows");
+    assert_eq!(env.unlock_kinds(bob.account).len(), 2, "the rows are as they were");
+    assert_eq!(env.count("secrets.reset"), 0);
+    env.repair("hw_broken");
+    assert_no_content(&admin_post(&env, &alice, bob.account, "reset-secrets").await, "the retry");
+    assert_eq!(env.unlock_kinds(bob.account).len(), 1);
+    assert_eq!(env.count("secrets.reset"), 1, "the retry is the one that is written down");
+}
+
+#[tokio::test]
+async fn reset_secrets_of_an_account_that_is_not_there_asks_the_seam_nothing() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    let response = env.send(env.post_json("/api/admin/accounts/987654/reset-secrets", &json!({}), &alice)).await;
+    assert_code(&response, 404, json!({"code": "not_found"}), "no such account");
+    assert!(env.secrets.calls().is_empty());
+    assert_eq!(env.count("secrets.reset"), 0);
+}
+
+#[tokio::test]
+async fn lock_an_administrator_lifts_the_lock_of_the_sign_in() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    let dave = env.person("dave").await;
+    for _ in 0..5 {
+        let refused = env.send(env.post("/auth/password", &json!({"username": "dave", "password": WRONG}))).await;
+        assert!(matches!(refused.status.as_u16(), 401 | 429));
+    }
+    assert_eq!(password_status(&env, "dave", PASSWORD).await, 429, "dave is locked out");
+    let list = env.send(env.get_as("/api/admin/accounts", &alice)).await.json();
+    assert_eq!(by_name(&list, "dave")["state"], "locked_out");
+
+    let response = admin_post(&env, &alice, dave, "unlock-signin").await;
+    assert_no_content(&response, "the unlock");
+    assert_eq!(password_status(&env, "dave", PASSWORD).await, 200, "the next try is not throttled on the name");
+    let list = env.send(env.get_as("/api/admin/accounts", &alice)).await.json();
+    assert_eq!(by_name(&list, "dave")["state"], "active");
+    let lines = lines_of(&env, "account.unlock");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["result"], "ok");
+    assert_eq!(lines[0]["actor"], alice.account.get().to_string());
+    assert_eq!(lines[0]["target"], dave.get().to_string());
+    println!("Lock: 5 wrong passwords lock dave (429, listed locked_out), unlock-signin 204, the next sign-in 200, listed active, 1 account.unlock line");
+}
+
+#[tokio::test]
+async fn lock_unlocking_a_person_who_is_not_locked_is_fine_and_an_unknown_one_is_not_found() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    let bob = env.member("bob");
+    assert_no_content(&admin_post(&env, &alice, bob.account, "unlock-signin").await, "not locked");
+    assert_eq!(env.count("account.unlock"), 1);
+    let unknown = env.send(env.post_json("/api/admin/accounts/987654/unlock-signin", &json!({}), &alice)).await;
+    assert_code(&unknown, 404, json!({"code": "not_found"}), "unknown");
+    let lines = lines_of(&env, "account.unlock");
+    assert_eq!(lines.len(), 2, "one line per call: {lines:?}");
+    assert_eq!(lines[1]["result"], "fail");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Targets, the actor and the three gates
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn targets_an_id_that_is_not_a_plain_number_or_not_an_account_is_not_found_on_every_route() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    env.member("bob");
+    let bob = id_of(&env, "bob");
+    let before = account_text(&env, bob);
+    let lines = env.audit_lines().len();
+    let ids: Vec<String> = vec![
+        "0".to_owned(),
+        "987654".to_owned(),
+        "abc".to_owned(),
+        "-1".to_owned(),
+        "+1".to_owned(),
+        "1.0".to_owned(),
+        "1e3".to_owned(),
+        "0x1".to_owned(),
+        "%20".to_owned(),
+        "1%20".to_owned(),
+        "%E0%A5%A9".to_owned(),
+        "..".to_owned(),
+        "9".repeat(20),
+        "9".repeat(21),
+        "9".repeat(5_000),
+        format!("{}%00", bob.get()),
+        format!("{}/", bob.get()),
+    ];
+    let routes = ["role", "disable", "enable", "reset-secrets", "unlock-signin"];
+    for id in &ids {
+        for tail in routes {
+            let body = if tail == "role" { json!({"role": "admin"}) } else { json!({}) };
+            let response = env.send(env.post_json(&format!("/api/admin/accounts/{id}/{tail}"), &body, &alice)).await;
+            assert!(
+                response.status == 404 && (response.json() == json!({"code": "not_found"}) || response.body.is_empty()),
+                "{tail} with id {:?}: {} {}",
+                &id[..id.len().min(40)],
+                response.status,
+                response.text()
+            );
+        }
+        let response = env.send(env.delete_as(&format!("/api/admin/accounts/{id}"), &alice)).await;
+        assert_eq!(response.status, 404, "delete with id {:?}", &id[..id.len().min(40)]);
+    }
+    assert_eq!(account_text(&env, bob), before, "bob is as he was");
+    assert_eq!(state_now(&env, alice.account), AccountState::Active);
+    assert_eq!(env.audit_lines().len(), lines, "nothing was written down");
+    assert!(env.secrets.calls().is_empty());
+    assert!(env.observer.ended().is_empty());
+}
+
+#[tokio::test]
+async fn targets_the_actor_is_always_the_session_and_no_body_names_one() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    let carol = env.admin_fresh("carol");
+    env.member("bob");
+    let bob = id_of(&env, "bob");
+    for (who, name) in [(&alice, "alice"), (&carol, "carol")] {
+        for member in ["actor", "actor_id", "account", "by", "admin", "user"] {
+            let path = format!("/api/admin/accounts/{}/role", bob.get());
+            let body = json!({"role": "member", member: who.account.get()});
+            let response = env.send(env.post_json(&path, &body, who)).await;
+            assert_code(&response, 400, json!({"code": "bad_request"}), &format!("{name} names {member}"));
+        }
+    }
+    assert_no_content(&change_role(&env, &alice, bob, "admin").await, "alice");
+    assert_no_content(&change_role(&env, &carol, bob, "member").await, "carol");
+    let lines = lines_of(&env, "account.role");
+    let actors: Vec<&str> = lines.iter().map(|l| l["actor"].as_str().expect("actor")).collect();
+    assert_eq!(actors, [alice.account.get().to_string(), carol.account.get().to_string()]);
+}
+
+#[tokio::test]
+async fn gates_every_change_of_the_administration_needs_a_session() {
+    let env = ApiEnv::new();
+    env.admin_fresh("alice");
+    env.member("bob");
+    let bob = id_of(&env, "bob");
+    let mut routes = admin_changes(bob);
+    routes.push(("invitation", Method::POST, "/api/admin/invitations".to_owned(), json!({"role": "member"})));
+    for (name, method, path, body) in routes {
+        let req = edge::Req::new(method, &path)
+            .header("host", edge::HOST)
+            .header("origin", edge::ORIGIN)
+            .header("content-type", "application/json")
+            .json(&body);
+        assert_code(&env.send(req).await, 401, json!({"code": "invalid"}), name);
+    }
+    assert_eq!(state_now(&env, bob), AccountState::Active);
+    assert_eq!(env.invitation_rows(), 0);
+}
+
+#[tokio::test]
+async fn gates_a_member_is_forbidden_without_a_step_up_hint_before_the_body_is_read() {
+    let env = ApiEnv::new();
+    env.admin_fresh("alice");
+    let bob = env.member("bob");
+    let carol = env.member("carol");
+    let before = account_text(&env, carol.account);
+    let mut routes = admin_changes(carol.account);
+    routes.push(("invitation", Method::POST, "/api/admin/invitations".to_owned(), json!({"role": "member"})));
+    for (name, method, path, body) in &routes {
+        let response = env.send(request_of(&env, method, path, body, &bob)).await;
+        assert_code(&response, 403, json!({"code": "forbidden"}), name);
+        // A body that cannot be read is not read: the answer is the same.
+        let broken = request_of(&env, method, path, body, &bob).bytes(b"{ not json".to_vec());
+        assert_code(&env.send(broken).await, 403, json!({"code": "forbidden"}), &format!("{name} with a broken body"));
+    }
+    assert_eq!(account_text(&env, carol.account), before);
+    assert_eq!(env.invitation_rows(), 0);
+    assert!(env.secrets.calls().is_empty());
+    assert!(env.audit_lines().is_empty(), "a refusal at the gate writes nothing: {:?}", env.audit_lines());
+    println!("Gates: 7 administration changes: no session 401 invalid, member 403 forbidden (no step_up, body unread), old sign-in 403 step_up, no token or foreign origin 403, nothing written");
+}
+
+#[tokio::test]
+async fn gates_an_old_sign_in_needs_a_step_up_first_and_then_the_same_call_works() {
+    let env = ApiEnv::new();
+    let alice = admin_with_password(&env, "alice", SIX_MINUTES).await;
+    env.member("bob");
+    let bob = id_of(&env, "bob");
+    let before = account_text(&env, bob);
+    let mut routes = admin_changes(bob);
+    routes.push(("invitation", Method::POST, "/api/admin/invitations".to_owned(), json!({"role": "member"})));
+    for (name, method, path, body) in &routes {
+        let response = env.send(request_of(&env, method, path, body, &alice)).await;
+        assert_code(&response, 403, json!({"code": "forbidden", "step_up": true}), name);
+    }
+    assert_eq!(account_text(&env, bob), before);
+    assert_eq!(env.invitation_rows(), 0);
+    assert!(env.secrets.calls().is_empty() && env.observer.ended().is_empty());
+    assert_eq!(env.send(env.get_as("/api/admin/accounts", &alice)).await.status, 200, "a read needs no recent sign-in");
+
+    let step_up = env.send(env.post_json("/auth/step-up", &json!({"password": PASSWORD}), &alice)).await;
+    assert_eq!(step_up.status, 200, "{}", step_up.text());
+    assert_no_content(&admin_post(&env, &alice, bob, "unlock-signin").await, "after the step-up");
+    println!("Step-up: 7 changes by an old sign-in 403 {{forbidden, step_up:true}} and nothing written; after /auth/step-up the same kind of call 204");
+}
+
+#[tokio::test]
+async fn gates_a_change_without_the_token_or_from_another_origin_changes_nothing() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    env.member("bob");
+    let bob = id_of(&env, "bob");
+    let before = account_text(&env, bob);
+    let mut routes = admin_changes(bob);
+    routes.push(("invitation", Method::POST, "/api/admin/invitations".to_owned(), json!({"role": "member"})));
+    for (name, method, path, body) in &routes {
+        let no_token = edge::Req::new(method.clone(), path)
+            .header("host", edge::HOST)
+            .header("origin", edge::ORIGIN)
+            .header("content-type", "application/json")
+            .json(body)
+            .cookie(&alice.cookie);
+        assert_code(&env.send(no_token).await, 403, json!({"code": "forbidden"}), &format!("{name} without a token"));
+        let foreign = request_of(&env, method, path, body, &alice).set("origin", "https://evil.example.test");
+        assert_code(&env.send(foreign).await, 403, json!({"code": "forbidden"}), &format!("{name} from another origin"));
+    }
+    assert_eq!(account_text(&env, bob), before);
+    assert_eq!(env.invitation_rows(), 0);
+    assert!(env.audit_lines().is_empty());
+}
+
+#[tokio::test]
+async fn gates_an_administrator_who_was_demoted_a_moment_ago_changes_nothing() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    let bob_session = env.admin_fresh("bob");
+    env.member("carol");
+    let carol = id_of(&env, "carol");
+    assert_no_content(&change_role(&env, &alice, bob_session.account, "member").await, "the demotion");
+    let before = account_text(&env, carol);
+    let mut routes = admin_changes(carol);
+    routes.push(("invitation", Method::POST, "/api/admin/invitations".to_owned(), json!({"role": "member"})));
+    for (name, method, path, body) in &routes {
+        let response = env.send(request_of(&env, method, path, body, &bob_session)).await;
+        assert_code(&response, 403, json!({"code": "forbidden"}), name);
+    }
+    assert_eq!(account_text(&env, carol), before);
+    println!("Roles: a demoted administrator's live session is refused 403 forbidden on all 7 changes");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Invitations
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn invitations_at_most_two_hundred_are_open_and_a_redeemed_or_expired_one_makes_room() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    for n in 0..200 {
+        let response = env.send(env.post_json("/api/admin/invitations", &json!({"role": "member", "days": 1}), &alice)).await;
+        assert_eq!(response.status, 200, "invitation {n}: {}", response.text());
+    }
+    assert_eq!(env.invitation_rows(), 200);
+    let over = env.send(env.post_json("/api/admin/invitations", &json!({"role": "member"}), &alice)).await;
+    assert_code(&over, 409, json!({"code": "conflict", "field": "invitations"}), "the 201st");
+    assert_eq!(env.invitation_rows(), 200);
+    let named = env.send(env.post_json("/api/admin/invitations", &json!({"role": "member", "username": "bob"}), &alice)).await;
+    assert_code(&named, 409, json!({"code": "conflict", "field": "invitations"}), "a named account counts the same");
+    assert!(env.store.account_by_username("bob").expect("read").is_none(), "and makes no account");
+    let failed = lines_of(&env, "account.invite").into_iter().filter(|l| l["result"] == "fail").count();
+    assert_eq!(failed, 2, "each refusal is one line");
+
+    env.clock.advance(2 * 86_400);
+    let alice = env.signed_aged("alice", 0);
+    let again = env.send(env.post_json("/api/admin/invitations", &json!({"role": "member"}), &alice)).await;
+    assert_eq!(again.status, 200, "the old ones ran out: {}", again.text());
+    println!("Invitations: 200 open invitations accepted, the 201st and a named account are 409 conflict field invitations, room again once they expire");
+}
+
+#[tokio::test]
+async fn invitations_the_days_are_1_to_30_and_default_to_7() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    for (days, expected) in [(json!(1), 1), (json!(30), 30), (json!(14), 14)] {
+        let response = env.send(env.post_json("/api/admin/invitations", &json!({"role": "member", "days": days}), &alice)).await;
+        assert_eq!(response.status, 200, "{days}: {}", response.text());
+        assert_eq!(response.json()["expires_at"], text_time(env.clock.unix() + expected * 86_400));
+    }
+    let rows = env.invitation_rows();
+    for (what, days) in [
+        ("zero", json!(0)),
+        ("31", json!(31)),
+        ("negative", json!(-1)),
+        ("a fraction", json!(1.5)),
+        ("text", json!("7")),
+        ("null", json!(null)),
+        ("a list", json!([7])),
+        ("huge", json!(u64::MAX)),
+    ] {
+        let response = env.send(env.post_json("/api/admin/invitations", &json!({"role": "member", "days": days}), &alice)).await;
+        assert_code(&response, 400, json!({"code": "bad_request", "field": "days"}), what);
+    }
+    assert_eq!(env.invitation_rows(), rows);
+}
+
+#[tokio::test]
+async fn invitations_a_role_a_name_and_a_shown_name_are_checked_and_name_the_member_that_is_wrong() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    for (what, body, field) in [
+        ("no role", json!({}), "role"),
+        ("a bad role", json!({"role": "owner"}), "role"),
+        ("a number as role", json!({"role": 1}), "role"),
+        ("a number as name", json!({"role": "member", "username": 5}), "username"),
+        ("a name with a space", json!({"role": "member", "username": "bo b"}), "username"),
+        ("an upper case name", json!({"role": "member", "username": "Bob"}), "username"),
+        ("a name that is too long", json!({"role": "member", "username": "b".repeat(65)}), "username"),
+        ("a shown name without a name", json!({"role": "member", "display_name": "Bob"}), "display_name"),
+        ("a number as shown name", json!({"role": "member", "username": "bob", "display_name": 5}), "display_name"),
+        ("an empty shown name", json!({"role": "member", "username": "bob", "display_name": ""}), "display_name"),
+        ("a shown name with a control character", json!({"role": "member", "username": "bob", "display_name": "a\u{7}b"}), "display_name"),
+    ] {
+        let response = env.send(env.post_json("/api/admin/invitations", &json!(body), &alice)).await;
+        assert_code(&response, 400, json!({"code": "bad_request", "field": field}), what);
+    }
+    let extra = env.send(env.post_json("/api/admin/invitations", &json!({"role": "member", "x": 1}), &alice)).await;
+    assert_code(&extra, 400, json!({"code": "bad_request"}), "an unknown member");
+    assert_eq!(env.invitation_rows(), 0);
+    assert_eq!(env.count("account.invite"), 0);
+}
+
+#[tokio::test]
+async fn invitations_a_name_makes_an_account_without_a_sign_in_method_and_the_link_enrols_it() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    let response = env
+        .send(env.post_json(
+            "/api/admin/invitations",
+            &json!({"role": "admin", "username": "bob", "display_name": "Bob B", "days": 3}),
+            &alice,
+        ))
+        .await;
+    assert_eq!(response.status, 200, "{}", response.text());
+    let bob = env.store.account_by_username("bob").expect("read").expect("bob exists");
+    assert_eq!((bob.role, bob.display_name.as_str()), (Role::Admin, "Bob B"));
+    assert_eq!(response.json()["expires_at"], text_time(env.clock.unix() + 3 * 86_400));
+    assert!(env.unlock_kinds(bob.id).is_empty());
+    let link = response.json()["link"].as_str().expect("a link").to_owned();
+    let token = link.strip_prefix(&format!("{PUBLIC_URL}/#invite=")).expect("the shape").to_owned();
+    let (finish, _secret) = env.redeem_with_password(&token, "bob").await;
+    assert_eq!(finish.status, 200, "{}", finish.text());
+
+    // The name is taken now: the same name again is a conflict on username, with no second invitation.
+    let rows = env.invitation_rows();
+    let twice = env.send(env.post_json("/api/admin/invitations", &json!({"role": "member", "username": "bob"}), &alice)).await;
+    assert_code(&twice, 409, json!({"code": "conflict", "field": "username"}), "a name that exists");
+    assert_eq!(env.invitation_rows(), rows);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Exactly one audit line per change
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// One change route with the setup it needs, run in an environment of its own; answers the audit lines the call wrote.
+async fn one_change(case: usize) -> (&'static str, Vec<Value>, String) {
+    let env = ApiEnv::new();
+    let admin = env.admin_fresh("alice");
+    let actor = admin.account.get().to_string();
+    let target = env.member_with_password("bob").await;
+    let mut who: &Signed = &admin;
+    let (name, response, before): (&'static str, Resp, usize);
+    match case {
+        0 => {
+            before = env.audit_lines().len();
+            name = "account.invite";
+            response = env.send(env.post_json("/api/admin/invitations", &json!({"role": "member"}), &admin)).await;
+        }
+        1 => {
+            before = env.audit_lines().len();
+            name = "account.role";
+            response = change_role(&env, &admin, target.account, "admin").await;
+        }
+        2 => {
+            before = env.audit_lines().len();
+            name = "account.disable";
+            response = admin_post(&env, &admin, target.account, "disable").await;
+        }
+        3 => {
+            env.set_state("bob", AccountState::Disabled);
+            before = env.audit_lines().len();
+            name = "account.enable";
+            response = admin_post(&env, &admin, target.account, "enable").await;
+        }
+        4 => {
+            before = env.audit_lines().len();
+            name = "secrets.reset";
+            response = admin_post(&env, &admin, target.account, "reset-secrets").await;
+        }
+        5 => {
+            before = env.audit_lines().len();
+            name = "account.unlock";
+            response = admin_post(&env, &admin, target.account, "unlock-signin").await;
+        }
+        6 => {
+            before = env.audit_lines().len();
+            name = "account.delete";
+            response = delete_account(&env, &admin, target.account).await;
+        }
+        7 => {
+            who = &target;
+            before = env.audit_lines().len();
+            name = "auth.password.change";
+            response = env.send(env.post_json("/api/me/password", &change_body(PASSWORD, NEW_PASSWORD), &target)).await;
+        }
+        8 => {
+            who = &target;
+            let begin = totp_begin(&env, &target).await;
+            let secret = secret_of(&begin);
+            let code = totp::code_at(&secret, env.clock.unix()).expect("a code").to_string();
+            before = env.audit_lines().len();
+            name = "auth.totp.enrol";
+            response = totp_finish(&env, &target, &code).await;
+        }
+        9 => {
+            who = &target;
+            let begin = passkey_begin(&env, &target, "Key").await;
+            let mut key = SoftPasskey::new();
+            let credential = key.register(&begin.json()["options"], &env.origin).expect("answers");
+            before = env.audit_lines().len();
+            name = "auth.passkey.add";
+            response = passkey_finish(&env, &target, &credential, None).await;
+        }
+        10 => {
+            who = &target;
+            let (added, _key) = add_passkey(&env, &target, "Key", None).await;
+            let id = added.json()["id"].as_i64().expect("an id");
+            before = env.audit_lines().len();
+            name = "auth.passkey.remove";
+            response = env.send(env.delete_as(&format!("/api/me/passkeys/{id}"), &target)).await;
+        }
+        11 => {
+            who = &target;
+            before = env.audit_lines().len();
+            name = "auth.passphrase.set";
+            response = set_passphrase(&env, &target, NEW_PASSPHRASE).await;
+        }
+        12 => {
+            who = &target;
+            before = env.audit_lines().len();
+            name = "recovery.replace";
+            response = replace_recovery(&env, &target).await;
+        }
+        13 => {
+            who = &target;
+            let other = env.another_session("bob");
+            before = env.audit_lines().len();
+            name = "signout";
+            response = env.send(env.delete_as(&format!("/api/me/sessions/{}", handle_of(&other)), &target)).await;
+        }
+        _ => {
+            who = &target;
+            env.another_session("bob");
+            before = env.audit_lines().len();
+            name = "signout";
+            response = env.send(env.delete_as("/api/me/sessions", &target)).await;
+        }
+    }
+    assert!(matches!(response.status.as_u16(), 200 | 204), "{name}: {} {}", response.status, response.text());
+    let lines = env.audit_lines().split_off(before);
+    let expected_actor = if who.account == admin.account { actor } else { target.account.get().to_string() };
+    (name, lines, expected_actor)
+}
+
+#[tokio::test]
+async fn audit_once_each_of_fifteen_changes_writes_exactly_one_line_with_the_actor_of_the_session() {
+    let mut seen = Vec::new();
+    for case in 0..15 {
+        let (name, lines, actor) = one_change(case).await;
+        assert_eq!(lines.len(), 1, "{name}: {lines:?}");
+        assert_eq!(lines[0]["action"], name);
+        assert_eq!(lines[0]["result"], "ok", "{name}");
+        assert_eq!(lines[0]["actor"], actor, "{name}");
+        seen.push(name);
+    }
+    println!("Audit once: 15 change routes, one ok line each with the session's account as actor: {}", seen.join(", "));
+}
+
+#[tokio::test]
+async fn audit_once_a_refused_change_writes_one_failure_line_and_a_gate_writes_none() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    let before = env.audit_lines().len();
+    assert_eq!(admin_post(&env, &alice, alice.account, "disable").await.status, 409);
+    let lines = env.audit_lines().split_off(before);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!((lines[0]["action"].as_str(), lines[0]["result"].as_str()), (Some("account.disable"), Some("fail")));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The race, hostile input, overload, disclosure and the canary
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn race_two_administrators_demoting_each_other_never_leave_the_service_without_one() {
+    let env = Arc::new(ApiEnv::new());
+    let alice = Arc::new(env.admin_fresh("alice"));
+    let bob = Arc::new(env.admin_fresh("bob"));
+    let (mut alice_won, mut bob_won) = (0, 0);
+    for round in 0..16 {
+        let (a, b) = (alice.clone(), bob.clone());
+        let (ea, eb) = (env.clone(), env.clone());
+        let first = tokio::spawn(async move { change_role(&ea, &a, b.account, "member").await });
+        let (a, b) = (alice.clone(), bob.clone());
+        let second = tokio::spawn(async move { change_role(&eb, &b, a.account, "member").await });
+        let (first, second) = (first.await.expect("task"), second.await.expect("task"));
+        let admins = env.count_rows("SELECT COUNT(*) FROM accounts WHERE role = 'admin' AND state = 'active'");
+        assert_eq!(admins, 1, "round {round}: exactly one administrator is left");
+        let statuses = (first.status.as_u16(), second.status.as_u16());
+        assert!(matches!(statuses, (204, 403) | (403, 204)), "round {round}: one wins and the other is no administrator any more: {statuses:?}");
+        // The winner puts the loser back for the next round.
+        let (winner, loser) = if statuses.0 == 204 { alice_won += 1; (&alice, &bob) } else { bob_won += 1; (&bob, &alice) };
+        assert_no_content(&change_role(&env, winner, loser.account, "admin").await, "the loser comes back");
+    }
+    println!("Race: 16 rounds of mutual demotion, each ended with exactly 1 administrator, one 204 and one 403 (alice won {alice_won}, bob won {bob_won})");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn race_a_disable_and_a_deletion_of_the_other_administrator_leave_one() {
+    let env = Arc::new(ApiEnv::new());
+    let alice = Arc::new(env.admin_fresh("alice"));
+    let bob = Arc::new(env.admin_fresh("bob"));
+    let (ea, eb) = (env.clone(), env.clone());
+    let (a, b) = (alice.clone(), bob.clone());
+    let first = tokio::spawn(async move { admin_post(&ea, &a, b.account, "disable").await });
+    let (a, b) = (alice.clone(), bob.clone());
+    let second = tokio::spawn(async move { delete_account(&eb, &b, a.account).await });
+    let (first, second) = (first.await.expect("task"), second.await.expect("task"));
+    let admins = env.count_rows("SELECT COUNT(*) FROM accounts WHERE role = 'admin' AND state = 'active'");
+    assert_eq!(admins, 1, "{} / {}", first.text(), second.text());
+    assert_eq!([first.status.as_u16(), second.status.as_u16()].iter().filter(|s| **s == 204).count(), 1);
+}
+
+/// A route and a body that its handler would accept.
+fn admin_posts(id: AccountId) -> Vec<(&'static str, String, Value)> {
+    admin_changes(id)
+        .into_iter()
+        .filter(|(_, method, _, _)| *method == Method::POST)
+        .map(|(name, _, path, body)| (name, path, body))
+        .collect()
+}
+
+#[tokio::test]
+async fn hostile_bodies_are_refused_as_bad_requests_on_every_route_and_change_nothing() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    env.member("bob");
+    let bob = id_of(&env, "bob");
+    let before = account_text(&env, bob);
+    let lines = env.audit_lines().len();
+    let deep = format!("{}{}", "[".repeat(10_000), "]".repeat(10_000));
+    let prefix = "{\"role\":\"member\",\"pad\":\"";
+    let oversize = format!("{prefix}{}\"}}", "x".repeat(64 * 1024 + 1 - prefix.len() - 2));
+    let mut bodies: Vec<(&str, Vec<u8>)> = vec![
+        ("broken json", b"{".to_vec()),
+        ("an empty body", Vec::new()),
+        ("an array", b"[]".to_vec()),
+        ("null", b"null".to_vec()),
+        ("a string", b"\"role\"".to_vec()),
+        ("a number", b"12".to_vec()),
+        ("a duplicate member", b"{\"role\":\"member\",\"role\":\"admin\"}".to_vec()),
+        ("an unknown member", b"{\"marker\":1}".to_vec()),
+        ("a deep list", deep.into_bytes()),
+        ("an oversize body", oversize.into_bytes()),
+        ("invalid utf-8", vec![b'{', 0xFF, 0xFE, b'}']),
+        ("a byte order mark", b"\xEF\xBB\xBF{}".to_vec()),
+        ("trailing text", b"{} x".to_vec()),
+    ];
+    bodies.push(("a nul byte", b"{\"role\":\"mem\0ber\"}".to_vec()));
+    let mut routes = admin_posts(bob);
+    routes.push(("invitation", "/api/admin/invitations".to_owned(), json!({})));
+    let mut refused = 0;
+    for (name, path, _) in &routes {
+        for (what, bytes) in &bodies {
+            let req = edge::Req::new(Method::POST, path)
+                .header("host", edge::HOST)
+                .header("origin", edge::ORIGIN)
+                .header("content-type", "application/json")
+                .bytes(bytes.clone())
+                .signed(&alice);
+            let response = env.send(req).await;
+            assert_eq!(response.status, 400, "{name} / {what}: {}", response.text());
+            assert_eq!(response.json()["code"], "bad_request", "{name} / {what}");
+            assert!(!response.text().contains("marker"), "{name} / {what}: the answer repeats nothing of the input");
+            refused += 1;
+        }
+    }
+    // A content type that is not JSON, or twice, is refused before the body.
+    for (what, types) in [("text", vec!["text/plain"]), ("form", vec!["application/x-www-form-urlencoded"]), ("twice", vec!["application/json", "application/json"])] {
+        let mut req = edge::Req::new(Method::POST, &format!("/api/admin/accounts/{}/disable", bob.get()))
+            .header("host", edge::HOST)
+            .header("origin", edge::ORIGIN)
+            .bytes(b"{}".to_vec())
+            .signed(&alice);
+        for t in types {
+            req = req.header("content-type", t);
+        }
+        let response = env.send(req).await;
+        assert!(matches!(response.status.as_u16(), 400 | 403 | 415), "{what}: {} {}", response.status, response.text());
+        refused += 1;
+    }
+    assert_eq!(account_text(&env, bob), before);
+    assert_eq!(env.audit_lines().len(), lines, "nothing was written down");
+    assert_eq!(env.invitation_rows(), 0);
+    assert!(env.secrets.calls().is_empty() && env.observer.ended().is_empty());
+    println!("Hostile: {refused} hostile bodies and content types over {} administration routes, every one refused (400), nothing changed, nothing written", routes.len());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn overload_forty_simultaneous_password_changes_with_one_permit_give_busy_answers() {
+    let tuning = Tuning { permits: 1, derive_pause: Some(std::time::Duration::from_millis(50)), ..Tuning::default() };
+    let env = Arc::new(ApiEnv::build(Methods::ALL, tuning));
+    let bob = Arc::new(env.member_with_password("bob").await);
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..40 {
+        let (env, bob) = (env.clone(), bob.clone());
+        // A new password that breaks the policy: the current password is derived, and then nothing is changed.
+        set.spawn(async move { env.send(env.post_json("/api/me/password", &change_body(PASSWORD, "short"), &bob)).await });
+    }
+    let (mut refused, mut busy, mut other) = (0, 0, Vec::new());
+    while let Some(done) = set.join_next().await {
+        let response = done.expect("the task finished");
+        match response.status.as_u16() {
+            400 => refused += 1,
+            503 => {
+                busy += 1;
+                assert_eq!(response.json(), json!({"code": "busy"}));
+                assert!(response.all("set-cookie").is_empty());
+            }
+            status => other.push(status),
+        }
+    }
+    println!("Overload: 40 simultaneous password changes with one permit: 400={refused} 503={busy} other={other:?}");
+    assert!(busy >= 6, "one running and 32 waiting leave at least 7 for the busy answer, got {busy}");
+    assert!(other.is_empty(), "no other status: {other:?}");
+    assert!(env.secrets.calls().is_empty(), "no slot was touched");
+    let after = env.send(env.post_json("/api/me/password", &change_body(PASSWORD, NEW_PASSWORD), &bob)).await;
+    assert_eq!(after.status, 204, "a change after they finished works: {}", after.text());
+}
+
+/// Every stored byte string of an account that must never leave the server, as the texts it could be written as.
+fn secret_forms(env: &ApiEnv, id: AccountId) -> Vec<String> {
+    let conn = rusqlite::Connection::open(env.store.path()).expect("a second connection");
+    let mut blobs: Vec<Vec<u8>> = Vec::new();
+    for sql in [
+        "SELECT verifier FROM password_credentials WHERE account_id = ?1",
+        "SELECT salt FROM password_credentials WHERE account_id = ?1",
+        "SELECT sealed_secret FROM totp WHERE account_id = ?1",
+        "SELECT credential_id FROM passkeys WHERE account_id = ?1",
+        "SELECT coalesce(prf_salt, x'00') FROM passkeys WHERE account_id = ?1",
+        "SELECT salt FROM unlock_methods WHERE account_id = ?1",
+        "SELECT id_hash FROM sessions WHERE account_id = ?1",
+    ] {
+        let mut stmt = conn.prepare(sql).expect("prepare");
+        let rows: Vec<Vec<u8>> =
+            stmt.query_map([id.get()], |r| r.get(0)).expect("query").collect::<rusqlite::Result<_>>().expect("rows");
+        blobs.extend(rows);
+    }
+    assert!(blobs.len() >= 7, "the account holds credentials of every kind: {}", blobs.len());
+    use base64::engine::general_purpose::STANDARD_NO_PAD;
+    let mut forms = Vec::new();
+    for blob in blobs.iter().filter(|b| b.len() >= 8) {
+        forms.push(blob.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        forms.push(URL_SAFE_NO_PAD.encode(blob));
+        forms.push(STANDARD_NO_PAD.encode(blob));
+    }
+    forms
+}
+
+#[tokio::test]
+async fn disclosure_no_answer_of_the_administration_or_the_account_holds_a_credential_or_a_session_secret() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    let bob = env.member_with_password("bob").await;
+    let (added, _key) = add_passkey(&env, &bob, "Laptop", Some(&prf_text(7))).await;
+    assert_eq!(added.status, 200);
+    assert_eq!(set_passphrase(&env, &bob, NEW_PASSPHRASE).await.status, 204);
+    let code = replace_recovery(&env, &bob).await.json()["recovery_code"].as_str().expect("a code").to_owned();
+    let other = env.another_session("bob");
+    let forms = secret_forms(&env, bob.account);
+    let mut forbidden: Vec<String> = forms;
+    forbidden.extend([PASSWORD.to_owned(), NEW_PASSPHRASE.to_owned(), other.cookie.clone(), bob.cookie.clone(), other.csrf.clone(), bob.csrf.clone()]);
+    for word in ["verifier", "sealed", "passkey_json", "id_hash", "prf_salt", "credential_id", "password_hash"] {
+        forbidden.push(word.to_owned());
+    }
+
+    let mut answers: Vec<(String, String)> = Vec::new();
+    let mut note = |what: &str, response: &Resp| answers.push((what.to_owned(), format!("{}\n{:?}", response.text(), response.headers)));
+    note("list", &env.send(env.get_as("/api/admin/accounts", &alice)).await);
+    note("me of bob", &env.me_of(&bob).await);
+    note("me of the other session", &env.me_of(&other).await);
+    note("invitation", &env.send(env.post_json("/api/admin/invitations", &json!({"role": "member"}), &alice)).await);
+    for (name, method, path, body) in admin_changes(bob.account) {
+        if name == "delete" {
+            continue;
+        }
+        note(name, &env.send(request_of(&env, &method, &path, &body, &alice)).await);
+    }
+    note("a refusal", &env.send(env.post_json("/api/admin/accounts/987654/role", &json!({"role": "admin"}), &alice)).await);
+    for (what, text) in &answers {
+        for secret in &forbidden {
+            assert!(!text.contains(secret.as_str()), "{what} holds {:?}", &secret[..secret.len().min(12)]);
+        }
+        assert!(!text.contains(&code), "{what} holds the recovery code");
+    }
+    let audit = env.audit_text();
+    for secret in &forbidden {
+        if !secret.starts_with(|c: char| c.is_ascii_lowercase()) || secret.len() > 12 {
+            assert!(!audit.contains(secret.as_str()), "the audit holds {:?}", &secret[..secret.len().min(12)]);
+        }
+    }
+    assert!(!audit.contains(&code));
+    println!("Disclosure: {} answers (list, /api/me, invitation, five changes, a refusal) hold none of {} stored forms of verifier, salts, sealed secret, credential ids, session hashes, cookies, tokens, the passphrase or the recovery code", answers.len(), forbidden.len());
+}
+
+const CANARY: &str = "canary-4c1e9a7b-must-not-appear-anywhere";
+
+#[tokio::test]
+async fn canary_a_secret_in_every_input_appears_in_no_answer_header_or_audit_line() {
+    let env = ApiEnv::new();
+    let alice = env.admin_fresh("alice");
+    let id = env.person("bob").await;
+    env.set_password_text(id, CANARY).await;
+    let bob = env.signed_aged("bob", 0);
+    let mut seen: Vec<String> = Vec::new();
+    let mut note = |response: &Resp| seen.push(format!("{}\n{:?}", response.text(), response.headers));
+    let wrong = format!("{CANARY}-wrong");
+
+    note(&env.send(env.post_json("/api/me/password", &change_body(&wrong, &wrong), &bob)).await);
+    note(&env.send(env.post_json("/api/me/password", &change_body(CANARY, &format!("{CANARY}{}", "x".repeat(300))), &bob)).await);
+    note(&env.send(env.post_json("/api/me/password", &json!({"current": CANARY, "new": CANARY, "x": CANARY}), &bob)).await);
+    note(&env.send(env.put_json("/api/me/passphrase", &json!({"passphrase": CANARY, "x": CANARY}), &bob)).await);
+    note(&env.send(env.put_json("/api/me/passphrase", &json!({"passphrase": CANARY.repeat(8)}), &bob)).await);
+    note(&env.send(env.post_json("/api/me/totp", &json!({"step": CANARY}), &bob)).await);
+    note(&env.send(env.post_json("/api/me/totp", &json!({"step": "finish", "code": CANARY}), &bob)).await);
+    note(&env.send(env.post_json("/api/me/passkeys", &json!({"step": "begin", "name": CANARY.repeat(3)}), &bob)).await);
+    note(&env.send(env.post_json("/api/me/passkeys", &json!({"step": "finish", "credential": {"id": CANARY}, "prf": CANARY}), &bob)).await);
+    note(&env.send(env.delete_as(&format!("/api/me/passkeys/{CANARY}"), &bob)).await);
+    note(&env.send(env.delete_as(&format!("/api/me/sessions/{CANARY}"), &bob)).await);
+    note(&env.send(env.post_json("/api/me/recovery", &json!({"x": CANARY}), &bob)).await);
+    note(&env.send(env.post_json(&format!("/api/admin/accounts/{CANARY}/role"), &json!({"role": CANARY}), &alice)).await);
+    note(&env.send(env.post_json(&format!("/api/admin/accounts/{}/role", id.get()), &json!({"role": CANARY}), &alice)).await);
+    note(&env.send(env.post_json("/api/admin/invitations", &json!({"role": "member", "username": CANARY, "display_name": CANARY}), &alice)).await);
+    note(&env.send(env.post_json("/api/admin/invitations", &json!({"role": "member", "days": CANARY}), &alice)).await);
+
+    // The canary is the real password: a good change uses it and the secrets it shows are shown to the person only.
+    let good = env.send(env.post_json("/api/me/password", &change_body(CANARY, NEW_PASSWORD), &bob)).await;
+    assert_eq!(good.status, 204, "{}", good.text());
+    let recovery = replace_recovery(&env, &bob).await.json()["recovery_code"].as_str().expect("a code").to_owned();
+    let begin = totp_begin(&env, &bob).await;
+    let shown = begin.json()["secret"].as_str().expect("a secret").to_owned();
+    note(&env.send(env.get_as("/api/admin/accounts", &alice)).await);
+    note(&env.me_of(&bob).await);
+
+    for text in &seen {
+        assert!(!text.contains(CANARY), "an answer repeats the canary: {text}");
+        assert!(!text.contains(&recovery) && !text.contains(&shown), "a secret that was shown once is shown again");
+    }
+    let audit = env.audit_text();
+    assert!(!audit.contains(CANARY) && !audit.contains(&recovery) && !audit.contains(&shown) && !audit.contains(NEW_PASSWORD));
+    assert!(!env.credential_dump(id).contains(CANARY), "the stored forms hold nothing readable");
+    println!("Canary: {} answers and the whole audit directory hold neither the canary (as password, new password, passphrase, name, code, id, handle, role, days) nor the recovery code nor the authenticator secret shown once", seen.len());
 }

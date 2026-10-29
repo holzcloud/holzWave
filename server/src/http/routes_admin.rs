@@ -30,6 +30,7 @@ use crate::http::router::{Access, Admin, ApiError, ApiJson, Part};
 use crate::store::{AccountState, MAX_DISPLAY_NAME, Role, valid_username};
 
 use super::routes_auth::{Object, Refusal, answer, blocking};
+use super::routes_me::SecretsAdmin;
 
 /// The services the administration routes call.
 pub struct AdminServices {
@@ -37,13 +38,20 @@ pub struct AdminServices {
     signin: Arc<SignIn>,
     origin: PublicOrigin,
     clock: Arc<dyn Clock>,
+    secrets: Arc<dyn SecretsAdmin>,
 }
 
 impl AdminServices {
     /// The services over the accounts, the sign-in (for the locks of the password path), the public origin that links are
-    /// built on and the clock.
-    pub fn new(accounts: Arc<Accounts>, signin: Arc<SignIn>, origin: PublicOrigin, clock: Arc<dyn Clock>) -> AdminServices {
-        AdminServices { accounts, signin, origin, clock }
+    /// built on, the clock and the seam to the secret store (for the reset of a person's secrets).
+    pub fn new(
+        accounts: Arc<Accounts>,
+        signin: Arc<SignIn>,
+        origin: PublicOrigin,
+        clock: Arc<dyn Clock>,
+        secrets: Arc<dyn SecretsAdmin>,
+    ) -> AdminServices {
+        AdminServices { accounts, signin, origin, clock, secrets }
     }
 }
 

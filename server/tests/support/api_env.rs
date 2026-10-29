@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::http::Method;
-use holzwave_server::accounts::Accounts;
+use holzwave_server::accounts::{AccountObserver, Accounts, Ending};
 use holzwave_server::auth::session::Method as SignInMethod;
 use holzwave_server::clock::Clock;
 use holzwave_server::http::app::{StoreState, StoreView};
@@ -201,10 +201,30 @@ impl SecretsAdmin for RecordingSecrets {
     }
 }
 
+/// Who was told that an account ended, and how.
+#[derive(Default)]
+pub struct RecordingObserver {
+    ended: Mutex<Vec<(AccountId, u32, Ending)>>,
+}
+
+impl RecordingObserver {
+    /// The endings in the order they were told.
+    pub fn ended(&self) -> Vec<(AccountId, u32, Ending)> {
+        self.ended.lock().expect("lock").clone()
+    }
+}
+
+impl AccountObserver for RecordingObserver {
+    fn account_ended(&self, account: AccountId, uid: u32, ending: Ending) {
+        self.ended.lock().expect("lock").push((account, uid, ending));
+    }
+}
+
 /// The environment.
 pub struct ApiEnv {
     pub auth: AuthEnv,
     pub secrets: Arc<RecordingSecrets>,
+    pub observer: Arc<RecordingObserver>,
     pub accounts: Arc<Accounts>,
     pub enrol: Arc<Enrol>,
     pub me: Arc<MeServices>,
@@ -240,7 +260,11 @@ impl ApiEnv {
     pub fn build_with(methods: Methods, tuning: Tuning, max_pending: usize) -> ApiEnv {
         let auth = AuthEnv::build(methods, tuning);
         let clock: Arc<dyn Clock> = auth.clock.clone();
-        let accounts = Arc::new(Accounts::new(auth.store.clone(), clock.clone(), auth.app.audit.clone(), UID_RANGE));
+        let observer = Arc::new(RecordingObserver::default());
+        let accounts = Arc::new(
+            Accounts::new(auth.store.clone(), clock.clone(), auth.app.audit.clone(), UID_RANGE)
+                .with_observer(observer.clone()),
+        );
         let secrets = Arc::new(RecordingSecrets {
             inner: auth.gate.clone(),
             calls: Mutex::new(Vec::new()),
@@ -261,7 +285,13 @@ impl ApiEnv {
             argon: auth.argon.clone(),
             sealer: sealer.clone(),
         });
-        let admin = Arc::new(AdminServices::new(accounts.clone(), auth.signin.clone(), auth.app.origin.clone(), clock));
+        let admin = Arc::new(AdminServices::new(
+            accounts.clone(),
+            auth.signin.clone(),
+            auth.app.origin.clone(),
+            clock,
+            secrets.clone(),
+        ));
         let me = Arc::new(
             MeServices::new(
                 auth.app.clone(),
@@ -279,7 +309,7 @@ impl ApiEnv {
         parts.extend(routes_admin::parts(admin));
         parts.extend(routes_me::parts(me.clone()));
         let router = router::build(auth.app.clone(), parts);
-        ApiEnv { auth, secrets, accounts, enrol, me, router }
+        ApiEnv { auth, secrets, observer, accounts, enrol, me, router }
     }
 
     /// Sends a request to the router that holds every part.
