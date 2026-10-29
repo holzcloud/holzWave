@@ -179,6 +179,42 @@ pub fn announcement(public_url: &str, issued: &Issued) -> String {
     )
 }
 
+/// The account an invitation is for, as a peek found it. The `Debug` text prints a marker: the facts are about a person.
+#[derive(Clone)]
+pub struct InviteTarget {
+    /// The account.
+    pub id: AccountId,
+    /// Its sign-in name.
+    pub username: String,
+    /// The name shown to people.
+    pub display_name: String,
+    /// Its WebAuthn user handle, which a passkey enrolment must use.
+    pub handle: [u8; HANDLE_BYTES],
+    /// Whether it has any way to sign in already: a password, an authenticator, a passkey or a single sign-on identity.
+    pub has_method: bool,
+}
+
+impl fmt::Debug for InviteTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("InviteTarget(..)")
+    }
+}
+
+/// What a peek at an invitation found. The `Debug` text prints a marker.
+#[derive(Clone)]
+pub struct InvitePeek {
+    /// The role the person gets: the invitation's for a new person, the account's own for an existing one.
+    pub role: Role,
+    /// The account the invitation is for, or `None` for a new person.
+    pub account: Option<InviteTarget>,
+}
+
+impl fmt::Debug for InvitePeek {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("InvitePeek(..)")
+    }
+}
+
 /// What a new person chooses for their account. The role comes from the token that is redeemed.
 #[derive(Debug, Clone)]
 pub struct NewAccount<'a> {
@@ -470,6 +506,13 @@ impl Accounts {
             Err(_) => self.finish(Action::AccountRedeem, Actor::Anonymous, addr, None, &result, &[]),
         }
         result
+    }
+
+    /// Looks at an invitation without spending it: the role, and for an invitation to an existing account that account's facts.
+    /// An unknown, expired and spent token, and one whose administrator is no longer active, are the one
+    /// [`AccountError::NotRedeemable`]. Not implemented yet.
+    pub fn peek_invite(&self, _token: &str) -> Result<InvitePeek, AccountError> {
+        Err(AccountError::NotRedeemable)
     }
 
     // ---- single sign-on ----

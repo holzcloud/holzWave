@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use holzwave_server::accounts::Accounts;
 use holzwave_server::clock::Clock;
 use holzwave_server::http::app::{StoreState, StoreView};
@@ -21,6 +23,7 @@ use holzwave_server::store::{AccountId, Role, UnlockKind};
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
 
+use crate::auth_env::webauthn_client::SoftPasskey;
 use crate::auth_env::{AuthEnv, FixedPage, Methods, Tuning, WithCookies, set_cookie_value};
 use crate::edge::{Req, Resp, UID_RANGE, server_key};
 
@@ -240,6 +243,39 @@ impl EnrolEnv {
         let finish = self.finish_code(route, &pending, &self.code_for(&secret)).await;
         (finish, secret)
     }
+}
+
+impl EnrolEnv {
+    /// `begin` with the passkey method.
+    pub async fn begin_passkey(&self, route: &str, token: &str, username: &str) -> Resp {
+        self.send(self.post(route, &EnrolEnv::begin_passkey_body(token, username, "Alice"))).await
+    }
+
+    /// `finish` with a credential (and the PRF output the page read beside it), under a pending cookie.
+    pub async fn finish_credential(&self, route: &str, pending: &str, credential: &Value, prf: Option<&str>) -> Resp {
+        let mut body = json!({"step": "finish", "credential": credential});
+        if let Some(prf) = prf {
+            body["prf"] = json!(prf);
+        }
+        self.send(self.post(route, &body).set_cookies(&[(PENDING, pending)])).await
+    }
+
+    /// A whole passkey enrolment through the router with a fresh software authenticator. Answers the `finish` response and the
+    /// authenticator.
+    pub async fn enrol_with_passkey(&self, route: &str, token: &str, username: &str, prf: Option<&str>) -> (Resp, SoftPasskey) {
+        let begin = self.begin_passkey(route, token, username).await;
+        assert_eq!(begin.status, 200, "begin: {}", begin.text());
+        let pending = set_cookie_value(&begin, PENDING).expect("a pending cookie");
+        let mut key = SoftPasskey::new();
+        let credential = key.register(&begin.json()["options"], &self.origin).expect("the authenticator answers");
+        (self.finish_credential(route, &pending, &credential, prf).await, key)
+    }
+}
+
+/// The WebAuthn user handle the creation options name, as bytes.
+pub fn user_handle_of(options: &Value) -> Vec<u8> {
+    let id = options["publicKey"]["user"]["id"].as_str().expect("a user id in the options");
+    URL_SAFE_NO_PAD.decode(id).expect("the user id is base64url")
 }
 
 impl Default for EnrolEnv {
