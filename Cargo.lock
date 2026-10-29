@@ -2767,6 +2767,7 @@ dependencies = [
  "hkdf 0.13.0",
  "holzwave-core",
  "holzwave-host",
+ "holzwave-spawn-helper",
  "http",
  "http-body-util",
  "hyper",

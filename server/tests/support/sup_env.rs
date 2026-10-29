@@ -7,20 +7,24 @@
 //! `#[path = "support/sup_env.rs"] mod sup_env;` next to `#[path = "support/scratch.rs"] mod scratch;`.
 #![allow(dead_code)]
 
-use std::collections::VecDeque;
-use std::io::Write;
+use std::collections::{HashMap, VecDeque};
+use std::io::{IoSlice, IoSliceMut, Write};
+use std::mem::MaybeUninit;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::UnixStream as StdStream;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use holzwave_host::state::ShellSpec;
+use holzwave_spawn_helper::protocol::{self, Answer, ExitedEvent, Mode, Request};
 use holzwave_server::clock::ManualClock;
 use holzwave_server::store::AccountId;
 use holzwave_server::supervisor::{
-    AccountKey, AttachError, InProcessLauncher, Launch, LaunchError, LaunchRequest, LaunchedWorker, Outbound, SocketHandle,
-    SocketRx, Supervisor, SupervisorSettings, WorkerLauncher,
+    AccountKey, AttachError, HelperClient, HelperLauncher, HelperTimeouts, InProcessLauncher, Launch, LaunchError, LaunchRequest,
+    LaunchedWorker, Outbound, SocketHandle, SocketRx, Supervisor, SupervisorSettings, WorkerLauncher,
 };
 use holzwave_server::wire::{CmdFrame, Ctl, Frame, Note, PROTOCOL_VERSION, read_frame, write_frame};
 use holzwave_server::worker::runtime::WorkerMode;
@@ -599,4 +603,334 @@ impl ScriptEnv {
 /// The `Init` the supervisor must send first.
 pub fn expected_init(max_panes: u32, max_scrollback_lines: u32) -> Ctl {
     Ctl::Init { version: PROTOCOL_VERSION, max_panes, max_scrollback_lines }
+}
+
+
+// ---- the fake spawn helper ---------------------------------------------------------------------------------------------
+
+/// What the fake helper does with the next request instead of the normal answer.
+pub enum Next {
+    /// The normal answer, but with exactly these descriptors (none, or too many) instead of the worker's end.
+    WithFds(Vec<OwnedFd>),
+}
+
+#[derive(Default)]
+struct FakeConfig {
+    /// Answer nothing.
+    silent: bool,
+    /// Keep this many answers and send them in the opposite order.
+    hold: usize,
+    held: Vec<(Vec<u8>, Option<OwnedFd>)>,
+    next: VecDeque<Next>,
+    /// Workers do not answer `Init` with `Ready`.
+    no_ready: bool,
+    /// The status of the exit event that follows a wipe.
+    wipe_status: i32,
+}
+
+struct FakeInner {
+    control: Mutex<Option<Arc<OwnedFd>>>,
+    requests: Mutex<Vec<Request>>,
+    config: Mutex<FakeConfig>,
+    workers: Mutex<HashMap<i32, (u32, StdStream)>>,
+    next_pid: AtomicI32,
+    stop: AtomicBool,
+    send_lock: Mutex<()>,
+}
+
+/// The socket type of the control socket: the helper's own, where the system has it.
+pub fn datagram_type() -> rustix::net::SocketType {
+    if cfg!(target_os = "linux") { rustix::net::SocketType::SEQPACKET } else { rustix::net::SocketType::DGRAM }
+}
+
+/// A pair of connected sockets of the control socket's type.
+pub fn datagram_pair() -> (OwnedFd, OwnedFd) {
+    let (a, b) = rustix::net::socketpair(rustix::net::AddressFamily::UNIX, datagram_type(), rustix::net::SocketFlags::empty(), None)
+        .expect("a socket pair");
+    for fd in [&a, &b] {
+        rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::CLOEXEC).expect("close-on-exec");
+    }
+    (a, b)
+}
+
+/// A stand-in for the spawn helper: a thread on the other end of a datagram socket pair that speaks the helper's own types.
+/// It records every request and answers by default the way the helper does (a worker is a thread that says `Ready` to `Init`).
+pub struct FakeHelper {
+    inner: Arc<FakeInner>,
+}
+
+impl FakeHelper {
+    /// A fake and the end of the socket that the client takes.
+    pub fn start() -> (FakeHelper, OwnedFd) {
+        let (client_end, helper_end) = datagram_pair();
+        let _ = rustix::net::sockopt::set_socket_timeout(&helper_end, rustix::net::sockopt::Timeout::Recv, Some(Duration::from_millis(50)));
+        let _ = rustix::net::sockopt::set_socket_send_buffer_size(&helper_end, 1 << 20);
+        let _ = rustix::net::sockopt::set_socket_send_buffer_size(&client_end, 1 << 20);
+        let inner = Arc::new(FakeInner {
+            control: Mutex::new(Some(Arc::new(helper_end))),
+            requests: Mutex::new(Vec::new()),
+            config: Mutex::new(FakeConfig::default()),
+            workers: Mutex::new(HashMap::new()),
+            next_pid: AtomicI32::new(4242),
+            stop: AtomicBool::new(false),
+            send_lock: Mutex::new(()),
+        });
+        let thread_inner = inner.clone();
+        std::thread::Builder::new().name("fake-helper".into()).spawn(move || thread_inner.serve()).expect("the fake helper thread");
+        (FakeHelper { inner }, client_end)
+    }
+
+    /// Every request the fake received, in order.
+    pub fn requests(&self) -> Vec<Request> {
+        self.inner.requests.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    /// The user id and mode of every `spawn`, in order.
+    pub fn spawns(&self) -> Vec<(u64, Mode)> {
+        self.requests()
+            .into_iter()
+            .filter_map(|r| match r {
+                Request::Spawn { uid, mode } => Some((uid, mode)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The user id of every `kill_uid`.
+    pub fn kills(&self) -> Vec<u64> {
+        self.requests()
+            .into_iter()
+            .filter_map(|r| match r {
+                Request::KillUid { uid, .. } => Some(uid),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn config(&self) -> std::sync::MutexGuard<'_, FakeConfig> {
+        self.inner.config.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Answers nothing from now on (or again).
+    pub fn set_silent(&self, silent: bool) {
+        self.config().silent = silent;
+    }
+
+    /// Keeps the next `count` answers and sends them together in the opposite order.
+    pub fn hold_answers(&self, count: usize) {
+        self.config().hold = count;
+    }
+
+    /// The next request is answered the normal way but with these descriptors.
+    pub fn override_next(&self, next: Next) {
+        self.config().next.push_back(next);
+    }
+
+    /// Workers started from now on stay silent after `Init`.
+    pub fn set_no_ready(&self, on: bool) {
+        self.config().no_ready = on;
+    }
+
+    /// The exit status that follows a wipe worker.
+    pub fn set_wipe_status(&self, status: i32) {
+        self.config().wipe_status = status;
+    }
+
+    /// Sends one datagram, with descriptors, whatever the client expects.
+    pub fn send_raw(&self, bytes: &[u8], fds: Vec<OwnedFd>) {
+        self.inner.send(bytes, &fds);
+    }
+
+    /// The worker `pid` ends with `status`: the helper sends its event and the worker's link closes.
+    pub fn exit(&self, pid: i32, status: i32) {
+        let found = self.inner.workers.lock().unwrap_or_else(PoisonError::into_inner).remove(&pid);
+        if let Some((uid, link)) = found {
+            let _ = link.shutdown(std::net::Shutdown::Both);
+            self.inner.send(&ExitedEvent::new(pid, uid, status, None).to_bytes(), &[]);
+        }
+    }
+
+    /// The process numbers of the workers that run.
+    pub fn pids(&self) -> Vec<i32> {
+        let mut pids: Vec<i32> = self.inner.workers.lock().unwrap_or_else(PoisonError::into_inner).keys().copied().collect();
+        pids.sort_unstable();
+        pids
+    }
+
+    /// The helper goes away: its end of the socket closes.
+    pub fn close(&self) {
+        self.inner.stop.store(true, Ordering::SeqCst);
+        self.inner.control.lock().unwrap_or_else(PoisonError::into_inner).take();
+        // The thread notices at its next timeout and drops its own handle.
+        std::thread::sleep(Duration::from_millis(150));
+    }
+}
+
+impl Drop for FakeHelper {
+    fn drop(&mut self) {
+        self.inner.stop.store(true, Ordering::SeqCst);
+        self.inner.control.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let workers: Vec<_> = self.inner.workers.lock().unwrap_or_else(PoisonError::into_inner).drain().collect();
+        for (_, (_, link)) in workers {
+            let _ = link.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
+impl FakeInner {
+    fn control(&self) -> Option<Arc<OwnedFd>> {
+        self.control.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    fn serve(self: Arc<Self>) {
+        let Some(control) = self.control() else { return };
+        let mut buf = vec![0u8; 16 * 1024];
+        while !self.stop.load(Ordering::SeqCst) {
+            let received = {
+                let mut iov = [IoSliceMut::new(&mut buf)];
+                rustix::net::recvmsg(control.as_fd(), &mut iov, &mut rustix::net::RecvAncillaryBuffer::default(), rustix::net::RecvFlags::empty())
+            };
+            match received {
+                Ok(msg) if msg.bytes == 0 => return,
+                Ok(msg) => {
+                    let bytes = buf[..msg.bytes].to_vec();
+                    self.handle(&bytes);
+                }
+                Err(rustix::io::Errno::AGAIN | rustix::io::Errno::INTR) => {}
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// One datagram out, with descriptors.
+    fn send(&self, bytes: &[u8], fds: &[OwnedFd]) {
+        let _guard = self.send_lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(control) = self.control() else { return };
+        let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(2))];
+        let mut ancillary = rustix::net::SendAncillaryBuffer::new(&mut space);
+        let borrowed: Vec<_> = fds.iter().map(|f| f.as_fd()).collect();
+        if !borrowed.is_empty() {
+            ancillary.push(rustix::net::SendAncillaryMessage::ScmRights(&borrowed));
+        }
+        let _ = rustix::net::sendmsg(control.as_fd(), &[IoSlice::new(bytes)], &mut ancillary, rustix::net::SendFlags::empty());
+    }
+
+    /// An answer, with the rules of the config: silent, held and reversed, or with other descriptors.
+    fn answer(&self, bytes: Vec<u8>, fd: Option<OwnedFd>) {
+        let mut config = self.config.lock().unwrap_or_else(PoisonError::into_inner);
+        if config.silent {
+            return;
+        }
+        let (bytes, fds) = match config.next.pop_front() {
+            Some(Next::WithFds(fds)) => (bytes, fds),
+            None => (bytes, fd.into_iter().collect()),
+        };
+        if config.hold > 0 {
+            // Only one descriptor per held answer in the tests that hold.
+            config.held.push((bytes, fds.into_iter().next()));
+            if config.held.len() == config.hold {
+                let held: Vec<_> = config.held.drain(..).rev().collect();
+                config.hold = 0;
+                drop(config);
+                for (bytes, fd) in held {
+                    self.send(&bytes, &fd.into_iter().collect::<Vec<_>>());
+                }
+            }
+            return;
+        }
+        drop(config);
+        self.send(&bytes, &fds);
+    }
+
+    fn handle(&self, bytes: &[u8]) {
+        let Ok((id, request)) = protocol::parse(bytes) else { return };
+        self.requests.lock().unwrap_or_else(PoisonError::into_inner).push(request.clone());
+        match request {
+            Request::Ping => {
+                let workers = self.workers.lock().unwrap_or_else(PoisonError::into_inner).len() as u32;
+                self.answer(Answer::pong(id, workers).to_bytes(), None);
+            }
+            Request::KillUid { uid, .. } => {
+                self.answer(Answer::signalled(id, 1).to_bytes(), None);
+                let killed: Vec<(i32, StdStream)> = {
+                    let mut workers = self.workers.lock().unwrap_or_else(PoisonError::into_inner);
+                    let pids: Vec<i32> = workers.iter().filter(|(_, (u, _))| u64::from(*u) == uid).map(|(p, _)| *p).collect();
+                    pids.into_iter().filter_map(|p| workers.remove(&p).map(|(_, link)| (p, link))).collect()
+                };
+                for (pid, link) in killed {
+                    let _ = link.shutdown(std::net::Shutdown::Both);
+                    self.send(&ExitedEvent::new(pid, uid as u32, 137, Some(9)).to_bytes(), &[]);
+                }
+            }
+            Request::RemoveHome { .. } => self.answer(Answer::done(id).to_bytes(), None),
+            Request::Spawn { uid, mode } => {
+                let pid = self.next_pid.fetch_add(1, Ordering::SeqCst);
+                let (ours, theirs) = StdStream::pair().expect("a worker socket pair");
+                let keep = theirs.try_clone().expect("a clone");
+                self.workers.lock().unwrap_or_else(PoisonError::into_inner).insert(pid, (uid as u32, keep));
+                let (no_ready, wipe_status) = {
+                    let config = self.config.lock().unwrap_or_else(PoisonError::into_inner);
+                    (config.no_ready, config.wipe_status)
+                };
+                if mode == Mode::Serve {
+                    std::thread::Builder::new()
+                        .name(format!("fake-worker-{pid}"))
+                        .spawn(move || scripted_worker(theirs, no_ready))
+                        .expect("a fake worker thread");
+                    self.answer(Answer::spawned(id, pid).to_bytes(), Some(OwnedFd::from(ours)));
+                } else {
+                    // A wipe worker does its work and ends: the helper reports the status.
+                    drop(theirs);
+                    self.answer(Answer::spawned(id, pid).to_bytes(), Some(OwnedFd::from(ours)));
+                    self.workers.lock().unwrap_or_else(PoisonError::into_inner).remove(&pid);
+                    self.send(&ExitedEvent::new(pid, uid as u32, wipe_status, None).to_bytes(), &[]);
+                }
+            }
+        }
+    }
+}
+
+/// A worker that says `Ready` to `Init` and ends at `Shutdown`.
+fn scripted_worker(mut link: StdStream, no_ready: bool) {
+    loop {
+        match read_frame(&mut link) {
+            Ok(Some(Frame::Ctl(Ctl::Init { .. }))) if !no_ready => {
+                let _ = write_frame(&mut link, &Frame::Note(Note::Ready));
+            }
+            Ok(Some(Frame::Ctl(Ctl::Shutdown))) => {
+                let _ = link.shutdown(std::net::Shutdown::Both);
+                return;
+            }
+            Ok(Some(_)) => {}
+            _ => return,
+        }
+    }
+}
+
+/// A supervisor over the spawn-helper launcher and a fake helper.
+pub struct HelperEnv {
+    pub clock: Arc<ManualClock>,
+    pub fake: FakeHelper,
+    pub launcher: Arc<HelperLauncher>,
+    pub supervisor: Supervisor,
+}
+
+impl HelperEnv {
+    pub async fn start() -> HelperEnv {
+        HelperEnv::start_with(SupervisorSettings::default(), HelperTimeouts::default()).await
+    }
+
+    pub async fn start_with(settings: SupervisorSettings, timeouts: HelperTimeouts) -> HelperEnv {
+        let (fake, end) = FakeHelper::start();
+        let client = HelperClient::from_socket(end, timeouts).expect("the client");
+        let launcher = Arc::new(HelperLauncher::new(client));
+        let clock = Arc::new(ManualClock::new(START));
+        let supervisor = Supervisor::new(launcher.clone(), settings, clock.clone());
+        HelperEnv { clock, fake, launcher, supervisor }
+    }
+
+    pub async fn client(&self, account: AccountKey) -> Client {
+        let (handle, rx) = self.supervisor.attach(account).await.unwrap_or_else(|e| panic!("attach failed: {e}"));
+        Client::new(handle, rx)
+    }
 }

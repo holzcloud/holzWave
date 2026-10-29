@@ -26,8 +26,9 @@ use crate::log::{self, Level};
 use crate::store::AccountId;
 use crate::supervisor::fanout::{self, Counters, Fault, Owners, Synthetic};
 use crate::supervisor::launcher::{LaunchRequest, LaunchedWorker, WorkerLauncher};
+use crate::accounts::{AccountObserver, Ending};
 use crate::supervisor::socket::{self, Attached, SocketCore, SocketHandle, SocketRx, SubmitError};
-use crate::wire::{self, CmdFrame, Ctl, Frame, Note, PROTOCOL_VERSION, StoreState};
+use crate::wire::{self, CmdFrame, Ctl, CtlOutcome, Frame, Note, PROTOCOL_VERSION, StoreState};
 use crate::worker::runtime::WorkerMode;
 
 /// The close code for a socket whose worker ended.
@@ -63,6 +64,8 @@ pub struct SupervisorSettings {
     pub control_timeout: Duration,
     /// How long a wipe may take.
     pub wipe_timeout: Duration,
+    /// How often the sweeper looks for idle workers.
+    pub sweep_interval: Duration,
 }
 
 impl Default for SupervisorSettings {
@@ -77,6 +80,7 @@ impl Default for SupervisorSettings {
             shutdown_timeout: limits::WORKER_SHUTDOWN_TIMEOUT,
             control_timeout: limits::WORKER_CONTROL_TIMEOUT,
             wipe_timeout: limits::WORKER_WIPE_TIMEOUT,
+            sweep_interval: limits::SWEEP_INTERVAL,
         }
     }
 }
@@ -104,6 +108,50 @@ impl fmt::Display for AttachError {
 
 impl std::error::Error for AttachError {}
 
+/// Why a control frame did not get an answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CtlError {
+    /// The supervisor refuses to send this frame; the sentence says why.
+    Refused(&'static str),
+    /// The worker did not answer in time.
+    Timeout,
+    /// The worker ended before it answered.
+    WorkerGone,
+    /// There are too many controls waiting for an answer.
+    Busy,
+    /// No worker could be started.
+    Launch(String),
+    /// The server is stopping.
+    ShuttingDown,
+}
+
+impl fmt::Display for CtlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CtlError::Refused(sentence) => f.write_str(sentence),
+            CtlError::Timeout => f.write_str("the worker did not answer in time"),
+            CtlError::WorkerGone => f.write_str("the worker ended before it answered"),
+            CtlError::Busy => f.write_str("too many controls are waiting"),
+            CtlError::Launch(sentence) => f.write_str(sentence),
+            CtlError::ShuttingDown => f.write_str("the server is stopping"),
+        }
+    }
+}
+
+impl std::error::Error for CtlError {}
+
+/// Why a wipe did not happen. One sentence, no byte of any request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WipeError(pub String);
+
+impl fmt::Display for WipeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for WipeError {}
+
 /// What the supervisor counts, over all people.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -121,6 +169,10 @@ pub struct Stats {
     pub overflow_closes: u64,
     /// Workers that were declared dead because of what they sent or because the link broke.
     pub worker_deaths: u64,
+    /// Answers to controls that nobody waited for.
+    pub dropped_ctl_done: u64,
+    /// Whether the spawn helper (or whatever starts the workers) can be reached.
+    pub helper_alive: bool,
 }
 
 /// What the supervisor knows about one person.
@@ -702,6 +754,8 @@ impl Supervisor {
             dropped_synthetic: Counters::get(&counters.dropped_synthetic),
             overflow_closes: Counters::get(&counters.overflow_closes),
             worker_deaths: Counters::get(&counters.worker_deaths),
+            dropped_ctl_done: Counters::get(&counters.dropped_ctl_done),
+            helper_alive: self.shared.launcher.helper_alive(),
             ..Stats::default()
         };
         for worker in slots.iter().filter_map(|slot| slot.live()) {
@@ -709,6 +763,47 @@ impl Supervisor {
             stats.sockets += worker.lock().sockets.len();
         }
         stats
+    }
+
+    /// Starts a worker for `account` if there is none, without attaching a socket. Its idle time starts when it is ready.
+    pub async fn ensure(&self, _account: AccountKey) -> Result<(), AttachError> {
+        Err(AttachError::Launch("not built yet".into()))
+    }
+
+    /// Sends a control frame that belongs to the unlock plumbing to the worker of `account` and returns what the worker
+    /// answered. `Init`, `Attach`, `Detach` and `Shutdown` belong to the supervisor and are refused.
+    pub async fn ctl(&self, _account: AccountKey, _control: Ctl) -> Result<CtlOutcome, CtlError> {
+        Err(CtlError::Refused("not built yet"))
+    }
+
+    /// What the worker last said about the store of `account`; `None` while no worker runs.
+    pub fn store_state(&self, _account: AccountKey) -> Option<StoreState> {
+        None
+    }
+
+    /// A channel that carries the store state of `account` whenever it changes.
+    pub fn watch_store_state(&self, account: AccountKey) -> watch::Receiver<Option<StoreState>> {
+        self.slot(account).store.subscribe()
+    }
+
+    /// Ends the workers whose last socket left at least the idle timeout ago. The number of workers ended.
+    pub async fn sweep(&self) -> usize {
+        0
+    }
+
+    /// Runs [`Supervisor::sweep`] every `sweep_interval` until [`Supervisor::shutdown`].
+    pub fn start_sweeper(&self) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async {})
+    }
+
+    /// Removes the secret store of `account`: through the running worker, or through a worker in wipe mode.
+    pub async fn wipe_secrets(&self, _account: AccountKey) -> Result<(), WipeError> {
+        Err(WipeError("not built yet".into()))
+    }
+
+    /// Removes everything in the home of `account`.
+    pub async fn wipe_home(&self, _account: AccountKey) -> Result<(), WipeError> {
+        Err(WipeError("not built yet".into()))
     }
 
     /// Asks every worker to end.
@@ -719,4 +814,9 @@ impl Supervisor {
             let _ = worker.push_control(Ctl::Shutdown);
         }
     }
+}
+
+/// A disabled or deleted account loses its worker and its sockets; its home and its store stay where they are.
+impl AccountObserver for Supervisor {
+    fn account_ended(&self, _account: AccountId, _uid: u32, _ending: Ending) {}
 }

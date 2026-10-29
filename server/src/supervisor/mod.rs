@@ -11,8 +11,9 @@ pub mod launcher;
 pub mod registry;
 pub mod socket;
 
-pub use launcher::{Launch, LaunchError, LaunchRequest, LaunchedWorker, WorkerLauncher};
+pub use helper_client::{HelperClient, HelperError, HelperSettings, HelperTimeouts, Spawned};
+pub use launcher::{HelperLauncher, Launch, LaunchError, LaunchRequest, LaunchedWorker, WorkerLauncher};
 #[cfg(feature = "in-process-workers")]
 pub use launcher::InProcessLauncher;
-pub use registry::{AccountKey, AccountStats, AttachError, Stats, Supervisor, SupervisorSettings};
+pub use registry::{AccountKey, AccountStats, AttachError, CtlError, Stats, Supervisor, SupervisorSettings, WipeError};
 pub use socket::{Outbound, SocketHandle, SocketRx, SubmitError};

@@ -210,6 +210,11 @@ const WORKSPACE_ALLOWLIST: &[(&str, &[Dependency])] = &[
                 "the command table and the plain command functions that the worker dispatches; the server never turns on \
                  the keyring feature",
             ),
+            (
+                "holzwave-spawn-helper",
+                "the helper's request and answer types, so that the client of the supervisor and the helper cannot drift apart \
+                 (supervisor/helper_client.rs)",
+            ),
             ("http", "the request and response types shared by the router and the accept loop (http/app.rs)"),
             ("http-body-util", "reads request bodies with a hard size cap and builds response bodies (http/app.rs)"),
             (

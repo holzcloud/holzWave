@@ -12,6 +12,7 @@ use std::pin::Pin;
 use tokio::net::UnixStream;
 use tokio::sync::watch;
 
+use crate::supervisor::helper_client::HelperClient;
 use crate::supervisor::registry::AccountKey;
 use crate::worker::runtime::WorkerMode;
 
@@ -72,6 +73,37 @@ pub trait WorkerLauncher: Send + Sync {
     /// Whether the thing behind the launcher (the spawn helper) can still be reached.
     fn helper_alive(&self) -> bool {
         true
+    }
+}
+
+/// Starts workers through the spawn helper, which runs each as the person's own Unix user.
+pub struct HelperLauncher {
+    client: HelperClient,
+}
+
+impl HelperLauncher {
+    /// A launcher over a helper client.
+    pub fn new(client: HelperClient) -> HelperLauncher {
+        HelperLauncher { client }
+    }
+
+    /// The client, for the calls the launcher trait does not carry.
+    pub fn client(&self) -> &HelperClient {
+        &self.client
+    }
+}
+
+impl WorkerLauncher for HelperLauncher {
+    fn launch(&self, _request: LaunchRequest) -> Launch<'_, LaunchedWorker> {
+        Box::pin(async move { Err(LaunchError::new("the spawn helper launcher is not built yet")) })
+    }
+
+    fn kill_uid(&self, _uid: u32) -> Launch<'_, ()> {
+        Box::pin(async move { Err(LaunchError::new("the spawn helper launcher is not built yet")) })
+    }
+
+    fn helper_alive(&self) -> bool {
+        self.client.is_alive()
     }
 }
 

@@ -11,11 +11,22 @@ mod sup_env;
 
 use std::time::{Duration, Instant};
 
+use std::sync::Arc;
+
+use holzwave_server::accounts::{AccountObserver, Accounts, NewAccount};
+use holzwave_server::audit::Audit;
+use holzwave_server::clock::ManualClock;
 use holzwave_server::limits::{REMEMBERED_SIZES, SYNTHETIC_REQUEST_BASE, WORKER_QUEUE_FRAMES};
-use holzwave_server::supervisor::{AccountKey, AttachError, Outbound, SubmitError, SupervisorSettings};
-use holzwave_server::wire::{CmdFrame, Ctl, Evt, Frame, MAX_PAYLOAD, Note, Res, ResBody};
+use holzwave_server::store::{Account, Role, Store, StoreError, Tx};
+use holzwave_server::supervisor::idle;
+use holzwave_server::supervisor::{AccountKey, AttachError, CtlError, Outbound, SubmitError, Supervisor, SupervisorSettings};
+use holzwave_server::wire::{
+    CmdFrame, Ctl, CtlOutcome, Evt, Frame, Key, MAX_PAYLOAD, Note, OpeningKey, Res, ResBody, SLOT_ID_BYTES, SlotKey, StoreState,
+};
+use holzwave_server::worker::runtime::WorkerMode;
+use holzwave_server::worker::secretstore::SlotKind;
 use serde_json::Value;
-use sup_env::{Client, PATIENCE, Reply, ScriptEnv, ScriptHandle, SupEnv, account, expected_init};
+use sup_env::{Client, PATIENCE, Reply, ScriptEnv, ScriptHandle, SupEnv, account, expected_init, process_exists};
 
 /// The id of the focused pane of a layout answer.
 fn focus(view: &Value) -> u64 {
@@ -1160,4 +1171,657 @@ async fn several_eight_sockets_read_2000_events_in_order_with_random_delays() {
         assert!(missing.iter().all(|n| n % 10 != 0), "socket {index} lost a layout event");
     }
     assert_eq!(env.supervisor.stats().overflow_closes, 0);
+}
+
+// ---- the idle rule ------------------------------------------------------------------------------------------------------
+
+const IDLE: i64 = 86_400;
+
+/// Settings whose waits are short, so that a worker that does not answer costs a fraction of a second.
+fn quick_settings() -> SupervisorSettings {
+    SupervisorSettings {
+        shutdown_timeout: Duration::from_millis(300),
+        control_timeout: Duration::from_millis(300),
+        wipe_timeout: Duration::from_millis(600),
+        ..SupervisorSettings::default()
+    }
+}
+
+/// Runs `sweep` on a task of its own, so that the test thread can play the worker meanwhile.
+fn sweeping(supervisor: &Supervisor) -> tokio::task::JoinHandle<usize> {
+    let supervisor = supervisor.clone();
+    tokio::spawn(async move { supervisor.sweep().await })
+}
+
+#[test]
+fn idle_the_rule_is_a_pure_function_with_the_boundary_at_the_timeout() {
+    let timeout = Duration::from_secs(86_400);
+    let table = [
+        (0i64, 86_399i64, false, "one second before"),
+        (0, 86_400, true, "at the limit"),
+        (0, 86_401, true, "one second after"),
+        (1_000, 1_000, false, "no time passed"),
+        (1_000, 999, false, "a clock that went back"),
+        (-5, 86_395, true, "times before the epoch"),
+    ];
+    for (since, now, expected, what) in table {
+        assert_eq!(idle::expired(since, now, timeout), expected, "{what}");
+    }
+    assert!(idle::expired(0, 1, Duration::ZERO), "a timeout of zero ends at once");
+    assert!(!idle::expired(i64::MAX - 1, i64::MIN, timeout), "no overflow");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_a_worker_ends_one_second_after_the_boundary_and_a_clean_close_needs_no_kill() {
+    let env = ScriptEnv::start_with(quick_settings()).await;
+    let client = env.client(one()).await;
+    let mut script = env.launcher.script(PATIENCE);
+    drop(client);
+    wait_until("the socket to leave", || env.supervisor.account_stats(one()).sockets == 0).await;
+    env.clock.advance(IDLE - 1);
+    assert_eq!(env.supervisor.sweep().await, 0, "86,399 seconds do not end the worker");
+    assert!(env.supervisor.account_stats(one()).worker_running);
+    env.clock.advance(1);
+    let sweep = sweeping(&env.supervisor);
+    script.wait_for("Shutdown", PATIENCE, |f| matches!(f, Frame::Ctl(Ctl::Shutdown)));
+    script.close();
+    assert_eq!(sweep.await.expect("joined"), 1, "86,400 seconds end it");
+    assert!(!env.supervisor.account_stats(one()).worker_running);
+    assert!(env.launcher.kills().is_empty(), "a worker that closed its link in time is not killed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_a_worker_that_was_ensured_with_no_socket_starts_its_idle_time_at_ready() {
+    let env = ScriptEnv::start_with(quick_settings()).await;
+    env.supervisor.ensure(one()).await.expect("a worker");
+    let mut script = env.launcher.script(PATIENCE);
+    assert!(env.supervisor.account_stats(one()).worker_running);
+    env.clock.advance(IDLE - 1);
+    assert_eq!(env.supervisor.sweep().await, 0);
+    env.clock.advance(1);
+    let sweep = sweeping(&env.supervisor);
+    script.wait_for("Shutdown", PATIENCE, |f| matches!(f, Frame::Ctl(Ctl::Shutdown)));
+    script.close();
+    assert_eq!(sweep.await.expect("joined"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_an_attach_at_the_last_second_resets_the_time_and_a_detach_starts_a_new_period() {
+    let env = ScriptEnv::start_with(quick_settings()).await;
+    let first = env.client(one()).await;
+    let mut script = env.launcher.script(PATIENCE);
+    drop(first);
+    wait_until("the socket to leave", || env.supervisor.account_stats(one()).sockets == 0).await;
+    env.clock.advance(IDLE - 1);
+    let second = env.client(one()).await;
+    env.clock.advance(IDLE * 2);
+    assert_eq!(env.supervisor.sweep().await, 0, "a worker with a socket is never idle");
+    drop(second);
+    wait_until("the socket to leave", || env.supervisor.account_stats(one()).sockets == 0).await;
+    env.clock.advance(IDLE - 1);
+    assert_eq!(env.supervisor.sweep().await, 0, "the period starts again at the second detach");
+    env.clock.advance(1);
+    let sweep = sweeping(&env.supervisor);
+    script.wait_for("Shutdown", PATIENCE, |f| matches!(f, Frame::Ctl(Ctl::Shutdown)));
+    script.close();
+    assert_eq!(sweep.await.expect("joined"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_two_accounts_with_different_last_socket_times_are_swept_independently() {
+    let env = ScriptEnv::start_with(quick_settings()).await;
+    let a = env.client(account(1, 20001)).await;
+    let mut script_a = env.launcher.script(PATIENCE);
+    drop(a);
+    wait_until("a to leave", || env.supervisor.account_stats(account(1, 20001)).sockets == 0).await;
+    env.clock.advance(1000);
+    let b = env.client(account(2, 20002)).await;
+    let mut script_b = env.launcher.script(PATIENCE);
+    drop(b);
+    wait_until("b to leave", || env.supervisor.account_stats(account(2, 20002)).sockets == 0).await;
+    env.clock.advance(IDLE - 1000);
+    let sweep = sweeping(&env.supervisor);
+    script_a.wait_for("Shutdown for a", PATIENCE, |f| matches!(f, Frame::Ctl(Ctl::Shutdown)));
+    script_a.close();
+    assert_eq!(sweep.await.expect("joined"), 1, "only a is at the limit");
+    assert!(env.supervisor.account_stats(account(2, 20002)).worker_running, "b has 1,000 seconds left");
+    assert!(!script_b.ctls().contains(&Ctl::Shutdown));
+    env.clock.advance(1000);
+    let sweep = sweeping(&env.supervisor);
+    script_b.wait_for("Shutdown for b", PATIENCE, |f| matches!(f, Frame::Ctl(Ctl::Shutdown)));
+    script_b.close();
+    assert_eq!(sweep.await.expect("joined"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_sweep_does_nothing_for_an_account_whose_worker_ended_already() {
+    let env = ScriptEnv::start_with(quick_settings()).await;
+    let client = env.client(one()).await;
+    let script = env.launcher.script(PATIENCE);
+    drop(client);
+    wait_until("the socket to leave", || env.supervisor.account_stats(one()).sockets == 0).await;
+    script.close();
+    wait_until("the worker to end", || !env.supervisor.account_stats(one()).worker_running).await;
+    env.clock.advance(IDLE * 3);
+    assert_eq!(env.supervisor.sweep().await, 0);
+    assert_eq!(env.launcher.launches(), 1, "nothing started again");
+    assert!(env.launcher.kills().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_a_worker_that_does_not_close_is_killed_by_uid_after_the_bound() {
+    let env = ScriptEnv::start_with(quick_settings()).await;
+    let client = env.client(one()).await;
+    let mut script = env.launcher.script(PATIENCE);
+    drop(client);
+    wait_until("the socket to leave", || env.supervisor.account_stats(one()).sockets == 0).await;
+    env.clock.advance(IDLE);
+    let started = Instant::now();
+    assert_eq!(env.supervisor.sweep().await, 1);
+    assert!(started.elapsed() >= Duration::from_millis(250), "the supervisor waited for the bound: {:?}", started.elapsed());
+    script.wait_for("Shutdown", PATIENCE, |f| matches!(f, Frame::Ctl(Ctl::Shutdown)));
+    assert_eq!(env.launcher.kills(), vec![ONE], "the uid of the account, once");
+    assert!(!env.supervisor.account_stats(one()).worker_running);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_the_sweeper_task_ends_idle_workers_by_itself_and_stops_at_shutdown() {
+    let settings = SupervisorSettings { sweep_interval: Duration::from_millis(40), ..quick_settings() };
+    let env = ScriptEnv::start_with(settings).await;
+    let sweeper = env.supervisor.start_sweeper();
+    let client = env.client(one()).await;
+    let _script = env.launcher.script(PATIENCE);
+    drop(client);
+    wait_until("the socket to leave", || env.supervisor.account_stats(one()).sockets == 0).await;
+    env.clock.advance(IDLE);
+    wait_until("the sweeper to end the worker", || !env.supervisor.account_stats(one()).worker_running).await;
+    env.supervisor.shutdown().await;
+    tokio::time::timeout(PATIENCE, sweeper).await.expect("the sweeper stops with the shutdown").expect("joined");
+}
+
+// ---- limits -------------------------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn limits_eight_attaches_at_once_start_one_worker_and_all_get_sockets() {
+    let env = ScriptEnv::start().await;
+    let tasks: Vec<_> = (0..8)
+        .map(|_| {
+            let supervisor = env.supervisor.clone();
+            tokio::spawn(async move { supervisor.attach(one()).await })
+        })
+        .collect();
+    let mut sockets = Vec::new();
+    for task in tasks {
+        sockets.push(task.await.expect("joined").expect("every attach succeeds"));
+    }
+    assert_eq!(env.launcher.launches(), 1, "one worker for eight attaches");
+    assert_eq!(env.supervisor.account_stats(one()).sockets, 8);
+    let ids: std::collections::BTreeSet<u32> = sockets.iter().map(|(handle, _)| handle.id()).collect();
+    assert_eq!(ids.len(), 8, "eight different socket numbers");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn limits_after_one_socket_leaves_a_ninth_is_accepted_and_the_others_keep_working() {
+    let mut rig = rig(8).await;
+    assert_eq!(rig.env.supervisor.attach(one()).await.err(), Some(AttachError::TooManySockets));
+    assert_eq!(AttachError::TooManySockets.to_string(), "too many connections");
+    let leaving = rig.clients.remove(3);
+    drop(leaving);
+    wait_until("the socket to leave", || rig.env.supervisor.account_stats(one()).sockets == 7).await;
+    let again = rig.env.client(one()).await;
+    assert_eq!(rig.env.supervisor.account_stats(one()).sockets, 8);
+    rig.clients.push(again);
+    for client in &rig.clients {
+        client.handle.submit(5, "get_layout", "{}").expect("a socket that stayed still works");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn limits_with_a_pane_cap_of_three_the_fourth_pane_is_refused_with_the_cores_sentence() {
+    let settings = SupervisorSettings { max_panes: 3, ..SupervisorSettings::default() };
+    let env = SupEnv::start_with(sup_env::SupOptions { settings: Some(settings) }).await;
+    let mut client = env.client(env.account(1, 20001)).await;
+    client.ok("split", r#"{"column":false}"#).await;
+    client.ok("split", r#"{"column":true}"#).await;
+    let refused = client.call("split", r#"{"column":false}"#).await;
+    let Reply::Err(text) = refused else { panic!("the fourth pane is refused: {refused:?}") };
+    assert!(text.to_string().contains("this server allows 3 panes per person; close one to open another"), "{text}");
+    let layout = client.ok("get_layout", "{}").await;
+    assert_eq!(layout["panes"].as_array().expect("panes").len(), 3, "the layout still has three panes");
+    env.supervisor.shutdown().await;
+}
+
+// ---- the account observer -----------------------------------------------------------------------------------------------
+
+/// Three accounts in a real accounts service on a scratch store: an administrator and two members.
+struct People {
+    _scratch: scratch::Scratch,
+    accounts: Accounts,
+    root: Account,
+    first: Account,
+    second: Account,
+}
+
+fn enrolled(_: &Tx<'_>, _: &Account) -> Result<(), StoreError> {
+    Ok(())
+}
+
+fn people(observer: Arc<dyn AccountObserver>) -> People {
+    let scratch = scratch::Scratch::new("sup-people");
+    let clock = Arc::new(ManualClock::new(1_772_353_800));
+    let store = Arc::new(Store::open(scratch.path()).expect("the store"));
+    let audit = Arc::new(Audit::open(scratch.path(), clock.clone()).expect("the audit log"));
+    let accounts = Accounts::new(store, clock, audit, 20000..=29999).with_observer(observer);
+    let issued = accounts.bootstrap_issue().expect("a bootstrap token");
+    let root = accounts
+        .redeem_bootstrap(issued.token.expose(), &NewAccount { username: "root", display_name: "Root", handle: None }, None, enrolled)
+        .expect("the first administrator");
+    let member = |name: &str| {
+        let invite = accounts.invite_create(root.id, None, None, Role::Member).expect("an invitation");
+        accounts
+            .redeem_invite(invite.token.expose(), &NewAccount { username: name, display_name: name, handle: None }, None, enrolled)
+            .expect("a member")
+    };
+    let first = member("bob");
+    let second = member("carol");
+    People { _scratch: scratch, accounts, root, first, second }
+}
+
+fn key_of(account: &Account) -> AccountKey {
+    AccountKey { id: account.id, uid: account.uid }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn observer_disable_closes_the_sockets_with_4401_ends_the_worker_and_leaves_the_other_person_alone() {
+    let env = ScriptEnv::start_with(quick_settings()).await;
+    let people = people(Arc::new(env.supervisor.clone()));
+    let (bob, carol) = (key_of(&people.first), key_of(&people.second));
+    let mut bob_a = env.client(bob).await;
+    let mut bob_b = env.client(bob).await;
+    let mut script_bob = env.launcher.script(PATIENCE);
+    let mut carol_a = env.client(carol).await;
+    let script_carol = env.launcher.script(PATIENCE);
+
+    people.accounts.disable(people.root.id, None, people.first.id).expect("disable");
+    assert_eq!(bob_a.close_code(PATIENCE).await, Some(4401));
+    assert_eq!(bob_b.close_code(PATIENCE).await, Some(4401));
+    script_bob.wait_for("Shutdown", PATIENCE, |f| matches!(f, Frame::Ctl(Ctl::Shutdown)));
+    wait_until("kill_uid after the bound", || env.launcher.kills() == vec![bob.uid]).await;
+    assert!(!env.supervisor.account_stats(bob).worker_running);
+
+    assert!(env.supervisor.account_stats(carol).worker_running, "the other account keeps its worker");
+    assert_eq!(env.supervisor.account_stats(carol).sockets, 1);
+    assert!(carol_a.next_message(Duration::from_millis(100)).await.is_none(), "and its socket hears nothing");
+    assert!(!script_carol.ctls().contains(&Ctl::Shutdown));
+    assert_eq!(env.launcher.kills(), vec![bob.uid], "no other uid was killed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn observer_delete_does_the_same_and_a_real_worker_leaves_its_home_where_it_is() {
+    let env = SupEnv::start_with(sup_env::SupOptions { settings: Some(quick_settings()) }).await;
+    let people = people(Arc::new(env.supervisor.clone()));
+    let (bob, carol) = (key_of(&people.first), key_of(&people.second));
+    let mut bob_client = env.client(bob).await;
+    let mut carol_client = env.client(carol).await;
+    let home = env.launcher.home(bob.uid);
+    std::fs::write(home.join("keepsake.txt"), b"still here").expect("a file in the home");
+
+    people.accounts.delete(people.root.id, None, people.first.id).expect("delete");
+    assert_eq!(bob_client.close_code(PATIENCE).await, Some(4401));
+    wait_until("the worker to end", || !env.supervisor.account_stats(bob).worker_running).await;
+    wait_until("kill_uid", || env.launcher.kills().contains(&bob.uid)).await;
+    assert_eq!(std::fs::read(home.join("keepsake.txt")).expect("the home was not touched"), b"still here");
+    assert!(env.supervisor.account_stats(carol).worker_running);
+    assert!(matches!(carol_client.call("get_layout", "{}").await, Reply::Ok(_)), "the other person's worker answers");
+    assert!(!env.launcher.kills().contains(&carol.uid));
+    env.supervisor.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn observer_enable_starts_nothing_and_a_call_for_an_account_without_a_worker_does_nothing() {
+    let env = ScriptEnv::start_with(quick_settings()).await;
+    let people = people(Arc::new(env.supervisor.clone()));
+    // Carol never had a worker: disabling her tells the observer, which finds nothing to end.
+    people.accounts.disable(people.root.id, None, people.second.id).expect("disable");
+    people.accounts.enable(people.root.id, None, people.second.id).expect("enable");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(env.launcher.launches(), 0, "nothing was started");
+    assert!(env.launcher.kills().is_empty(), "nothing was killed");
+    assert_eq!(env.supervisor.stats().workers, 0);
+    let _client = env.client(key_of(&people.second)).await;
+    assert_eq!(env.launcher.launches(), 1, "she gets a worker when she signs in again");
+}
+
+// ---- the wipes ------------------------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wipe_secrets_with_a_running_worker_sends_reset_secrets_and_answers_when_done_arrives() {
+    let env = ScriptEnv::start_with(quick_settings()).await;
+    let _client = env.client(one()).await;
+    let mut script = env.launcher.script(PATIENCE);
+    let wipe = tokio::spawn({
+        let supervisor = env.supervisor.clone();
+        async move { supervisor.wipe_secrets(one()).await }
+    });
+    let Frame::Ctl(Ctl::ResetSecrets { ctl }) = script.wait_for("ResetSecrets", PATIENCE, |f| matches!(f, Frame::Ctl(Ctl::ResetSecrets { .. })))
+    else {
+        unreachable!()
+    };
+    script.send(Frame::Note(Note::CtlDone { ctl, outcome: CtlOutcome::Done }));
+    wipe.await.expect("joined").expect("the secrets are wiped");
+    assert_eq!(env.launcher.launches(), 1, "the running worker did it");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wipe_secrets_with_a_running_worker_that_fails_is_an_error_with_a_sentence() {
+    let env = ScriptEnv::start_with(quick_settings()).await;
+    let _client = env.client(one()).await;
+    let mut script = env.launcher.script(PATIENCE);
+    let wipe = tokio::spawn({
+        let supervisor = env.supervisor.clone();
+        async move { supervisor.wipe_secrets(one()).await }
+    });
+    let Frame::Ctl(Ctl::ResetSecrets { ctl }) = script.wait_for("ResetSecrets", PATIENCE, |f| matches!(f, Frame::Ctl(Ctl::ResetSecrets { .. })))
+    else {
+        unreachable!()
+    };
+    script.send(Frame::Note(Note::CtlDone { ctl, outcome: CtlOutcome::Failed }));
+    let error = wipe.await.expect("joined").expect_err("a failed wipe");
+    assert_eq!(error.to_string(), "the secret store could not be removed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wipe_without_a_worker_launches_in_wipe_mode_and_the_exit_status_decides() {
+    let env = ScriptEnv::start_with(quick_settings()).await;
+    for (status, modes, ok) in [(0, WorkerMode::WipeSecrets, true), (1, WorkerMode::WipeSecrets, false), (0, WorkerMode::WipeHome, true), (7, WorkerMode::WipeHome, false)] {
+        let key = account(1, ONE);
+        let wipe = tokio::spawn({
+            let supervisor = env.supervisor.clone();
+            async move {
+                match modes {
+                    WorkerMode::WipeSecrets => supervisor.wipe_secrets(key).await,
+                    _ => supervisor.wipe_home(key).await,
+                }
+            }
+        });
+        let script = env.launcher.script(PATIENCE);
+        assert_eq!(script.mode, modes);
+        assert_eq!(script.uid, ONE);
+        script.exit(status);
+        let result = wipe.await.expect("joined");
+        assert_eq!(result.is_ok(), ok, "status {status}: {result:?}");
+        if let Err(error) = result {
+            assert!(error.to_string().contains("did not finish"), "{error}");
+        }
+    }
+    assert_eq!(env.supervisor.stats().workers, 0, "a wipe worker is no serving worker");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wipe_with_the_in_process_launcher_calls_the_workers_own_wipe_functions() {
+    let env = SupEnv::start().await;
+    let key = env.account(1, 20001);
+    // A wipe of a home that has no worker: the launcher makes the home, the wipe empties it.
+    env.supervisor.wipe_home(key).await.expect("a wipe of an empty home");
+    let home = env.launcher.home(20001);
+    std::fs::write(home.join("old.txt"), b"x").expect("a file");
+    env.supervisor.wipe_home(key).await.expect("the home is emptied");
+    assert!(!home.join("old.txt").exists(), "the file is gone");
+    env.supervisor.wipe_secrets(key).await.expect("no store, nothing to remove");
+    let requests = env.launcher.requests();
+    assert_eq!(requests.iter().filter(|(_, mode)| *mode == WorkerMode::WipeHome).count(), 2);
+    assert_eq!(requests.iter().filter(|(_, mode)| *mode == WorkerMode::WipeSecrets).count(), 1);
+}
+
+// ---- the shutdown -------------------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_closes_every_socket_with_1001_ends_every_worker_and_leaves_no_shell_running() {
+    let env = SupEnv::start().await;
+    let layout = [(1, 20001, 2usize), (2, 20002, 2), (3, 20003, 1)];
+    let mut clients = Vec::new();
+    for (id, uid, sockets) in layout {
+        for n in 0..sockets {
+            let mut client = env.client(env.account(id, uid)).await;
+            if n == 0 {
+                let view = client.ok("get_layout", "{}").await;
+                let pane = focus(&view);
+                client.ok("start_pane", &format!(r#"{{"pane":{pane},"cols":80,"rows":24,"cell_w":8,"cell_h":16}}"#)).await;
+            }
+            clients.push(client);
+        }
+    }
+    wait_until("three shells", || env.shell_pids().len() >= 3).await;
+    let pids = env.shell_pids();
+    assert!(pids.iter().all(|pid| process_exists(*pid)), "the shells run before the shutdown");
+
+    env.supervisor.shutdown().await;
+    for client in &mut clients {
+        let mut last = None;
+        while let Some(message) = client.next_message(Duration::from_secs(3)).await {
+            last = Some(message);
+        }
+        assert!(matches!(last, Some(Outbound::Close { code: 1001, .. })), "the last message is the close: {last:?}");
+    }
+    assert_eq!(env.supervisor.stats().workers, 0);
+    wait_until("the shells to be gone", || pids.iter().all(|pid| !process_exists(*pid))).await;
+    assert_eq!(env.supervisor.attach(env.account(1, 20001)).await.err(), Some(AttachError::ShuttingDown));
+    let started = Instant::now();
+    env.supervisor.shutdown().await;
+    assert!(started.elapsed() < Duration::from_millis(500), "a second shutdown is a no-op");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_kills_a_worker_that_never_closes_after_the_bound() {
+    let env = ScriptEnv::start_with(quick_settings()).await;
+    let mut client = env.client(one()).await;
+    let mut script = env.launcher.script(PATIENCE);
+    let started = Instant::now();
+    env.supervisor.shutdown().await;
+    assert!(started.elapsed() >= Duration::from_millis(250), "it waited for the bound: {:?}", started.elapsed());
+    script.wait_for("Shutdown", PATIENCE, |f| matches!(f, Frame::Ctl(Ctl::Shutdown)));
+    assert_eq!(env.launcher.kills(), vec![ONE]);
+    let mut last = None;
+    while let Some(message) = client.next_message(Duration::from_millis(300)).await {
+        last = Some(message);
+    }
+    assert!(matches!(last, Some(Outbound::Close { code: 1001, .. })), "{last:?}");
+}
+
+// ---- control frames -----------------------------------------------------------------------------------------------------
+
+fn slot_id() -> [u8; SLOT_ID_BYTES] {
+    [9; SLOT_ID_BYTES]
+}
+
+fn key(byte: u8) -> Key {
+    Key::from_bytes(&[byte; 32])
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn control_the_six_worker_controls_reach_the_worker_with_a_number_and_return_its_answer() {
+    let env = ScriptEnv::start_with(quick_settings()).await;
+    let _client = env.client(one()).await;
+    let mut script = env.launcher.script(PATIENCE);
+    let controls = vec![
+        Ctl::Unlock { ctl: 1, kind: SlotKind::Password, key: key(1) },
+        Ctl::Lock { ctl: 1 },
+        Ctl::ResetSecrets { ctl: 1 },
+        Ctl::Provision { ctl: 1, slots: vec![SlotKey { kind: SlotKind::Password, id: slot_id(), key: key(2) }] },
+        Ctl::SetSlot { ctl: 1, slot: SlotKey { kind: SlotKind::Recovery, id: slot_id(), key: key(3) }, opening: Some(OpeningKey { kind: SlotKind::Password, key: key(4) }) },
+        Ctl::RemoveSlot { ctl: 1, kind: SlotKind::Recovery, id: slot_id() },
+    ];
+    let outcomes = [CtlOutcome::Done, CtlOutcome::Locked, CtlOutcome::Refused, CtlOutcome::Failed, CtlOutcome::Absent, CtlOutcome::Done];
+    let mut seen_numbers = Vec::new();
+    for (control, outcome) in controls.into_iter().zip(outcomes) {
+        let name = format!("{control:?}");
+        let call = tokio::spawn({
+            let supervisor = env.supervisor.clone();
+            async move { supervisor.ctl(one(), control).await }
+        });
+        let frame = script.wait_for(&name, PATIENCE, |f| matches!(f, Frame::Ctl(c) if !matches!(c, Ctl::Init { .. } | Ctl::Attach { .. }) && !seen_numbers_contains(&seen_numbers, c)));
+        let Frame::Ctl(arrived) = frame else { unreachable!() };
+        let number = ctl_number(&arrived).expect("a control with a number");
+        assert_ne!(number, 1, "{name}: the supervisor chooses the number, not the caller");
+        seen_numbers.push(number);
+        script.send(Frame::Note(Note::CtlDone { ctl: number, outcome }));
+        assert_eq!(call.await.expect("joined"), Ok(outcome), "{name}");
+    }
+    let distinct: std::collections::BTreeSet<u64> = seen_numbers.iter().copied().collect();
+    assert_eq!(distinct.len(), 6, "every control has a number of its own");
+}
+
+fn ctl_number(control: &Ctl) -> Option<u64> {
+    match control {
+        Ctl::Unlock { ctl, .. }
+        | Ctl::Lock { ctl }
+        | Ctl::ResetSecrets { ctl }
+        | Ctl::Provision { ctl, .. }
+        | Ctl::SetSlot { ctl, .. }
+        | Ctl::RemoveSlot { ctl, .. } => Some(*ctl),
+        _ => None,
+    }
+}
+
+fn seen_numbers_contains(seen: &[u64], control: &Ctl) -> bool {
+    ctl_number(control).is_some_and(|n| seen.contains(&n))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn control_the_four_frames_the_supervisor_owns_are_refused_with_a_sentence_and_nothing_is_sent() {
+    let env = ScriptEnv::start_with(quick_settings()).await;
+    let _client = env.client(one()).await;
+    let mut script = env.launcher.script(PATIENCE);
+    let settings = SupervisorSettings::default();
+    for control in [
+        Ctl::Init { version: 1, max_panes: 0, max_scrollback_lines: 0 },
+        Ctl::Attach { socket: 99 },
+        Ctl::Detach { socket: 1 },
+        Ctl::Shutdown,
+    ] {
+        let name = format!("{control:?}");
+        let error = env.supervisor.ctl(one(), control).await.expect_err("refused");
+        assert!(matches!(error, CtlError::Refused(sentence) if !sentence.is_empty()), "{name}: {error:?}");
+        assert!(!error.to_string().is_empty());
+    }
+    script.settle(Duration::from_millis(200));
+    assert_eq!(
+        script.ctls(),
+        vec![expected_init(settings.max_panes, settings.max_scrollback_lines), Ctl::Attach { socket: 1 }],
+        "only what the supervisor itself sent"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn control_a_control_that_gets_no_answer_times_out_and_the_worker_keeps_running() {
+    let env = ScriptEnv::start_with(quick_settings()).await;
+    let _client = env.client(one()).await;
+    let mut script = env.launcher.script(PATIENCE);
+    let started = Instant::now();
+    let error = env.supervisor.ctl(one(), Ctl::Lock { ctl: 0 }).await.expect_err("no answer");
+    assert_eq!(error, CtlError::Timeout);
+    assert!(started.elapsed() >= Duration::from_millis(250) && started.elapsed() < Duration::from_secs(5));
+    assert!(env.supervisor.account_stats(one()).worker_running, "a slow control does not end the worker");
+    // The late answer finds nobody waiting: it is dropped and counted.
+    let Frame::Ctl(Ctl::Lock { ctl }) = script.wait_for("Lock", PATIENCE, |f| matches!(f, Frame::Ctl(Ctl::Lock { .. }))) else { unreachable!() };
+    script.send(Frame::Note(Note::CtlDone { ctl, outcome: CtlOutcome::Done }));
+    wait_until("the late answer to be counted", || env.supervisor.stats().dropped_ctl_done == 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn control_an_answer_with_a_number_nobody_waits_for_is_dropped_and_counted() {
+    let env = ScriptEnv::start_with(quick_settings()).await;
+    let _client = env.client(one()).await;
+    let script = env.launcher.script(PATIENCE);
+    script.send(Frame::Note(Note::CtlDone { ctl: 424_242, outcome: CtlOutcome::Done }));
+    wait_until("the answer to be counted", || env.supervisor.stats().dropped_ctl_done == 1).await;
+    assert!(env.supervisor.account_stats(one()).worker_running, "and the worker goes on");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn control_lock_with_no_worker_is_done_without_starting_one() {
+    let env = ScriptEnv::start_with(quick_settings()).await;
+    assert_eq!(env.supervisor.ctl(one(), Ctl::Lock { ctl: 0 }).await, Ok(CtlOutcome::Done));
+    assert_eq!(env.launcher.launches(), 0);
+    assert_eq!(env.supervisor.store_state(one()), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn control_the_store_state_notes_update_the_state_and_the_watch_channel() {
+    let env = ScriptEnv::start_with(quick_settings()).await;
+    let _client = env.client(one()).await;
+    let script = env.launcher.script(PATIENCE);
+    let mut watcher = env.supervisor.watch_store_state(one());
+    assert_eq!(env.supervisor.store_state(one()), None, "nothing is known before the worker says");
+    script.send(Frame::Note(Note::StoreState(StoreState::Locked)));
+    tokio::time::timeout(PATIENCE, watcher.wait_for(|s| *s == Some(StoreState::Locked))).await.expect("in time").expect("open");
+    assert_eq!(env.supervisor.store_state(one()), Some(StoreState::Locked));
+    script.send(Frame::Note(Note::StoreState(StoreState::Unlocked)));
+    tokio::time::timeout(PATIENCE, watcher.wait_for(|s| *s == Some(StoreState::Unlocked))).await.expect("in time").expect("open");
+    assert_eq!(env.supervisor.store_state(one()), Some(StoreState::Unlocked));
+    // The person's state is theirs: another account's is untouched.
+    assert_eq!(env.supervisor.store_state(account(2, 20002)), None);
+}
+
+// ---- the canary -------------------------------------------------------------------------------------------------------
+
+const CANARY: &str = "CANARY-7d41f0c9-secret";
+const CANARY_CHILD: &str = "HOLZWAVE_CANARY_CHILD";
+
+/// The scenario itself. It runs in a child process of the test binary, so that its standard error can be read whole.
+#[tokio::test(flavor = "multi_thread")]
+async fn canary_scenario_in_the_child_process() {
+    if std::env::var_os(CANARY_CHILD).is_none() {
+        return;
+    }
+    let env = ScriptEnv::start_with(quick_settings()).await;
+    let mut texts = Vec::<String>::new();
+    let mut client = env.client(one()).await;
+    let mut script = env.launcher.script(PATIENCE);
+    // A canary in a command argument, a rejected command name and a refused control, and a key in a control frame.
+    client.handle.submit(1, "get_layout", &format!(r#"{{"note":"{CANARY}"}}"#)).expect("submit");
+    texts.push(format!("{:?}", client.handle.submit(2, &format!("bad name {CANARY}"), "{}")));
+    texts.push(format!("{:?}", env.supervisor.ctl(one(), Ctl::Attach { socket: 1 }).await));
+    texts.push(format!("{:?}", Ctl::Unlock { ctl: 1, kind: SlotKind::Password, key: Key::from_bytes(&[0xC7; 32]) }));
+    let call = tokio::spawn({
+        let supervisor = env.supervisor.clone();
+        async move {
+            supervisor.ctl(one(), Ctl::Unlock { ctl: 1, kind: SlotKind::Password, key: Key::from_bytes(&[0xC7; 32]) }).await
+        }
+    });
+    script.wait_for("Unlock", PATIENCE, |f| matches!(f, Frame::Ctl(Ctl::Unlock { .. })));
+    // A frame event with the canary in its body reaches the socket; it must not reach the log.
+    script.send(Frame::Evt(Evt { target: 0, name: "layout".into(), text: format!(r#"{{"note":"{CANARY}"}}"#) }));
+    let delivered = client.next_event("layout", PATIENCE).await.expect("the event arrives at the socket");
+    assert!(delivered.to_string().contains(CANARY));
+    // A hostile frame with the canary in its event name ends the link and is logged by kind only.
+    script.send_raw(&raw_evt(CANARY.to_ascii_lowercase().as_bytes(), b"{}"));
+    assert_eq!(client.close_code(PATIENCE).await, Some(1012));
+    texts.push(format!("{:?}", call.await.expect("joined")));
+    texts.push(format!("{:?}", env.supervisor.stats()));
+    for text in texts {
+        println!("ERRORTEXT {}", text.replace('\n', " "));
+    }
+}
+
+#[test]
+fn canary_no_argument_key_event_body_or_hostile_frame_reaches_a_log_line_or_an_error_text() {
+    if std::env::var_os(CANARY_CHILD).is_some() {
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", "canary_scenario_in_the_child_process", "--nocapture", "--test-threads=1"])
+        .env(CANARY_CHILD, "1")
+        .output()
+        .expect("the child process");
+    let (out, err) = (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(output.status.success(), "the scenario failed:\n{out}\n{err}");
+    assert!(out.contains("ERRORTEXT"), "the scenario ran: {out}");
+    assert!(err.contains("supervisor.worker_fault"), "the hostile frame was logged, so the log is the real one: {err:?}");
+    let error_texts: String = out.lines().filter(|l| l.starts_with("ERRORTEXT")).collect::<Vec<_>>().join("\n");
+    for (what, text) in [("the log", err.as_ref()), ("the error texts", error_texts.as_str())] {
+        let lower = text.to_ascii_lowercase();
+        assert!(!lower.contains(&CANARY.to_ascii_lowercase()), "the canary is in {what}: {text}");
+        assert!(!lower.contains("c7c7c7c7"), "key bytes are in {what}: {text}");
+    }
 }

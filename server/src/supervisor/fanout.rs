@@ -28,6 +28,7 @@ pub(super) struct Counters {
     pub(super) dropped_synthetic: AtomicU64,
     pub(super) overflow_closes: AtomicU64,
     pub(super) worker_deaths: AtomicU64,
+    pub(super) dropped_ctl_done: AtomicU64,
 }
 
 impl Counters {
