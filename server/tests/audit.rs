@@ -65,7 +65,7 @@ fn plain(action: Action) -> Event {
 }
 
 /// The actions of the audit vocabulary, as a literal: a new action must change this list.
-const ACTIONS: [&str; 25] = [
+const ACTIONS: [&str; 26] = [
     "bootstrap.redeem",
     "signin.ok",
     "signin.fail",
@@ -88,6 +88,7 @@ const ACTIONS: [&str; 25] = [
     "auth.passkey.remove",
     "auth.passphrase.set",
     "recovery.use",
+    "recovery.replace",
     "secrets.reset",
     "secrets.unlock",
     "secrets.lock",
