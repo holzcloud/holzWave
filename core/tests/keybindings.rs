@@ -693,3 +693,25 @@ fn overrides_in_settings_json_flow_into_the_resolved_table() {
     assert_eq!(kb.action_of(&chord("Cmd+Shift+Enter")), Some("pane.split_right"));
     assert_eq!(kb.chord_of("palette.open"), None, "the empty string unbinds");
 }
+
+// ---- the browser build's table ---------------------------------------------------------------------------
+
+/// The lines `os|id|default` of the three desktop tables in table order, with the empty text for an unbound action: the
+/// form of `fixtures/keybindings-defaults.txt`.
+fn pinned_lines() -> Vec<String> {
+    OSES.iter()
+        .flat_map(|os| actions_for(os).iter().map(move |a| format!("{os}|{}|{}", a.id, a.default.unwrap_or(""))))
+        .collect()
+}
+
+#[test]
+fn the_three_existing_tables_are_what_they_were() {
+    // The file was written from the tables as they were before the browser table existed.
+    let pinned: Vec<&str> = include_str!("fixtures/keybindings-defaults.txt").lines().collect();
+    let now = pinned_lines();
+    assert_eq!(pinned.len(), 3 * 57, "the pinned file holds three tables of 57 rows");
+    for (index, (want, got)) in pinned.iter().zip(&now).enumerate() {
+        assert_eq!(want, got, "line {} of the pinned defaults differs", index + 1);
+    }
+    assert_eq!(pinned.len(), now.len(), "the number of rows differs from the pinned file");
+}
