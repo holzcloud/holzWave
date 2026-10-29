@@ -7345,8 +7345,10 @@ mod tests {
             (rows(Platform::MacOs), rows(Platform::Windows), rows(Platform::Linux), rows(Platform::Web));
         assert_ne!(mac, linux, "macOS has its own table");
         assert_ne!(win, linux, "Windows has its own table");
-        // The core has no table called `web` yet: the name selects the Linux one until the web table exists.
-        assert_eq!(web, linux);
+        // The browser table is the Linux one with close pane, new tab and new workspace moved off the chords a browser keeps.
+        assert_ne!(web, linux, "the browser has its own table");
+        let moved: Vec<&str> = web.iter().zip(&linux).filter(|(w, l)| w != l).map(|(w, _)| w.0.as_str()).collect();
+        assert_eq!(moved, ["pane.close", "tab.new", "workspace.new"]);
     }
 
     /// The sentence a refused pane carries, for the cap `n`.
