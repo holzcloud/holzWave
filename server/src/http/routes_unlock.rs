@@ -25,7 +25,8 @@ use crate::auth::throttle::{Policy, Throttle, scoped_key};
 use crate::http::app::StoreView;
 use crate::http::router::{Access, ApiError, ApiJson, Authed, Part};
 use crate::proxy::key_of;
-use crate::store::AccountId;
+use crate::store::{AccountId, UnlockKind};
+use crate::unlock::{KEY_BYTES, Kek};
 
 use super::routes_auth::{AuthServices, GATE_TIMEOUT, Object, Refusal, answer, blocking};
 
@@ -82,9 +83,58 @@ pub enum GateError {
     Unavailable,
 }
 
+/// One key-encryption key of a new account, handed to the gate when the account is made. Not `Clone`, a marker for `Debug`,
+/// wiped when dropped.
+pub struct ProvisionKey {
+    kind: UnlockKind,
+    credential_id: Option<Vec<u8>>,
+    key: Zeroizing<[u8; KEY_BYTES]>,
+}
+
+impl ProvisionKey {
+    /// A key of `kind`; `credential_id` names the passkey of a PRF key and is `None` for the other kinds. The bytes are copied
+    /// and the copy is wiped with the value.
+    pub fn new(kind: UnlockKind, credential_id: Option<Vec<u8>>, key: &Kek) -> ProvisionKey {
+        ProvisionKey { kind, credential_id, key: Zeroizing::new(*key.expose()) }
+    }
+
+    /// Which unlock method the key belongs to.
+    pub fn kind(&self) -> UnlockKind {
+        self.kind
+    }
+
+    /// The passkey a PRF key comes from.
+    pub fn credential_id(&self) -> Option<&[u8]> {
+        self.credential_id.as_deref()
+    }
+
+    /// The 32 bytes, for the gate to wrap the data key of the new secret store.
+    pub fn key(&self) -> &[u8; KEY_BYTES] {
+        &self.key
+    }
+}
+
+impl std::fmt::Debug for ProvisionKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProvisionKey(..)")
+    }
+}
+
 /// The seam between the sign-in routes and the secret store of the worker side. It is also the [`StoreView`] the application
 /// state reads, so one object serves both.
 pub trait UnlockGate: StoreView {
+    /// A new account was made and committed; `keys` are the key-encryption keys of its unlock methods (the password's, the
+    /// passkey's when the browser gave PRF output, the recovery code's), so that the worker side can create the secret store
+    /// with one slot for each. The default does nothing. A failure changes nothing for the account: the store stays locked and
+    /// the page shows the unlock dialog.
+    fn provision(
+        &self,
+        _account: AccountId,
+        _keys: Vec<ProvisionKey>,
+    ) -> GateFuture<'_, Result<(), GateError>> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// A person signed in; `material` is what the method produced. A failure changes nothing for the sign-in: the store stays
     /// locked and the page shows the unlock dialog.
     fn session_started(

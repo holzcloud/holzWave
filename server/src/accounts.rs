@@ -365,6 +365,13 @@ impl Accounts {
         }
         result
     }
+
+    /// Looks at a bootstrap token without spending it: `Ok` when [`Accounts::redeem_bootstrap`] would accept it now. Not
+    /// implemented yet.
+    pub fn peek_bootstrap(&self, _token: &str) -> Result<(), AccountError> {
+        Err(AccountError::NotRedeemable)
+    }
+
     // ---- invitations ----
 
     /// Makes an invitation. `for_account` is `None` for a new person, who chooses their username when they redeem it and

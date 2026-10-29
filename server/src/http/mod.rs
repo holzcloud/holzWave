@@ -9,6 +9,7 @@ pub mod health;
 pub mod router;
 pub mod routes_admin;
 pub mod routes_auth;
+pub mod routes_enrol;
 pub mod routes_files;
 pub mod routes_me;
 pub mod routes_unlock;
