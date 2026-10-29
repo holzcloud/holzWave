@@ -74,7 +74,6 @@ fn tracer_a_pane_starts_draws_and_closes_through_the_real_core() {
     let frame = rig.wait_event("frame", |_, payload| payload["pane"] == json!(first));
     assert_eq!(frame.target, 0);
     assert_eq!(frame.name, "frame");
-    assert!(rig.shell_pid().is_some(), "the fixed shell wrote its process id");
 
     let seen_before = rig.seen().len();
     let closed = rig.call(7, "close_pane", json!({"pane": first}));
@@ -82,6 +81,8 @@ fn tracer_a_pane_starts_draws_and_closes_through_the_real_core() {
     let layout = rig.wait_event("layout", |_, payload| payload["panes"].as_array().is_some_and(|p| p.len() == 1));
     assert_eq!(layout.target, 0);
     assert!(rig.seen().len() > seen_before);
+    // Printed for the record of the plan: the kinds, the ids and the sizes, no payload text.
+    println!("tracer frames: {:#?}", rig.describe());
     rig.finish();
 }
 

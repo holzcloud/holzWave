@@ -220,6 +220,26 @@ impl Rig {
         end
     }
 
+    /// One line for every frame seen: the kind, the ids and the size of the text, never the text itself.
+    pub fn describe(&self) -> Vec<String> {
+        self.seen
+            .iter()
+            .map(|frame| match frame {
+                Frame::Cmd(c) => format!("Cmd socket {} request {} ({} bytes)", c.socket, c.request, c.json.len()),
+                Frame::Res(r) => {
+                    let (status, size) = match &r.body {
+                        ResBody::Ok(t) => (0, t.len()),
+                        ResBody::Err(t) => (1, t.len()),
+                        ResBody::Binary(b) => (2, b.len()),
+                    };
+                    format!("Res socket {} request {} status {status} ({size} bytes)", r.socket, r.request)
+                }
+                Frame::Evt(e) => format!("Evt {} target {} ({} bytes)", e.name, e.target, e.text.len()),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
     /// The process id the fixed shell wrote, once it has.
     pub fn shell_pid(&self) -> Option<i32> {
         std::fs::read_to_string(&self.pid_file).ok()?.trim().parse().ok()

@@ -87,8 +87,19 @@ pub const KIND_CTL: u8 = 4;
 /// The kind byte of a note.
 pub const KIND_NOTE: u8 = 5;
 
+/// The operation number of `Init`.
+pub const OP_INIT: u8 = 1;
+/// The operation number of `Attach`.
+pub const OP_ATTACH: u8 = 2;
+
+/// The operation number of the note `Ready`.
+pub const NOTE_READY: u8 = 1;
+
 /// The protocol version of the `Init` control.
 pub const PROTOCOL_VERSION: u16 = 1;
+
+/// How much of a payload is allocated before any of it has arrived.
+const FIRST_CHUNK: usize = 64 * 1024;
 
 /// Why a frame could not be read or written. None of the texts holds a byte of the frame.
 #[derive(Debug)]
@@ -218,26 +229,238 @@ pub enum Frame {
     Note(Note),
 }
 
+/// Whether `name` is a valid event name: one to 255 lower-case ASCII letters, `-` or `_`.
+pub fn valid_event_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 255 && name.bytes().all(|b| b.is_ascii_lowercase() || b == b'-' || b == b'_')
+}
+
+/// A reader over the bytes of a payload that fails with [`WireError::Truncated`] instead of panicking.
+struct Fields<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl<'a> Fields<'a> {
+    fn new(bytes: &'a [u8]) -> Fields<'a> {
+        Fields { bytes, at: 0 }
+    }
+
+    fn take(&mut self, n: usize) -> Result<&'a [u8], WireError> {
+        let end = self.at.checked_add(n).ok_or(WireError::Truncated)?;
+        let piece = self.bytes.get(self.at..end).ok_or(WireError::Truncated)?;
+        self.at = end;
+        Ok(piece)
+    }
+
+    fn u8(&mut self) -> Result<u8, WireError> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u16(&mut self) -> Result<u16, WireError> {
+        let bytes: [u8; 2] = self.take(2)?.try_into().map_err(|_| WireError::Truncated)?;
+        Ok(u16::from_be_bytes(bytes))
+    }
+
+    fn u32(&mut self) -> Result<u32, WireError> {
+        let bytes: [u8; 4] = self.take(4)?.try_into().map_err(|_| WireError::Truncated)?;
+        Ok(u32::from_be_bytes(bytes))
+    }
+
+    fn u64(&mut self) -> Result<u64, WireError> {
+        let bytes: [u8; 8] = self.take(8)?.try_into().map_err(|_| WireError::Truncated)?;
+        Ok(u64::from_be_bytes(bytes))
+    }
+
+    /// A socket id that is not 0.
+    fn socket(&mut self) -> Result<u32, WireError> {
+        match self.u32()? {
+            0 => Err(WireError::BadSocket),
+            socket => Ok(socket),
+        }
+    }
+
+    /// Everything that is left.
+    fn rest(&mut self) -> &'a [u8] {
+        let rest = &self.bytes[self.at..];
+        self.at = self.bytes.len();
+        rest
+    }
+
+    /// Fails when a byte is left.
+    fn finish(&self) -> Result<(), WireError> {
+        if self.at == self.bytes.len() { Ok(()) } else { Err(WireError::Trailing) }
+    }
+}
+
+fn text(bytes: &[u8]) -> Result<String, WireError> {
+    std::str::from_utf8(bytes).map(str::to_owned).map_err(|_| WireError::BadUtf8)
+}
+
+fn nonzero(socket: u32) -> Result<u32, WireError> {
+    if socket == 0 { Err(WireError::BadSocket) } else { Ok(socket) }
+}
+
 impl Frame {
-    /// The payload of this frame (without the length prefix).
+    /// Appends the payload of this frame (without the length prefix) to `out`.
+    fn encode_into(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
+        let start = out.len();
+        match self {
+            Frame::Cmd(cmd) => {
+                out.push(KIND_CMD);
+                out.extend_from_slice(&nonzero(cmd.socket)?.to_be_bytes());
+                out.extend_from_slice(&cmd.request.to_be_bytes());
+                out.extend_from_slice(cmd.json.as_bytes());
+            }
+            Frame::Res(res) => {
+                out.push(KIND_RES);
+                out.extend_from_slice(&nonzero(res.socket)?.to_be_bytes());
+                out.extend_from_slice(&res.request.to_be_bytes());
+                match &res.body {
+                    ResBody::Ok(body) => {
+                        out.push(0);
+                        out.extend_from_slice(body.as_bytes());
+                    }
+                    ResBody::Err(body) => {
+                        out.push(1);
+                        out.extend_from_slice(body.as_bytes());
+                    }
+                    ResBody::Binary(body) => {
+                        out.push(2);
+                        out.extend_from_slice(body);
+                    }
+                }
+            }
+            Frame::Evt(evt) => {
+                if !valid_event_name(&evt.name) {
+                    return Err(WireError::BadName);
+                }
+                out.push(KIND_EVT);
+                out.extend_from_slice(&evt.target.to_be_bytes());
+                out.push(u8::try_from(evt.name.len()).map_err(|_| WireError::BadName)?);
+                out.extend_from_slice(evt.name.as_bytes());
+                out.extend_from_slice(evt.text.as_bytes());
+            }
+            Frame::Ctl(Ctl::Init { version, max_panes, max_scrollback_lines }) => {
+                out.extend_from_slice(&[KIND_CTL, OP_INIT]);
+                out.extend_from_slice(&version.to_be_bytes());
+                out.extend_from_slice(&max_panes.to_be_bytes());
+                out.extend_from_slice(&max_scrollback_lines.to_be_bytes());
+            }
+            Frame::Ctl(Ctl::Attach { socket }) => {
+                out.extend_from_slice(&[KIND_CTL, OP_ATTACH]);
+                out.extend_from_slice(&nonzero(*socket)?.to_be_bytes());
+            }
+            Frame::Note(Note::Ready) => out.extend_from_slice(&[KIND_NOTE, NOTE_READY]),
+        }
+        if out.len() - start > MAX_PAYLOAD {
+            return Err(WireError::TooLarge(out.len() - start));
+        }
+        Ok(())
+    }
+
+    /// The payload of this frame (without the length prefix). The buffer is wiped when it is dropped.
     pub fn to_payload(&self) -> Result<Zeroizing<Vec<u8>>, WireError> {
-        Err(WireError::Empty)
+        let mut out = Zeroizing::new(Vec::new());
+        self.encode_into(&mut out)?;
+        Ok(out)
     }
 
     /// The frame in `payload` (without the length prefix).
-    pub fn from_payload(_payload: &[u8]) -> Result<Frame, WireError> {
-        Err(WireError::Empty)
+    pub fn from_payload(payload: &[u8]) -> Result<Frame, WireError> {
+        let mut fields = Fields::new(payload);
+        if payload.is_empty() {
+            return Err(WireError::Empty);
+        }
+        let kind = fields.u8()?;
+        let frame = match kind {
+            KIND_CMD => {
+                let socket = fields.socket()?;
+                let request = fields.u64()?;
+                Frame::Cmd(CmdFrame { socket, request, json: text(fields.rest())? })
+            }
+            KIND_RES => {
+                let socket = fields.socket()?;
+                let request = fields.u64()?;
+                let body = match fields.u8()? {
+                    0 => ResBody::Ok(text(fields.rest())?),
+                    1 => ResBody::Err(text(fields.rest())?),
+                    2 => ResBody::Binary(fields.rest().to_vec()),
+                    _ => return Err(WireError::BadValue("the status of an answer is not 0, 1 or 2")),
+                };
+                Frame::Res(Res { socket, request, body })
+            }
+            KIND_EVT => {
+                let target = fields.u32()?;
+                let length = usize::from(fields.u8()?);
+                let name = std::str::from_utf8(fields.take(length)?).map_err(|_| WireError::BadName)?.to_owned();
+                if !valid_event_name(&name) {
+                    return Err(WireError::BadName);
+                }
+                Frame::Evt(Evt { target, name, text: text(fields.rest())? })
+            }
+            KIND_CTL => {
+                let op = fields.u8()?;
+                match op {
+                    OP_INIT => {
+                        let version = fields.u16()?;
+                        let max_panes = fields.u32()?;
+                        let max_scrollback_lines = fields.u32()?;
+                        Frame::Ctl(Ctl::Init { version, max_panes, max_scrollback_lines })
+                    }
+                    OP_ATTACH => Frame::Ctl(Ctl::Attach { socket: fields.socket()? }),
+                    op => return Err(WireError::UnknownOp { kind, op }),
+                }
+            }
+            KIND_NOTE => match fields.u8()? {
+                NOTE_READY => Frame::Note(Note::Ready),
+                op => return Err(WireError::UnknownOp { kind, op }),
+            },
+            kind => return Err(WireError::UnknownKind(kind)),
+        };
+        fields.finish()?;
+        Ok(frame)
     }
 }
 
-/// Reads one frame, blocking. `Ok(None)` is the end of the stream between two frames.
-pub fn read_frame<R: Read>(_reader: &mut R) -> Result<Option<Frame>, WireError> {
-    Err(WireError::Empty)
+/// Reads one frame, blocking. `Ok(None)` is the end of the stream between two frames. A length over [`MAX_PAYLOAD`] is
+/// refused before any payload is read or allocated; the buffer of the payload is wiped when it is dropped.
+pub fn read_frame<R: Read>(reader: &mut R) -> Result<Option<Frame>, WireError> {
+    let mut head = [0u8; 4];
+    let mut got = 0;
+    while got < head.len() {
+        match reader.read(&mut head[got..]) {
+            Ok(0) if got == 0 => return Ok(None),
+            Ok(0) => return Err(WireError::Truncated),
+            Ok(n) => got += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let length = usize::try_from(u32::from_be_bytes(head)).map_err(|_| WireError::TooLarge(usize::MAX))?;
+    if length == 0 {
+        return Err(WireError::Empty);
+    }
+    if length > MAX_PAYLOAD {
+        return Err(WireError::TooLarge(length));
+    }
+    // The buffer grows as the payload arrives, so a length that promises more than the stream delivers costs only what
+    // arrived.
+    let mut payload = Zeroizing::new(Vec::with_capacity(length.min(FIRST_CHUNK)));
+    let read = reader.by_ref().take(length as u64).read_to_end(&mut payload)?;
+    if read < length {
+        return Err(WireError::Truncated);
+    }
+    Frame::from_payload(&payload).map(Some)
 }
 
 /// Writes one frame: the length prefix and the payload, in one `write_all`.
-pub fn write_frame<W: Write>(_writer: &mut W, _frame: &Frame) -> Result<(), WireError> {
-    Err(WireError::Empty)
+pub fn write_frame<W: Write>(writer: &mut W, frame: &Frame) -> Result<(), WireError> {
+    let mut out = Zeroizing::new(vec![0u8; 4]);
+    frame.encode_into(&mut out)?;
+    let length = u32::try_from(out.len() - 4).map_err(|_| WireError::TooLarge(out.len() - 4))?;
+    out[..4].copy_from_slice(&length.to_be_bytes());
+    writer.write_all(&out)?;
+    Ok(())
 }
 
 /// The tokio codec for the same layout, for the supervisor's side of the socket.
