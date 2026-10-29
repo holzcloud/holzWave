@@ -113,6 +113,14 @@ pub struct Stats {
     pub sockets: usize,
     /// Messages for a socket of a person that is not attached any more.
     pub dropped_unknown_socket: u64,
+    /// Frame events dropped because a socket's queue was full.
+    pub dropped_frames: u64,
+    /// Answers to requests the supervisor made up itself, dropped on purpose.
+    pub dropped_synthetic: u64,
+    /// Sockets closed with 1013 because their queue was full.
+    pub overflow_closes: u64,
+    /// Workers that were declared dead because of what they sent or because the link broke.
+    pub worker_deaths: u64,
 }
 
 /// What the supervisor knows about one person.
@@ -122,6 +130,16 @@ pub struct AccountStats {
     pub worker_running: bool,
     /// Sockets attached now.
     pub sockets: usize,
+    /// The bytes waiting in the queues of the sockets.
+    pub queued_bytes: usize,
+    /// The frames waiting for the worker's writer.
+    pub worker_queue_frames: usize,
+    /// The bytes waiting for the worker's writer.
+    pub worker_queue_bytes: usize,
+    /// The sizes remembered for panes that another socket owns.
+    pub remembered_sizes: usize,
+    /// The panes that have an owner.
+    pub owned_panes: usize,
 }
 
 // ---- the queue of frames to a worker ---------------------------------------------------------------------------------
@@ -512,7 +530,7 @@ impl Supervisor {
     pub fn account_stats(&self, account: AccountKey) -> AccountStats {
         let slot = self.shared.slots().get(&account.id).cloned();
         match slot.and_then(|slot| slot.live()) {
-            Some(worker) => AccountStats { worker_running: true, sockets: worker.lock().sockets.len() },
+            Some(worker) => AccountStats { worker_running: true, sockets: worker.lock().sockets.len(), ..AccountStats::default() },
             None => AccountStats::default(),
         }
     }
