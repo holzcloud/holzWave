@@ -225,7 +225,6 @@ async function pendingCase(page, url) {
   await page.waitForFunction(() => window.__fs.log.some((l) => l[0] === "unlock"));
   await page.evaluate(() => window.__fs.release());
   await wait(page, 300);
-  const kinds = (await log(page)).map((l) => l[0]);
-  assert.equal(kinds.at(-1), "unlock", "a lock granted after the exit is released again");
+  assert.deepEqual((await log(page)).map((l) => l[0]), ["request", "lock", "unlock", "unlock"], "a lock granted after the exit is released again");
   assert.equal(await notice(page), "", "and nothing is said");
 }

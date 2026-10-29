@@ -394,6 +394,7 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
    (hairline, 8 px radius, the one shadow). The web platform has no window buttons and no drag region, so the bar starts at the left edge. Errors are danger, underlined and marked !,
    a disabled button is dim with its reason in words, and nothing moves. */
 .m.web .wc,[data-os=web] .wc{display:none}
+.webonly{display:none}[data-os=web] .webonly{display:flex}[data-os=web] .deskonly{display:none}
 .m.web .titlebar,[data-os=web] .titlebar{padding-left:10px}
 .wb-page{flex:1;display:flex;align-items:flex-start;justify-content:center;gap:2rem;padding:3.5rem 1rem 1rem;background:var(--ground)}
 .wb-cell{display:flex;flex-direction:column;gap:.4rem}
@@ -1141,7 +1142,7 @@ const ovl={
   <div class="it"><span><span class="ro">k</span>ubectl lo<span class="ro">g</span>s -f etcd-0 -n kube-s<span class="ro">p</span>ace</span><span class="dim">~ · 1 w ago</span></div>
   <div class="row" style="padding:8px 14px;border-top:1px solid var(--edge);gap:12px"><span class="dim">↑↓ choose</span><span class="dim">⏎ to the prompt</span><span class="dim">⇧⌫ forget</span><span class="btn" style="margin-left:auto">Clear all</span></div></div>`,
  palette:`<div class="scrim"></div><div class="ov float" style="left:300px;top:70px;width:520px;border-radius:16px"><div class="row" style="padding:10px 14px;border-bottom:1px solid var(--edge);gap:8px"><span class="ro">❯</span>split<span class="cur"></span><span class="kbd" style="margin-left:auto">esc</span></div>
-  <div class="grp lbl">Actions</div><div class="it on"><span>Split pane right</span><span class="kbd">⌘D</span></div><div class="it"><span>Split pane down</span><span class="kbd">⇧⌘D</span></div><div class="it"><span>Move pane to new window</span><span class="kbd"></span></div>
+  <div class="grp lbl">Actions</div><div class="it on"><span>Split pane right</span><span class="kbd">⌘D</span></div><div class="it"><span>Split pane down</span><span class="kbd">⇧⌘D</span></div><div class="it deskonly"><span>Move pane to new window</span><span class="kbd"></span></div><div class="it webonly"><span>Toggle full screen</span></div>
   <div class="grp lbl">Connect</div><div class="it"><span>SSH: talos-1</span><span class="dim">host</span></div><div class="it"><span>K8s: exec in pod etcd-0</span><span class="dim">kubectl</span></div>
   <div class="grp lbl">Switch</div><div class="it"><span>Workspace: infra</span><span class="dim">3 tabs</span></div><div class="it"><span>Theme: aubergine</span><span class="dim">Theme</span></div><div style="height:8px"></div></div>`,
  blocks:`<div class="scrim"></div><div class="ov float" style="left:60px;top:62px;width:330px"><div class="grp lbl">New block</div>
@@ -1318,7 +1319,7 @@ const icStates=()=>`<div class="ic-grid">${[
 const icOver=v=>v==='kintconfirm'?`<div class="ov" style="right:12px;top:68px">${icCard({...icDelete,mode:'armed',prod:'Production EU'})}</div>`:'';
 const views=[
  ['alltag','Daily','Every level at a glance: workspaces as pills, tabs below, panes inside. Panes: local shell, SSH with Kubernetes context (reconnecting here), SFTP editor, Markdown preview, system monitor. Hosts, context, history and widgets on the right.'],
- ['palette','Palette ⌘K','Every action by name: layout, connect, switch, themes. The way to reach anything without its own button.'],
+ ['palette','Palette ⌘K','Every action by name: layout, connect, switch, themes. The way to reach anything without its own button. With the Browser platform the tear-off entry is gone and Toggle full screen is listed, without a chord.'],
  ['history','History','Fuzzy search over every command typed in the shells (fed by wsh): matched letters in rose, directory and age beside them, Enter puts the command on the prompt without running it.'],
  ['blocks','New block','The plus or ⌘T opens the block picker: shell, SSH, WSL, Docker, preview, editor, Kubernetes, Talos, Azure, GAM7, monitor, history. Roadmap phases are shown.'],
  ['search','Search','Scrollback search in the pane: hits marked, current hit in yellow, with case, regex and whole-word switches.'],

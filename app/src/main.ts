@@ -5,7 +5,7 @@
 // clipboard text), search-ui (the search bar), palette (the command palette), frames (the pane mirrors), bridge,
 // state, geometry. This file only starts them.
 // Every window runs this same page; it listens with its own label (bridge) and says `window_ready` when it has drawn.
-import { call, listen, onConnection } from "./bridge.js";
+import { backend, call, listen, onConnection } from "./bridge.js";
 import { initAiSettings } from "./aisettings.js";
 import { initAsk } from "./askcard.js";
 import { attention } from "./attentionstate.js";
@@ -101,6 +101,9 @@ async function main() {
   await initEvents();
   await listen<View>("layout", applyView);
   await initDragDropEvents();
+  // The code that exists only in a browser (full screen and the key lock, and what later joins them) is one module, loaded on the
+  // web backend only, after the listeners above and before the first layout. The desktop page never requests it.
+  if (backend === "web") (await import("./web.js")).initWeb();
   fit();
   applyView(await call("get_layout"));
   // A connection to a server that came back may have missed a layout change: ask again and draw what is there. An error
