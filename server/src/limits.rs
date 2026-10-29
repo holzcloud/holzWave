@@ -71,6 +71,71 @@ pub const WORKER_NOFILE: u64 = 4096;
 /// The largest file a person may upload, in bytes.
 pub const UPLOAD_BYTES: u64 = 256 * MIB;
 
+// ---------------------------------------------------------------------------------------------------------------------
+// The supervisor: sockets, queues and waits. These are fixed by the design and are not configuration keys.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The frames the supervisor may have queued for one worker (commands, not counting the few control frames).
+pub const WORKER_QUEUE_FRAMES: usize = 1024;
+
+/// The bytes, length prefixes included, the supervisor may have queued for one worker.
+pub const WORKER_QUEUE_BYTES: usize = 32 * 1024 * 1024;
+
+/// How many control frames (attach, detach, shutdown, key controls) may queue beyond [`WORKER_QUEUE_FRAMES`] for a
+/// worker that has stopped reading.
+pub const WORKER_QUEUE_CONTROL_RESERVE: usize = 256;
+
+/// The most sizes the supervisor remembers for panes that another socket owns, over all panes of one person.
+pub const REMEMBERED_SIZES: usize = 512;
+
+/// The most panes the supervisor remembers an owner of, for one person. The oldest entry is forgotten first, and a pane
+/// without an owner is claimed by the next socket that resizes it.
+pub const OWNED_PANES: usize = 2048;
+
+/// The most control frames that wait for the answer of a worker at once.
+pub const PENDING_CONTROLS: usize = 64;
+
+/// The most people the supervisor keeps a record of at once.
+pub const ACCOUNT_SLOTS: usize = 65_536;
+
+/// How long a new worker may take to say it is ready; after it the worker is killed and the attach fails.
+pub const WORKER_READY_TIMEOUT: Duration = secs(10);
+
+/// How long a worker may take to close its link after it was asked to shut down; after it everything of the person is
+/// killed.
+pub const WORKER_SHUTDOWN_TIMEOUT: Duration = secs(10);
+
+/// How long the answer to a control frame (an unlock, a lock, a slot change) may take.
+pub const WORKER_CONTROL_TIMEOUT: Duration = secs(10);
+
+/// How long a worker that wipes a store or a home may take before it counts as failed.
+pub const WORKER_WIPE_TIMEOUT: Duration = secs(60);
+
+/// How long one write of a frame to a worker may take before the worker counts as stuck and its link is closed.
+pub const WORKER_WRITE_TIMEOUT: Duration = secs(30);
+
+/// How long the spawn helper may take to answer one request.
+pub const HELPER_REQUEST_TIMEOUT: Duration = secs(10);
+
+/// How long a newly started spawn helper may take to answer its first request.
+pub const HELPER_START_TIMEOUT: Duration = secs(10);
+
+/// The most requests to the spawn helper that wait for an answer at once.
+pub const HELPER_PENDING_REQUESTS: usize = 256;
+
+/// How often the idle rule looks at the workers. The rule itself reads the injected clock.
+pub const SWEEP_INTERVAL: Duration = secs(10);
+
+/// The first request number the supervisor makes up itself (for the size of a pane that changes hands). The page's own
+/// numbers stay below it, and a command that carries a number at or above it is refused.
+pub const SYNTHETIC_REQUEST_BASE: u64 = 1 << 60;
+
+/// The longest event name a worker may send, in bytes.
+pub const EVENT_NAME_BYTES: usize = 32;
+
+/// The longest command name a page may send, in bytes.
+pub const COMMAND_NAME_BYTES: usize = 64;
+
 /// A setting with its default and its lower and upper bound, both included.
 #[derive(Debug, Clone, Copy)]
 pub struct Spec<T> {
