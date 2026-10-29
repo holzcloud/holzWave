@@ -1845,11 +1845,11 @@ async fn reset_secrets_leaves_the_rows_and_the_audit_alone_when_the_seam_cannot(
     env.break_writes("hw_broken", "DELETE", "unlock_methods", "");
     let broken = admin_post(&env, &alice, bob.account, "reset-secrets").await;
     assert_code(&broken, 503, json!({"code": "busy"}), "the rows");
-    assert_eq!(env.unlock_kinds(bob.account).len(), 2, "the rows are as they were");
+    assert_eq!(env.unlock_kinds(bob.account).len(), 1, "the row is as it was");
     assert_eq!(env.count("secrets.reset"), 0);
     env.repair("hw_broken");
     assert_no_content(&admin_post(&env, &alice, bob.account, "reset-secrets").await, "the retry");
-    assert_eq!(env.unlock_kinds(bob.account).len(), 1);
+    assert!(env.unlock_kinds(bob.account).is_empty());
     assert_eq!(env.count("secrets.reset"), 1, "the retry is the one that is written down");
 }
 
@@ -1899,8 +1899,7 @@ async fn lock_unlocking_a_person_who_is_not_locked_is_fine_and_an_unknown_one_is
     let unknown = env.send(env.post_json("/api/admin/accounts/987654/unlock-signin", &json!({}), &alice)).await;
     assert_code(&unknown, 404, json!({"code": "not_found"}), "unknown");
     let lines = lines_of(&env, "account.unlock");
-    assert_eq!(lines.len(), 2, "one line per call: {lines:?}");
-    assert_eq!(lines[1]["result"], "fail");
+    assert_eq!(lines.len(), 1, "an account that is not there is looked up first and writes nothing: {lines:?}");
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2109,7 +2108,11 @@ async fn invitations_at_most_two_hundred_are_open_and_a_redeemed_or_expired_one_
     let named = env.send(env.post_json("/api/admin/invitations", &json!({"role": "member", "username": "bob"}), &alice)).await;
     assert_code(&named, 409, json!({"code": "conflict", "field": "invitations"}), "a named account counts the same");
     assert!(env.store.account_by_username("bob").expect("read").is_none(), "and makes no account");
-    let failed = lines_of(&env, "account.invite").into_iter().filter(|l| l["result"] == "fail").count();
+    let failed = env
+        .audit_lines()
+        .into_iter()
+        .filter(|l| l["result"] == "fail" && (l["action"] == "account.invite" || l["action"] == "account.create"))
+        .count();
     assert_eq!(failed, 2, "each refusal is one line");
 
     env.clock.advance(2 * 86_400);
@@ -2591,7 +2594,7 @@ async fn canary_a_secret_in_every_input_appears_in_no_answer_header_or_audit_lin
     note(&env.send(env.post_json("/api/me/recovery", &json!({"x": CANARY}), &bob)).await);
     note(&env.send(env.post_json(&format!("/api/admin/accounts/{CANARY}/role"), &json!({"role": CANARY}), &alice)).await);
     note(&env.send(env.post_json(&format!("/api/admin/accounts/{}/role", id.get()), &json!({"role": CANARY}), &alice)).await);
-    note(&env.send(env.post_json("/api/admin/invitations", &json!({"role": "member", "username": CANARY, "display_name": CANARY}), &alice)).await);
+    note(&env.send(env.post_json("/api/admin/invitations", &json!({"role": "member", "username": format!("{CANARY} x"), "display_name": CANARY}), &alice)).await);
     note(&env.send(env.post_json("/api/admin/invitations", &json!({"role": "member", "days": CANARY}), &alice)).await);
 
     // The canary is the real password: a good change uses it and the secrets it shows are shown to the person only.

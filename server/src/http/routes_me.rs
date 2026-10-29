@@ -105,7 +105,7 @@ pub trait SecretsAdmin: Send + Sync {
 }
 
 /// What the seam's refusal looks like to the browser.
-fn seam_refusal(error: SecretsError) -> Refusal {
+pub(super) fn seam_refusal(error: SecretsError) -> Refusal {
     Refusal(match error {
         SecretsError::Locked => ApiError::Locked,
         SecretsError::Unavailable => ApiError::Busy,
@@ -260,6 +260,11 @@ fn time_text(unix: i64) -> String {
     rfc3339(from_unix(unix))
 }
 
+/// Reads a member as it is written, so that `null` is a value that names itself when it is wrong and not an absent member.
+pub(super) fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
 /// A member that must be a string.
 fn text_member(value: Option<Value>, field: &'static str) -> Result<Zeroizing<String>, Refusal> {
     match value {
@@ -269,7 +274,7 @@ fn text_member(value: Option<Value>, field: &'static str) -> Result<Zeroizing<St
 }
 
 /// A 204 with `no-store`.
-fn no_content(cookies: Vec<HeaderValue>) -> Response {
+pub(super) fn no_content(cookies: Vec<HeaderValue>) -> Response {
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     for cookie in cookies {
@@ -399,9 +404,9 @@ async fn me_route(State(services): State<Shared>, authed: Authed) -> Result<Resp
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PasswordBody {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     current: Option<Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     new: Option<Value>,
 }
 
@@ -464,9 +469,9 @@ async fn password_route(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TotpBody {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     step: Option<Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     code: Option<Value>,
 }
 
@@ -549,13 +554,13 @@ async fn totp_route(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PasskeyBody {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     step: Option<Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     name: Option<Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     credential: Option<Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     prf: Option<Value>,
 }
 
@@ -718,7 +723,7 @@ async fn passkey_remove_route(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PassphraseBody {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     passphrase: Option<Value>,
 }
 

@@ -15,22 +15,23 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::State;
+use axum::extract::rejection::PathRejection;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::accounts::{AccountError, Accounts, INVITE_DAYS, MAX_INVITE_DAYS};
-use crate::auth::signin::SignIn;
+use crate::auth::signin::{SignIn, SignInError};
 use crate::clock::{Clock, from_unix, rfc3339};
 use crate::http::app::PublicOrigin;
 use crate::http::router::{Access, Admin, ApiError, ApiJson, Part};
-use crate::store::{AccountState, MAX_DISPLAY_NAME, Role, valid_username};
+use crate::store::{AccountId, AccountState, MAX_DISPLAY_NAME, Role, valid_username};
 
 use super::routes_auth::{Object, Refusal, answer, blocking};
-use super::routes_me::SecretsAdmin;
+use super::routes_me::{SecretsAdmin, present, seam, seam_refusal};
 
 /// The services the administration routes call.
 pub struct AdminServices {
@@ -130,13 +131,13 @@ async fn list_route(State(services): State<Shared>, Admin(who): Admin) -> Result
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InvitationBody {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     role: Option<Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     days: Option<Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     username: Option<Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     display_name: Option<Value>,
 }
 
@@ -215,6 +216,149 @@ async fn invitations_route(
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Changes to one account
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The most characters of an account id in a path. A number of that many digits that does not fit is no account either.
+const MAX_ID_CHARS: usize = 20;
+
+/// The account a path names: plain decimal digits, at most [`MAX_ID_CHARS`] of them, and a number that fits. Anything else
+/// (a sign, a point, an exponent, a space, an empty text, a long one) names no account, and the answer is the same as for an
+/// account that is not there.
+fn target_of(path: Result<Path<String>, PathRejection>) -> Result<AccountId, Refusal> {
+    let not_found = || Refusal(ApiError::NotFound);
+    let Path(text) = path.map_err(|_| not_found())?;
+    if text.is_empty() || text.len() > MAX_ID_CHARS || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(not_found());
+    }
+    text.parse::<i64>().map(AccountId::from_raw).map_err(|_| not_found())
+}
+
+/// A body with no member: `{}`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Empty {}
+
+/// The one member of a role change.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoleBody {
+    #[serde(default, deserialize_with = "present")]
+    role: Option<Value>,
+}
+
+/// Looks the target up before anything is asked of it: an account that is not there, or is deleted, is 404 and writes nothing.
+async fn require_target(services: &Shared, actor: AccountId, target: AccountId) -> Result<(), Refusal> {
+    let worker = services.clone();
+    blocking(move || worker.accounts.check_target(actor, target)).await?.map_err(|e| refusal(&e))
+}
+
+fn no_content() -> Response {
+    super::routes_me::no_content(Vec::new())
+}
+
+/// `POST /api/admin/accounts/{id}/role`: makes the account an administrator or a member. The last active administrator cannot
+/// be made a member (409 on `role`).
+async fn role_route(
+    State(services): State<Shared>,
+    Admin(who): Admin,
+    path: Result<Path<String>, PathRejection>,
+    ApiJson(Object(body)): ApiJson<Object<RoleBody>>,
+) -> Result<Response, Refusal> {
+    let role = role_of(body.role, "role")?;
+    let target = target_of(path)?;
+    let (actor, addr) = (who.account.id, Some(who.client));
+    require_target(&services, actor, target).await?;
+    let worker = services.clone();
+    blocking(move || worker.accounts.set_role(actor, addr, target, role)).await?.map_err(|e| refusal(&e))?;
+    Ok(no_content())
+}
+
+/// `POST /api/admin/accounts/{id}/disable`: the account cannot sign in and every session of it ends.
+async fn disable_route(
+    State(services): State<Shared>,
+    Admin(who): Admin,
+    path: Result<Path<String>, PathRejection>,
+    ApiJson(Object(_)): ApiJson<Object<Empty>>,
+) -> Result<Response, Refusal> {
+    let target = target_of(path)?;
+    let (actor, addr) = (who.account.id, Some(who.client));
+    require_target(&services, actor, target).await?;
+    let worker = services.clone();
+    blocking(move || worker.accounts.disable(actor, addr, target)).await?.map_err(|e| refusal(&e))?;
+    Ok(no_content())
+}
+
+/// `POST /api/admin/accounts/{id}/enable`: a disabled account can sign in again.
+async fn enable_route(
+    State(services): State<Shared>,
+    Admin(who): Admin,
+    path: Result<Path<String>, PathRejection>,
+    ApiJson(Object(_)): ApiJson<Object<Empty>>,
+) -> Result<Response, Refusal> {
+    let target = target_of(path)?;
+    let (actor, addr) = (who.account.id, Some(who.client));
+    require_target(&services, actor, target).await?;
+    let worker = services.clone();
+    blocking(move || worker.accounts.enable(actor, addr, target)).await?.map_err(|e| refusal(&e))?;
+    Ok(no_content())
+}
+
+/// `DELETE /api/admin/accounts/{id}`: the credentials, identities and sessions of the account go; its row, user id and name
+/// stay reserved.
+async fn delete_route(
+    State(services): State<Shared>,
+    Admin(who): Admin,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<Response, Refusal> {
+    let target = target_of(path)?;
+    let (actor, addr) = (who.account.id, Some(who.client));
+    require_target(&services, actor, target).await?;
+    let worker = services.clone();
+    blocking(move || worker.accounts.delete(actor, addr, target)).await?.map_err(|e| refusal(&e))?;
+    Ok(no_content())
+}
+
+/// `POST /api/admin/accounts/{id}/reset-secrets`: the person's secret store is removed (the seam first), then the unlock rows
+/// that hang on it, and only then is the line written. A seam that cannot do it leaves everything as it was; so does a
+/// database that cannot, and the call may be made again.
+async fn reset_secrets_route(
+    State(services): State<Shared>,
+    Admin(who): Admin,
+    path: Result<Path<String>, PathRejection>,
+    ApiJson(Object(_)): ApiJson<Object<Empty>>,
+) -> Result<Response, Refusal> {
+    let target = target_of(path)?;
+    let (actor, addr) = (who.account.id, Some(who.client));
+    require_target(&services, actor, target).await?;
+    seam(services.secrets.reset(target)).await.map_err(seam_refusal)?;
+    let worker = services.clone();
+    blocking(move || worker.accounts.secrets_reset_done(actor, addr, target)).await?.map_err(|e| refusal(&e))?;
+    Ok(no_content())
+}
+
+/// `POST /api/admin/accounts/{id}/unlock-signin`: lifts the lock of the password path of the account. An account that is not
+/// locked is answered the same way.
+async fn unlock_signin_route(
+    State(services): State<Shared>,
+    Admin(who): Admin,
+    path: Result<Path<String>, PathRejection>,
+    ApiJson(Object(_)): ApiJson<Object<Empty>>,
+) -> Result<Response, Refusal> {
+    let target = target_of(path)?;
+    let (actor, addr) = (who.account.id, Some(who.client));
+    require_target(&services, actor, target).await?;
+    let worker = services.clone();
+    blocking(move || worker.signin.unlock_signin(actor, addr, target)).await?.map_err(|e| {
+        Refusal(match e {
+            SignInError::Invalid => ApiError::NotFound,
+            _ => ApiError::Busy,
+        })
+    })?;
+    Ok(no_content())
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The part
 // ---------------------------------------------------------------------------------------------------------------------
 
@@ -223,6 +367,12 @@ pub fn parts(services: Arc<AdminServices>) -> Vec<Part> {
     let router = Router::new()
         .route("/api/admin/accounts", get(list_route))
         .route("/api/admin/invitations", post(invitations_route))
+        .route("/api/admin/accounts/{id}", delete(delete_route))
+        .route("/api/admin/accounts/{id}/role", post(role_route))
+        .route("/api/admin/accounts/{id}/disable", post(disable_route))
+        .route("/api/admin/accounts/{id}/enable", post(enable_route))
+        .route("/api/admin/accounts/{id}/reset-secrets", post(reset_secrets_route))
+        .route("/api/admin/accounts/{id}/unlock-signin", post(unlock_signin_route))
         .with_state(services);
     vec![Part { access: Access::SessionFresh, router }]
 }

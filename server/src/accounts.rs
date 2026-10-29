@@ -21,7 +21,7 @@ use crate::clock::Clock;
 use crate::config;
 use crate::log::{self, Level};
 use crate::store::{
-    Account, AccountId, AccountState, HANDLE_BYTES, NewInvite, Role, Store, StoreError, TokenHash, Tx, hash_token,
+    Account, AccountId, AccountState, HANDLE_BYTES, NewInvite, Role, Store, StoreError, TokenHash, Tx, UnlockKind, hash_token,
 };
 
 /// What a bootstrap token starts with.
@@ -674,6 +674,43 @@ impl Accounts {
                     .collect();
                 Ok(Ok(Listing { admins, accounts }))
             })?
+    }
+
+    /// Checks, in one read, that `actor` is an active administrator and that `target` is an account that is not deleted. It
+    /// writes no audit line: a call that names nothing is not a change that failed.
+    pub fn check_target(&self, actor: AccountId, target: AccountId) -> Result<(), AccountError> {
+        self.store.read(|tx| {
+            let allowed =
+                tx.account_get(actor)?.is_some_and(|a| a.state == AccountState::Active && a.role == Role::Admin);
+            if !allowed {
+                return Ok(Err(AccountError::NotAllowed));
+            }
+            let found = tx.account_get(target)?.is_some_and(|a| a.state != AccountState::Deleted);
+            Ok(if found { Ok(()) } else { Err(AccountError::NotFound) })
+        })?
+    }
+
+    /// Removes the unlock methods that hang on the secret store of `target` (passphrase, PRF keys and recovery code) once the
+    /// store itself has been reset, in one transaction, and writes the `secrets.reset` line. The password row stays: it is how
+    /// the person gets back in and starts a new store. A failure writes no line, so that the line means the reset is done.
+    pub fn secrets_reset_done(
+        &self,
+        actor: AccountId,
+        addr: Option<IpAddr>,
+        target: AccountId,
+    ) -> Result<(), AccountError> {
+        let result = self.run(|tx| {
+            require_admin(tx, actor)?;
+            if tx.account_get(target)?.is_none_or(|a| a.state == AccountState::Deleted) {
+                return Err(AccountError::NotFound);
+            }
+            tx.unlock_remove_kinds(target, &[UnlockKind::Passphrase, UnlockKind::Prf, UnlockKind::Recovery])?;
+            Ok(())
+        });
+        if result.is_ok() {
+            self.finish(Action::SecretsReset, Actor::Account(actor), addr, Some(target), &result, &[]);
+        }
+        result
     }
 
     /// Makes an account that has no credential, and one invitation for it that enrols the first one and works for seven days.
