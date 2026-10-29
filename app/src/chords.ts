@@ -4,8 +4,9 @@
 // `pane.close` is Cmd+W (D-14): the native macOS menu has no Close Window item, so the page owns the shortcut. The
 // clipboard chords Cmd+C and Cmd+V are fixed here as well (no rebindable action): the page owns them, the native Edit
 // menu and the web view's own `paste` event stay a second route.
-// It is only the fallback until the core's rows arrive. On Windows and Linux it holds just the fixed clipboard chords
-// (see FIXED_CLIPBOARD): the Super key (`Cmd`) is the OS's there, so a Win-key chord must never run from this table.
+// It is only the fallback until the core's rows arrive. On Windows, Linux and the web it holds just the fixed clipboard
+// chords (see FIXED_CLIPBOARD): the Super key (`Cmd`) is the OS's there and a browser keeps its own `Cmd` chords, so a
+// Win-key or browser chord must never run from this table.
 
 export const CHORDS: ReadonlyMap<string, string> = new Map([
   ["Cmd+D", "pane.split_right"],
@@ -60,9 +61,9 @@ export const CHORDS: ReadonlyMap<string, string> = new Map([
 // ---- the platform --------------------------------------------------------------------------------
 
 /**
- * The fixed clipboard shortcuts of Windows and Linux: outside the core's rebindable table, like `Cmd+C` on macOS.
- * Plain `Ctrl+C` is never a copy (it is SIGINT and always reaches the program). `Ctrl+V` pastes on Windows only: on
- * Linux a terminal keeps it for the program (Ctrl+V is the literal-next of the shell).
+ * The fixed clipboard shortcuts of Windows, Linux and the web: outside the core's rebindable table, like `Cmd+C` on
+ * macOS. Plain `Ctrl+C` is never a copy (it is SIGINT and always reaches the program). `Ctrl+V` pastes on Windows only:
+ * on Linux and in a browser a terminal keeps it for the program (Ctrl+V is the literal-next of the shell).
  */
 const FIXED_CLIPBOARD: ReadonlyMap<string, string> = new Map([
   ["Ctrl+Shift+C", "edit.copy"],
@@ -71,11 +72,13 @@ const FIXED_CLIPBOARD: ReadonlyMap<string, string> = new Map([
   ["Shift+Insert", "edit.paste"],
 ]);
 const WINDOWS_CLIPBOARD: ReadonlyMap<string, string> = new Map([...FIXED_CLIPBOARD, ["Ctrl+V", "edit.paste"]]);
+/** The web's own entry, named so the platform is explicit: today the table of Linux, without `Ctrl+V`. */
+const WEB_CLIPBOARD: ReadonlyMap<string, string> = new Map(FIXED_CLIPBOARD);
 
 /** The platform the page runs on, as `app_info` names it; empty until it is known, which reads as macOS. */
 let os = "";
 
-/** Tell this module the platform (`macos`, `windows`, anything else is Linux). An empty name means not known yet. */
+/** Tell this module the platform (`macos`, `windows`, `web`, anything else is Linux). An empty name means not known yet. */
 export function setOs(name: string): void {
   os = name;
 }
@@ -83,6 +86,7 @@ export function setOs(name: string): void {
 /** The static fallback of the platform: the whole table on macOS (and while the OS is unknown), else clipboard chords. */
 function fallback(): ReadonlyMap<string, string> {
   if (os === "" || os === "macos") return CHORDS;
+  if (os === "web") return WEB_CLIPBOARD;
   return os === "windows" ? WINDOWS_CLIPBOARD : FIXED_CLIPBOARD;
 }
 

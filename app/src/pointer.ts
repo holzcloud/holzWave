@@ -20,7 +20,7 @@ import type { PxRect } from "./frame.js";
 import { cellAt, gridRect, paneAt } from "./geometry.js";
 import { gridPoint, modifierBits, wheelRows } from "./mouse.js";
 import { canvas as sceneCanvas } from "./scene.js";
-import { copyOnSelect, copySelection } from "./selection.js";
+import { copyOnSelectAfter, copySelection } from "./selection.js";
 import { state } from "./state.js";
 import type { UnitRect, View } from "./types.js";
 
@@ -410,9 +410,9 @@ export function initPointer(applyView: (v: View) => void): void {
       if (g.mode === "cell" && !g.moved) {
         void select(g.pane, { kind: "clear" });
       } else {
-        // A selection ended: copy it once the core has the last begin or extend. The highlight stays.
-        const pane = g.pane;
-        void g.sent.then(() => copyOnSelect(pane));
+        // A selection ended: copy it once the core has the last begin or extend. The highlight stays. On the web the
+        // write starts here, inside the release (a browser lets the clipboard be written only from a gesture).
+        copyOnSelectAfter(g.pane, g.sent);
       }
     }
     endGesture(canvas);

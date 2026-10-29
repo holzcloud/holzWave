@@ -166,6 +166,52 @@ export async function copyOnSelect(pane: number): Promise<void> {
 }
 
 /**
+ * The end of a selection gesture: copy the pane's selection once `sent` (the newest select command) is answered. On the
+ * desktop that is `copyOnSelect`. In a browser (the platform `web`) the write must start inside the pointer release, which is the gesture:
+ * this builds a clipboard item whose text is a promise, resolved from `selection_text` once the core has the last
+ * extent, and writes it at once. Where the browser has no clipboard item, or refuses the write, the async text write
+ * after the answer is the second try. An empty selection writes nothing. The core's `copy_selection` is not used.
+ */
+export function copyOnSelectAfter(pane: number, sent: Promise<void>): void {
+  if (state.os !== "web") {
+    void sent.then(() => copyOnSelect(pane));
+    return;
+  }
+  if (state.settings?.settings.copy_on_select === false) return;
+  const answer = sent
+    .then(() => call<string | null>("selection_text", { pane }))
+    .then((text) => (typeof text === "string" ? text : ""));
+  const secondTry = (): void => {
+    void answer
+      .then((text) => {
+        if (text !== "" && typeof navigator.clipboard?.writeText === "function") return navigator.clipboard.writeText(text);
+      })
+      .catch(() => {});
+  };
+  if (typeof ClipboardItem === "function" && typeof navigator.clipboard?.write === "function") {
+    let empty = false;
+    try {
+      const item = new ClipboardItem({
+        "text/plain": answer.then((text) => {
+          if (text === "") {
+            empty = true; // nothing is selected: the write fails and the clipboard keeps what it had
+            throw new Error("no selection");
+          }
+          return new Blob([text], { type: "text/plain" });
+        }),
+      });
+      navigator.clipboard.write([item]).catch(() => {
+        if (!empty) secondTry();
+      });
+      return;
+    } catch {
+      // the browser refused the item: the text write below is the second try
+    }
+  }
+  secondTry();
+}
+
+/**
  * Whether a copy inside this element belongs to the element (a text field of the page), not to the terminal. The
  * terminal's own input element (`#ime`, keyboard.ts) is not a field: a copy from the Edit menu fires on it.
  */

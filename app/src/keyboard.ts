@@ -15,7 +15,9 @@ import { chordsOf, isComposingKey, isModifierKey, keyPayload } from "./keymap.js
 import { offerKey, pushKeyHandler } from "./keystack.js";
 import { confirmPaste, isConfirmingPaste, pasteDecision } from "./paste-confirm.js";
 import { state } from "./state.js";
+import { showNotice } from "./status.js";
 import type { View } from "./types.js";
+import { CLIPBOARD_REFUSED } from "./webstate.js";
 
 export { pushKeyHandler };
 export type { KeyHandler } from "./keystack.js";
@@ -252,6 +254,11 @@ async function pasteInto(pane: number, text: string): Promise<void> {
   }
 }
 
+/** Paste `text` into `pane` through the one paste path: the core decides, the person is asked where it says so. */
+export function pasteText(pane: number, text: string): Promise<void> {
+  return pasteInto(pane, text);
+}
+
 /** Whether the clipboard data of a paste event holds an image (a file of an `image/` type), whatever else it holds. */
 function holdsImage(data: DataTransfer | null): boolean {
   if (!data) return false;
@@ -322,17 +329,23 @@ function awaitPasteEvent(): void {
  * the page is served from a custom scheme that WebKit does not treat as a secure context, so `navigator.clipboard` is
  * not there in the app's web view on macOS. A shell without a native clipboard (an error), or an answer that is not
  * text, hands over to the web view's clipboard. Only ever called after the person's own paste chord.
+ *
+ * In a browser (the platform `web`) there is no native read: the page reads the browser's clipboard once, from that
+ * gesture, and a read the browser refuses is said in the status line and gives the empty text.
  */
 async function readClipboardText(): Promise<string> {
-  try {
-    const answer = await call<unknown>("clipboard_text");
-    if (typeof answer === "string") return answer;
-  } catch {
-    // no native clipboard here: the web view's is the second try
+  if (state.os !== "web") {
+    try {
+      const answer = await call<unknown>("clipboard_text");
+      if (typeof answer === "string") return answer;
+    } catch {
+      // no native clipboard here: the web view's is the second try
+    }
   }
   try {
     return await navigator.clipboard.readText();
   } catch {
+    if (state.os === "web") showNotice(CLIPBOARD_REFUSED);
     return ""; // no permission or no clipboard: nothing to paste
   }
 }
