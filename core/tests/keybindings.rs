@@ -742,3 +742,207 @@ fn web_table_resolves_to_its_own_chords() {
     assert_eq!(kb.chord_of("pane.close").map(ToString::to_string), Some("Alt+Shift+W".to_string()));
     assert_eq!(kb.chord_of("palette.open").map(ToString::to_string), Some("Ctrl+Shift+P".to_string()));
 }
+
+// ---- the invariants of the browser table -------------------------------------------------------------------
+
+/// The chords a browser keeps for itself, whatever the page says: close tab, new tab, new window, next tab, and the
+/// shifted and paged relatives of the same (close window, reopen tab, private window, previous and next tab).
+const BROWSER_KEEPS: [&str; 9] = [
+    "Ctrl+W",
+    "Ctrl+T",
+    "Ctrl+N",
+    "Ctrl+Tab",
+    "Ctrl+Shift+W",
+    "Ctrl+Shift+T",
+    "Ctrl+Shift+N",
+    "Ctrl+PageUp",
+    "Ctrl+PageDown",
+];
+
+/// The ids of the actions of the table of `os` whose default is one of the chords a browser keeps.
+fn holders_of_browser_chords(os: &str) -> Vec<&'static str> {
+    let reserved: Vec<Chord> = BROWSER_KEEPS.iter().map(|text| chord(text)).collect();
+    all_actions(os)
+        .iter()
+        .filter(|a| a.default.is_some_and(|d| reserved.contains(&chord(d))))
+        .map(|a| a.id)
+        .collect()
+}
+
+#[test]
+fn web_table_holds_none_of_the_chords_a_browser_keeps() {
+    assert_eq!(holders_of_browser_chords(WEB), Vec::<&str>::new());
+}
+
+#[test]
+fn web_table_reserved_set_check_can_fail_the_linux_table_holds_three_of_them() {
+    // The reason for the browser table, and the proof that the check above is able to find something.
+    let holders = holders_of_browser_chords("linux");
+    println!("Reserved: the Linux table holds browser chords for {holders:?}");
+    assert_eq!(holders, ["pane.close", "tab.new", "workspace.new"]);
+}
+
+#[test]
+fn web_table_defaults_are_written_in_canonical_form() {
+    for a in all_actions(WEB) {
+        if let Some(d) = a.default {
+            assert_eq!(canon(d), Ok(d.to_string()), "default of {} is not canonical", a.id);
+        }
+    }
+}
+
+#[test]
+fn web_table_defaults_are_bindable_and_each_belongs_to_one_action() {
+    let mut seen = HashSet::new();
+    for a in all_actions(WEB) {
+        let Some(d) = a.default else { continue };
+        let c = chord(d);
+        assert!(c.is_bindable(), "default {d} of {} is refused by the policy", a.id);
+        assert!(seen.insert(c), "default chord {d} is used twice");
+    }
+}
+
+#[test]
+fn web_table_resolves_without_a_warning_and_every_default_finds_its_action() {
+    let (kb, warnings) = Keybindings::resolve_for(WEB, &BTreeMap::new());
+    assert!(warnings.is_empty(), "{warnings:?}");
+    for a in all_actions(WEB) {
+        let want = a.default.map(chord);
+        assert_eq!(kb.chord_of(a.id), want.as_ref(), "chord of {}", a.id);
+        if let Some(c) = want {
+            assert_eq!(kb.action_of(&c), Some(a.id));
+        }
+    }
+    assert!(kb.table().iter().all(|row| row.is_default));
+}
+
+#[test]
+fn web_table_never_takes_the_super_key_or_plain_typing() {
+    for a in all_actions(WEB) {
+        let Some(d) = a.default else { continue };
+        let c = chord(d);
+        assert!(!c.cmd, "default {d} of {} uses the Super key", a.id);
+        assert!(c.modifier_count() >= 1, "default {d} of {} is plain typing", a.id);
+        let letter = c.key.len() == 1 && c.key.chars().all(|ch| ch.is_ascii_alphabetic());
+        let plain = c.modifier_count() == 1 && (c.ctrl || c.alt);
+        assert!(!(letter && plain), "default {d} of {} is a plain Ctrl or Alt letter, which belongs to the shell", a.id);
+        assert!(!(c.ctrl && c.alt), "default {d} of {} uses Ctrl+Alt, which is AltGr on Windows", a.id);
+    }
+}
+
+#[test]
+fn web_table_new_chords_are_alt_shift_letters_that_no_other_default_uses() {
+    let alt_shift_letters: Vec<&str> = all_actions(WEB)
+        .iter()
+        .filter_map(|a| a.default)
+        .filter(|d| {
+            let c = chord(d);
+            c.alt && c.shift && !c.ctrl && !c.cmd && c.key.chars().all(|ch| ch.is_ascii_alphabetic())
+        })
+        .collect();
+    assert_eq!(alt_shift_letters, ["Alt+Shift+W", "Alt+Shift+T", "Alt+Shift+N"]);
+}
+
+#[test]
+fn web_table_differs_from_the_linux_table_in_exactly_three_rows() {
+    let mut different = Vec::new();
+    for (w, l) in all_actions(WEB).iter().zip(all_actions("linux")) {
+        assert_eq!(w.id, l.id);
+        if w.default != l.default {
+            different.push((w.id, w.default, l.default));
+        }
+    }
+    assert_eq!(
+        different,
+        [
+            ("pane.close", Some("Alt+Shift+W"), Some("Ctrl+Shift+W")),
+            ("tab.new", Some("Alt+Shift+T"), Some("Ctrl+Shift+T")),
+            ("workspace.new", Some("Alt+Shift+N"), Some("Ctrl+Shift+N")),
+        ]
+    );
+}
+
+#[test]
+fn web_table_line_editing_actions_are_the_linux_ones() {
+    assert_eq!(default_of(WEB, "edit.word_back"), Some("Ctrl+Left"));
+    assert_eq!(default_of(WEB, "edit.word_forward"), Some("Ctrl+Right"));
+    assert_eq!(default_of(WEB, "edit.delete_word_back"), Some("Ctrl+Backspace"));
+    for id in ["edit.line_start", "edit.line_end", "edit.delete_to_line_start"] {
+        assert_eq!(default_of(WEB, id), None, "{id} is unbound");
+    }
+}
+
+#[test]
+fn web_table_override_moves_an_action_and_is_reported_as_not_default() {
+    let (kb, warnings) = Keybindings::resolve_for(WEB, &overrides(&[("pane.close", "Ctrl+Shift+Q")]));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(kb.chord_of("pane.close"), Some(&chord("Ctrl+Shift+Q")));
+    assert_eq!(kb.action_of(&chord("Alt+Shift+W")), None, "the default chord is free after the override");
+    let row = kb.table().into_iter().find(|row| row.action == "pane.close").expect("the row exists");
+    assert!(!row.is_default);
+}
+
+#[test]
+fn web_table_empty_text_unbinds() {
+    let (kb, warnings) = Keybindings::resolve_for(WEB, &overrides(&[("tab.new", "")]));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(kb.chord_of("tab.new"), None);
+    assert_eq!(kb.action_of(&chord("Alt+Shift+T")), None);
+}
+
+#[test]
+fn web_table_refuses_a_chord_the_policy_refuses_and_keeps_the_default() {
+    // Ctrl+W is a plain Ctrl letter: it belongs to the shell, and the policy refuses it on every table.
+    let (kb, warnings) = Keybindings::resolve_for(WEB, &overrides(&[("workspace.new", "Ctrl+W")]));
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("workspace.new") && warnings[0].contains("not allowed"), "{warnings:?}");
+    assert_eq!(kb.chord_of("workspace.new"), Some(&chord("Alt+Shift+N")));
+    assert_eq!(kb.action_of(&chord("Ctrl+W")), None);
+
+    let (kb, warnings) = Keybindings::resolve_for(WEB, &overrides(&[("pane.close", "Hyper+W")]));
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(kb.chord_of("pane.close"), Some(&chord("Alt+Shift+W")), "an unparsable text keeps the default");
+}
+
+#[test]
+fn web_table_override_that_takes_a_default_unbinds_the_displaced_action_with_a_warning() {
+    let (kb, warnings) = Keybindings::resolve_for(WEB, &overrides(&[("tab.select_1", "Alt+Shift+W")]));
+    assert_eq!(kb.action_of(&chord("Alt+Shift+W")), Some("tab.select_1"));
+    assert_eq!(kb.chord_of("pane.close"), None);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("pane.close") && warnings[0].contains("lost its default Alt+Shift+W"), "{warnings:?}");
+}
+
+#[test]
+fn web_table_override_equal_to_the_default_counts_as_default() {
+    let (kb, warnings) = Keybindings::resolve_for(WEB, &overrides(&[("pane.close", "alt+shift+w")]));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let row = kb.table().into_iter().find(|row| row.action == "pane.close").expect("the row exists");
+    assert_eq!(row.chord.as_deref(), Some("Alt+Shift+W"));
+    assert!(row.is_default);
+}
+
+#[test]
+fn web_table_lets_a_person_bind_a_chord_a_browser_keeps_when_the_grammar_accepts_it() {
+    // The choice is theirs: every chord stays changeable. The page may not receive the chord, which the person finds out.
+    let (kb, warnings) = Keybindings::resolve_for(WEB, &overrides(&[("pane.close", "Ctrl+Shift+W")]));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(kb.chord_of("pane.close"), Some(&chord("Ctrl+Shift+W")));
+    // The Linux default of the action that used to hold the chord is free on this table, so nobody is displaced.
+    assert_eq!(kb.chord_of("tab.new"), Some(&chord("Alt+Shift+T")));
+}
+
+#[test]
+fn web_table_is_chosen_by_the_exact_name_only() {
+    let linux = all_actions("linux");
+    for name in ["Web", "WEB", " web", "web ", "linux", "freebsd", "", "android", "MacOS", "Windows"] {
+        assert_eq!(actions_for(name), linux, "{name:?} selects the Linux table");
+    }
+    assert_ne!(actions_for(WEB), linux);
+}
+
+#[test]
+fn web_table_is_built_once() {
+    assert!(std::ptr::eq(actions_for(WEB), actions_for(WEB)));
+    assert!(std::ptr::eq(actions_for("linux"), actions_for("freebsd")));
+}
