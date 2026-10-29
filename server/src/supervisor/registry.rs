@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -16,6 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::runtime::Handle;
 use tokio::sync::{Notify, oneshot, watch};
+use tokio::task::JoinSet;
 use tokio_util::codec::Decoder;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -25,6 +26,7 @@ use crate::limits;
 use crate::log::{self, Level};
 use crate::store::AccountId;
 use crate::supervisor::fanout::{self, Counters, Fault, Owners, Synthetic};
+use crate::supervisor::idle;
 use crate::supervisor::launcher::{LaunchRequest, LaunchedWorker, WorkerLauncher};
 use crate::accounts::{AccountObserver, Ending};
 use crate::supervisor::socket::{self, Attached, SocketCore, SocketHandle, SocketRx, SubmitError};
@@ -33,6 +35,12 @@ use crate::worker::runtime::WorkerMode;
 
 /// The close code for a socket whose worker ended.
 pub const CLOSE_WORKER_ENDED: u16 = 1012;
+
+/// The close code for a socket when the server stops.
+pub const CLOSE_SERVER_STOPPING: u16 = 1001;
+
+/// The close code for a socket of an account that was disabled or deleted.
+pub const CLOSE_ACCOUNT_ENDED: u16 = 4401;
 
 /// A person, as the supervisor knows them: the account and the operating-system user it runs as.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -306,6 +314,19 @@ fn encode(frame: &Frame) -> Result<Zeroizing<Vec<u8>>, SubmitError> {
     Ok(out)
 }
 
+/// The control with the number `number` in place of the caller's. `None` for the four controls the supervisor owns.
+fn with_number(control: Ctl, number: u64) -> Option<Ctl> {
+    Some(match control {
+        Ctl::Unlock { kind, key, .. } => Ctl::Unlock { ctl: number, kind, key },
+        Ctl::Lock { .. } => Ctl::Lock { ctl: number },
+        Ctl::ResetSecrets { .. } => Ctl::ResetSecrets { ctl: number },
+        Ctl::Provision { slots, .. } => Ctl::Provision { ctl: number, slots },
+        Ctl::SetSlot { slot, opening, .. } => Ctl::SetSlot { ctl: number, slot, opening },
+        Ctl::RemoveSlot { kind, id, .. } => Ctl::RemoveSlot { ctl: number, kind, id },
+        Ctl::Init { .. } | Ctl::Attach { .. } | Ctl::Detach { .. } | Ctl::Shutdown => return None,
+    })
+}
+
 // ---- the worker ------------------------------------------------------------------------------------------------------
 
 struct WorkerState {
@@ -327,8 +348,16 @@ struct Worker {
     out: WorkQueue,
     cancel: CancellationToken,
     dead: AtomicBool,
+    /// The worker is being ended: no socket may join it any more.
+    ending: AtomicBool,
     done: watch::Sender<bool>,
+    /// The controls that wait for their answer, by the number the supervisor gave them.
+    waiters: Mutex<HashMap<u64, oneshot::Sender<CtlOutcome>>>,
+    next_ctl: AtomicU64,
 }
+
+/// The first number the supervisor gives a control: high, so that a number a caller wrote never looks like it.
+const FIRST_CTL_NUMBER: u64 = 1_000;
 
 impl Worker {
     fn lock(&self) -> MutexGuard<'_, WorkerState> {
@@ -337,6 +366,63 @@ impl Worker {
 
     fn is_dead(&self) -> bool {
         self.dead.load(Ordering::SeqCst)
+    }
+
+    fn is_ending(&self) -> bool {
+        self.ending.load(Ordering::SeqCst)
+    }
+
+    fn waiters(&self) -> MutexGuard<'_, HashMap<u64, oneshot::Sender<CtlOutcome>>> {
+        self.waiters.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Starts the end of this worker: no socket may join it, the sockets it has close with `close` if given, and it is asked
+    /// to shut down.
+    fn begin_end(&self, close: Option<(u16, &'static str)>) {
+        self.ending.store(true, Ordering::SeqCst);
+        if let Some((code, reason)) = close {
+            let sockets: Vec<Arc<SocketCore>> = self.lock().sockets.drain().map(|(_, s)| s).collect();
+            for socket in sockets {
+                socket.queue.close(code, reason);
+            }
+        }
+        let _ = self.push_control(Ctl::Shutdown);
+    }
+
+    /// Waits for the worker to be gone, at most `limit`. True when it ended in time.
+    async fn wait_done(&self, limit: Duration) -> bool {
+        let mut done = self.done.subscribe();
+        matches!(tokio::time::timeout(limit, done.wait_for(|done| *done)).await, Ok(Ok(_)))
+    }
+
+    /// Sends a control that has an answer and waits for it. The number in `control` is replaced by one of the supervisor's.
+    async fn control(self: &Arc<Self>, control: Ctl) -> Result<CtlOutcome, CtlError> {
+        let (tx, rx) = oneshot::channel();
+        let number = {
+            let mut waiters = self.waiters();
+            if waiters.len() >= limits::PENDING_CONTROLS {
+                return Err(CtlError::Busy);
+            }
+            let number = self.next_ctl.fetch_add(1, Ordering::SeqCst);
+            waiters.insert(number, tx);
+            number
+        };
+        let Some(frame) = with_number(control, number) else {
+            self.waiters().remove(&number);
+            return Err(CtlError::Refused("this control belongs to the supervisor"));
+        };
+        if self.push_control(frame).is_err() {
+            self.waiters().remove(&number);
+            return Err(CtlError::WorkerGone);
+        }
+        match tokio::time::timeout(self.shared.settings.control_timeout, rx).await {
+            Ok(Ok(outcome)) => Ok(outcome),
+            Ok(Err(_)) => Err(CtlError::WorkerGone),
+            Err(_) => {
+                self.waiters().remove(&number);
+                Err(CtlError::Timeout)
+            }
+        }
     }
 
     fn push_control(&self, control: Ctl) -> Result<(), SubmitError> {
@@ -359,6 +445,7 @@ impl Worker {
         Counters::bump(&self.shared.counters.worker_deaths);
         self.cancel.cancel();
         self.out.close();
+        self.waiters().clear();
         let sockets: Vec<Arc<SocketCore>> = self.lock().sockets.drain().map(|(_, s)| s).collect();
         for socket in sockets {
             socket.queue.close(CLOSE_WORKER_ENDED, "the worker ended");
@@ -376,7 +463,7 @@ impl Worker {
     /// Joins a new socket to this worker.
     fn add_socket(self: &Arc<Self>) -> Result<(SocketHandle, SocketRx), AttachError> {
         let mut state = self.lock();
-        if self.is_dead() {
+        if self.is_dead() || self.is_ending() {
             return Err(AttachError::Launch("the worker ended while the socket attached".into()));
         }
         if state.sockets.len() >= self.shared.settings.sockets_per_person {
@@ -445,7 +532,13 @@ impl Worker {
                 self.slot.store.send_replace(Some(state));
             }
             Frame::Note(Note::Exiting(_)) => self.die(),
-            Frame::Note(Note::PaneCount(_) | Note::CtlDone { .. }) => {}
+            Frame::Note(Note::CtlDone { ctl, outcome }) => match self.waiters().remove(&ctl) {
+                Some(waiter) => {
+                    let _ = waiter.send(outcome);
+                }
+                None => Counters::bump(&self.shared.counters.dropped_ctl_done),
+            },
+            Frame::Note(Note::PaneCount(_)) => {}
         }
         Ok(())
     }
@@ -523,12 +616,12 @@ async fn read_loop(worker: Arc<Worker>, mut read: OwnedReadHalf, ready: oneshot:
                 n = read.read_buf(&mut buf) => n,
             };
             match read_some {
-                Ok(0) => match codec.decode_eof(&mut buf) {
+                // A link that breaks is a link that ends: a frame cut off by either is a fault of the worker.
+                Ok(0) | Err(_) => match codec.decode_eof(&mut buf) {
                     Ok(Some(payload)) => break Ok(Some(payload)),
                     Ok(None) => break Ok(None),
                     Err(_) => break Err(Fault::Malformed),
                 },
-                Err(_) => break Ok(None),
                 Ok(_) => {}
             }
         };
@@ -558,7 +651,7 @@ async fn write_loop(worker: Arc<Worker>, mut write: OwnedWriteHalf) {
         let Some(frame) = frame else { return };
         match tokio::time::timeout(limits::WORKER_WRITE_TIMEOUT, write.write_all(&frame)).await {
             Ok(Ok(())) => worker.out.done(frame.len()),
-            Ok(Err(_)) | Err(_) => break,
+            _ => break,
         }
     }
     worker.die();
@@ -592,6 +685,11 @@ impl Slot {
     fn live(&self) -> Option<Arc<Worker>> {
         self.current().clone().filter(|w| !w.is_dead())
     }
+
+    /// The worker, if one runs and is not being ended.
+    fn usable(&self) -> Option<Arc<Worker>> {
+        self.current().clone().filter(|w| !w.is_dead() && !w.is_ending())
+    }
 }
 
 struct Shared {
@@ -601,7 +699,8 @@ struct Shared {
     slots: Mutex<HashMap<AccountId, Arc<Slot>>>,
     counters: Counters,
     shutting_down: AtomicBool,
-    #[allow(dead_code)]
+    /// Cancelled at shutdown: stops the sweeper.
+    stop: CancellationToken,
     runtime: Handle,
 }
 
@@ -628,6 +727,7 @@ impl Supervisor {
                 slots: Mutex::new(HashMap::new()),
                 counters: Counters::default(),
                 shutting_down: AtomicBool::new(false),
+                stop: CancellationToken::new(),
                 runtime: Handle::current(),
             }),
         }
@@ -654,11 +754,15 @@ impl Supervisor {
             return Err(AttachError::ShuttingDown);
         }
         let slot = self.slot(account);
-        if let Some(worker) = slot.live() {
+        if let Some(worker) = slot.usable() {
             return Ok(worker);
         }
+        // A worker that is being ended holds this lock until it is gone, so a new one never overlaps it.
         let _launching = slot.launch.lock().await;
-        if let Some(worker) = slot.live() {
+        if self.shared.shutting_down.load(Ordering::SeqCst) {
+            return Err(AttachError::ShuttingDown);
+        }
+        if let Some(worker) = slot.usable() {
             return Ok(worker);
         }
         self.start_worker(&slot).await
@@ -687,7 +791,10 @@ impl Supervisor {
             out: WorkQueue::new(),
             cancel: CancellationToken::new(),
             dead: AtomicBool::new(false),
+            ending: AtomicBool::new(false),
             done: watch::channel(false).0,
+            waiters: Mutex::new(HashMap::new()),
+            next_ctl: AtomicU64::new(FIRST_CTL_NUMBER),
         });
         let init = Ctl::Init {
             version: PROTOCOL_VERSION,
@@ -766,19 +873,33 @@ impl Supervisor {
     }
 
     /// Starts a worker for `account` if there is none, without attaching a socket. Its idle time starts when it is ready.
-    pub async fn ensure(&self, _account: AccountKey) -> Result<(), AttachError> {
-        Err(AttachError::Launch("not built yet".into()))
+    pub async fn ensure(&self, account: AccountKey) -> Result<(), AttachError> {
+        self.ensure_worker(account).await.map(|_| ())
     }
 
     /// Sends a control frame that belongs to the unlock plumbing to the worker of `account` and returns what the worker
-    /// answered. `Init`, `Attach`, `Detach` and `Shutdown` belong to the supervisor and are refused.
-    pub async fn ctl(&self, _account: AccountKey, _control: Ctl) -> Result<CtlOutcome, CtlError> {
-        Err(CtlError::Refused("not built yet"))
+    /// answered, starting the worker if there is none. `Init`, `Attach`, `Detach` and `Shutdown` belong to the supervisor and
+    /// are refused. A `Lock` for a person without a worker is done: there is no key to wipe.
+    pub async fn ctl(&self, account: AccountKey, control: Ctl) -> Result<CtlOutcome, CtlError> {
+        if matches!(control, Ctl::Init { .. } | Ctl::Attach { .. } | Ctl::Detach { .. } | Ctl::Shutdown) {
+            return Err(CtlError::Refused("this control belongs to the supervisor"));
+        }
+        let existing = self.shared.slots().get(&account.id).and_then(|slot| slot.usable());
+        let worker = match existing {
+            Some(worker) => worker,
+            None if matches!(control, Ctl::Lock { .. }) => return Ok(CtlOutcome::Done),
+            None => self.ensure_worker(account).await.map_err(|e| match e {
+                AttachError::ShuttingDown => CtlError::ShuttingDown,
+                other => CtlError::Launch(other.to_string()),
+            })?,
+        };
+        worker.control(control).await
     }
 
     /// What the worker last said about the store of `account`; `None` while no worker runs.
-    pub fn store_state(&self, _account: AccountKey) -> Option<StoreState> {
-        None
+    pub fn store_state(&self, account: AccountKey) -> Option<StoreState> {
+        let slot = self.shared.slots().get(&account.id).cloned()?;
+        *slot.store.borrow()
     }
 
     /// A channel that carries the store state of `account` whenever it changes.
@@ -788,35 +909,170 @@ impl Supervisor {
 
     /// Ends the workers whose last socket left at least the idle timeout ago. The number of workers ended.
     pub async fn sweep(&self) -> usize {
-        0
+        let now = self.shared.clock.unix();
+        let timeout = self.shared.settings.idle_timeout;
+        let slots: Vec<Arc<Slot>> = self.shared.slots().values().cloned().collect();
+        let mut ending = JoinSet::new();
+        for slot in slots {
+            let idle = slot.usable().is_some_and(|worker| {
+                let state = worker.lock();
+                state.sockets.is_empty() && state.idle_since.is_some_and(|since| idle::expired(since, now, timeout))
+            });
+            if idle {
+                let supervisor = self.clone();
+                ending.spawn(async move { supervisor.end_idle(&slot, now).await });
+            }
+        }
+        let mut ended = 0;
+        while let Some(result) = ending.join_next().await {
+            if result.unwrap_or(false) {
+                ended += 1;
+            }
+        }
+        ended
+    }
+
+    /// Ends the worker of `slot` if it is still idle, once nobody is starting or ending it.
+    async fn end_idle(&self, slot: &Arc<Slot>, now: i64) -> bool {
+        let _launching = slot.launch.lock().await;
+        let Some(worker) = slot.usable() else { return false };
+        {
+            // Decided and marked under one lock, so that no socket joins in between.
+            let state = worker.lock();
+            let idle = state.sockets.is_empty()
+                && state.idle_since.is_some_and(|since| idle::expired(since, now, self.shared.settings.idle_timeout));
+            if !idle {
+                return false;
+            }
+            worker.ending.store(true, Ordering::SeqCst);
+        }
+        log::event(Level::Info, "supervisor.worker_idle", &[("account", &slot.key.id.to_string())]);
+        worker.begin_end(None);
+        if !worker.wait_done(self.shared.settings.shutdown_timeout).await {
+            worker.die();
+            let _ = self.shared.launcher.kill_uid(slot.key.uid).await;
+        }
+        true
     }
 
     /// Runs [`Supervisor::sweep`] every `sweep_interval` until [`Supervisor::shutdown`].
     pub fn start_sweeper(&self) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async {})
+        tokio::spawn(idle::run(self.clone(), self.shared.settings.sweep_interval, self.shared.stop.clone()))
     }
 
     /// Removes the secret store of `account`: through the running worker, or through a worker in wipe mode.
-    pub async fn wipe_secrets(&self, _account: AccountKey) -> Result<(), WipeError> {
-        Err(WipeError("not built yet".into()))
-    }
-
-    /// Removes everything in the home of `account`.
-    pub async fn wipe_home(&self, _account: AccountKey) -> Result<(), WipeError> {
-        Err(WipeError("not built yet".into()))
-    }
-
-    /// Asks every worker to end.
-    pub async fn shutdown(&self) {
-        self.shared.shutting_down.store(true, Ordering::SeqCst);
-        let slots: Vec<Arc<Slot>> = self.shared.slots().values().cloned().collect();
-        for worker in slots.iter().filter_map(|slot| slot.live()) {
-            let _ = worker.push_control(Ctl::Shutdown);
+    pub async fn wipe_secrets(&self, account: AccountKey) -> Result<(), WipeError> {
+        let slot = self.slot(account);
+        loop {
+            if self.shared.shutting_down.load(Ordering::SeqCst) {
+                return Err(WipeError("the server is stopping".into()));
+            }
+            if slot.usable().is_some() {
+                return match self.ctl(account, Ctl::ResetSecrets { ctl: 0 }).await {
+                    Ok(CtlOutcome::Done) => Ok(()),
+                    Ok(_) => Err(WipeError("the secret store could not be removed".into())),
+                    Err(error) => Err(WipeError(error.to_string())),
+                };
+            }
+            let launching = slot.launch.lock().await;
+            if slot.usable().is_some() {
+                // A worker started while this waited: it does the wipe.
+                drop(launching);
+                continue;
+            }
+            return self.wipe_launch(&slot, WorkerMode::WipeSecrets).await;
         }
+    }
+
+    /// Removes everything in the home of `account`. A running worker is ended first.
+    pub async fn wipe_home(&self, account: AccountKey) -> Result<(), WipeError> {
+        if self.shared.shutting_down.load(Ordering::SeqCst) {
+            return Err(WipeError("the server is stopping".into()));
+        }
+        let slot = self.slot(account);
+        let _launching = slot.launch.lock().await;
+        if let Some(worker) = slot.live() {
+            worker.begin_end(Some((CLOSE_WORKER_ENDED, "the worker ended")));
+            if !worker.wait_done(self.shared.settings.shutdown_timeout).await {
+                worker.die();
+                let _ = self.shared.launcher.kill_uid(slot.key.uid).await;
+            }
+        }
+        self.wipe_launch(&slot, WorkerMode::WipeHome).await
+    }
+
+    /// Starts a worker in a wipe mode and waits for its process to end. The caller holds the launch lock of the slot.
+    async fn wipe_launch(&self, slot: &Arc<Slot>, mode: WorkerMode) -> Result<(), WipeError> {
+        let launched = self
+            .shared
+            .launcher
+            .launch(LaunchRequest { account: slot.key, mode })
+            .await
+            .map_err(|e| WipeError(e.to_string()))?;
+        let LaunchedWorker { link, mut ended } = launched;
+        // A wipe worker has nothing to say on its link.
+        drop(link);
+        let finished = tokio::time::timeout(self.shared.settings.wipe_timeout, ended.wait_for(|status| status.is_some()))
+            .await
+            .map(|result| result.map(|status| *status));
+        match finished {
+            Ok(Ok(Some(0))) => Ok(()),
+            Ok(_) => Err(WipeError("the wipe did not finish: the worker ended with an error".into())),
+            Err(_) => {
+                let _ = self.shared.launcher.kill_uid(slot.key.uid).await;
+                Err(WipeError("the wipe did not finish in time".into()))
+            }
+        }
+    }
+
+    /// Ends every worker: the sockets close with 1001, each worker is asked to shut down, and one that does not close its
+    /// link in time is killed by user id. A second call does nothing.
+    pub async fn shutdown(&self) {
+        if self.shared.shutting_down.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.shared.stop.cancel();
+        let slots: Vec<Arc<Slot>> = self.shared.slots().values().cloned().collect();
+        let mut ending = JoinSet::new();
+        for slot in slots {
+            let supervisor = self.clone();
+            ending.spawn(async move {
+                // A worker that is still being started finishes first (and its start sees the flag next time).
+                let _launching = slot.launch.lock().await;
+                let Some(worker) = slot.live() else { return };
+                worker.begin_end(Some((CLOSE_SERVER_STOPPING, "the server is stopping")));
+                if !worker.wait_done(supervisor.shared.settings.shutdown_timeout).await {
+                    worker.die();
+                    let _ = supervisor.shared.launcher.kill_uid(slot.key.uid).await;
+                }
+            });
+        }
+        while ending.join_next().await.is_some() {}
+    }
+}
+
+impl Supervisor {
+    /// Ends the worker of an account that was disabled or deleted: its sockets close with 4401, the worker is asked to shut
+    /// down, and whatever is left of the user's processes is killed after the bound. The home and the store stay.
+    async fn end_account(&self, slot: Arc<Slot>, uid: u32) {
+        // Waits for a start that is in progress, so that its worker is ended too.
+        let _launching = slot.launch.lock().await;
+        let Some(worker) = slot.live() else { return };
+        log::event(Level::Info, "supervisor.account_ended", &[("account", &slot.key.id.to_string())]);
+        worker.begin_end(Some((CLOSE_ACCOUNT_ENDED, "the account was ended")));
+        if !worker.wait_done(self.shared.settings.shutdown_timeout).await {
+            worker.die();
+        }
+        let _ = self.shared.launcher.kill_uid(uid).await;
     }
 }
 
 /// A disabled or deleted account loses its worker and its sockets; its home and its store stay where they are.
 impl AccountObserver for Supervisor {
-    fn account_ended(&self, _account: AccountId, _uid: u32, _ending: Ending) {}
+    fn account_ended(&self, account: AccountId, uid: u32, _ending: Ending) {
+        // An account that never had a worker has no slot: there is nothing to end.
+        let Some(slot) = self.shared.slots().get(&account).cloned() else { return };
+        let supervisor = self.clone();
+        self.shared.runtime.spawn(async move { supervisor.end_account(slot, uid).await });
+    }
 }

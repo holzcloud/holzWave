@@ -26,15 +26,19 @@ use holzwave_server::wire::{
 use holzwave_server::worker::runtime::WorkerMode;
 use holzwave_server::worker::secretstore::SlotKind;
 use serde_json::Value;
-use sup_env::{Client, PATIENCE, Reply, ScriptEnv, ScriptHandle, SupEnv, account, expected_init, process_exists};
+use sup_env::{Client, PATIENCE, Reply, ScriptEnv, ScriptHandle, account, expected_init};
+#[cfg(feature = "in-process-workers")]
+use sup_env::{SupEnv, process_exists};
 
 /// The id of the focused pane of a layout answer.
+#[cfg(feature = "in-process-workers")]
 fn focus(view: &Value) -> u64 {
     view["focus"].as_u64().expect("the view names the focused pane")
 }
 
 // ---- the tracer ---------------------------------------------------------------------------------------------------------
 
+#[cfg(feature = "in-process-workers")]
 #[tokio::test(flavor = "multi_thread")]
 async fn tracer_one_person_runs_a_command_in_a_real_worker_and_gets_the_event() {
     let env = SupEnv::start().await;
@@ -67,6 +71,7 @@ async fn tracer_one_person_runs_a_command_in_a_real_worker_and_gets_the_event() 
     env.supervisor.shutdown().await;
 }
 
+#[cfg(feature = "in-process-workers")]
 #[tokio::test(flavor = "multi_thread")]
 async fn tracer_two_people_get_two_workers_and_nothing_crosses() {
     let env = SupEnv::start().await;
@@ -313,7 +318,7 @@ async fn order_a_worker_that_stops_reading_gets_1024_frames_and_the_next_one_is_
             Err(e) => break e,
         }
         assert!(accepted < 2 * WORKER_QUEUE_FRAMES as u64, "the queue never answered Busy");
-        if accepted % 64 == 0 {
+        if accepted.is_multiple_of(64) {
             tokio::task::yield_now().await;
         }
     };
@@ -501,6 +506,10 @@ async fn hostile_case(what: &str, hostile: impl FnOnce(&ScriptHandle)) {
         let first = client.next_message(PATIENCE).await;
         assert_eq!(first, Some(Outbound::Text(r#"{"event":"layout","payload":{"n":1}}"#.into())), "{what}");
     }
+    // The worker has been told about both sockets, so that nothing is written to its link once it misbehaves.
+    for id in rig.clients.iter().map(Client::id).collect::<Vec<_>>() {
+        rig.script.wait_for("Attach", PATIENCE, |f| matches!(f, Frame::Ctl(Ctl::Attach { socket }) if *socket == id));
+    }
     hostile(&rig.script);
     for client in &mut rig.clients {
         let second = client.next_message(PATIENCE).await;
@@ -550,7 +559,7 @@ async fn checks_an_unknown_note_ends_the_link() {
 async fn checks_a_frame_cut_off_at_the_end_of_the_file_ends_the_link() {
     hostile_case("a truncated frame", |script| {
         script.send_raw(&[0, 0, 0, 10, 3, 0, 0]);
-        script.close();
+        script.close_link();
     })
     .await;
 }
@@ -767,7 +776,8 @@ async fn queues_a_dropped_receiver_frees_the_socket_and_its_queue() {
     for n in 0..10 {
         rig.script.send(evt(0, "layout", &payload_of(n, 500)));
     }
-    wait_until("queued", || rig.env.supervisor.account_stats(one()).queued_bytes >= 10 * 500).await;
+    // Both sockets have all ten events before one of them goes.
+    wait_until("queued", || rig.env.supervisor.account_stats(one()).queued_bytes == 20 * wrapped_len("layout", 500)).await;
     drop(rx);
     wait_until("the socket to leave", || rig.env.supervisor.account_stats(one()).sockets == 1).await;
     rig.script.wait_for("Detach", PATIENCE, |f| matches!(f, Frame::Ctl(Ctl::Detach { socket }) if *socket == gone));
@@ -1144,7 +1154,7 @@ async fn several_eight_sockets_read_2000_events_in_order_with_random_delays() {
                 state ^= state << 13;
                 state ^= state >> 7;
                 state ^= state << 17;
-                if state % 4 == 0 {
+                if state.is_multiple_of(4) {
                     tokio::time::sleep(Duration::from_micros(state % 2000)).await;
                 }
                 match client.next_message(PATIENCE).await {
@@ -1376,6 +1386,7 @@ async fn limits_after_one_socket_leaves_a_ninth_is_accepted_and_the_others_keep_
     }
 }
 
+#[cfg(feature = "in-process-workers")]
 #[tokio::test(flavor = "multi_thread")]
 async fn limits_with_a_pane_cap_of_three_the_fourth_pane_is_refused_with_the_cores_sentence() {
     let settings = SupervisorSettings { max_panes: 3, ..SupervisorSettings::default() };
@@ -1456,6 +1467,7 @@ async fn observer_disable_closes_the_sockets_with_4401_ends_the_worker_and_leave
     assert_eq!(env.launcher.kills(), vec![bob.uid], "no other uid was killed");
 }
 
+#[cfg(feature = "in-process-workers")]
 #[tokio::test(flavor = "multi_thread")]
 async fn observer_delete_does_the_same_and_a_real_worker_leaves_its_home_where_it_is() {
     let env = SupEnv::start_with(sup_env::SupOptions { settings: Some(quick_settings()) }).await;
@@ -1557,6 +1569,7 @@ async fn wipe_without_a_worker_launches_in_wipe_mode_and_the_exit_status_decides
     assert_eq!(env.supervisor.stats().workers, 0, "a wipe worker is no serving worker");
 }
 
+#[cfg(feature = "in-process-workers")]
 #[tokio::test(flavor = "multi_thread")]
 async fn wipe_with_the_in_process_launcher_calls_the_workers_own_wipe_functions() {
     let env = SupEnv::start().await;
@@ -1575,6 +1588,7 @@ async fn wipe_with_the_in_process_launcher_calls_the_workers_own_wipe_functions(
 
 // ---- the shutdown -------------------------------------------------------------------------------------------------------
 
+#[cfg(feature = "in-process-workers")]
 #[tokio::test(flavor = "multi_thread")]
 async fn shutdown_closes_every_socket_with_1001_ends_every_worker_and_leaves_no_shell_running() {
     let env = SupEnv::start().await;

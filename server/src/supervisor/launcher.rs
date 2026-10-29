@@ -12,6 +12,8 @@ use std::pin::Pin;
 use tokio::net::UnixStream;
 use tokio::sync::watch;
 
+use holzwave_spawn_helper::protocol::{Mode, Signal};
+
 use crate::supervisor::helper_client::HelperClient;
 use crate::supervisor::registry::AccountKey;
 use crate::worker::runtime::WorkerMode;
@@ -94,12 +96,35 @@ impl HelperLauncher {
 }
 
 impl WorkerLauncher for HelperLauncher {
-    fn launch(&self, _request: LaunchRequest) -> Launch<'_, LaunchedWorker> {
-        Box::pin(async move { Err(LaunchError::new("the spawn helper launcher is not built yet")) })
+    fn launch(&self, request: LaunchRequest) -> Launch<'_, LaunchedWorker> {
+        Box::pin(async move {
+            // The user id of the account is the only thing about the person that goes to the helper.
+            let uid = request.account.uid;
+            let mode = match request.mode {
+                WorkerMode::Serve => Mode::Serve,
+                WorkerMode::WipeSecrets => Mode::WipeSecrets,
+                WorkerMode::WipeHome => Mode::WipeHome,
+            };
+            let spawned = match self.client.spawn(uid, mode).await {
+                Ok(spawned) => spawned,
+                Err(error) => {
+                    if error.may_have_started() {
+                        let _ = self.client.kill_uid(uid, Signal::Kill).await;
+                    }
+                    return Err(LaunchError::new(error.sentence()));
+                }
+            };
+            let stream = std::os::unix::net::UnixStream::from(spawned.link);
+            stream.set_nonblocking(true).map_err(|_| LaunchError::new("the link to the worker could not be made non-blocking"))?;
+            let link = UnixStream::from_std(stream).map_err(|_| LaunchError::new("the link to the worker could not be adopted"))?;
+            Ok(LaunchedWorker { link, ended: spawned.ended })
+        })
     }
 
-    fn kill_uid(&self, _uid: u32) -> Launch<'_, ()> {
-        Box::pin(async move { Err(LaunchError::new("the spawn helper launcher is not built yet")) })
+    fn kill_uid(&self, uid: u32) -> Launch<'_, ()> {
+        Box::pin(async move {
+            self.client.kill_uid(uid, Signal::Kill).await.map(|_| ()).map_err(|e| LaunchError::new(e.sentence()))
+        })
     }
 
     fn helper_alive(&self) -> bool {

@@ -401,10 +401,11 @@ impl Owners {
     /// Remembers the latest size of `socket` for `pane`.
     fn remember(&mut self, pane: u64, socket: u32, size: Size) {
         self.clock += 1;
-        if !self.sizes.contains_key(&(pane, socket)) && self.sizes.len() >= limits::REMEMBERED_SIZES {
-            if let Some(oldest) = self.sizes.iter().min_by_key(|(_, r)| r.stamp).map(|(key, _)| *key) {
-                self.sizes.remove(&oldest);
-            }
+        if !self.sizes.contains_key(&(pane, socket))
+            && self.sizes.len() >= limits::REMEMBERED_SIZES
+            && let Some(oldest) = self.sizes.iter().min_by_key(|(_, r)| r.stamp).map(|(key, _)| *key)
+        {
+            self.sizes.remove(&oldest);
         }
         self.sizes.insert((pane, socket), Remembered { size, stamp: self.clock });
     }

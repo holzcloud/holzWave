@@ -12,31 +12,37 @@ use std::io::{IoSlice, IoSliceMut, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::UnixStream as StdStream;
+#[cfg(feature = "in-process-workers")]
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "in-process-workers")]
 use holzwave_host::state::ShellSpec;
 use holzwave_spawn_helper::protocol::{self, Answer, ExitedEvent, Mode, Request};
 use holzwave_server::clock::ManualClock;
 use holzwave_server::store::AccountId;
 use holzwave_server::supervisor::{
-    AccountKey, AttachError, HelperClient, HelperLauncher, HelperTimeouts, InProcessLauncher, Launch, LaunchError, LaunchRequest,
+    AccountKey, HelperClient, HelperLauncher, HelperTimeouts, Launch, LaunchError, LaunchRequest,
     LaunchedWorker, Outbound, SocketHandle, SocketRx, Supervisor, SupervisorSettings, WorkerLauncher,
 };
+#[cfg(feature = "in-process-workers")]
+use holzwave_server::supervisor::{AttachError, InProcessLauncher};
 use holzwave_server::wire::{CmdFrame, Ctl, Frame, Note, PROTOCOL_VERSION, read_frame, write_frame};
 use holzwave_server::worker::runtime::WorkerMode;
 use serde_json::Value;
 use tokio::sync::watch;
 
+#[cfg(feature = "in-process-workers")]
 use crate::scratch::Scratch;
 
 /// How long a test waits for anything the supervisor should do.
 pub const PATIENCE: Duration = Duration::from_secs(10);
 
 /// What a `SupEnv` is started with.
+#[cfg(feature = "in-process-workers")]
 #[derive(Default)]
 pub struct SupOptions {
     /// Replaces the default settings (the pane cap of 64 and the default times).
@@ -44,6 +50,7 @@ pub struct SupOptions {
 }
 
 /// A supervisor over real in-process workers.
+#[cfg(feature = "in-process-workers")]
 pub struct SupEnv {
     pub scratch: Scratch,
     pub clock: Arc<ManualClock>,
@@ -56,6 +63,7 @@ pub struct SupEnv {
 /// The first moment of every test clock.
 pub const START: i64 = 1_800_000_000;
 
+#[cfg(feature = "in-process-workers")]
 impl SupEnv {
     /// A supervisor with the default settings.
     pub async fn start() -> SupEnv {
@@ -320,6 +328,8 @@ pub struct ScriptHandle {
     frames: Receiver<Result<Frame, String>>,
     seen: Vec<Frame>,
     ended: Arc<watch::Sender<Option<i32>>>,
+    /// Set by `close_link`: the closed link is then not read as the end of the process.
+    quiet: Arc<AtomicBool>,
     pause: Arc<Pause>,
     pub uid: u32,
     pub mode: WorkerMode,
@@ -415,6 +425,13 @@ impl ScriptHandle {
         let writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
         let _ = writer.shutdown(std::net::Shutdown::Both);
         let _ = self.ended.send(Some(0));
+    }
+
+    /// Closes the link without saying that the process ended, as a worker that died in the middle of a frame leaves it.
+    pub fn close_link(&self) {
+        self.quiet.store(true, Ordering::SeqCst);
+        let writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = writer.shutdown(std::net::Shutdown::Both);
     }
 
     /// Says the process ended (the helper's exit event) without closing the link.
@@ -513,7 +530,11 @@ impl ScriptedLauncher {
         let (tx, frames) = channel();
         let pause = Arc::new(Pause::default());
         let auto = *self.auto_ready.lock().unwrap_or_else(PoisonError::into_inner);
+        // A serving worker that sees its link close ends; a wipe worker has no use for its link, and the test says when it ends.
+        let serving = request.mode == WorkerMode::Serve;
+        let quiet = Arc::new(AtomicBool::new(false));
         {
+            let quiet = quiet.clone();
             let (mut reading, writer, pause, ended_tx) = (theirs, writer.clone(), pause.clone(), ended_tx.clone());
             std::thread::Builder::new()
                 .name("script-reader".into())
@@ -531,7 +552,9 @@ impl ScriptedLauncher {
                                 }
                             }
                             Ok(None) => {
-                                let _ = ended_tx.send(Some(0));
+                                if serving && !quiet.load(Ordering::SeqCst) {
+                                    let _ = ended_tx.send(Some(0));
+                                }
                                 return;
                             }
                             Err(e) => {
@@ -552,6 +575,7 @@ impl ScriptedLauncher {
             frames,
             seen: Vec::new(),
             ended: ended_tx,
+            quiet,
             pause,
             uid: request.account.uid,
             mode: request.mode,
@@ -636,6 +660,33 @@ struct FakeInner {
     next_pid: AtomicI32,
     stop: AtomicBool,
     send_lock: Mutex<()>,
+    _turn: Turn,
+}
+
+/// On systems other than Linux only one fake helper lives at a time. The tests pass descriptors through datagram sockets
+/// there, and macOS closes sockets of other threads' pairs while the descriptors of a test that ended are collected
+/// (a link shows end of stream a moment after it was handed out, only when helper tests run side by side). On Linux the
+/// tests run side by side, as everywhere else.
+struct Turn;
+
+#[cfg(not(target_os = "linux"))]
+static TURN: AtomicBool = AtomicBool::new(false);
+
+impl Turn {
+    fn take() -> Turn {
+        #[cfg(not(target_os = "linux"))]
+        while TURN.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Turn
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        #[cfg(not(target_os = "linux"))]
+        TURN.store(false, Ordering::SeqCst);
+    }
 }
 
 /// The socket type of the control socket: the helper's own, where the system has it.
@@ -662,10 +713,14 @@ pub struct FakeHelper {
 impl FakeHelper {
     /// A fake and the end of the socket that the client takes.
     pub fn start() -> (FakeHelper, OwnedFd) {
+        let turn = Turn::take();
         let (client_end, helper_end) = datagram_pair();
         let _ = rustix::net::sockopt::set_socket_timeout(&helper_end, rustix::net::sockopt::Timeout::Recv, Some(Duration::from_millis(50)));
-        let _ = rustix::net::sockopt::set_socket_send_buffer_size(&helper_end, 1 << 20);
-        let _ = rustix::net::sockopt::set_socket_send_buffer_size(&client_end, 1 << 20);
+        // Datagram sockets of some systems queue very little by default; the tests send hundreds of requests at once.
+        for fd in [&helper_end, &client_end] {
+            let _ = rustix::net::sockopt::set_socket_send_buffer_size(fd, 1 << 20);
+            let _ = rustix::net::sockopt::set_socket_recv_buffer_size(fd, 1 << 20);
+        }
         let inner = Arc::new(FakeInner {
             control: Mutex::new(Some(Arc::new(helper_end))),
             requests: Mutex::new(Vec::new()),
@@ -674,6 +729,7 @@ impl FakeHelper {
             next_pid: AtomicI32::new(4242),
             stop: AtomicBool::new(false),
             send_lock: Mutex::new(()),
+            _turn: turn,
         });
         let thread_inner = inner.clone();
         std::thread::Builder::new().name("fake-helper".into()).spawn(move || thread_inner.serve()).expect("the fake helper thread");
@@ -759,6 +815,9 @@ impl FakeHelper {
 
     /// The helper goes away: its end of the socket closes.
     pub fn close(&self) {
+        // A datagram socket has no end of stream on every system: an empty message says "closed", as the helper's own
+        // read of an empty message does.
+        self.inner.send(&[], &[]);
         self.inner.stop.store(true, Ordering::SeqCst);
         self.inner.control.lock().unwrap_or_else(PoisonError::into_inner).take();
         // The thread notices at its next timeout and drops its own handle.
