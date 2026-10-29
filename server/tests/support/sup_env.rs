@@ -132,11 +132,35 @@ pub struct Client {
     pub rx: SocketRx,
     next: u64,
     backlog: VecDeque<Outbound>,
+    log: Vec<String>,
+}
+
+/// One line for a message: the kind and the size, never the content.
+pub fn describe(message: &Outbound) -> String {
+    match message {
+        Outbound::Text(text) => {
+            let event = serde_json::from_str::<Value>(text)
+                .ok()
+                .and_then(|v| v.get("event").and_then(Value::as_str).map(str::to_owned));
+            match (event, answer_id(text)) {
+                (Some(name), _) => format!("Text event {name} ({} bytes)", text.len()),
+                (None, Some(id)) => format!("Text answer {id} ({} bytes)", text.len()),
+                (None, None) => format!("Text ({} bytes)", text.len()),
+            }
+        }
+        Outbound::Binary(bytes) => format!("Binary ({} bytes)", bytes.len()),
+        Outbound::Close { code, .. } => format!("Close {code}"),
+    }
 }
 
 impl Client {
     pub fn new(handle: SocketHandle, rx: SocketRx) -> Client {
-        Client { handle, rx, next: 1, backlog: VecDeque::new() }
+        Client { handle, rx, next: 1, backlog: VecDeque::new(), log: Vec::new() }
+    }
+
+    /// One line for every message taken from the socket so far, in order.
+    pub fn log(&self) -> &[String] {
+        &self.log
     }
 
     /// The number of the socket.
@@ -158,8 +182,11 @@ impl Client {
             return Some(message);
         }
         match tokio::time::timeout(timeout, self.rx.recv()).await {
-            Ok(message) => message,
-            Err(_) => None,
+            Ok(Some(message)) => {
+                self.log.push(describe(&message));
+                Some(message)
+            }
+            Ok(None) | Err(_) => None,
         }
     }
 
@@ -172,8 +199,13 @@ impl Client {
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             match tokio::time::timeout(left, self.rx.recv()).await {
-                Ok(Some(message)) if wanted(&message) => return Some(message),
-                Ok(Some(message)) => self.backlog.push_back(message),
+                Ok(Some(message)) => {
+                    self.log.push(describe(&message));
+                    if wanted(&message) {
+                        return Some(message);
+                    }
+                    self.backlog.push_back(message);
+                }
                 Ok(None) | Err(_) => return None,
             }
         }

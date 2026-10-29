@@ -50,6 +50,8 @@ async fn tracer_one_person_runs_a_command_in_a_real_worker_and_gets_the_event() 
     assert!(matches!(closed, Reply::Ok(_)), "{closed:?}");
     let layout = client.event_where("layout", PATIENCE, |p| p["panes"].as_array().is_some_and(|p| p.len() == 1)).await;
     assert!(layout.is_some(), "a layout event follows the close");
+    // Printed for the record of the plan: the kinds, the ids and the sizes, no payload text.
+    println!("tracer messages at the socket: {:#?}", client.log());
     env.supervisor.shutdown().await;
 }
 
@@ -119,6 +121,7 @@ async fn tracer_the_first_frames_are_init_with_the_caps_then_attach_and_the_end_
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(script.ctls().iter().filter(|c| matches!(c, Ctl::Detach { .. })).count(), 1, "Detach is sent once");
+    println!("tracer controls seen by the worker: {:?}", script.ctls());
 }
 
 #[tokio::test(flavor = "multi_thread")]
