@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 pub const APPLICATION_ID: i64 = 0x6877_5356;
 
 /// The schema version this code writes and the newest one it reads.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// How long a statement waits for another writer before it fails with a busy error.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -395,11 +395,17 @@ CREATE INDEX unlock_methods_by_account ON unlock_methods (account_id);
 ";
 
 /// The migrations, indexed by the version they start from: entry `n` takes a database at version `n` to `n + 1`.
-const MIGRATIONS: [fn(&Connection) -> rusqlite::Result<()>; SCHEMA_VERSION as usize] = [migrate_to_1];
+const MIGRATIONS: [fn(&Connection) -> rusqlite::Result<()>; SCHEMA_VERSION as usize] = [migrate_to_1, migrate_to_2];
 
 fn migrate_to_1(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(SCHEMA_V1)?;
     conn.pragma_update(None, "application_id", APPLICATION_ID)
+}
+
+/// Version 2 adds the time of the last sign-in to an account: nullable, and `NULL` until the account signs in again. It
+/// takes no value from the sessions that exist, because a session row says when it was made, not that it was the newest.
+fn migrate_to_2(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("ALTER TABLE accounts ADD COLUMN last_signin INTEGER;")
 }
 
 /// Looks at the identity of an open database with queries that write nothing. A database that is empty and carries no
@@ -1165,9 +1171,22 @@ impl Tx<'_> {
         Ok(optional(stmt.query_row(params![i64::from(uid)], account_from_row))?)
     }
 
-    /// The time of the last sign-in of an account, or `None` when it never signed in.
-    pub fn account_last_signin(&self, _id: AccountId) -> Result<Option<i64>> {
-        Ok(None)
+    /// The time of the last sign-in of an account (the creation of its newest session), or `None` when it never signed in or
+    /// does not exist.
+    pub fn account_last_signin(&self, id: AccountId) -> Result<Option<i64>> {
+        let mut stmt = self.conn.prepare_cached("SELECT last_signin FROM accounts WHERE id = ?1")?;
+        Ok(optional(stmt.query_row(params![id.0], |r| r.get::<_, Option<i64>>(0)))?.flatten())
+    }
+
+    /// The accounts that are not deleted with their last sign-in, in the order they were made, at most `limit` of them.
+    pub fn account_list_signins(&self, limit: usize) -> Result<Vec<(Account, Option<i64>)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, username, handle, display_name, role, uid, state, created_at, last_signin \
+             FROM accounts WHERE state != 'deleted' ORDER BY id LIMIT ?1",
+        )?;
+        Ok(stmt
+            .query_map(params![cap(limit)], |row| Ok((account_from_row(row)?, row.get::<_, Option<i64>>(8)?)))?
+            .collect::<rusqlite::Result<_>>()?)
     }
 
     /// The number of administrators who can sign in.
@@ -1514,6 +1533,15 @@ impl Tx<'_> {
         Ok(stmt.query_map([], invite_from_row)?.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// How many invitations are open at `now`: not redeemed and not expired.
+    pub fn invite_open_count(&self, now: i64) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT count(*) FROM invites WHERE redeemed_at IS NULL AND expires_at > ?1",
+            params![now],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Withdraws an invitation that was not redeemed.
     pub fn invite_revoke(&self, invite_id: i64) -> Result<()> {
         let changed = self
@@ -1603,6 +1631,11 @@ impl Tx<'_> {
                  VALUES (?1, ?2, ?3, ?3, ?3, ?4, ?5, ?6, ?7)",
             )?
             .execute(params![&new.id_hash[..], new.account_id.0, new.now, new.method.as_str(), new.absolute_expires, device, addr])?;
+        // The newest session names the last sign-in. The stamp is written with the row, so a creation that fails leaves it as
+        // it was, and it moves forward only.
+        self.conn
+            .prepare_cached("UPDATE accounts SET last_signin = max(coalesce(last_signin, 0), ?1) WHERE id = ?2")?
+            .execute(params![new.now, new.account_id.0])?;
         Ok(Session {
             id_hash: new.id_hash,
             account_id: new.account_id,

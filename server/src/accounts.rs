@@ -42,6 +42,15 @@ pub const INVITE_DAYS: i64 = 7;
 /// How long an invitation works, in seconds.
 pub const INVITE_TTL_SECS: i64 = INVITE_DAYS * 24 * 3_600;
 
+/// The most days an invitation may be made to work.
+pub const MAX_INVITE_DAYS: i64 = 30;
+
+/// The most invitations that may be open (not redeemed, not expired) at once.
+pub const MAX_OPEN_INVITATIONS: i64 = 200;
+
+/// The most accounts the list of an administrator holds.
+pub const MAX_LISTED_ACCOUNTS: usize = 1_000;
+
 /// Why an operation was refused or failed. The texts are sentences; none holds a token, a name or a claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountError {
@@ -67,6 +76,8 @@ pub enum AccountError {
     Enrolment(&'static str),
     /// The operating system gave no random bytes.
     Random,
+    /// There are as many open invitations as there may be.
+    TooManyInvitations,
     /// The store failed.
     Store(StoreError),
 }
@@ -86,6 +97,7 @@ impl AccountError {
             AccountError::Invalid(_) => "invalid",
             AccountError::Enrolment(_) => "enrolment",
             AccountError::Random => "random",
+            AccountError::TooManyInvitations => "too_many",
             AccountError::Store(_) => "storage",
         }
     }
@@ -108,6 +120,7 @@ impl fmt::Display for AccountError {
             }
             AccountError::Invalid(reason) | AccountError::Enrolment(reason) => f.write_str(reason),
             AccountError::Random => f.write_str("the operating system gave no random bytes"),
+            AccountError::TooManyInvitations => f.write_str("there are too many open invitations"),
             AccountError::Store(e) => e.fmt(f),
         }
     }
@@ -267,6 +280,24 @@ pub trait AccountObserver: Send + Sync {
 struct NoObserver;
 
 impl AccountObserver for NoObserver {}
+
+/// One account of the administrator's list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed {
+    /// The account.
+    pub account: Account,
+    /// Unix seconds of the last sign-in, or `None` when the person never signed in.
+    pub last_signin: Option<i64>,
+}
+
+/// What an administrator sees of the accounts: the number of active administrators and the accounts that are not deleted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listing {
+    /// The active administrators.
+    pub admins: i64,
+    /// The accounts, in the order they were made.
+    pub accounts: Vec<Listed>,
+}
 
 /// The accounts of the server.
 pub struct Accounts {
@@ -428,10 +459,7 @@ impl Accounts {
 
     // ---- invitations ----
 
-    /// Makes an invitation. `for_account` is `None` for a new person, who chooses their username when they redeem it and
-    /// gets `role`; it is an active account for a person who needs another credential (the invitation then keeps that
-    /// account's role and username). The token is returned once and works for seven days. The actor must be an active
-    /// administrator, which is checked inside the transaction.
+    /// Makes an invitation that works for seven days. See [`Accounts::invite_create_days`].
     pub fn invite_create(
         &self,
         actor: AccountId,
@@ -439,9 +467,27 @@ impl Accounts {
         for_account: Option<AccountId>,
         role: Role,
     ) -> Result<Issued, AccountError> {
+        self.invite_create_days(actor, addr, for_account, role, INVITE_DAYS)
+    }
+
+    /// Makes an invitation that works for `days` (1 to [`MAX_INVITE_DAYS`]). `for_account` is `None` for a new person, who
+    /// chooses their username when they redeem it and gets `role`; it is an active account for a person who needs another
+    /// credential (the invitation then keeps that account's role and username). The token is returned once. The actor must be
+    /// an active administrator, and there must be fewer than [`MAX_OPEN_INVITATIONS`] open invitations; both are checked inside
+    /// the transaction.
+    pub fn invite_create_days(
+        &self,
+        actor: AccountId,
+        addr: Option<IpAddr>,
+        for_account: Option<AccountId>,
+        role: Role,
+        days: i64,
+    ) -> Result<Issued, AccountError> {
         let result = (|| {
+            let ttl = ttl_of(days)?;
             let (token, hash) = new_token(INVITE_PREFIX)?;
-            let expires_at = self.clock.unix().saturating_add(INVITE_TTL_SECS);
+            let now = self.clock.unix();
+            let expires_at = now.saturating_add(ttl);
             let role = self.run(|tx| {
                 require_admin(tx, actor)?;
                 let role = match for_account {
@@ -451,6 +497,7 @@ impl Accounts {
                     },
                     None => role,
                 };
+                require_room_for_invitation(tx, now)?;
                 tx.invite_create(&NewInvite { token_hash: hash, account_id: for_account, role, created_by: actor, expires_at })?;
                 Ok(role)
             })?;
@@ -458,7 +505,7 @@ impl Accounts {
         })();
         let details = [
             (DetailKey::Role, DetailValue::Text(result.as_ref().map_or("", |(_, role)| role.as_str()))),
-            (DetailKey::Days, DetailValue::Number(INVITE_DAYS)),
+            (DetailKey::Days, DetailValue::Number(days)),
         ];
         self.finish(Action::AccountInvite, Actor::Account(actor), addr, for_account, &result, &details);
         result.map(|(issued, _)| issued)
@@ -607,8 +654,30 @@ impl Accounts {
 
     // ---- what an administrator does to an account ----
 
-    /// Makes an account that has no credential, and one invitation for it that enrols the first one. The invitation token
-    /// is returned once. Only an active administrator can do this.
+    /// The accounts that are not deleted, with the time each last signed in, and the number of active administrators. Only an
+    /// active administrator may ask, which is checked in the read transaction. At most [`MAX_LISTED_ACCOUNTS`] accounts are
+    /// listed. A read: it writes no audit line.
+    pub fn list(&self, actor: AccountId) -> Result<Listing, AccountError> {
+        self.store
+            .read(|tx| {
+                let allowed = tx
+                    .account_get(actor)?
+                    .is_some_and(|a| a.state == AccountState::Active && a.role == Role::Admin);
+                if !allowed {
+                    return Ok(Err(AccountError::NotAllowed));
+                }
+                let admins = tx.admin_count_active()?;
+                let accounts = tx
+                    .account_list_signins(MAX_LISTED_ACCOUNTS)?
+                    .into_iter()
+                    .map(|(account, last_signin)| Listed { account, last_signin })
+                    .collect();
+                Ok(Ok(Listing { admins, accounts }))
+            })?
+    }
+
+    /// Makes an account that has no credential, and one invitation for it that enrols the first one and works for seven days.
+    /// See [`Accounts::create_account_days`].
     pub fn create_account(
         &self,
         actor: AccountId,
@@ -617,12 +686,29 @@ impl Accounts {
         display_name: &str,
         role: Role,
     ) -> Result<(Account, Issued), AccountError> {
+        self.create_account_days(actor, addr, username, display_name, role, INVITE_DAYS)
+    }
+
+    /// Makes an account that has no credential, and one invitation for it that enrols the first one and works for `days`
+    /// (1 to [`MAX_INVITE_DAYS`]). The invitation token is returned once. Only an active administrator can do this, and only
+    /// while there are fewer than [`MAX_OPEN_INVITATIONS`] open invitations.
+    pub fn create_account_days(
+        &self,
+        actor: AccountId,
+        addr: Option<IpAddr>,
+        username: &str,
+        display_name: &str,
+        role: Role,
+        days: i64,
+    ) -> Result<(Account, Issued), AccountError> {
         let result = (|| {
+            let ttl = ttl_of(days)?;
             let (token, hash) = new_token(INVITE_PREFIX)?;
             let now = self.clock.unix();
-            let expires_at = now.saturating_add(INVITE_TTL_SECS);
+            let expires_at = now.saturating_add(ttl);
             let account = self.run(|tx| {
                 require_admin(tx, actor)?;
+                require_room_for_invitation(tx, now)?;
                 let new = crate::store::NewAccount { username, display_name, role, handle: None };
                 let account = tx.account_create(&new, self.uid_range.clone(), now)?;
                 tx.invite_create(&NewInvite {
@@ -744,6 +830,21 @@ impl Accounts {
             Err(e) => Err(e),
         }
     }
+}
+
+/// The seconds an invitation of `days` days works, or an error for a number of days outside 1 to [`MAX_INVITE_DAYS`].
+fn ttl_of(days: i64) -> Result<i64, AccountError> {
+    if (1..=MAX_INVITE_DAYS).contains(&days) {
+        Ok(days * 24 * 3_600)
+    } else {
+        Err(AccountError::Invalid("an invitation works for 1 to 30 days"))
+    }
+}
+
+/// Fails with [`AccountError::TooManyInvitations`] when [`MAX_OPEN_INVITATIONS`] invitations are open at `now`. It runs in the
+/// transaction of the invitation it guards, so two callers cannot both take the last place.
+fn require_room_for_invitation(tx: &Tx<'_>, now: i64) -> Result<(), AccountError> {
+    if tx.invite_open_count(now)? >= MAX_OPEN_INVITATIONS { Err(AccountError::TooManyInvitations) } else { Ok(()) }
 }
 
 /// Fails with [`AccountError::NotAllowed`] unless `actor` is an active administrator. It reads inside the transaction of the
