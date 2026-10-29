@@ -27,7 +27,7 @@ use std::fs::{File, OpenOptions, Permissions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
@@ -38,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::unlock::{KEY_BYTES, Kek, UnlockError, random};
+use crate::wire::{CtlOutcome, StoreState};
 
 /// The text of the error of every locked operation.
 pub const LOCKED: &str = "secrets are locked";
@@ -678,74 +679,239 @@ pub fn store_path(home: &Path) -> PathBuf {
     home.join(DATA_DIR).join(STORE_FILE)
 }
 
+/// What the handle holds of the person's store.
+enum Held {
+    /// There is no store file.
+    None,
+    /// A store file, opened.
+    Store(Arc<EncryptedFileStore>),
+    /// A file is there and cannot be used. It counts as a locked store: nothing opens it and nothing replaces it but a reset.
+    Damaged,
+}
+
 /// The person's store as the worker holds it: absent, locked or open. It is the one secret store of the web host, and the
-/// controls of the supervisor change it.
+/// controls of the supervisor change it. Everything fails closed: with no store or a locked one the secret-using commands
+/// of the host answer [`LOCKED`].
 pub struct SecretsHandle {
     path: PathBuf,
+    held: Mutex<Held>,
+}
+
+impl fmt::Debug for SecretsHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SecretsHandle(..)")
+    }
+}
+
+/// How a failed store operation is told to the supervisor.
+fn outcome_of(error: &StoreError) -> CtlOutcome {
+    match error {
+        StoreError::Locked => CtlOutcome::Locked,
+        StoreError::Slot(_) | StoreError::Exists | StoreError::Limit(_) | StoreError::Invalid(_) => CtlOutcome::Refused,
+        StoreError::Format(_) | StoreError::Random | StoreError::Io(_) => CtlOutcome::Failed,
+    }
 }
 
 impl SecretsHandle {
     /// The handle for the home `home`: a store file that is there is found locked.
     pub fn open(home: &Path) -> SecretsHandle {
-        SecretsHandle { path: store_path(home) }
+        let path = store_path(home);
+        let held = Mutex::new(Self::find(&path));
+        SecretsHandle { path, held }
+    }
+
+    fn find(path: &Path) -> Held {
+        if std::fs::symlink_metadata(path).is_err() {
+            return Held::None;
+        }
+        match EncryptedFileStore::open(path) {
+            Ok(store) => Held::Store(Arc::new(store)),
+            Err(_) => Held::Damaged,
+        }
+    }
+
+    fn held(&self) -> MutexGuard<'_, Held> {
+        self.held.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// What the store is now.
-    pub fn state(&self) -> crate::wire::StoreState {
-        crate::wire::StoreState::Absent
+    pub fn state(&self) -> StoreState {
+        match &*self.held() {
+            Held::None => StoreState::Absent,
+            Held::Damaged => StoreState::Locked,
+            Held::Store(store) if store.is_unlocked() => StoreState::Unlocked,
+            Held::Store(_) => StoreState::Locked,
+        }
     }
 
-    pub fn provision(&self, _slots: &[(SlotKind, [u8; ID_BYTES], Kek)]) -> crate::wire::CtlOutcome {
-        crate::wire::CtlOutcome::Failed
+    /// Create the store with these slots (one to four) and leave it unlocked. A store exists already: refused.
+    pub fn provision(&self, slots: &[(SlotKind, [u8; ID_BYTES], Kek)]) -> CtlOutcome {
+        let mut held = self.held();
+        if !matches!(*held, Held::None) || slots.is_empty() || slots.len() > MAX_SLOTS {
+            return CtlOutcome::Refused;
+        }
+        let (kind, id, kek) = &slots[0];
+        let store = match EncryptedFileStore::create(&self.path, *kind, *id, kek) {
+            Ok(store) => store,
+            Err(e) => return outcome_of(&e),
+        };
+        for (kind, id, kek) in &slots[1..] {
+            if let Err(e) = store.add_slot(*kind, *id, kek) {
+                store.lock();
+                let _ = remove_store_files(&self.path);
+                return outcome_of(&e);
+            }
+        }
+        *held = Held::Store(Arc::new(store));
+        CtlOutcome::Done
     }
 
+    /// Add or replace the slot `(kind, id)`. With no store the call creates it, unless it carries an opening key, which has
+    /// nothing to open. A locked store is opened with `opening` for the change and is locked again afterwards.
     pub fn set_slot(
         &self,
-        _kind: SlotKind,
-        _id: [u8; ID_BYTES],
-        _kek: &Kek,
-        _opening: Option<(SlotKind, &Kek)>,
-    ) -> crate::wire::CtlOutcome {
-        crate::wire::CtlOutcome::Failed
+        kind: SlotKind,
+        id: [u8; ID_BYTES],
+        kek: &Kek,
+        opening: Option<(SlotKind, &Kek)>,
+    ) -> CtlOutcome {
+        let mut held = self.held();
+        let store = match &*held {
+            Held::None => {
+                if opening.is_some() {
+                    return CtlOutcome::Absent;
+                }
+                return match EncryptedFileStore::create(&self.path, kind, id, kek) {
+                    Ok(store) => {
+                        *held = Held::Store(Arc::new(store));
+                        CtlOutcome::Done
+                    }
+                    Err(e) => outcome_of(&e),
+                };
+            }
+            Held::Damaged => return CtlOutcome::Locked,
+            Held::Store(store) => store.clone(),
+        };
+        drop(held);
+        let was_unlocked = store.is_unlocked();
+        if !was_unlocked {
+            let Some((open_kind, open_kek)) = opening else { return CtlOutcome::Locked };
+            if let Err(e) = store.unlock(open_kind, open_kek) {
+                return outcome_of(&e);
+            }
+        }
+        let result = match store.slots() {
+            Ok(slots) if slots.iter().any(|(k, i)| *k == kind && *i == id) => store.replace_slot(kind, id, kek),
+            Ok(_) => store.add_slot(kind, id, kek),
+            Err(e) => Err(e),
+        };
+        if !was_unlocked {
+            store.lock();
+        }
+        match result {
+            Ok(()) => CtlOutcome::Done,
+            Err(e) => outcome_of(&e),
+        }
     }
 
-    pub fn remove_slot(&self, _kind: SlotKind, _id: [u8; ID_BYTES]) -> crate::wire::CtlOutcome {
-        crate::wire::CtlOutcome::Failed
+    /// Remove the slot `(kind, id)`. The store must be open; the last slot stays.
+    pub fn remove_slot(&self, kind: SlotKind, id: [u8; ID_BYTES]) -> CtlOutcome {
+        let store = match &*self.held() {
+            Held::None => return CtlOutcome::Absent,
+            Held::Damaged => return CtlOutcome::Locked,
+            Held::Store(store) => store.clone(),
+        };
+        match store.remove_slot(kind, id) {
+            Ok(()) => CtlOutcome::Done,
+            Err(e) => outcome_of(&e),
+        }
     }
 
-    pub fn unlock(&self, _kind: SlotKind, _kek: &Kek) -> crate::wire::CtlOutcome {
-        crate::wire::CtlOutcome::Failed
+    /// Open the store with the key of a slot of `kind`. A wrong key changes nothing.
+    pub fn unlock(&self, kind: SlotKind, kek: &Kek) -> CtlOutcome {
+        let store = match &*self.held() {
+            Held::None => return CtlOutcome::Absent,
+            Held::Damaged => return CtlOutcome::Locked,
+            Held::Store(store) => store.clone(),
+        };
+        match store.unlock(kind, kek) {
+            Ok(()) => CtlOutcome::Done,
+            Err(e) => outcome_of(&e),
+        }
     }
 
-    pub fn lock(&self) -> crate::wire::CtlOutcome {
-        crate::wire::CtlOutcome::Failed
+    /// Close the store: the data key is wiped.
+    pub fn lock(&self) -> CtlOutcome {
+        match &*self.held() {
+            Held::None => CtlOutcome::Absent,
+            Held::Damaged => CtlOutcome::Done,
+            Held::Store(store) => {
+                store.lock();
+                CtlOutcome::Done
+            }
+        }
     }
 
-    pub fn reset(&self) -> crate::wire::CtlOutcome {
-        crate::wire::CtlOutcome::Failed
+    /// Wipe the key and remove the store file and the files beside it.
+    pub fn reset(&self) -> CtlOutcome {
+        let mut held = self.held();
+        if let Held::Store(store) = &*held {
+            store.lock();
+        }
+        let removed = remove_store_files(&self.path);
+        *held = Self::find(&self.path);
+        if removed.is_ok() { CtlOutcome::Done } else { CtlOutcome::Failed }
     }
 
     /// The path of the store file.
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// The open store, or the error every secret-using command gets.
+    fn store(&self) -> Result<Arc<EncryptedFileStore>> {
+        match &*self.held() {
+            Held::Store(store) => Ok(store.clone()),
+            Held::None | Held::Damaged => Err(StoreError::Locked.into()),
+        }
+    }
 }
 
 impl SecretStore for SecretsHandle {
-    fn get(&self, _account: &str) -> Result<Option<String>> {
-        Ok(None)
+    fn get(&self, account: &str) -> Result<Option<String>> {
+        self.store()?.get(account)
     }
 
-    fn set(&self, _account: &str, _secret: &str) -> Result<()> {
-        Ok(())
+    fn set(&self, account: &str, secret: &str) -> Result<()> {
+        self.store()?.set(account, secret)
     }
 
-    fn delete(&self, _account: &str) -> Result<()> {
-        Ok(())
+    fn delete(&self, account: &str) -> Result<()> {
+        self.store()?.delete(account)
     }
 }
 
-/// Removes the store file and every file the store makes beside it.
-pub fn remove_store_files(_path: &Path) -> io::Result<()> {
-    Ok(())
+/// Removes the store file and every file the store makes beside it: the lock file and the temporary files a crash left.
+/// Links are removed as links, never followed, and a directory with such a name is left alone.
+pub fn remove_store_files(path: &Path) -> io::Result<()> {
+    let remove = |target: &Path| -> io::Result<()> {
+        match std::fs::symlink_metadata(target) {
+            Ok(meta) if !meta.is_dir() => std::fs::remove_file(target),
+            Ok(_) => Err(io::Error::other("a directory has the name of a store file")),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    };
+    let mut result = remove(path);
+    let lock = sidecar(path, ".lock");
+    result = result.and(remove(&lock));
+    let prefix = temp_prefix(path);
+    if let Ok(entries) = std::fs::read_dir(directory_of(path)) {
+        for item in entries.flatten() {
+            if item.file_name().to_string_lossy().starts_with(&prefix) {
+                result = result.and(remove(&item.path()));
+            }
+        }
+    }
+    result
 }

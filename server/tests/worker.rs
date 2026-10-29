@@ -175,6 +175,12 @@ fn store_file(rig: &Rig) -> std::path::PathBuf {
     rig.home.path().join(".holzwave").join("secrets.store")
 }
 
+/// A view without its revision number, which counts every view that was made.
+fn without_rev(mut view: Value) -> Value {
+    view.as_object_mut().expect("a view is an object").remove("rev");
+    view
+}
+
 fn res_text(res: &Res) -> String {
     match &res.body {
         ResBody::Ok(t) | ResBody::Err(t) => t.clone(),
@@ -494,7 +500,7 @@ fn sink_a_pane_that_lost_frames_is_asked_for_a_full_one_when_the_queue_is_low_ag
     let hooks = TestHooks {
         writer_gate: Some(gate.clone()),
         probe: Some(probe.clone()),
-        queue: Some(QueueLimits { soft: 6_000, hard: 10_000_000, low: 2_000 }),
+        queue: Some(QueueLimits { soft: 1_200, hard: 10_000_000, low: 800 }),
         ..TestHooks::default()
     };
     let mut rig = Rig::start_with(RigOptions {
@@ -508,9 +514,9 @@ fn sink_a_pane_that_lost_frames_is_asked_for_a_full_one_when_the_queue_is_low_ag
     let deadline = std::time::Instant::now() + PATIENCE;
     while probe.repaired().is_empty() && std::time::Instant::now() < deadline {
         // The repair waits for the queue to go low, which happens when the writer is let through.
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(300));
         gate.release();
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
         gate.hold();
     }
     gate.release();
@@ -528,6 +534,7 @@ fn start_titled_pane(rig: &mut Rig) -> u64 {
     let first = first_pane(&rig.ok(2, "get_layout", json!({})));
     rig.ok(2, "start_pane", json!({"pane": first, "cols": 80, "rows": 24, "cell_w": 8, "cell_h": 16}));
     rig.wait_event("title", |_, payload| payload["pane"] == json!(first));
+    rig.wait_event("cwd", |_, payload| payload["pane"] == json!(first));
     first
 }
 
@@ -553,7 +560,9 @@ fn replay_the_page_asking_for_it_gets_it_on_its_own_socket_and_other_commands_st
     rig.ok(4, "window_ready", json!({}));
     rig.wait_event("title", |e, _| e.target == 4);
     // A layout change caused by a command of socket 4 still goes to everybody.
+    let first = first_pane(&rig.ok(4, "get_layout", json!({})));
     rig.ok(4, "split", json!({"column": false}));
+    rig.ok(4, "close_pane", json!({"pane": first}));
     let layout = rig.wait_event("layout", |e, _| e.target == 0);
     assert_eq!(layout.target, 0);
     assert!(rig.events("layout").iter().all(|e| e.target == 0));
@@ -584,11 +593,11 @@ fn host_the_pane_cap_of_init_refuses_the_next_split_with_the_sentence_and_change
     rig.init_with(3, 0);
     rig.ok(2, "split", json!({"column": false}));
     rig.ok(2, "split", json!({"column": true}));
-    let before = rig.ok(2, "get_layout", json!({}));
+    let before = without_rev(rig.ok(2, "get_layout", json!({})));
     let res = rig.call(2, "split", json!({"column": false}));
     let ResBody::Err(text) = &res.body else { panic!("{res:?}") };
     assert!(text.contains("this server allows 3 panes per person; close one to open another"), "{text}");
-    assert_eq!(rig.ok(2, "get_layout", json!({})), before);
+    assert_eq!(without_rev(rig.ok(2, "get_layout", json!({}))), before);
     rig.finish();
 }
 

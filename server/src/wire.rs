@@ -95,9 +95,37 @@ pub const KIND_NOTE: u8 = 5;
 pub const OP_INIT: u8 = 1;
 /// The operation number of `Attach`.
 pub const OP_ATTACH: u8 = 2;
+/// The operation number of `Detach`.
+pub const OP_DETACH: u8 = 3;
+/// The operation number of `Unlock`.
+pub const OP_UNLOCK: u8 = 4;
+/// The operation number of `Lock`.
+pub const OP_LOCK: u8 = 5;
+/// The operation number of `Shutdown`.
+pub const OP_SHUTDOWN: u8 = 6;
+/// The operation number of `ResetSecrets`.
+pub const OP_RESET_SECRETS: u8 = 7;
+/// The first operation number reserved for the file routes.
+pub const OP_RESERVED_FIRST: u8 = 8;
+/// The last operation number reserved for the file routes.
+pub const OP_RESERVED_LAST: u8 = 11;
+/// The operation number of `Provision`.
+pub const OP_PROVISION: u8 = 12;
+/// The operation number of `SetSlot`.
+pub const OP_SET_SLOT: u8 = 13;
+/// The operation number of `RemoveSlot`.
+pub const OP_REMOVE_SLOT: u8 = 14;
 
 /// The operation number of the note `Ready`.
 pub const NOTE_READY: u8 = 1;
+/// The operation number of the note `StoreState`.
+pub const NOTE_STORE_STATE: u8 = 2;
+/// The operation number of the note `PaneCount`.
+pub const NOTE_PANE_COUNT: u8 = 3;
+/// The operation number of the note `Exiting`.
+pub const NOTE_EXITING: u8 = 4;
+/// The operation number of the note `CtlDone`.
+pub const NOTE_CTL_DONE: u8 = 5;
 
 /// The protocol version of the `Init` control.
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -221,6 +249,16 @@ impl Key {
     /// A key from 32 bytes. The caller wipes its own copy.
     pub fn from_bytes(bytes: &[u8; KEY_BYTES]) -> Key {
         Key(Zeroizing::new(*bytes))
+    }
+
+    /// A key from a slice of exactly 32 bytes.
+    fn from_slice(bytes: &[u8]) -> Result<Key, WireError> {
+        let mut raw = Zeroizing::new([0u8; KEY_BYTES]);
+        if bytes.len() != KEY_BYTES {
+            return Err(WireError::Truncated);
+        }
+        raw.copy_from_slice(bytes);
+        Ok(Key::from_bytes(&raw))
     }
 
     /// The bytes, for the code that uses the key and nothing else.
@@ -426,6 +464,22 @@ impl<'a> Fields<'a> {
         }
     }
 
+    fn kind(&mut self) -> Result<SlotKind, WireError> {
+        SlotKind::from_byte(self.u8()?).ok_or(WireError::BadValue("a key kind is not 1, 2, 3 or 4"))
+    }
+
+    fn key(&mut self) -> Result<Key, WireError> {
+        Key::from_slice(self.take(KEY_BYTES)?)
+    }
+
+    fn slot_id(&mut self) -> Result<[u8; SLOT_ID_BYTES], WireError> {
+        self.take(SLOT_ID_BYTES)?.try_into().map_err(|_| WireError::Truncated)
+    }
+
+    fn slot_key(&mut self) -> Result<SlotKey, WireError> {
+        Ok(SlotKey { kind: self.kind()?, id: self.slot_id()?, key: self.key()? })
+    }
+
     /// Everything that is left.
     fn rest(&mut self) -> &'a [u8] {
         let rest = &self.bytes[self.at..];
@@ -445,6 +499,12 @@ fn text(bytes: &[u8]) -> Result<String, WireError> {
 
 fn nonzero(socket: u32) -> Result<u32, WireError> {
     if socket == 0 { Err(WireError::BadSocket) } else { Ok(socket) }
+}
+
+fn put_slot_key(out: &mut Vec<u8>, slot: &SlotKey) {
+    out.push(slot.kind.byte());
+    out.extend_from_slice(&slot.id);
+    out.extend_from_slice(slot.key.expose());
 }
 
 impl Frame {
@@ -497,8 +557,67 @@ impl Frame {
                 out.extend_from_slice(&[KIND_CTL, OP_ATTACH]);
                 out.extend_from_slice(&nonzero(*socket)?.to_be_bytes());
             }
+            Frame::Ctl(Ctl::Detach { socket }) => {
+                out.extend_from_slice(&[KIND_CTL, OP_DETACH]);
+                out.extend_from_slice(&nonzero(*socket)?.to_be_bytes());
+            }
+            Frame::Ctl(Ctl::Unlock { ctl, kind, key }) => {
+                out.extend_from_slice(&[KIND_CTL, OP_UNLOCK]);
+                out.extend_from_slice(&ctl.to_be_bytes());
+                out.push(kind.byte());
+                out.extend_from_slice(key.expose());
+            }
+            Frame::Ctl(Ctl::Lock { ctl }) => {
+                out.extend_from_slice(&[KIND_CTL, OP_LOCK]);
+                out.extend_from_slice(&ctl.to_be_bytes());
+            }
+            Frame::Ctl(Ctl::Shutdown) => out.extend_from_slice(&[KIND_CTL, OP_SHUTDOWN]),
+            Frame::Ctl(Ctl::ResetSecrets { ctl }) => {
+                out.extend_from_slice(&[KIND_CTL, OP_RESET_SECRETS]);
+                out.extend_from_slice(&ctl.to_be_bytes());
+            }
+            Frame::Ctl(Ctl::Provision { ctl, slots }) => {
+                if slots.len() > MAX_PROVISION_SLOTS {
+                    return Err(WireError::BadValue("a provision carries at most four slot keys"));
+                }
+                out.extend_from_slice(&[KIND_CTL, OP_PROVISION]);
+                out.extend_from_slice(&ctl.to_be_bytes());
+                out.push(u8::try_from(slots.len()).map_err(|_| WireError::BadValue("too many slot keys"))?);
+                for slot in slots {
+                    put_slot_key(out, slot);
+                }
+            }
+            Frame::Ctl(Ctl::SetSlot { ctl, slot, opening }) => {
+                out.extend_from_slice(&[KIND_CTL, OP_SET_SLOT]);
+                out.extend_from_slice(&ctl.to_be_bytes());
+                put_slot_key(out, slot);
+                match opening {
+                    None => out.push(0),
+                    Some(opening) => {
+                        out.push(1);
+                        out.push(opening.kind.byte());
+                        out.extend_from_slice(opening.key.expose());
+                    }
+                }
+            }
+            Frame::Ctl(Ctl::RemoveSlot { ctl, kind, id }) => {
+                out.extend_from_slice(&[KIND_CTL, OP_REMOVE_SLOT]);
+                out.extend_from_slice(&ctl.to_be_bytes());
+                out.push(kind.byte());
+                out.extend_from_slice(id);
+            }
             Frame::Note(Note::Ready) => out.extend_from_slice(&[KIND_NOTE, NOTE_READY]),
-            Frame::Ctl(_) | Frame::Note(_) => return Err(WireError::BadValue("this frame is not written yet")),
+            Frame::Note(Note::StoreState(state)) => out.extend_from_slice(&[KIND_NOTE, NOTE_STORE_STATE, *state as u8]),
+            Frame::Note(Note::PaneCount(count)) => {
+                out.extend_from_slice(&[KIND_NOTE, NOTE_PANE_COUNT]);
+                out.extend_from_slice(&count.to_be_bytes());
+            }
+            Frame::Note(Note::Exiting(reason)) => out.extend_from_slice(&[KIND_NOTE, NOTE_EXITING, *reason as u8]),
+            Frame::Note(Note::CtlDone { ctl, outcome }) => {
+                out.extend_from_slice(&[KIND_NOTE, NOTE_CTL_DONE]);
+                out.extend_from_slice(&ctl.to_be_bytes());
+                out.push(*outcome as u8);
+            }
         }
         if out.len() - start > MAX_PAYLOAD {
             return Err(WireError::TooLarge(out.len() - start));
@@ -556,11 +675,72 @@ impl Frame {
                         Frame::Ctl(Ctl::Init { version, max_panes, max_scrollback_lines })
                     }
                     OP_ATTACH => Frame::Ctl(Ctl::Attach { socket: fields.socket()? }),
+                    OP_DETACH => Frame::Ctl(Ctl::Detach { socket: fields.socket()? }),
+                    OP_UNLOCK => {
+                        let ctl = fields.u64()?;
+                        let kind = fields.kind()?;
+                        Frame::Ctl(Ctl::Unlock { ctl, kind, key: fields.key()? })
+                    }
+                    OP_LOCK => Frame::Ctl(Ctl::Lock { ctl: fields.u64()? }),
+                    OP_SHUTDOWN => Frame::Ctl(Ctl::Shutdown),
+                    OP_RESET_SECRETS => Frame::Ctl(Ctl::ResetSecrets { ctl: fields.u64()? }),
+                    OP_RESERVED_FIRST..=OP_RESERVED_LAST => return Err(WireError::ReservedOp(op)),
+                    OP_PROVISION => {
+                        let ctl = fields.u64()?;
+                        let count = usize::from(fields.u8()?);
+                        if count > MAX_PROVISION_SLOTS {
+                            return Err(WireError::BadValue("a provision carries at most four slot keys"));
+                        }
+                        let mut slots = Vec::with_capacity(count);
+                        for _ in 0..count {
+                            slots.push(fields.slot_key()?);
+                        }
+                        Frame::Ctl(Ctl::Provision { ctl, slots })
+                    }
+                    OP_SET_SLOT => {
+                        let ctl = fields.u64()?;
+                        let slot = fields.slot_key()?;
+                        let opening = match fields.u8()? {
+                            0 => None,
+                            1 => Some(OpeningKey { kind: fields.kind()?, key: fields.key()? }),
+                            _ => return Err(WireError::BadValue("the opening-key flag is not 0 or 1")),
+                        };
+                        Frame::Ctl(Ctl::SetSlot { ctl, slot, opening })
+                    }
+                    OP_REMOVE_SLOT => {
+                        let ctl = fields.u64()?;
+                        let kind = fields.kind()?;
+                        Frame::Ctl(Ctl::RemoveSlot { ctl, kind, id: fields.slot_id()? })
+                    }
                     op => return Err(WireError::UnknownOp { kind, op }),
                 }
             }
             KIND_NOTE => match fields.u8()? {
                 NOTE_READY => Frame::Note(Note::Ready),
+                NOTE_STORE_STATE => Frame::Note(Note::StoreState(match fields.u8()? {
+                    0 => StoreState::Absent,
+                    1 => StoreState::Locked,
+                    2 => StoreState::Unlocked,
+                    _ => return Err(WireError::BadValue("a store state is not 0, 1 or 2")),
+                })),
+                NOTE_PANE_COUNT => Frame::Note(Note::PaneCount(fields.u32()?)),
+                NOTE_EXITING => Frame::Note(Note::Exiting(match fields.u8()? {
+                    0 => ExitReason::Clean,
+                    1 => ExitReason::Failure,
+                    _ => return Err(WireError::BadValue("an exit reason is not 0 or 1")),
+                })),
+                NOTE_CTL_DONE => {
+                    let ctl = fields.u64()?;
+                    let outcome = match fields.u8()? {
+                        0 => CtlOutcome::Done,
+                        1 => CtlOutcome::Locked,
+                        2 => CtlOutcome::Refused,
+                        3 => CtlOutcome::Failed,
+                        4 => CtlOutcome::Absent,
+                        _ => return Err(WireError::BadValue("a control outcome is not 0 to 4")),
+                    };
+                    Frame::Note(Note::CtlDone { ctl, outcome })
+                }
                 op => return Err(WireError::UnknownOp { kind, op }),
             },
             kind => return Err(WireError::UnknownKind(kind)),

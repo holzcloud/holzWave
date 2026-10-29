@@ -1,24 +1,30 @@
-//! The worker's run loop: setup, the self-check of its own privileges, and shutdown.
+//! The worker's run loop: setup from the first frame, the commands and controls that follow, and the end.
+//!
+//! One thread reads the link and never blocks on anything but the link: a command is handed to the dispatcher, a control
+//! is a short call on the secret store, and everything the worker says goes through the outbound queue to the writer
+//! thread. The run ends when the link ends, when the supervisor asks for it, or when the worker cannot go on.
 
 use std::fmt;
 use std::fs::DirBuilder;
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Sender};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
-use holzwave_core::secrets::{MemoryStore, SecretStore};
-use holzwave_host::commands::registry::{Mode, Outcome};
+use holzwave_core::secrets::SecretStore;
 use holzwave_host::local_network::{Source, Unsupported};
 use holzwave_host::seams::{Host, HostLimits, Platform};
 use holzwave_host::state::{AppCore, ShellSpec};
 
-use crate::wire::{Ctl, Frame, Note, PROTOCOL_VERSION, read_frame};
-use crate::worker::dispatch::{self, ChannelSink, Item, QueueLimits};
+use crate::log::Level;
+use crate::wire::{Ctl, ExitReason, Frame, Note, PROTOCOL_VERSION, StoreState, read_frame};
+pub use crate::worker::dispatch::{Gate, HookRow, Probe, QueueLimits};
+use crate::worker::dispatch::{self, Dispatcher, Outbound, Pin, ServerSink, WorkerLog};
+pub use crate::worker::secretstore::DATA_DIR;
+use crate::worker::secretstore::SecretsHandle;
 
-/// The name of the worker's data directory inside the home.
-pub const DATA_DIR: &str = ".holzwave";
+/// The command a page sends when it is ready for the state of the window; the events it causes are for that page alone.
+pub const REPLAY_COMMAND: &str = "window_ready";
 
 /// What the worker needs to know about its surroundings, and nothing a frame can change.
 #[derive(Clone, Debug)]
@@ -29,45 +35,6 @@ pub struct WorkerEnv {
     pub tmp: PathBuf,
     /// The program a pane runs.
     pub shell: ShellSpec,
-}
-
-pub use crate::worker::dispatch::Gate;
-
-/// What the worker records for a test: the thread every command ran on, the panes it asked a full frame for.
-#[derive(Debug, Default)]
-pub struct Probe {
-    calls: Mutex<Vec<(String, String)>>,
-    repaired: Mutex<Vec<u64>>,
-}
-
-impl Probe {
-    pub fn new() -> Arc<Probe> {
-        Arc::new(Probe::default())
-    }
-
-    /// `(command, thread name)` for every command that ran, in the order they started.
-    pub fn calls(&self) -> Vec<(String, String)> {
-        self.calls.lock().unwrap_or_else(PoisonError::into_inner).clone()
-    }
-
-    /// The panes the worker asked a full frame for after it dropped frames, in order.
-    pub fn repaired(&self) -> Vec<u64> {
-        self.repaired.lock().unwrap_or_else(PoisonError::into_inner).clone()
-    }
-}
-
-/// A command that is not in the table of the host, for a test: it runs where its mode says.
-#[derive(Clone)]
-pub struct HookRow {
-    pub name: &'static str,
-    pub mode: Mode,
-    pub run: Arc<dyn Fn() -> Outcome + Send + Sync>,
-}
-
-impl HookRow {
-    pub fn new(name: &'static str, mode: Mode, run: impl Fn() -> Outcome + Send + Sync + 'static) -> HookRow {
-        HookRow { name, mode, run: Arc::new(run) }
-    }
 }
 
 /// Switches of the integration tests, passed to [`run_with`]; the product passes the default, which changes nothing.
@@ -102,9 +69,10 @@ pub enum RunEnd {
     Failed,
 }
 
-/// The host of a person's core: the web platform, no local network source, no text scale, the caps of `Init`.
+/// The host of a person's core: the web platform, the store of the controls, no local network source, no text scale, the
+/// caps of `Init`.
 struct WebHost {
-    secrets: Arc<dyn SecretStore>,
+    secrets: Arc<SecretsHandle>,
     limits: HostLimits,
 }
 
@@ -144,54 +112,87 @@ pub fn run(link: UnixStream, env: WorkerEnv) -> RunEnd {
 }
 
 /// [`run`] with the switches of a test.
-pub fn run_with(link: UnixStream, env: WorkerEnv, _hooks: TestHooks) -> RunEnd {
+pub fn run_with(link: UnixStream, env: WorkerEnv, hooks: TestHooks) -> RunEnd {
     let Ok(write_half) = link.try_clone() else { return RunEnd::Failed };
+    let queue = Outbound::new(hooks.queue.unwrap_or_default());
+    let writer = dispatch::spawn_writer(write_half, queue.clone(), hooks.writer_gate.clone());
     let mut reader = link;
-    let (out, items) = channel::<Item>();
-    let writer = dispatch::spawn_item_writer(write_half, items);
-    let end = serve(&mut reader, &env, &out);
-    let _ = out.send(Item::Stop);
+    let log = WorkerLog::new(hooks.log.clone());
+    let end = serve(&mut reader, &env, &queue, &hooks, &log);
+    queue.close();
     let _ = writer.join();
-    end
+    if queue.is_dead() { RunEnd::Failed } else { end }
 }
 
+/// Everything that exists once `Init` has come.
 struct Running {
     core: Arc<AppCore>,
-    jobs: Sender<dispatch::Job>,
+    sink: Arc<ServerSink>,
+    secrets: Arc<SecretsHandle>,
+    dispatcher: Dispatcher,
+    /// The store state the supervisor was told last.
+    told: StoreState,
 }
 
-fn serve(reader: &mut UnixStream, env: &WorkerEnv, out: &Sender<Item>) -> RunEnd {
+/// Ends the run with a failure note.
+fn fail(queue: &Outbound, log: &WorkerLog, why: &'static str) -> RunEnd {
+    log.event(Level::Warn, "worker_failed", &[("reason", why)]);
+    queue.push(Frame::Note(Note::Exiting(ExitReason::Failure)));
+    RunEnd::Failed
+}
+
+fn serve(
+    reader: &mut UnixStream,
+    env: &WorkerEnv,
+    queue: &Arc<Outbound>,
+    hooks: &TestHooks,
+    log: &WorkerLog,
+) -> RunEnd {
     let mut running: Option<Running> = None;
     let end = loop {
         let frame = match read_frame(reader) {
             Ok(Some(frame)) => frame,
             Ok(None) => break RunEnd::LinkClosed,
-            Err(_) => break RunEnd::Failed,
+            Err(_) => break fail(queue, log, "bad frame"),
         };
-        match (frame, running.as_ref()) {
+        match (frame, running.as_mut()) {
             (Frame::Ctl(Ctl::Init { version, max_panes, max_scrollback_lines }), None) => {
                 if version != PROTOCOL_VERSION {
-                    break RunEnd::Failed;
+                    break fail(queue, log, "protocol version");
                 }
                 let limits = HostLimits { max_panes: cap(max_panes), max_scrollback_lines: cap(max_scrollback_lines) };
-                let Some(core) = build_core(env, out, limits) else { break RunEnd::Failed };
-                let (jobs, queue) = channel();
-                dispatch::spawn_dispatcher(core.clone(), queue, out.clone());
-                running = Some(Running { core, jobs });
-                let _ = out.send(Item::Frame(Frame::Note(Note::Ready)));
+                let Some(started) = start(env, queue, hooks, log, limits) else { break fail(queue, log, "setup") };
+                queue.push(Frame::Note(Note::Ready));
+                let state = started.secrets.state();
+                queue.push(Frame::Note(Note::StoreState(state)));
+                if let Ok(view) = started.core.view_in(dispatch::WINDOW) {
+                    started.sink.announce_panes(view.workspaces.iter().map(|w| w.panes).sum());
+                }
+                running = Some(Running { told: state, ..started });
             }
-            (Frame::Cmd(cmd), Some(running)) => match dispatch::accept(&cmd) {
-                Ok(job) => {
-                    let _ = running.jobs.send(job);
+            (Frame::Cmd(cmd), Some(running)) => {
+                if let Err(answer) = running.dispatcher.submit(&cmd) {
+                    queue.push(answer);
                 }
-                Err(refusal) => {
-                    let _ = out.send(Item::Frame(refusal));
-                }
-            },
+            }
             (Frame::Cmd(cmd), None) => {
-                let _ = out.send(Item::Frame(dispatch::refusal(cmd.socket, cmd.request, "the worker is not ready")));
+                queue.push(dispatch::refusal(cmd.socket, cmd.request, "the worker is not ready"));
             }
-            _ => {}
+            (Frame::Ctl(Ctl::Shutdown), Some(running)) => {
+                running.core.shutdown();
+                queue.push(Frame::Note(Note::Exiting(ExitReason::Clean)));
+                break RunEnd::Shutdown;
+            }
+            (Frame::Ctl(Ctl::Attach { socket }), Some(running)) => {
+                // The replay of titles and directories is for the page that attached alone.
+                let _pin = Pin::to(socket);
+                let _ = running.core.window_ready_in(dispatch::WINDOW);
+            }
+            (Frame::Ctl(Ctl::Detach { .. }), Some(_)) => {}
+            (Frame::Ctl(Ctl::Init { .. }), Some(_)) => break fail(queue, log, "second init"),
+            (Frame::Ctl(control), Some(running)) => control_store(running, queue, control),
+            // A second Init, a frame before Init, or a frame that only the worker writes.
+            _ => break fail(queue, log, "unexpected frame"),
         }
     };
     if let Some(running) = running {
@@ -200,12 +201,65 @@ fn serve(reader: &mut UnixStream, env: &WorkerEnv, out: &Sender<Item>) -> RunEnd
     end
 }
 
-fn build_core(env: &WorkerEnv, out: &Sender<Item>, limits: HostLimits) -> Option<Arc<AppCore>> {
+/// A control of the secret store: the change, the new state when it changed, and the answer.
+fn control_store(running: &mut Running, queue: &Outbound, control: Ctl) {
+    let (ctl, outcome) = match control {
+        Ctl::Unlock { ctl, kind, key } => (ctl, running.secrets.unlock(kind, &key.to_kek())),
+        Ctl::Lock { ctl } => (ctl, running.secrets.lock()),
+        Ctl::ResetSecrets { ctl } => (ctl, running.secrets.reset()),
+        Ctl::Provision { ctl, slots } => {
+            let keys: Vec<_> = slots.iter().map(|s| (s.kind, s.id, s.key.to_kek())).collect();
+            (ctl, running.secrets.provision(&keys))
+        }
+        Ctl::SetSlot { ctl, slot, opening } => {
+            let opening_kek = opening.as_ref().map(|o| (o.kind, o.key.to_kek()));
+            let outcome = running.secrets.set_slot(
+                slot.kind,
+                slot.id,
+                &slot.key.to_kek(),
+                opening_kek.as_ref().map(|(kind, kek)| (*kind, kek)),
+            );
+            (ctl, outcome)
+        }
+        Ctl::RemoveSlot { ctl, kind, id } => (ctl, running.secrets.remove_slot(kind, id)),
+        // The other controls are handled by the loop.
+        Ctl::Init { .. } | Ctl::Attach { .. } | Ctl::Detach { .. } | Ctl::Shutdown => return,
+    };
+    let state = running.secrets.state();
+    if state != running.told {
+        running.told = state;
+        queue.push(Frame::Note(Note::StoreState(state)));
+    }
+    queue.push(Frame::Note(Note::CtlDone { ctl, outcome }));
+}
+
+/// Builds the core of the person and the threads that run its commands.
+fn start(
+    env: &WorkerEnv,
+    queue: &Arc<Outbound>,
+    hooks: &TestHooks,
+    log: &WorkerLog,
+    limits: HostLimits,
+) -> Option<Running> {
     let dir = env.home.join(DATA_DIR);
     if !dir.is_dir() {
         DirBuilder::new().mode(0o700).create(&dir).ok()?;
     }
-    let host = WebHost { secrets: Arc::new(MemoryStore::default()), limits };
-    let sink = Arc::new(ChannelSink::new(out.clone()));
-    Some(AppCore::new_with_host(dir, sink, env.shell.clone(), None, None, Arc::new(host)))
+    let secrets = Arc::new(SecretsHandle::open(&env.home));
+    let host = WebHost { secrets: secrets.clone(), limits };
+    let sink = Arc::new(ServerSink::with_log(queue.clone(), log.clone()));
+    let core = AppCore::new_with_host(dir, sink.clone(), env.shell.clone(), None, None, Arc::new(host));
+    let repair_core = Arc::downgrade(&core);
+    let probe = hooks.probe.clone();
+    queue.set_repair(move |pane| {
+        if let Some(probe) = &probe {
+            probe.record_repair(pane);
+        }
+        if let Some(core) = repair_core.upgrade() {
+            let _ = core.request_full(pane);
+        }
+    });
+    let dispatcher =
+        Dispatcher::start(&core, &sink, queue, hooks.rows.clone(), hooks.probe.clone(), log.clone(), REPLAY_COMMAND);
+    Some(Running { core, sink, secrets, dispatcher, told: StoreState::Absent })
 }

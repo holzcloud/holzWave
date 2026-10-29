@@ -618,11 +618,23 @@ impl Noise {
 fn ten_thousand_garbage_payloads_never_panic_and_the_good_ones_survive_a_round_trip() {
     let mut noise = Noise(0x9E37_79B9_7F4A_7C15);
     let mut decoded = 0usize;
+    let real: Vec<Vec<u8>> = fixed_frames().iter().map(payload).collect();
     for case in 0..10_000 {
         let length = usize::try_from(noise.below(120)).expect("small");
         let mut bytes: Vec<u8> = (0..length).map(|_| u8::try_from(noise.below(256)).expect("a byte")).collect();
+        // A third of the cases are a real frame with one byte changed, so the deep branches of the decoder run.
+        if noise.below(3) == 0 {
+            let which = usize::try_from(noise.below(real.len() as u64)).expect("small");
+            bytes = real[which].clone();
+            let at = usize::try_from(noise.below(bytes.len() as u64)).expect("small");
+            match noise.below(3) {
+                0 => bytes[at] = u8::try_from(noise.below(256)).expect("a byte"),
+                1 => bytes.truncate(at),
+                _ => bytes.push(0),
+            }
+        }
         // Most cases start like a real frame, so the deeper branches of the decoder run.
-        if length >= 2 && noise.below(10) < 8 {
+        if bytes.len() >= 2 && length >= 2 && noise.below(10) < 2 {
             bytes[0] = u8::try_from(1 + noise.below(5)).expect("a kind");
             if bytes[0] == 4 || bytes[0] == 5 {
                 bytes[1] = u8::try_from(noise.below(18)).expect("an operation");
