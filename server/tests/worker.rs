@@ -1749,6 +1749,8 @@ mod on_linux {
             assert!(Instant::now() < deadline, "the shell never wrote its descriptor listing");
             std::thread::sleep(Duration::from_millis(50));
         };
+        // Printed for the record: the descriptors of the pane's own shell (the last column is where each one points).
+        println!("pane shell descriptors:\n{text}");
         assert!(!text.contains("socket:"), "the pane's shell holds a socket:\n{text}");
         started.ours.shutdown(std::net::Shutdown::Both).expect("close");
         assert_eq!(wait_exit(&mut started.child).code(), Some(0));
