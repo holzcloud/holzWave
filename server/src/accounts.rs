@@ -366,10 +366,28 @@ impl Accounts {
         result
     }
 
-    /// Looks at a bootstrap token without spending it: `Ok` when [`Accounts::redeem_bootstrap`] would accept it now. Not
-    /// implemented yet.
-    pub fn peek_bootstrap(&self, _token: &str) -> Result<(), AccountError> {
-        Err(AccountError::NotRedeemable)
+    /// Runs `f` in one write transaction that is always rolled back, and answers what `f` answered. A peek asks the question of
+    /// a redemption with the very query a redemption uses (an immediate transaction, the conditional update of the token), and
+    /// then gives the token back, so nothing is spent, created or audited. The write lock is held for that one query only.
+    fn peek<T>(&self, f: impl FnOnce(&Tx<'_>) -> Result<T, AccountError>) -> Result<T, AccountError> {
+        let mut answer: Option<Result<T, AccountError>> = None;
+        let written = self.store.write(|tx| {
+            answer = Some(f(tx));
+            Err::<(), StoreError>(StoreError::Invalid("a peek is always rolled back"))
+        });
+        match (answer, written) {
+            (Some(answer), _) => answer,
+            (None, Err(e)) => Err(e.into()),
+            (None, Ok(())) => Err(AccountError::NotRedeemable),
+        }
+    }
+
+    /// Looks at a bootstrap token without spending it: `Ok` when [`Accounts::redeem_bootstrap`] would accept it now, otherwise
+    /// the one [`AccountError::NotRedeemable`] for an unknown, expired, spent and no-longer-allowed token. No audit line.
+    pub fn peek_bootstrap(&self, token: &str) -> Result<(), AccountError> {
+        let hash = presented_hash(BOOTSTRAP_PREFIX, token).ok_or(AccountError::NotRedeemable)?;
+        let now = self.clock.unix();
+        self.peek(|tx| tx.bootstrap_redeem(&hash, now).map_err(AccountError::from))
     }
 
     // ---- invitations ----
