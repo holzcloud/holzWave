@@ -4,8 +4,11 @@
 //! then the key, letters in upper case. The webview builds that string from a `KeyboardEvent`, the keybinding
 //! editor writes it to `settings.json`, and [`Chord::parse`] reads it back, so all three agree on one spelling.
 //!
-//! std only. There are three default tables, chosen by an OS name (`macos`, `windows`, anything else is Linux) in
-//! [`actions_for`]; [`actions`] is the one for the OS this build runs on.
+//! std only. There are four default tables, chosen by a name (`macos`, `windows`, `web`, anything else is Linux) in
+//! [`actions_for`]; [`actions`] is the one for the OS this build runs on. The `web` table is the Linux table with
+//! three chords moved: a browser keeps `Ctrl+W`, `Ctrl+T`, `Ctrl+N`, `Ctrl+Tab`, `Ctrl+PageUp` and `Ctrl+PageDown`
+//! for itself, and also `Ctrl+Shift+W`, `Ctrl+Shift+T` and `Ctrl+Shift+N` (close window, reopen tab, private
+//! window), which sit under close pane, new tab and new workspace on Linux. See [`WEB_REBINDS`].
 //!
 //! macOS keeps `Cmd` for everything. Windows and Linux never use `Cmd` (the Super key: the OS claims it) and never a
 //! plain `Ctrl+letter` or `Alt+letter` (those belong to the shell: `Ctrl+C` is SIGINT, `Ctrl+D` is EOF). They use
@@ -338,20 +341,39 @@ static EDIT_ACTIONS_WINDOWS: [ActionInfo; 6] = [
     unbound("edit.delete_to_line_start", "Delete to the start of the line"),
 ];
 
-/// Every action with its default chord on the OS of that name (`macos`, `windows`; any other name is Linux, the
-/// spelling of `std::env::consts::OS` and of the app's `app_info`). The one place that chooses the default table: the
-/// base part of the platform, then its line-editing actions. Each table is built once.
+/// The three defaults of the Linux table that the browser build replaces, as `(action id, chord)`. A browser keeps
+/// `Ctrl+Shift+W`, `Ctrl+Shift+T` and `Ctrl+Shift+N` for itself, so close pane, new tab and new workspace move to
+/// `Alt+Shift` and the same letter, next to the `Alt+Shift+digit` tab numbers. Every other row is the Linux row.
+const WEB_REBINDS: &[(&str, &str)] = &[
+    ("pane.close", "Alt+Shift+W"),     // Linux: Ctrl+Shift+W, a browser closes its window
+    ("tab.new", "Alt+Shift+T"),        // Linux: Ctrl+Shift+T, a browser reopens a closed tab
+    ("workspace.new", "Alt+Shift+N"),  // Linux: Ctrl+Shift+N, a browser opens a private window
+];
+
+/// Every action with its default chord in the table of that name: `macos`, `windows` and `web` (the browser build:
+/// the Linux table with the three chords of [`WEB_REBINDS`]); any other name, `linux` included, is Linux, so the
+/// spelling is exactly that of `std::env::consts::OS` and of the app's `app_info`. The one place that chooses the
+/// default table: the base part of the platform, then its line-editing actions. Each table is built once.
 pub fn actions_for(os: &str) -> &'static [ActionInfo] {
     static MACOS: OnceLock<Vec<ActionInfo>> = OnceLock::new();
     static WINDOWS: OnceLock<Vec<ActionInfo>> = OnceLock::new();
     static LINUX: OnceLock<Vec<ActionInfo>> = OnceLock::new();
-    let (cell, base, edit): (&OnceLock<Vec<ActionInfo>>, &[ActionInfo], &[ActionInfo]) = match os {
-        "macos" => (&MACOS, &BASE_MACOS, &EDIT_ACTIONS_MACOS),
-        "windows" => (&WINDOWS, &BASE_OTHER, &EDIT_ACTIONS_WINDOWS),
-        _ => (&LINUX, &BASE_OTHER, &EDIT_ACTIONS_LINUX),
-    };
+    static WEB: OnceLock<Vec<ActionInfo>> = OnceLock::new();
+    let (cell, base, edit, rebinds): (&OnceLock<Vec<ActionInfo>>, &[ActionInfo], &[ActionInfo], &[(&str, &str)]) =
+        match os {
+            "macos" => (&MACOS, &BASE_MACOS, &EDIT_ACTIONS_MACOS, &[]),
+            "windows" => (&WINDOWS, &BASE_OTHER, &EDIT_ACTIONS_WINDOWS, &[]),
+            "web" => (&WEB, &BASE_OTHER, &EDIT_ACTIONS_LINUX, WEB_REBINDS),
+            _ => (&LINUX, &BASE_OTHER, &EDIT_ACTIONS_LINUX, &[]),
+        };
     cell.get_or_init(|| {
-        base.iter().chain(edit).map(|a| ActionInfo { id: a.id, title: a.title, default: a.default }).collect()
+        base.iter()
+            .chain(edit)
+            .map(|a| {
+                let default = rebinds.iter().find(|(id, _)| *id == a.id).map(|(_, chord)| *chord).or(a.default);
+                ActionInfo { id: a.id, title: a.title, default }
+            })
+            .collect()
     })
 }
 
