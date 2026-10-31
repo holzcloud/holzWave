@@ -55,9 +55,21 @@ impl Rig {
     /// A worker with the given switches. The fixed shell writes its own process id into [`Rig::pid_file`], prints `ready` and
     /// then echoes what it is typed.
     pub fn start_with(options: RigOptions) -> Rig {
+        Rig::start_inner(options, true)
+    }
+
+    /// A worker whose `TMPDIR` names a directory that is not there, as the spawn helper leaves it: it names `$HOME/.tmp` and
+    /// makes nothing.
+    pub fn start_without_tmp() -> Rig {
+        Rig::start_inner(RigOptions::default(), false)
+    }
+
+    fn start_inner(options: RigOptions, make_tmp: bool) -> Rig {
         let home = Scratch::new("worker");
         let tmp = home.join(".tmp");
-        std::fs::create_dir(&tmp).expect("the temporary directory");
+        if make_tmp {
+            std::fs::create_dir(&tmp).expect("the temporary directory");
+        }
         let pid_file = home.join("shell.pid");
         let shell = options.shell.unwrap_or_else(|| {
             let script = format!("echo $$ > '{}'; echo ready; exec cat", pid_file.display());

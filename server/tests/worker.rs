@@ -49,6 +49,18 @@ fn tracer_init_answers_ready_and_nothing_runs_before_it() {
 }
 
 #[test]
+fn the_worker_makes_the_temporary_directory_that_the_helper_only_names() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut rig = Rig::start_without_tmp();
+    let tmp = rig.home.join(".tmp");
+    assert!(!tmp.exists(), "the spawn helper makes nothing but the home");
+    rig.init();
+    assert!(tmp.is_dir(), "the worker made the directory TMPDIR names");
+    assert_eq!(std::fs::metadata(&tmp).expect("metadata").permissions().mode() & 0o777, 0o700, "private to the person");
+    rig.finish();
+}
+
+#[test]
 fn tracer_the_layout_read_answers_a_view_with_one_workspace() {
     let mut rig = Rig::start();
     rig.init();

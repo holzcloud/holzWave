@@ -247,6 +247,11 @@ fn start(
     if !dir.is_dir() {
         DirBuilder::new().mode(0o700).create(&dir).ok()?;
     }
+    // The spawn helper names the temporary directory (`$HOME/.tmp`) in the environment and makes nothing; the person's own
+    // worker makes it, private, so that a shell's `$TMPDIR` is a directory that is there.
+    if !env.tmp.is_dir() {
+        DirBuilder::new().mode(0o700).create(&env.tmp).ok()?;
+    }
     let secrets = Arc::new(SecretsHandle::open(&env.home));
     let host = WebHost { secrets: secrets.clone(), limits };
     let sink = Arc::new(ServerSink::with_log(queue.clone(), log.clone()));
