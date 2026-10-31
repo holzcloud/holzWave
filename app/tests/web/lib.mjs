@@ -5,7 +5,7 @@
 //
 // The page tests import the engines and the launcher from ../browser/lib.mjs; nothing in that library is changed, and the
 // certificate exception lives in `openContext` of this file only.
-import { launch, ENGINES } from "../browser/lib.mjs";
+import { launch, loadPlaywright, ENGINES } from "../browser/lib.mjs";
 import { startHarness } from "./harness.mjs";
 
 export { ENGINES, launch };
@@ -79,6 +79,8 @@ export async function openContext(browser, harness, { allow = [], ...contextOpti
   const pageErrors = [];
   const policy = [];
   const consoleErrors = [];
+  // Pages that belong to a hostile site: what goes wrong in them is theirs, not the application's.
+  const foreign = new WeakSet();
 
   const classify = (raw) => {
     let url;
@@ -96,7 +98,9 @@ export async function openContext(browser, harness, { allow = [], ...contextOpti
   };
   context.on("request", (request) => classify(request.url()));
   const watch = (page) => {
-    page.on("pageerror", (error) => pageErrors.push(`page error: ${error.message}`));
+    page.on("pageerror", (error) => {
+      if (!foreign.has(page)) pageErrors.push(`page error: ${error.message}`);
+    });
     page.on("console", (message) => {
       if (message.type() === "error") consoleErrors.push(message.text().slice(0, 200));
     });
@@ -106,7 +110,9 @@ export async function openContext(browser, harness, { allow = [], ...contextOpti
     });
   };
   context.on("page", watch);
-  await context.exposeFunction("__hwPolicy", (what) => policy.push(what));
+  await context.exposeBinding("__hwPolicy", (source, what) => {
+    if (!foreign.has(source.page)) policy.push(`${what} (on ${new URL(source.page.url()).host}${new URL(source.page.url()).pathname})`);
+  });
   await context.addInitScript(() => {
     window.addEventListener(
       "securitypolicyviolation",
@@ -121,6 +127,8 @@ export async function openContext(browser, harness, { allow = [], ...contextOpti
     pageErrors,
     policy,
     consoleErrors,
+    /** Mark a page as one of a hostile site: its page errors and policy violations are not counted against the application. */
+    foreign: (page) => foreign.add(page),
     /** Throw when the context saw a request to another host, a page error or a policy violation. */
     expectClean(what = "the context") {
       const found = [
@@ -259,7 +267,7 @@ const FILE_LIMIT_MS = 240_000;
  * `body({ engine, browser, harness, open(options) })`, and clean up whatever happens. Exit status 0 is a pass, 1 a failure
  * (the message names the step and the state), 77 a skip (see `skip`).
  */
-export async function runTest(name, harnessOptions, body) {
+export async function runTest(name, harnessOptions, body, { chromiumArgs = [] } = {}) {
   const engine = process.env.HW_ENGINE;
   if (!ENGINES.includes(engine)) {
     console.error(`HW_ENGINE must be one of ${ENGINES.join(", ")}`);
@@ -275,7 +283,10 @@ export async function runTest(name, harnessOptions, body) {
   let failure = null;
   try {
     harness = await startHarness(harnessOptions);
-    browser = await launch(engine);
+    // `chromiumArgs` is for a file that must reach the server from a hostile page: Chromium's own protection of loopback addresses
+    // (Local Network Access) would stop that page before the server saw anything, so such a file turns that one check off and
+    // tests the server's own defences; everything else is the launcher of the page tests.
+    browser = engine === "chromium" && chromiumArgs.length > 0 ? await loadPlaywright().chromium.launch({ args: chromiumArgs }) : await launch(engine);
     const open = async (options) => {
       const opened = await openContext(browser, harness, options);
       contexts.push(opened);
