@@ -114,6 +114,18 @@ test("decodeCreationOptions_converts_challenge_user_and_excluded_credentials", (
   assert.throws(() => decodeCreationOptions({ challenge: text("c"), user: { id: text("u") }, excludeCredentials: [{}] }), TypeError);
 });
 
+test("the options are taken from the publicKey member the server's library wraps them in", () => {
+  const request = decodeRequestOptions({ publicKey: { challenge: text("challenge"), rpId: "holz.example.net", allowCredentials: [{ id: text("c1"), type: "public-key" }] } });
+  assert.equal(Buffer.from(request.challenge).toString(), "challenge");
+  assert.equal(request.rpId, "holz.example.net");
+  assert.equal(Buffer.from(request.allowCredentials[0].id).toString(), "c1");
+  const creation = decodeCreationOptions({ publicKey: { challenge: text("c"), user: { id: text("u"), name: "anna", displayName: "Anna" }, rp: { name: "holzWave" } } });
+  assert.equal(Buffer.from(creation.user.id).toString(), "u");
+  assert.equal(creation.rp.name, "holzWave");
+  assert.throws(() => decodeRequestOptions({ publicKey: "no" }), TypeError);
+  assert.throws(() => decodeCreationOptions({ publicKey: { challenge: text("c") } }), TypeError, "no user inside publicKey");
+});
+
 const assertion = (over = {}, extensionResults = {}) => ({
   id: "Y3JlZC1pZA",
   rawId: buffer(99, 114, 101, 100, 45, 105, 100),

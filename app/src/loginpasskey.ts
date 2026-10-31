@@ -50,6 +50,15 @@ function list(value: unknown, what: string): unknown[] {
   return value;
 }
 
+/**
+ * The options of a ceremony as the server answers them: the library's own text is `{"publicKey": {...}}`, and the page takes
+ * the members of `publicKey` (a bare object, as the scripted servers of the page tests answer, is taken as it is).
+ */
+function publicKeyOf(raw: unknown): Json {
+  const o = obj(raw, "options");
+  return isObject(o.publicKey) && o.challenge === undefined ? o.publicKey : o;
+}
+
 /** A base64url member as an `ArrayBuffer`. */
 function buf(value: unknown, what: string): ArrayBuffer {
   if (typeof value !== "string") throw new TypeError(`${what} is not a string`);
@@ -93,7 +102,7 @@ function descriptors(value: unknown, what: string): Json[] {
 
 /** The options of `POST /auth/passkey/begin` in the form `navigator.credentials.get({ publicKey })` takes. Throws a `TypeError` for a member of the wrong type. */
 export function decodeRequestOptions(raw: unknown): Json {
-  const o = obj(raw, "options");
+  const o = publicKeyOf(raw);
   const out: Json = { ...o, challenge: buf(o.challenge, "challenge") };
   if (o.allowCredentials !== undefined) out.allowCredentials = descriptors(o.allowCredentials, "allowCredentials");
   if (o.extensions !== undefined) out.extensions = extensions(o.extensions);
@@ -102,7 +111,7 @@ export function decodeRequestOptions(raw: unknown): Json {
 
 /** The creation options of a set-up in the form `navigator.credentials.create({ publicKey })` takes. Throws a `TypeError` for a member of the wrong type. */
 export function decodeCreationOptions(raw: unknown): Json {
-  const o = obj(raw, "options");
+  const o = publicKeyOf(raw);
   const out: Json = { ...o, challenge: buf(o.challenge, "challenge") };
   const user = obj(o.user, "user");
   out.user = { ...user, id: buf(user.id, "user.id") };
