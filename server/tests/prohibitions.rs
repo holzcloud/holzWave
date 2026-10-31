@@ -1015,19 +1015,20 @@ impl Rig {
             let reply = self.send(&parts).await;
             assert_refused(&label, "a JSON content type where the octet stream is required", &reply, 400, "bad_request");
             tally.ran("a JSON content type where the octet stream is required", &label, reply.status);
-            // A length over the limit with a short body is refused on the header.
+            // A length over the limit is refused on the header.
             let mut head = case.parts.clone();
             head.remove("content-length");
             let mut request = Request::new(&head.method, &head.target);
             request.headers = head.headers.clone();
             request = request.header("Content-Length", &(256u64 * 1024 * 1024 + 1).to_string());
             let mut conn = self.env.ws.connection().await;
+            // Only the head is sent: the refusal is made on the declared length, before any body is read (the server may close
+            // the connection at once, so a body write would race with that).
             conn.send(&request.bytes()).await;
-            conn.send(b"short").await;
             let reply = conn.reply(false).await.expect("an answer on the header");
             self.ledger.note(&reply);
-            assert_refused(&label, "a Content-Length over the limit with a short body", &reply, 400, "bad_request");
-            tally.ran("a Content-Length over the limit with a short body", &label, reply.status);
+            assert_refused(&label, "a Content-Length over the limit with no body sent", &reply, 400, "bad_request");
+            tally.ran("a Content-Length over the limit with no body sent", &label, reply.status);
             assert_eq!(self.fingerprint(&case.watch).await, before, "{label}: nothing was kept");
         }
         // Nothing changed: the same correct call still works, which also shows that the base request of the variations was valid.
