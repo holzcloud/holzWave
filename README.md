@@ -47,6 +47,14 @@ Every [release](https://github.com/holzcloud/holzWave/releases) carries the pack
 
 Both are built on a Mac (Windows as a cross build, Linux in an amd64 container) and tested by the author on Windows and Linux; reports of what breaks are the point of the preview.
 
+## Install (server, Docker or Kubernetes)
+
+The web build runs holzWave in a browser from one container: people sign in, and each person's terminals run as a user of their
+own on the server. There is no published image; you build it from this repository and run it with Docker Compose or with the
+Helm chart in `packaging/helm/holzwave`. The steps, the three TLS modes, single sign-on, backup and the sentences the server
+prints when it refuses to start are in the [Server guide](docs/server.md). Built and tested against a test identity provider, virtual authenticators, the container tests and a Pebble certificate authority on the author's machines; not yet run against a real cluster, a real identity provider, hardware authenticators or real networks. A restart ends every pane, and the rows that
+still have to be run are in Part 10 of the [test plan](docs/test-plan.md).
+
 > [!IMPORTANT]
 > holzWave is inspired by [Wave Terminal](https://github.com/wavetermdev/waveterm), whose idea of the shell as one block
 > among others is the UX reference. holzWave started as a fork and is now a separate project that **contains none of
@@ -97,6 +105,18 @@ Both are built on a Mac (Windows as a cross build, Linux in an amd64 container) 
 </tr>
 </table>
 
+| The browser build: sign in | First administrator | Invitation |
+|---|---|---|
+| ![The sign-in page of the server: the passkey button, a single sign-on button, and the password form](docs/design/web-signin.png) | ![The first-administrator page: the setup token, a name, a display name and the sign-in method](docs/design/web-first-admin.png) | ![The invitation page: the key of the authenticator app in groups of four and the recovery code step](docs/design/web-invite.png) |
+
+| Unlock the saved passwords | Account | People |
+|---|---|---|
+| ![The unlock dialog with the passphrase and the recovery code, each with Not now and Unlock](docs/design/web-unlock.png) | ![The account dialog with the layer that asks to confirm it is you](docs/design/web-account.png) | ![The people dialog: a table of accounts with their state, a row menu and the invitation link](docs/design/web-people.png) |
+
+| The window in a browser | The web as a platform |
+|---|---|
+| ![The window as a browser shows it: no window buttons, status line marks, the upload target and the Download row menu](docs/design/web-window.png) | ![The holzWave window inside a browser tab](docs/design/platforms/web.png) |
+
 The same window is drawn on every platform; only the OS window buttons and the keyboard shortcuts differ. All views and
 the design rules are in [docs/design.md](docs/design.md).
 
@@ -121,6 +141,7 @@ Built and tested by the author on macOS, Windows and Linux:
 | AI chat in a pane, the sidebar, the palette and `wsh ai`: Anthropic, OpenAI, Gemini, local servers and gateways; you share a pane before its text leaves, and every tool action asks first | built, tested against test servers, not yet against real providers |
 | **Fully offline AI on a Mac:** the Apple on-device model (macOS 26 or later with Apple Intelligence) answers on the Mac itself, with no account, no key and nothing leaving the computer | built |
 | Kubernetes, Talos, Azure CLI and GAM7 as blocks (your own `kubectl`, `talosctl`, `az` and GAM7 on this computer), a Context section with a status for each, a card with the exact command and a second press on a production context, a profiles dialog, palette entries | built, tested against fake tools and recorded fixtures, not yet against real clusters or accounts or on Windows and Linux hardware; the Flatpak build does not run them and the mobile apps do not have them |
+| **The web build:** holzWave in a browser from one container, with sign-in by passkey, password and authenticator code or single sign-on, one user of its own for every person, and the Compose and Helm files | built, tested against a test identity provider, virtual authenticators, the container tests and a Pebble certificate authority, not yet against a real cluster, a real identity provider, hardware authenticators or real networks; Linux container only, one replica, a restart ends every pane ([Server guide](docs/server.md), Part 10 of the test plan) |
 | iOS, Android | planned |
 
 Per-phase detail: [docs/status.md](docs/status.md).
@@ -151,7 +172,7 @@ and the `wsh` CLI are built and tested against test servers. The system monitor 
 and the sidebar with widgets are built too, and so are the AI chat and the on-device model, whose manual checks wait for
 real accounts and Macs (Part 7 of the [test plan](docs/test-plan.md)). The native integrations (Kubernetes, Talos, Azure
 CLI, GAM7) are built and tested against fake tools and recorded fixtures; their rows for real clusters and accounts and for
-Windows and Linux hardware are open (Part 9 of the test plan). Mobile comes next.
+Windows and Linux hardware are open (Part 9 of the test plan). The web build (a server in one container, with the same window in a browser) is built and tested in containers; its rows for a real cluster, identity provider, authenticators, certificate authority, proxy and browsers are open (Part 10 of the test plan). Mobile comes next.
 Versions go `0.0.1-alpha3`, `0.0.1-beta1` (now), `0.0.1`.
 Full plan: [docs/roadmap.md](docs/roadmap.md).
 
@@ -159,7 +180,7 @@ Full plan: [docs/roadmap.md](docs/roadmap.md).
 
 [Architecture](docs/architecture.md) · [Design](docs/design.md) · [Roadmap](docs/roadmap.md) ·
 [Status and stack](docs/status.md) · [Building](docs/building.md) · [Sync format](docs/sync.md) ·
-[Configuration files](docs/config.md) · [Test plan](docs/test-plan.md) ·
+[Configuration files](docs/config.md) · [Server guide](docs/server.md) · [Test plan](docs/test-plan.md) ·
 [Profile schema](docs/integrations.schema.json) · [View schema](docs/integration-view.schema.json)
 
 ## License and credits

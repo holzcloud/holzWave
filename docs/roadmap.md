@@ -154,6 +154,23 @@ Open: the New block picker (drawn in the design, not built), a saved Pod connect
 (none, on purpose), importing a kubeconfig, user-loadable integrations, and `kube-rs` or a Talos gRPC client only if polling
 proves too slow.
 
+## The web build (after 0.0.1)
+
+holzWave in a browser from one container, for a person or a small team that runs its own server.
+
+- In: one server binary with a supervisor, one worker and one user id for each person, a small privileged helper with four file
+  capabilities, TLS 1.3 from files, ACME or a proxy, sign-in by passkey, password and authenticator code or single sign-on,
+  invitations, roles and an audit log, an encrypted store of each person's saved passwords, the same commands and the same page as
+  the desktop over one WebSocket, upload by drop and download of the files the core grants, the Docker image, a Compose file and a
+  Helm chart, and an operator guide ([server.md](server.md)).
+- Out: shared panes between people, an installable web app, a mobile layout of the page, a long-lived token for scripts, an
+  operator for Kubernetes, tear-off windows, the Apple on-device model, the local network list and self-update.
+- Deferred: compression of the WebSocket (the measured library saved 79 to 94 percent but left 18 Autobahn cases unimplemented, so
+  it is off), workers that survive a restart (a restart ends every pane), user namespaces as a stronger boundary, a binary wire
+  format, more than one replica, a drop target on the chat pane and the file browser as well as the shell pane, and a refusal sentence of its own for each reason a download is refused.
+
+Status: built, rows open (test-plan Part 10). Built and tested against a test identity provider, virtual authenticators, the container tests and a Pebble certificate authority on the author's machines; not yet run against a real cluster, a real identity provider, hardware authenticators or real networks. The design is in architecture.md section 16.
+
 ## Phase 7 — Mobile
 
 - iOS: SSH only. Android: local shell plus SSH.

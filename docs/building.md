@@ -29,6 +29,29 @@ Windows and Linux are built from source as described in [build-windows.md](build
 
 **Local network permission (macOS).** `plugins/local-network` is a workspace crate with a first-party Swift package behind two integer C functions (whether the system has the Local Network privacy setting, macOS 15 or later, and one bounded Bonjour browse that reads allowed, denied or unknown); it is not a Tauri plugin and no dependency beyond `swift-rs`, which is already locked for the Apple on-device AI crate. The app depends on it in the macOS target table of `app/src-tauri/Cargo.toml`, and `app/src-tauri/Info.plist` (merged into the bundle by Tauri and embedded into a development binary) holds the text of the system question and the Bonjour type, which a test pins equal to the Swift source. `cargo run -p holzwave-local-network --example probe` prints whether the setting applies and what the probe reads. No test calls the real probe, and the limit is that a program started from Terminal is exempt from the setting: the probe reads `allowed` there whatever the setting is, so the system question, the denial and the Settings link can only be seen with the app bundle started from Finder (rows LN1 to LN8 of Part 8 in [test-plan.md](test-plan.md)). `sh scripts/bundle-check-macos.sh` checks that the built bundle's `Info.plist` carries the usage text and the Bonjour type.
 
+## The server image and its tests
+
+The web build ([server.md](server.md)) is one image built from `packaging/docker/Dockerfile` in three stages: the page with
+Node, the binaries with Zig and Rust, and a slim Debian runtime. Everything it fetches is pinned: the base images by tag and
+digest (Node 26.11.1 for the page, Debian trixie for the build and the runtime), Zig by the build argument `ZIG_VERSION` (0.16.0,
+with the checksum from ziglang.org's index verified before unpacking), rustup 1.29.2 with Rust 1.99.1, and the page's
+packages with `npm ci --ignore-scripts`. From the repository root:
+
+```sh
+docker build -f packaging/docker/Dockerfile -t holzwave-server .             # about five minutes the first time
+docker compose -f packaging/compose/docker-compose.yml build                  # the same image, named holzwave-server:local
+sh scripts/web-container-test.sh image                                        # builds it and proves its contract in containers
+sh scripts/web-container-test.sh all                                          # caps, isolation, image, multiarch and acme
+sh scripts/linux-container-test.sh server                                     # the server, host and helper tests on Linux
+cargo test --locked --offline -p holzwave-server --features in-process-workers   # the server tests on this machine
+npm --prefix app run test:web                                                 # the page against the product's own server
+```
+
+`HOLZWAVE_ZIG_VERSION=<version>` builds with another Zig than the Dockerfile's default, and `HOLZWAVE_WEB_CONTEXT=<directory>`
+builds from another tree, such as an export of a commit. The commands, the machines they need and the rows only an owner can
+run are in [test-plan.md](test-plan.md) (Part 1 and Part 10). Built and tested on the author's machines in Linux containers on
+an Apple Silicon Mac; nothing ran on a cluster.
+
 ## Releases
 
 Releases are built on this machine, never in CI. `sh scripts/release-macos.sh <version> --publish --casks` builds the app, packs the DMG, creates the GitHub release (a version with a hyphen is a

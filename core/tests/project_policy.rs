@@ -3056,6 +3056,69 @@ fn the_guide_check_sees_a_missing_sentence_and_reads_across_a_line_break() {
     assert_eq!(missing_guide_sentences(&changed), [GUIDE_SENTENCES[1]]);
 }
 
+/// The sentence that says what was done and what was not for the web build. The README, the status page, the roadmap, the
+/// configuration reference, the architecture and the operator guide say it in these words.
+const WEB_QUALIFIER: &str = "Built and tested against a test identity provider, virtual authenticators, the container tests and a Pebble certificate authority on the author's machines; not yet run against a real cluster, a real identity provider, hardware authenticators or real networks.";
+
+/// The documents that carry the qualifier.
+const WEB_QUALIFIER_DOCUMENTS: [&str; 6] =
+    ["README.md", "docs/status.md", "docs/roadmap.md", "docs/config.md", "docs/architecture.md", "docs/server.md"];
+
+/// The number in the heading of the part of the test plan on the web build (`## Part 10: the web build ...`), found by
+/// reading the headings and never remembered.
+fn web_part_number(test_plan: &str) -> Option<usize> {
+    test_plan.lines().find_map(|line| {
+        let rest = line.strip_prefix("## Part ")?;
+        let (number, title) = rest.split_once(':')?;
+        title.trim_start().starts_with("the web build").then(|| number.trim().parse().ok()).flatten()
+    })
+}
+
+/// The documents in `named` (path and text) that do not point at Part `number` of the test plan.
+fn missing_part_reference<'a>(number: usize, named: &[(&'a str, String)]) -> Vec<&'a str> {
+    let needle = format!("Part {number}");
+    named.iter().filter(|(_, text)| !one_line(text).contains(&needle)).map(|(path, _)| *path).collect()
+}
+
+#[test]
+fn the_readme_and_the_status_page_point_at_the_web_part_of_the_test_plan() {
+    let number = web_part_number(&read("docs/test-plan.md")).expect("docs/test-plan.md has a part on the web build");
+    let missing = missing_part_reference(number, &[("README.md", read("README.md")), ("docs/status.md", read("docs/status.md"))]);
+    assert!(missing.is_empty(), "these documents do not name Part {number} of the test plan: {missing:?}");
+}
+
+#[test]
+fn the_part_finder_reads_the_heading_and_the_reference_check_can_fail() {
+    let plan = "## Part 9: native integrations\n\n## Part 12: the web build (server, image, browser page)\n\n## What to expect\n";
+    assert_eq!(web_part_number(plan), Some(12));
+    assert_eq!(web_part_number("## Part 9: native integrations\n"), None);
+    let named = [("a.md", "see Part 12 of the plan".to_owned()), ("b.md", "see Part\n12".to_owned()), ("c.md", "see Part 9".to_owned())];
+    assert_eq!(missing_part_reference(12, &named), ["c.md"], "a line break between the word and the number still counts");
+}
+
+#[test]
+fn the_web_qualifier_is_the_same_in_every_document_that_describes_the_web_build() {
+    let flat_qualifier = one_line(WEB_QUALIFIER);
+    let missing: Vec<&str> =
+        WEB_QUALIFIER_DOCUMENTS.iter().copied().filter(|path| !one_line(&read(path)).contains(&flat_qualifier)).collect();
+    assert!(missing.is_empty(), "these documents do not carry the qualifier of the web build word for word: {missing:?}");
+    // No document claims what was not run.
+    for path in WEB_QUALIFIER_DOCUMENTS {
+        let flat = one_line(&read(path)).to_lowercase();
+        for claim in ["tested on a cluster", "works with keycloak", "works with google", "passkeys work on", "verified on a cluster"] {
+            assert!(!flat.contains(claim), "{path} says {claim:?}, which no one has run");
+        }
+    }
+}
+
+#[test]
+fn the_readme_lists_the_server_guide_and_links_it_from_the_install_paragraph() {
+    let readme = read("README.md");
+    assert!(readme.contains("[Server guide](docs/server.md)"), "the documentation list or the install paragraph lacks the guide");
+    assert!(one_line(&readme).contains("Install (server, Docker or Kubernetes)"), "README.md has no install paragraph for the server");
+    assert!(root().join("docs/server.md").is_file());
+}
+
 // ---- no plan label in the public tree -----------------------------------------------------------------------
 
 /// The first-party directories whose text files are public: the labels of the private planning tree stay out of them.

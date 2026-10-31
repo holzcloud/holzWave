@@ -53,6 +53,7 @@
 | UI | TypeScript, no framework, no bundler |
 | Rendering | WebGL2 glyph atlas, one instanced draw per pane, Canvas 2D fallback |
 | Persistence | JSON today, SQLite for settings and history |
+| Server | Rust (`holzwave-server`, axum, rustls), one container, SQLite, a small privileged helper for per-person user ids; the same page and the same commands as the desktop ([server.md](server.md)) |
 
 ## Feature status by phase
 
@@ -66,12 +67,19 @@ GAM7 as blocks, the Context section of the sidebar and the status segments, the 
 a production context, the profiles dialog and the palette entries. They are tested against fake tools and recorded fixtures
 and have not been run against a real cluster, a real Talos, Azure or Google Workspace account, or on Windows and Linux
 hardware; those rows are open (Part 9 of [test-plan.md](test-plan.md)). The Flatpak build does not run them, mobile drops
-them, and the New block picker is drawn in the design and not built. Not built:
+them, and the New block picker is drawn in the design and not built. The web build is built too: holzWave in a browser from one
+container, with sign-in by passkey, by password and authenticator code or by single sign-on, a first administrator,
+invitations and roles, an encrypted store of each person's saved passwords, one worker and one user id for every person, TLS
+from files, ACME or a proxy, and the Compose file and the Helm chart ([server.md](server.md)). Built and tested against a test identity provider, virtual authenticators, the container tests and a Pebble certificate authority on the author's machines; not yet run against a real cluster, a real identity provider, hardware authenticators or real networks. The rows that are
+still open (a cluster at the baseline level and a stricter one, an identity provider, passkeys and PRF keys, a certificate
+authority, a reverse proxy, the four browsers, both architectures, two real people, restart, backup and capacity) are Part 10
+of [test-plan.md](test-plan.md); the suites that need Linux ran in a container only. Not built:
 
 | Phase | Planned |
 |---|---|
 | 9 | iOS (SSH) and Android (local shell and SSH), widgets on mobile, AI provider keys on mobile (they need a mobile secret store) |
 | 10 | Kitty graphics, hyperlinks, signed packages |
+| Web build, left out | shared panes between people; an installable web app; a mobile layout of the web page; a long-lived token for scripts; an operator for Kubernetes; compression of the WebSocket (measured, not adopted). As the browser answers them: the two tear-off controls and the local network list say `Not available in the browser.`, the Apple on-device model is not offered, and updating is the operator's job (build and run the new image). Upload takes a file dropped on a shell pane only, and download covers images, video, audio and PDF files |
 
 Deliberately not included: a web browser block. Phase numbers here follow the project plan summary; the detailed
 breakdown is in [roadmap.md](roadmap.md).
