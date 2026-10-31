@@ -10,8 +10,8 @@ mod worker_env;
 use std::io::{self, Cursor, Read};
 
 use holzwave_server::wire::{
-    CmdFrame, Ctl, CtlOutcome, Evt, ExitReason, Frame, Key, MAX_PAYLOAD, Note, OpeningKey, Res, ResBody, SlotKey,
-    StoreState, WireError, codec, read_frame, write_frame,
+    CmdFrame, Ctl, CtlOutcome, Evt, ExitReason, FILE_PIECE, FILE_SOCKET, FileWhat, Frame, Key, MAX_PAYLOAD, Note,
+    OpeningKey, Res, ResBody, SlotKey, StoreState, WireError, codec, read_frame, write_frame,
 };
 use holzwave_server::worker::secretstore::SlotKind;
 use zeroize::{ZeroizeOnDrop, Zeroizing};
@@ -358,6 +358,9 @@ fn fixed_frames() -> Vec<Frame> {
             opening: Some(OpeningKey { kind: SlotKind::Password, key: key(2) }),
         }),
         Frame::Ctl(Ctl::RemoveSlot { ctl: 5, kind: SlotKind::Passphrase, id: [3; 16] }),
+        Frame::Ctl(Ctl::FileServe { request: 5, what: FileWhat::Stat, token: TOKEN.into(), offset: 0, length: 0 }),
+        Frame::Ctl(Ctl::FileServe { request: 5, what: FileWhat::Read, token: TOKEN.into(), offset: 7, length: 100 }),
+        Frame::Ctl(Ctl::UploadClose { id: 5, commit: true }),
         Frame::Note(Note::Ready),
         Frame::Note(Note::StoreState(StoreState::Locked)),
         Frame::Note(Note::PaneCount(7)),
@@ -405,14 +408,16 @@ fn a_trailing_byte_after_a_control_or_a_note_is_an_error() {
 }
 
 #[test]
-fn a_reserved_operation_number_is_an_error_that_names_it() {
+fn the_four_numbers_once_reserved_are_the_file_controls_and_a_short_frame_of_each_is_cut_off() {
+    // 8 to 11 carry the file controls now: an operation with nothing after it is a frame that is cut off, not a reserved
+    // number, and no number is reserved any more.
     for op in 8u8..=11 {
-        let error = Frame::from_payload(&[0x04, op]).expect_err("reserved");
-        assert!(matches!(error, WireError::ReservedOp(n) if n == op), "{error:?}");
-        assert!(error.to_string().contains(&op.to_string()), "{error}");
-        // Whatever follows, the number is refused first.
-        assert!(matches!(Frame::from_payload(&[0x04, op, 0, 0, 0, 0]), Err(WireError::ReservedOp(_))));
+        let error = Frame::from_payload(&[0x04, op]).expect_err("cut off");
+        assert!(matches!(error, WireError::Truncated), "{op}: {error:?}");
     }
+    let error = Frame::from_payload(&[0x04, 15]).expect_err("unknown");
+    assert!(matches!(error, WireError::UnknownOp { kind: 4, op: 15 }), "{error:?}");
+    assert!(matches!(WireError::ReservedOp(8).to_string().as_str(), "operation 8 is reserved"));
 }
 
 #[test]
@@ -654,4 +659,247 @@ fn ten_thousand_garbage_payloads_never_panic_and_the_good_ones_survive_a_round_t
         let _ = read_frame(&mut Cursor::new(stream));
     }
     assert!(decoded > 100, "the generator reached the decoder: {decoded} frames decoded");
+}
+
+// ---- the file controls ----------------------------------------------------------------------------------------------------
+
+const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+/// The eight bytes of the request or upload id `0x0102030405060708`.
+const ID_BYTES: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+const ID: u64 = 0x0102_0304_0506_0708;
+
+#[test]
+fn tracer_layout_file_serve_stat_is_operation_8_request_what_token_offset_length() {
+    let frame = Frame::Ctl(Ctl::FileServe { request: ID, what: FileWhat::Stat, token: TOKEN.into(), offset: 0, length: 0 });
+    let mut expected = vec![0x04, 0x08];
+    expected.extend_from_slice(&ID_BYTES);
+    expected.push(0);
+    expected.extend_from_slice(TOKEN.as_bytes());
+    expected.extend_from_slice(&[0; 8]);
+    expected.extend_from_slice(&[0; 4]);
+    assert_eq!(expected.len(), 55);
+    pinned(frame, expected);
+}
+
+#[test]
+fn tracer_layout_file_serve_read_carries_the_offset_and_the_length() {
+    let frame =
+        Frame::Ctl(Ctl::FileServe { request: ID, what: FileWhat::Read, token: TOKEN.into(), offset: 0x1112_1314_1516_1718, length: 0x0010_0000 });
+    let mut expected = vec![0x04, 0x08];
+    expected.extend_from_slice(&ID_BYTES);
+    expected.push(1);
+    expected.extend_from_slice(TOKEN.as_bytes());
+    expected.extend_from_slice(&[0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18]);
+    expected.extend_from_slice(&[0x00, 0x10, 0x00, 0x00]);
+    pinned(frame, expected);
+}
+
+#[test]
+fn tracer_layout_the_answer_to_a_file_control_is_a_res_on_the_file_socket() {
+    assert_eq!(FILE_SOCKET, u32::MAX);
+    let stat = Frame::Res(Res { socket: FILE_SOCKET, request: ID, body: ResBody::Ok(r#"{"mime":"image/png","size":8}"#.into()) });
+    let mut expected = vec![0x02, 0xFF, 0xFF, 0xFF, 0xFF];
+    expected.extend_from_slice(&ID_BYTES);
+    expected.push(0);
+    expected.extend_from_slice(br#"{"mime":"image/png","size":8}"#);
+    pinned(stat, expected);
+
+    let read = Frame::Res(Res { socket: FILE_SOCKET, request: ID, body: ResBody::Binary(vec![0x89, b'P', b'N', b'G']) });
+    let mut expected = vec![0x02, 0xFF, 0xFF, 0xFF, 0xFF];
+    expected.extend_from_slice(&ID_BYTES);
+    expected.extend_from_slice(&[2, 0x89, b'P', b'N', b'G']);
+    pinned(read, expected);
+
+    let refused = Frame::Res(Res { socket: FILE_SOCKET, request: ID, body: ResBody::Err("\"no such file\"".into()) });
+    let mut expected = vec![0x02, 0xFF, 0xFF, 0xFF, 0xFF];
+    expected.extend_from_slice(&ID_BYTES);
+    expected.push(1);
+    expected.extend_from_slice(b"\"no such file\"");
+    pinned(refused, expected);
+}
+
+#[test]
+fn layout_upload_open_is_operation_9_id_size_folder_length_folder_and_the_name() {
+    let frame = Frame::Ctl(Ctl::UploadOpen { id: ID, size: 0x0A0B, folder: "uploads".into(), name: "a.txt".into() });
+    let mut expected = vec![0x04, 0x09];
+    expected.extend_from_slice(&ID_BYTES);
+    expected.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0x0A, 0x0B]);
+    expected.extend_from_slice(&[0x00, 0x07]);
+    expected.extend_from_slice(b"uploads");
+    expected.extend_from_slice(b"a.txt");
+    pinned(frame, expected);
+}
+
+#[test]
+fn layout_upload_piece_is_operation_10_id_and_the_bytes() {
+    let mut expected = vec![0x04, 0x0A];
+    expected.extend_from_slice(&ID_BYTES);
+    expected.extend_from_slice(&[1, 2, 3]);
+    pinned(Frame::Ctl(Ctl::UploadPiece { id: ID, bytes: vec![1, 2, 3] }), expected);
+    // A piece of exactly 1 MiB is the largest.
+    let largest = Frame::Ctl(Ctl::UploadPiece { id: ID, bytes: vec![0xAB; FILE_PIECE] });
+    let bytes = payload(&largest);
+    assert_eq!(bytes.len(), 10 + FILE_PIECE);
+    assert_eq!(Frame::from_payload(&bytes).expect("decodes"), largest);
+}
+
+#[test]
+fn layout_upload_close_is_operation_11_id_and_the_commit_byte() {
+    for (commit, byte) in [(false, 0u8), (true, 1u8)] {
+        let mut expected = vec![0x04, 0x0B];
+        expected.extend_from_slice(&ID_BYTES);
+        expected.push(byte);
+        pinned(Frame::Ctl(Ctl::UploadClose { id: ID, commit }), expected);
+    }
+}
+
+/// The bytes of a stat or read of `FileServe` with the fields given raw, so that a test can build what no encoder would.
+fn serve_bytes(request: u64, what: u8, token: &[u8], offset: u64, length: u32) -> Vec<u8> {
+    let mut out = vec![0x04, 0x08];
+    out.extend_from_slice(&request.to_be_bytes());
+    out.push(what);
+    out.extend_from_slice(token);
+    out.extend_from_slice(&offset.to_be_bytes());
+    out.extend_from_slice(&length.to_be_bytes());
+    out
+}
+
+#[test]
+fn a_file_serve_with_a_bad_token_what_offset_length_or_id_is_an_error_and_never_a_panic() {
+    let good = serve_bytes(1, 1, TOKEN.as_bytes(), 0, 10);
+    assert!(Frame::from_payload(&good).is_ok());
+    let bad_tokens: [&[u8]; 8] = [
+        b"0123456789abcdef0123456789abcde",   // 31
+        b"0123456789abcdef0123456789abcdef0", // 33 (trailing)
+        b"0123456789ABCDEF0123456789abcdef",  // upper case
+        b"0123456789abcdef0123456789abcdeg",  // not hex
+        b"0123456789abcdef0123456789abcde.",  // a dot
+        b"0123456789abcdef0123456789abcde/",  // a slash
+        b"0123456789abcdef0123456789abcde\0", // a NUL
+        b"\xff123456789abcdef0123456789abcde", // not UTF-8
+    ];
+    for token in bad_tokens {
+        assert!(Frame::from_payload(&serve_bytes(1, 1, token, 0, 10)).is_err(), "{token:?}");
+    }
+    assert!(Frame::from_payload(&serve_bytes(1, 2, TOKEN.as_bytes(), 0, 10)).is_err(), "what 2");
+    assert!(Frame::from_payload(&serve_bytes(1, 255, TOKEN.as_bytes(), 0, 10)).is_err(), "what 255");
+    assert!(Frame::from_payload(&serve_bytes(0, 1, TOKEN.as_bytes(), 0, 10)).is_err(), "request 0");
+    assert!(Frame::from_payload(&serve_bytes(1, 0, TOKEN.as_bytes(), 1, 0)).is_err(), "a stat with an offset");
+    assert!(Frame::from_payload(&serve_bytes(1, 0, TOKEN.as_bytes(), 0, 1)).is_err(), "a stat with a length");
+    assert!(Frame::from_payload(&serve_bytes(1, 1, TOKEN.as_bytes(), 0, 0)).is_err(), "a read of nothing");
+    let piece = u32::try_from(FILE_PIECE).expect("small");
+    assert!(Frame::from_payload(&serve_bytes(1, 1, TOKEN.as_bytes(), 0, piece)).is_ok(), "a read of 1 MiB");
+    assert!(Frame::from_payload(&serve_bytes(1, 1, TOKEN.as_bytes(), 0, piece + 1)).is_err(), "over 1 MiB");
+    let chunk = u32::try_from(holzwave_host::ranges::CHUNK).expect("small");
+    assert!(Frame::from_payload(&serve_bytes(1, 1, TOKEN.as_bytes(), 0, chunk + 1)).is_err(), "over the chunk limit");
+    assert!(Frame::from_payload(&serve_bytes(1, 1, TOKEN.as_bytes(), 0, u32::MAX)).is_err(), "u32::MAX");
+    // The encoder refuses the same.
+    for (what, offset, length, token) in [
+        (FileWhat::Read, 0, 0, TOKEN),
+        (FileWhat::Read, 0, piece + 1, TOKEN),
+        (FileWhat::Stat, 1, 0, TOKEN),
+        (FileWhat::Stat, 0, 1, TOKEN),
+        (FileWhat::Read, 0, 1, "0123456789ABCDEF0123456789abcdef"),
+        (FileWhat::Read, 0, 1, "short"),
+    ] {
+        let frame = Frame::Ctl(Ctl::FileServe { request: 1, what, token: token.into(), offset, length });
+        assert!(frame.to_payload().is_err(), "{frame:?}");
+    }
+    assert!(Frame::Ctl(Ctl::FileServe { request: 0, what: FileWhat::Stat, token: TOKEN.into(), offset: 0, length: 0 })
+        .to_payload()
+        .is_err());
+}
+
+#[test]
+fn the_upload_controls_refuse_an_id_of_0_an_empty_or_too_long_part_and_a_bad_commit_byte() {
+    let open = |id: u64, folder_len: u16, folder: &[u8], name: &[u8]| {
+        let mut out = vec![0x04, 0x09];
+        out.extend_from_slice(&id.to_be_bytes());
+        out.extend_from_slice(&5u64.to_be_bytes());
+        out.extend_from_slice(&folder_len.to_be_bytes());
+        out.extend_from_slice(folder);
+        out.extend_from_slice(name);
+        out
+    };
+    assert!(Frame::from_payload(&open(1, 7, b"uploads", b"a.txt")).is_ok());
+    assert!(Frame::from_payload(&open(0, 7, b"uploads", b"a.txt")).is_err(), "id 0");
+    assert!(Frame::from_payload(&open(1, 0, b"", b"a.txt")).is_err(), "no folder");
+    assert!(Frame::from_payload(&open(1, 1025, &[b'a'; 1025], b"a.txt")).is_err(), "a folder over 1024");
+    assert!(Frame::from_payload(&open(1, 1024, &[b'a'; 1024], b"a.txt")).is_ok(), "a folder of 1024");
+    assert!(Frame::from_payload(&open(1, 7, b"uploads", b"")).is_err(), "no name");
+    assert!(Frame::from_payload(&open(1, 7, b"uploads", &[b'a'; 256])).is_err(), "a name over 255");
+    assert!(Frame::from_payload(&open(1, 7, b"uploads", &[b'a'; 255])).is_ok(), "a name of 255");
+    assert!(Frame::from_payload(&open(1, 9, b"uploads", b"a")).is_err(), "a folder longer than the frame");
+    assert!(Frame::from_payload(&open(1, 7, b"upl\xffads", b"a.txt")).is_err(), "a folder that is not UTF-8");
+    assert!(Frame::from_payload(&open(1, 7, b"uploads", b"a\xff")).is_err(), "a name that is not UTF-8");
+    for cut in 0..19 {
+        assert!(Frame::from_payload(&open(1, 7, b"uploads", b"a.txt")[..cut]).is_err(), "cut to {cut}");
+    }
+
+    let mut piece = vec![0x04, 0x0A];
+    piece.extend_from_slice(&0u64.to_be_bytes());
+    piece.push(1);
+    assert!(Frame::from_payload(&piece).is_err(), "piece id 0");
+    let mut empty = vec![0x04, 0x0A];
+    empty.extend_from_slice(&ID_BYTES);
+    assert!(Frame::from_payload(&empty).is_err(), "an empty piece");
+    let mut over = empty.clone();
+    over.extend(std::iter::repeat_n(0u8, FILE_PIECE + 1));
+    assert!(Frame::from_payload(&over).is_err(), "a piece over 1 MiB");
+    assert!(Frame::Ctl(Ctl::UploadPiece { id: 1, bytes: Vec::new() }).to_payload().is_err());
+    assert!(Frame::Ctl(Ctl::UploadPiece { id: 1, bytes: vec![0; FILE_PIECE + 1] }).to_payload().is_err());
+    assert!(Frame::Ctl(Ctl::UploadPiece { id: 0, bytes: vec![0] }).to_payload().is_err());
+
+    let mut close = vec![0x04, 0x0B];
+    close.extend_from_slice(&ID_BYTES);
+    close.push(2);
+    assert!(Frame::from_payload(&close).is_err(), "a commit byte of 2");
+    let mut close0 = vec![0x04, 0x0B];
+    close0.extend_from_slice(&0u64.to_be_bytes());
+    close0.push(1);
+    assert!(Frame::from_payload(&close0).is_err(), "close id 0");
+    assert!(Frame::Ctl(Ctl::UploadOpen { id: 0, size: 1, folder: "a".into(), name: "b".into() }).to_payload().is_err());
+    assert!(Frame::Ctl(Ctl::UploadOpen { id: 1, size: 1, folder: String::new(), name: "b".into() }).to_payload().is_err());
+    assert!(Frame::Ctl(Ctl::UploadOpen { id: 1, size: 1, folder: "a".into(), name: String::new() }).to_payload().is_err());
+    assert!(Frame::Ctl(Ctl::UploadClose { id: 0, commit: false }).to_payload().is_err());
+}
+
+#[test]
+fn the_debug_text_of_a_file_control_holds_no_token_no_folder_no_name_and_no_byte() {
+    let serve = Frame::Ctl(Ctl::FileServe { request: 3, what: FileWhat::Read, token: TOKEN.into(), offset: 1, length: 2 });
+    let open = Frame::Ctl(Ctl::UploadOpen { id: 4, size: 5, folder: "SECRET-FOLDER".into(), name: "SECRET-NAME".into() });
+    let piece = Frame::Ctl(Ctl::UploadPiece { id: 4, bytes: b"SECRET-BYTES".to_vec() });
+    for frame in [serve, open, piece] {
+        for text in [format!("{frame:?}"), format!("{frame:#?}")] {
+            assert!(!text.contains(TOKEN) && !text.contains("SECRET"), "{text}");
+        }
+    }
+}
+
+#[test]
+fn a_garbage_stream_of_file_controls_never_panics() {
+    let mut noise = Noise(0x1234_5678_9ABC_DEF1);
+    let templates = [
+        serve_bytes(1, 1, TOKEN.as_bytes(), 3, 100),
+        serve_bytes(1, 0, TOKEN.as_bytes(), 0, 0),
+        payload(&Frame::Ctl(Ctl::UploadOpen { id: 1, size: 9, folder: "uploads".into(), name: "a.txt".into() })),
+        payload(&Frame::Ctl(Ctl::UploadPiece { id: 1, bytes: vec![1, 2, 3, 4] })),
+        payload(&Frame::Ctl(Ctl::UploadClose { id: 1, commit: true })),
+    ];
+    let mut decoded = 0;
+    for _ in 0..5_000 {
+        let mut bytes = templates[usize::try_from(noise.below(templates.len() as u64)).expect("small")].clone();
+        let at = usize::try_from(noise.below(bytes.len() as u64)).expect("small");
+        match noise.below(3) {
+            0 => bytes[at] = u8::try_from(noise.below(256)).expect("a byte"),
+            1 => bytes.truncate(at),
+            _ => bytes.push(0),
+        }
+        if let Ok(frame) = Frame::from_payload(&bytes) {
+            decoded += 1;
+            assert_eq!(Frame::from_payload(&payload(&frame)).expect("again"), frame);
+        }
+    }
+    assert!(decoded > 100, "{decoded}");
 }

@@ -64,6 +64,12 @@ pub struct WsOptions {
     /// Builds the routes with the list of the assembly and the supervisor side of the secret store instead of the endpoint
     /// alone.
     pub real_gate: bool,
+    /// The switches of the workers (the file routes' grant time, a full disk, counters).
+    pub hooks: holzwave_server::worker::runtime::TestHooks,
+    /// Replaces the limits of the application (only with `real_gate`).
+    pub limits: Option<Limits>,
+    /// Replaces the upload settings (only with `real_gate`).
+    pub upload: Option<Upload>,
 }
 
 /// What the server holds for one person.
@@ -120,7 +126,7 @@ impl WsEnv {
         let test = TestApp::new();
         let scratch = Scratch::new("ws");
         let shell = ShellSpec::new("/bin/sh", &[]);
-        let launcher = Arc::new(InProcessLauncher::new(scratch.path().to_path_buf(), shell));
+        let launcher = Arc::new(InProcessLauncher::new(scratch.path().to_path_buf(), shell).with_hooks(options.hooks.clone()));
         let supervisor_clock = Arc::new(ManualClock::new(SUPERVISOR_START));
         let supervisor_clock_dyn: Arc<dyn Clock> = supervisor_clock.clone();
         let supervisor = Supervisor::new(launcher.clone(), options.supervisor.unwrap_or_default(), supervisor_clock_dyn);
@@ -145,7 +151,7 @@ impl WsEnv {
                     origin: PublicOrigin::parse(ORIGIN).expect("the public url"),
                     auth: test.app.auth.clone(),
                     sessions: Sessions::default(),
-                    limits: Limits::DEFAULT,
+                    limits: options.limits.unwrap_or(Limits::DEFAULT),
                     mode: Mode::Files,
                     proxies: TrustedProxies::none(),
                     store: test.store.clone(),
@@ -189,7 +195,7 @@ impl WsEnv {
                 argon,
                 sealer,
                 ws: state.clone(),
-                upload: Upload::default(),
+                upload: options.upload.clone().unwrap_or_default(),
             };
             (app, state, router_parts(&services), Some(gate))
         } else {
@@ -259,6 +265,11 @@ impl WsEnv {
 
     async fn tls(&self) -> TlsStream<TcpStream> {
         tls_to(self.addr, &self.der).await
+    }
+
+    /// A fresh HTTP/1.1 connection over TLS to the listener, for the tests that read or write by hand.
+    pub async fn connection(&self) -> Conn<TlsStream<TcpStream>> {
+        Conn::new(self.tls().await)
     }
 
     /// One plain HTTP request on its own connection.
