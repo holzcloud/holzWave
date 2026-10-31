@@ -561,7 +561,7 @@ img_wait_healthy() {
 
 # A client container on the network: the sign-in state over TLS 1.3 with the certificate as the only trust root.
 img_client() {
-    docker run --rm --network "$IMG_NET" --user 10001:10001 --read-only --cap-drop ALL \
+    docker run --rm --network "$IMG_NET" --user 10001:10001 --read-only --cap-drop ALL --tmpfs /tmp:rw,mode=1777 \
         -v "$IMG_TLS":/m:ro "$BASE_IMAGE" "$@"
 }
 

@@ -1,0 +1,18 @@
+# What the image build does not need from the tree. The page is built in its own stage from app/ (without the built output),
+# the Rust build needs every member of the workspace (their manifests) and the lock files.
+**/target
+**/node_modules
+.git
+.planning
+.claude
+.github
+.DS_Store
+app/dist
+app/dist-bench
+app/src-tauri/gen
+app/src-tauri/binaries
+docs
+assets
+Casks
+scripts
+packaging

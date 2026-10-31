@@ -1,0 +1,12 @@
+{
+  "public_url": "https://holzwave.example.net",
+  "tls": {
+    "mode": "files",
+    "cert_file": "/etc/holzwave/tls/tls.crt",
+    "key_file": "/etc/holzwave/tls/tls.key"
+  },
+  "auth": {
+    "passkey": true,
+    "password_totp": true
+  }
+}
