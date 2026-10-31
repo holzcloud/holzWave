@@ -321,3 +321,21 @@ export function batchText(done: { ok: number; failed: readonly string[]; over: n
   if (parts.length < 2) return parts[0] ?? "";
   return parts.map((p) => (p.endsWith(".") ? p : `${p}.`)).join(" ");
 }
+
+// ---- download (stubs) --------------------------------------------------------------------------------------------
+
+export const MAX_GRANTS = 16;
+export const DOWNLOAD_ONLY_SENTENCE = "";
+export class GrantList {
+  add(_token: string): string | null {
+    return null;
+  }
+  all(): string[] {
+    return [];
+  }
+  clear(): string[] {
+    return [];
+  }
+}
+export const baseName = (path: string): string => path;
+export const readGrant = (_json: unknown): { url: string; token: string } | null => null;

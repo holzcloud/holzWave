@@ -7,7 +7,7 @@ import {
   CLIPBOARD_REFUSED, DESKTOP_ONLY_ACTIONS, FULLSCREEN_NOTICE, ICON_ATTENTION, ICON_PLAIN, LOCK_KEYS, NOT_AVAILABLE, Notices, canLockKeys,
   NOTIFY_FLAG_KEY, NOTIFY_GAP_MS, NOTIFY_GROUP, NOTIFY_TEXT, NotifyGate, commandKind, noticeIcon, noticeTitle, permissionState,
   DROP_LABEL, FOLDERS_SKIPPED, MAX_DROP_FILES, batchText, ONLY_SIXTEEN, hasNewline, notUploaded, readUploaded, refusalText, shellQuote, takeFiles,
-  uploadFolder, uploadUrl, uploadedText, uploadingText,
+  uploadFolder, uploadUrl, uploadedText, uploadingText, DOWNLOAD_ONLY_SENTENCE, GrantList, MAX_GRANTS, baseName, readGrant,
 } from "../../dist/webstate.js";
 import { findTargets, isLinkModifier, linkAction } from "../../dist/links.js";
 import { isAvailable, listActions, listAvailableActions, registerAction, runAction, setAvailability } from "../../dist/actions.js";
@@ -465,4 +465,62 @@ test("the end of a run of uploads says how many arrived, the last refusal, and w
   assert.equal(batchText({ ...none, folders: 1 }), "Folders are not uploaded.");
   assert.equal(batchText({ ...none, over: 3, folders: 1 }), "Only 16 files at a time. Folders are not uploaded.");
   assert.equal(batchText(none), "");
+});
+
+// ---- download ---------------------------------------------------------------------------------------------------------
+
+test("the sentence for a file kind that is not granted is the one the design gives", () => {
+  assert.equal(DOWNLOAD_ONLY_SENTENCE, "Download works for images, video, audio and PDF files.");
+  assert.equal(MAX_GRANTS, 16);
+});
+
+test("the grant list keeps the last 16 tokens and hands back the oldest when it is full", () => {
+  const list = new GrantList();
+  assert.deepEqual(list.all(), []);
+  for (let i = 1; i <= 16; i++) assert.equal(list.add(`t${i}`), null, `token ${i} fits`);
+  assert.equal(list.all().length, 16);
+  assert.equal(list.add("t17"), "t1", "the 17th pushes the first out");
+  assert.equal(list.add("t18"), "t2");
+  assert.deepEqual(list.all(), Array.from({ length: 16 }, (_, i) => `t${i + 3}`), "oldest first");
+  list.all().length = 0;
+  assert.equal(list.all().length, 16, "the array is a copy");
+});
+
+test("a token that is already held is not added twice and pushes nothing out", () => {
+  const list = new GrantList();
+  assert.equal(list.add("a"), null);
+  assert.equal(list.add("a"), null);
+  assert.deepEqual(list.all(), ["a"]);
+  for (let i = 0; i < 15; i++) list.add(`b${i}`);
+  assert.equal(list.add("a"), null, "a duplicate of a full list evicts nothing");
+  assert.equal(list.all().length, 16);
+});
+
+test("clear gives back every token held, oldest first, and empties the list", () => {
+  const list = new GrantList();
+  for (const t of ["a", "b", "c"]) list.add(t);
+  assert.deepEqual(list.clear(), ["a", "b", "c"]);
+  assert.deepEqual(list.all(), []);
+  assert.deepEqual(list.clear(), []);
+});
+
+test("a grant is read only when its address is the same-origin path of its own token", () => {
+  assert.deepEqual(readGrant({ url: "/files/abc-123_X", token: "abc-123_X", mime: "image/png", size: 5 }), { url: "/files/abc-123_X", token: "abc-123_X" });
+  for (const bad of [
+    null, "x", [], {}, { token: "abc" }, { url: "/files/abc" }, { url: "/files/abc", token: "abd" }, { url: "/files/abc", token: 7 },
+    { url: "https://evil.example/files/abc", token: "abc" }, { url: "//evil.example/files/abc", token: "abc" }, { url: "holzfile://abc", token: "abc" },
+    { url: "/files/abc/x", token: "abc/x" }, { url: "/files/../abc", token: "../abc" }, { url: "/files/a b", token: "a b" }, { url: "/files/", token: "" },
+    { url: "/files/abc?x=1", token: "abc?x=1" }, { url: "/other/abc", token: "abc" }, { url: `/files/${"a".repeat(129)}`, token: "a".repeat(129) },
+  ]) {
+    assert.equal(readGrant(bad), null, JSON.stringify(bad));
+  }
+});
+
+test("the name of a downloaded file is the last part of its path", () => {
+  assert.equal(baseName("/home/p/a b.png"), "a b.png");
+  assert.equal(baseName("a.png"), "a.png");
+  assert.equal(baseName("C:\\Users\\p\\a.png"), "a.png");
+  assert.equal(baseName("/home/p/"), "download");
+  assert.equal(baseName(""), "download");
+  assert.equal(baseName("/home/p/a\u0007b.png"), "a\ufffdb.png", "a control character is not kept in a file name");
 });

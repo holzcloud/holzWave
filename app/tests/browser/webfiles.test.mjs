@@ -8,6 +8,24 @@ import { leftover, openMain, sessionRoute } from "./websession-lib.mjs";
 
 const FOLDER = "/home/p/uploads";
 
+const ENTRIES = [
+  { name: "docs", kind: "dir", link: false, size: 0, modified: 1760000000, hidden: false },
+  { name: "mockup.png", kind: "file", link: false, size: 412000, modified: 1760000000, hidden: false },
+  { name: "notes.md", kind: "file", link: false, size: 1536, modified: 1760000000, hidden: false },
+];
+const VIEW = {
+  workspaces: [{ name: "main", active: true, panes: 2 }],
+  tabs: [{ title: "files", active: true, focus: 1, panes: 2 }],
+  focus: 1,
+  panes: [[1, { x: 0, y: 0, w: 0.5, h: 1 }], [2, { x: 0.5, y: 0, w: 0.5, h: 1 }]],
+  dividers: [{ split: 10, axis: "Row", area: { x: 0, y: 0, w: 1, h: 1 }, ratio: 0.5 }],
+  pane_names: [],
+  windows: 1,
+};
+const FILES = { pane: 1, kind: "files", source: "local", path: "/home/holz", source_label: "This computer" };
+const PREVIEW = { pane: 2, kind: "preview", source: "local", path: "/home/holz/mockup.png", source_label: "This computer" };
+const SENTENCE = "Download works for images, video, audio and PDF files.";
+
 /** The answer of the server for a stored file: the path in the person's upload folder and the size. */
 const stored = (name, size) => ({ status: 200, body: { path: `${FOLDER}/${name}`, size } });
 
@@ -25,12 +43,24 @@ const settle = (page) =>
  * upload route answers from `answer(request, n)`, which returns `{ status, body }`, `{ abort: true }` or `{ delay, status, body }`.
  * Returns the server recorder and the log of the upload requests: method, path with query, header names, the bytes and the times.
  */
-async function open(page, url, { answer = () => stored("x", 0), os = "web", blocks = [] } = {}) {
+async function open(page, url, { answer = () => stored("x", 0), os = "web", blocks = [], focus = 1 } = {}) {
   await page.addInitScript(
-    ([o, b]) => {
+    ([o, b, f, entries, view]) => {
       window.__MOCK__.on("app_info", () => ({ os: o, version: "t", hostname: "h" }));
       window.__MOCK__.on("pane_blocks", () => structuredClone(b));
-      window.__MOCK__.on("files_list", ({ path }) => ({ path, parent: null, entries: [], truncated: false }));
+      window.__MOCK__.on("files_list", ({ path }) => ({ path, parent: "/home", entries, truncated: false }));
+      window.__MOCK__.on("file_open", ({ path }) => ({
+        content: "binary", name: path.split("/").pop(), mime: "application/octet-stream", size: 3, text: null, html: null, language: null, modified: 1, digest: null,
+      }));
+      // Grants are `tok-1`, `tok-2`, ...; `window.__REFUSE` makes the core refuse, as it does for a kind it does not grant.
+      let granted = 0;
+      window.__MOCK__.on("file_grant", () => {
+        if (window.__REFUSE) throw window.__REFUSE;
+        granted++;
+        return { url: `/files/tok-${granted}`, token: `tok-${granted}`, mime: "image/png", size: 1 };
+      });
+      window.__MOCK__.on("file_revoke", () => null);
+      if (b.length > 0) window.__MOCK__.setView({ ...view, focus: f });
       // The entries API of a real drop says which item is a folder; a made-up drop has none, so a file named `dir-...` plays one.
       DataTransferItem.prototype.webkitGetAsEntry = function () {
         const f = this.getAsFile();
@@ -40,6 +70,18 @@ async function open(page, url, { answer = () => stored("x", 0), os = "web", bloc
       // Init scripts of earlier cases run again on every load: the recorders are made once, the answers above come from the newest script.
       if (window.__recording) return;
       window.__recording = true;
+      // A download is a click on a link with the `download` attribute: record it and stop the browser from following it.
+      window.__links = [];
+      document.addEventListener(
+        "click",
+        (e) => {
+          const a = e.target instanceof Element ? e.target.closest("a") : null;
+          if (a === null || !a.hasAttribute("download")) return;
+          window.__links.push({ href: a.href, download: a.getAttribute("download"), rel: a.getAttribute("rel"), target: a.getAttribute("target"), inDocument: a.isConnected });
+          e.preventDefault();
+        },
+        true,
+      );
       // The page's request function is `fetch`: record the body of an upload before it goes on.
       window.__sent = [];
       const real = window.fetch.bind(window);
@@ -77,7 +119,7 @@ async function open(page, url, { answer = () => stored("x", 0), os = "web", bloc
         if (!watch()) new MutationObserver((_, obs) => watch() && obs.disconnect()).observe(document.body, { childList: true, subtree: true });
       });
     },
-    [os, blocks],
+    [os, blocks, focus, ENTRIES, VIEW],
   );
   const server = await openMain(page, url, [sessionRoute()]);
   await page.waitForSelector(".divider");
@@ -184,6 +226,13 @@ export default async function ({ page, url, errors }) {
     await quoteCase(page, url);
     await outsideCase(page, url);
     await endedCase(page, url);
+    await menuCase(page, url);
+    await keyboardMenuCase(page, url);
+    await closeCase(page, url);
+    await refusedGrantCase(page, url);
+    await paletteCase(page, url);
+    await revokeCase(page, url);
+    await platformMenuCase(page, url);
   }
   assert.deepEqual(errors, [], "the page reported errors");
 }
@@ -203,6 +252,25 @@ async function desktopCase(page, url) {
   assert.deepEqual(await targetOf(page), [], "no drop target is drawn");
   assert.deepEqual(await pastes(page), []);
   assert.ok(!requested.some((u) => /\/webfiles\.js|\/api\/upload/.test(u)), "the module of the browser build is not requested");
+
+  // The file browser of the desktop has no row menu, and a context-menu gesture does not request the module.
+  await page.addInitScript(([entries, view]) => {
+    window.__MOCK__.on("pane_blocks", () => [{ pane: 1, kind: "files", source: "local", path: "/home/holz", source_label: "This computer" }]);
+    window.__MOCK__.on("files_list", ({ path }) => ({ path, parent: "/home", entries, truncated: false }));
+    window.__MOCK__.setView(view);
+  }, [ENTRIES, VIEW]);
+  await page.goto(`${url}index.html?renderer=canvas`);
+  await page.locator(".block-files .bk-row").first().waitFor();
+  await rowOf(page, "mockup.png").click({ button: "right" });
+  await settle(page);
+  assert.equal(await menus(page).count(), 0, "no row menu on the desktop");
+  await page.keyboard.press("Shift+F10");
+  await settle(page);
+  assert.equal(await menus(page).count(), 0);
+  assert.equal(await registryHas(page, "files.download"), false, "no Download action");
+  assert.ok(!(await paletteTitles(page)).includes("Download"), "the palette does not list Download");
+  assert.ok(!requested.some((u) => /\/webfiles\.js/.test(u)), "no context-menu gesture requested the web module");
+  assert.deepEqual(await page.evaluate(() => window.__MOCK__.callsOf("file_grant")), []);
 }
 
 /** A page that runs against a server but whose platform is not `web` (the tests that play a desktop over the socket) keeps the desktop's way. */
@@ -466,4 +534,245 @@ async function endedCase(page, url) {
   assert.deepEqual(log, [], "no request after the session ended");
   assert.deepEqual(await pastes(page), []);
   assert.deepEqual(await targetOf(page), []);
+}
+
+// ---- download ---------------------------------------------------------------------------------------------------------
+
+const menus = (page) => page.locator('[role="menu"]');
+const rowOf = (page, name) => page.locator(".block-files .bk-row", { hasText: name });
+const links = (page) => page.evaluate(() => window.__links);
+const active = (page) => page.evaluate(() => document.activeElement?.id || document.activeElement?.className || "");
+const grants = (page) => page.evaluate(() => window.__MOCK__.callsOf("file_grant"));
+const revokes = (page) => page.evaluate(() => window.__MOCK__.callsOf("file_revoke").map((c) => c.token));
+const selectedName = (page) => page.locator('.block-files .bk-row[aria-selected="true"] .bk-name').textContent();
+const registryHas = (page, id) =>
+  page.evaluate(async (i) => (await import(new URL("actions.js", location.href).href)).listActions().some((a) => a.id === i), id);
+const paletteTitles = async (page) => {
+  await page.evaluate(async () => (await import(new URL("actions.js", location.href).href)).runAction("palette.open"));
+  await page.waitForSelector(".palette-row, .palette-empty:not([hidden])");
+  const titles = await page.evaluate(() => [...document.querySelectorAll(".palette-row .palette-title")].map((n) => n.textContent));
+  return titles;
+};
+const closePalette = async (page) => {
+  await page.keyboard.press("Escape");
+  await page.locator(".palette-backdrop.open").waitFor({ state: "detached" }).catch(() => {});
+  await page.waitForFunction(() => document.activeElement?.id === "ime");
+};
+
+/** Open the browser of pane 1 and wait for its rows. */
+async function openBrowser(page, url, options = {}) {
+  await open(page, url, { blocks: [FILES], ...options });
+  await page.locator(".block-files .bk-row").first().waitFor();
+}
+
+/** The context-menu gesture on a file row opens a menu with one entry, selects the row and grants nothing; a folder row opens none. */
+async function menuCase(page, url) {
+  await openBrowser(page, url);
+  await rowOf(page, "docs").click({ button: "right" });
+  await settle(page);
+  assert.equal(await menus(page).count(), 0, "a folder row opens no menu");
+
+  await rowOf(page, "mockup.png").click({ button: "right" });
+  await menus(page).waitFor({ state: "visible" });
+  assert.equal(await menus(page).count(), 1);
+  assert.equal(await selectedName(page), "mockup.png", "the row became the selected one");
+  const items = await menus(page).locator('[role="menuitem"]').allTextContents();
+  assert.deepEqual(items, ["Download"], "one entry");
+  assert.equal(await menus(page).getAttribute("aria-label"), "Actions for mockup.png");
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("role")), "menuitem", "the entry has the keyboard");
+  const box = await menus(page).evaluate((m) => {
+    const r = m.getBoundingClientRect();
+    const item = m.querySelector('[role="menuitem"]').getBoundingClientRect();
+    const cs = getComputedStyle(m);
+    return { r: r.toJSON(), itemHeight: item.height, shadow: cs.boxShadow, radius: cs.borderTopLeftRadius, border: cs.borderTopWidth, fixed: cs.position };
+  });
+  assert.ok(box.itemHeight >= 28, `the entry is at least 28 px high (${box.itemHeight})`);
+  assert.notEqual(box.shadow, "none", "a floating layer has the one shadow");
+  assert.equal(box.border, "1px");
+  assert.equal(box.fixed, "fixed");
+  assert.ok(box.r.left >= 0 && box.r.top >= 0 && box.r.right <= 1000 && box.r.bottom <= 640, "inside the window");
+  assert.deepEqual(await grants(page), [], "opening the menu grants nothing");
+  assert.deepEqual(await links(page), []);
+
+  // ArrowDown and ArrowUp keep the one entry focused and do not move the selection of the list.
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowUp");
+  await page.keyboard.press("End");
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("role")), "menuitem");
+  assert.equal(await selectedName(page), "mockup.png", "the list did not move under the menu");
+
+  // Enter runs it: one grant for that source and path, then a click on a same-origin link that downloads under the file's name.
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => window.__links.length === 1);
+  assert.deepEqual(await grants(page), [{ source: "local", path: "/home/holz/mockup.png" }]);
+  const [link] = await links(page);
+  assert.equal(link.href, `${new URL(url).origin}/files/tok-1`, "the address of the grant, on the page's own origin");
+  assert.equal(link.download, "mockup.png");
+  assert.equal(link.target, null, "no new tab");
+  assert.equal(await menus(page).count(), 0, "the menu is gone");
+  await page.waitForFunction(() => document.activeElement?.id === "ime");
+  assert.deepEqual(await page.evaluate(() => window.__MOCK__.callsOf("key")), [], "no key reached the terminal");
+  assert.deepEqual(await page.evaluate(() => window.__MOCK__.callsOf("block_open")), [], "Enter did not open a preview");
+
+  // A click on the entry does the same.
+  await rowOf(page, "notes.md").click({ button: "right" });
+  await menus(page).waitFor({ state: "visible" });
+  await menus(page).getByRole("menuitem", { name: "Download" }).click();
+  await page.waitForFunction(() => window.__links.length === 2);
+  assert.equal((await links(page))[1].download, "notes.md");
+  assert.equal((await grants(page))[1].path, "/home/holz/notes.md");
+  await page.waitForFunction(() => document.activeElement?.id === "ime");
+}
+
+/** The context-menu key and Shift+F10 open it at the selected file row, and Escape closes it and gives the keyboard back. */
+async function keyboardMenuCase(page, url) {
+  await openBrowser(page, url);
+  await page.waitForFunction(() => document.activeElement?.id === "ime" || document.getElementById("ime") !== null);
+  await page.evaluate(() => document.getElementById("ime").focus());
+  // The first row is a folder: no menu.
+  await page.keyboard.press("Shift+F10");
+  await settle(page);
+  assert.equal(await menus(page).count(), 0, "a folder is selected");
+  await page.keyboard.press("ArrowDown");
+  assert.equal(await selectedName(page), "mockup.png");
+  const row = await rowOf(page, "mockup.png").boundingBox();
+  await page.keyboard.press("Shift+F10");
+  await menus(page).waitFor({ state: "visible" });
+  const at = await menus(page).boundingBox();
+  assert.ok(at.y >= row.y - 2 && at.y <= row.y + row.height + 2, `the menu stands at the row ${JSON.stringify([at, row])}`);
+  assert.ok(at.x >= row.x && at.x <= row.x + row.width, "and inside its width");
+  const ring = await page.evaluate(() => {
+    const cs = getComputedStyle(document.activeElement);
+    return [cs.outlineStyle, cs.outlineWidth];
+  });
+  assert.deepEqual(ring, ["solid", "2px"], "the keyboard focus ring is 2 px");
+  await page.keyboard.press("Escape");
+  await menus(page).waitFor({ state: "detached" });
+  await page.waitForFunction(() => document.activeElement?.id === "ime");
+  assert.deepEqual(await grants(page), [], "nothing was granted");
+  assert.deepEqual(await page.evaluate(() => window.__MOCK__.callsOf("key")), [], "Escape did not reach the terminal");
+
+  await page.keyboard.press("ContextMenu");
+  await menus(page).waitFor({ state: "visible" });
+  assert.equal(await menus(page).locator('[role="menuitem"]').count(), 1);
+  await page.keyboard.press("Escape");
+  await menus(page).waitFor({ state: "detached" });
+  assert.equal(await selectedName(page), "mockup.png");
+}
+
+/** A click elsewhere, a blur and a layout change close it, and the keyboard is back in the terminal each time. */
+async function closeCase(page, url) {
+  await openBrowser(page, url);
+  const open = async () => {
+    await rowOf(page, "mockup.png").click({ button: "right" });
+    await menus(page).waitFor({ state: "visible" });
+  };
+  await open();
+  const two = await paneBox(page, 2);
+  await page.mouse.click(two.x, two.y);
+  await menus(page).waitFor({ state: "detached" });
+  await page.waitForFunction(() => document.activeElement?.id === "ime");
+
+  await open();
+  await page.evaluate(() => document.activeElement.blur());
+  await menus(page).waitFor({ state: "detached" });
+  await page.waitForFunction(() => document.activeElement?.id === "ime");
+
+  await open();
+  await page.evaluate(async () => (await import(new URL("actions.js", location.href).href)).runAction("pane.focus_next"));
+  await menus(page).waitFor({ state: "detached" });
+  await page.waitForFunction(() => document.activeElement?.id === "ime");
+
+  await open();
+  await page.setViewportSize({ width: 900, height: 600 });
+  await menus(page).waitFor({ state: "detached" });
+  await page.setViewportSize({ width: 1000, height: 640 });
+  assert.deepEqual(await grants(page), [], "closing never grants");
+  assert.deepEqual(await links(page), []);
+  assert.equal(await menus(page).count(), 0);
+}
+
+/** A kind the core does not grant says so in the status line; the page makes no download. */
+async function refusedGrantCase(page, url) {
+  await openBrowser(page, url);
+  await page.evaluate(() => (window.__REFUSE = "no preview or download for this kind of file"));
+  await rowOf(page, "notes.md").click({ button: "right" });
+  await menus(page).getByRole("menuitem", { name: "Download" }).click();
+  await page.waitForFunction((t) => document.querySelector("#status .notice")?.textContent === t, SENTENCE);
+  assert.deepEqual(await links(page), [], "nothing was downloaded");
+  assert.equal((await grants(page)).length, 1);
+  assert.deepEqual(await revokes(page), [], "there was no grant to end");
+  await page.waitForFunction(() => document.activeElement?.id === "ime");
+}
+
+/** The palette lists `Download` only while the focused pane is a file browser with a file selected, or a preview. */
+async function paletteCase(page, url) {
+  await openBrowser(page, url);
+  assert.equal(await registryHas(page, "files.download"), true, "the entry exists once a file pane does");
+  assert.equal(await selectedName(page), "docs");
+  assert.ok(!(await paletteTitles(page)).includes("Download"), "a folder is selected: not listed");
+  await closePalette(page);
+  await page.keyboard.press("ArrowDown");
+  assert.equal(await selectedName(page), "mockup.png");
+  assert.ok((await paletteTitles(page)).includes("Download"), "a file is selected: listed");
+  assert.deepEqual(await grants(page), [], "listing it grants nothing");
+  await page.locator(".palette-row", { hasText: "Download" }).first().click();
+  await page.waitForFunction(() => window.__links.length === 1);
+  assert.deepEqual(await grants(page), [{ source: "local", path: "/home/holz/mockup.png" }]);
+  assert.equal((await links(page))[0].download, "mockup.png");
+  await page.waitForFunction(() => document.activeElement?.id === "ime");
+
+  // A preview that has the focus: listed, and it downloads its own file.
+  await open(page, url, { blocks: [FILES, PREVIEW], focus: 2 });
+  await page.locator(".block-preview").waitFor();
+  await settle(page);
+  assert.ok((await paletteTitles(page)).includes("Download"), "a preview is focused: listed");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => window.__links.length === 1);
+  assert.deepEqual(await grants(page), [{ source: "local", path: "/home/holz/mockup.png" }]);
+  await page.waitForFunction(() => document.activeElement?.id === "ime");
+
+  // A shell pane has the focus: the entry is not listed (it is registered, as every action is).
+  await open(page, url, { blocks: [FILES], focus: 2 });
+  await page.locator(".block-files .bk-row").first().waitFor();
+  assert.ok(!(await paletteTitles(page)).includes("Download"), "a shell is focused: not listed");
+  await closePalette(page);
+}
+
+/** At most 16 grants stay: the 17th ends the first, and the page going away ends all that are left. */
+async function revokeCase(page, url) {
+  await openBrowser(page, url);
+  await page.keyboard.press("ArrowDown");
+  const run = () => page.evaluate(async () => (await import(new URL("actions.js", location.href).href)).runAction("files.download"));
+  for (let i = 1; i <= 16; i++) {
+    await run();
+    await page.waitForFunction((n) => window.__links.length === n, i);
+  }
+  assert.deepEqual(await revokes(page), [], "16 grants stay");
+  await run();
+  await page.waitForFunction(() => window.__links.length === 17);
+  assert.deepEqual(await revokes(page), ["tok-1"], "the 17th ends the oldest");
+  assert.equal((await grants(page)).length, 17);
+  await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+  await page.waitForFunction(() => window.__MOCK__.callsOf("file_revoke").length === 17);
+  assert.deepEqual(await revokes(page), Array.from({ length: 17 }, (_, i) => `tok-${i + 1}`), "pagehide ends every one that was left, oldest first");
+  await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+  await settle(page);
+  assert.equal((await revokes(page)).length, 17, "a second pagehide has nothing to end");
+}
+
+/** A page that runs against a server but whose platform is not `web` gets no menu and no entry. */
+async function platformMenuCase(page, url) {
+  const requested = [];
+  page.on("request", (r) => requested.push(r.url()));
+  await openBrowser(page, url, { os: "macos" });
+  await rowOf(page, "mockup.png").click({ button: "right" });
+  await settle(page);
+  assert.equal(await menus(page).count(), 0, "no row menu");
+  assert.equal(await registryHas(page, "files.download"), false);
+  await page.keyboard.press("Shift+F10");
+  await settle(page);
+  assert.equal(await menus(page).count(), 0);
+  assert.ok(!requested.some((u) => /\/webfiles\.js/.test(u)), "the web module is not requested");
+  assert.deepEqual(await grants(page), []);
 }
