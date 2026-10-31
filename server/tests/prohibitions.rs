@@ -21,6 +21,10 @@ mod parity_env;
 mod real_process;
 #[path = "support/route_walk.rs"]
 mod route_walk;
+#[path = "support/scratch.rs"]
+mod scratch;
+#[path = "support/sup_env.rs"]
+mod sup_env;
 #[path = "support/sweep.rs"]
 mod sweep;
 #[path = "support/unlock_env.rs"]
@@ -1475,4 +1479,579 @@ async fn admin_sweep_body() {
     let planted = scan_person(&sweep, "alice", &alice.recorder, &mut Counts::default());
     assert!(planted.iter().any(|f| f.canary == "content printed" && f.surface.contains("frame #")), "the sweep over alice's recorder finds a canary that is in her own pane");
     println!("Admin sweep (positive control): the canary printed in alice's own pane is found in {} of her frames", planted.iter().filter(|f| f.canary == "content printed").count());
+}
+
+// =============================================================================================================================
+// The start matrix: a mistaken configuration never runs
+// =============================================================================================================================
+
+/// One mistake of the start: how to make it, the word the sentence must contain, and the same builder with the mistake mended.
+struct Mistake {
+    name: &'static str,
+    /// The text the one error line must contain: the file or the key at fault.
+    names: &'static str,
+    /// Whether the key file variable is set.
+    with_key: bool,
+    bad: fn(&mut Site),
+    /// The same builder with the value made right: it must start.
+    good: fn(&mut Site),
+}
+
+fn keep(_: &mut Site) {}
+
+fn chmod(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
+}
+
+fn mistakes() -> Vec<Mistake> {
+    let m = |name, names, with_key, bad, good| Mistake { name, names, with_key, bad, good };
+    vec![
+        m("the key file variable is not set", "HOLZWAVE_SERVER_KEY_FILE", false, keep, keep),
+        m("the key file is missing", "key", true, |s| s.key = s.scratch.join("no-such-key"), keep),
+        m("the key file is readable by others (0644)", "key", true, |s| chmod(&s.key.clone(), 0o644), |s| chmod(&s.key.clone(), 0o600)),
+        m("the key file is all zero", "key", true, |s| {
+            let len = std::fs::metadata(&s.key).expect("key").len() as usize;
+            std::fs::write(&s.key, vec![0u8; len]).expect("write");
+            chmod(&s.key.clone(), 0o600);
+        }, keep),
+        m("the key file is not a key", "key", true, |s| {
+            std::fs::write(&s.key, b"not a key file\n").expect("write");
+            chmod(&s.key.clone(), 0o600);
+        }, keep),
+        m("public_url is missing", "public_url", true, |s| s.unset("public_url"), keep),
+        m("public_url is empty", "public_url", true, |s| s.set("public_url", json!("")), keep),
+        m("public_url is http", "public_url", true, |s| s.set("public_url", json!("http://hw.example.test")), keep),
+        m("public_url has a path", "public_url", true, |s| s.set("public_url", json!("https://hw.example.test/app")), keep),
+        m("public_url has a query", "public_url", true, |s| s.set("public_url", json!("https://hw.example.test/?a=1")), keep),
+        m("public_url has a fragment", "public_url", true, |s| s.set("public_url", json!("https://hw.example.test/#x")), keep),
+        m("public_url has user information", "public_url", true, |s| s.set("public_url", json!("https://me@hw.example.test")), keep),
+        m("public_url is an address and passkeys are on", "public_url", true, |s| s.set("public_url", json!("https://192.0.2.7")), keep),
+        m("the tls section is missing", "tls", true, |s| s.unset("tls"), keep),
+        m("the certificate file is missing", "cert_file", true, |s| s.set("tls.cert_file", json!("/no/such/cert.pem")), keep),
+        m("the certificate key file is missing", "key_file", true, |s| s.set("tls.key_file", json!("/no/such/key.pem")), keep),
+        m("the certificate file is unreadable (0000)", "cert_file", true, |s| {
+            let path = PathBuf::from(s.config["tls"]["cert_file"].as_str().expect("cert"));
+            chmod(&path, 0o000);
+        }, |s| {
+            let path = PathBuf::from(s.config["tls"]["cert_file"].as_str().expect("cert"));
+            chmod(&path, 0o644);
+        }),
+        m("a plain listener with no trusted proxy", "trusted_proxies", true, |s| s.set("tls", json!({"mode": "proxy"})), |s| {
+            s.set("tls", json!({"mode": "proxy", "trusted_proxies": ["10.0.0.0/8"]}));
+        }),
+        m("a plain listener with an empty proxy list", "trusted_proxies", true, |s| s.set("tls", json!({"mode": "proxy", "trusted_proxies": []})), |s| {
+            s.set("tls", json!({"mode": "proxy", "trusted_proxies": ["fd00::/8"]}));
+        }),
+        m("a plain listener that trusts every address", "trusted_proxies", true, |s| s.set("tls", json!({"mode": "proxy", "trusted_proxies": ["0.0.0.0/0"]})), |s| {
+            s.set("tls", json!({"mode": "proxy", "trusted_proxies": ["172.16.0.0/12"]}));
+        }),
+        m("no sign-in method", "sign-in", true, |s| s.set("auth", json!({"passkey": false, "password_totp": false})), keep),
+        m("no auth section", "sign-in", true, |s| s.unset("auth"), keep),
+        m("an unknown key at the top", "extra", true, |s| s.set("extra", json!(1)), keep),
+        m("an unknown key in tls", "extra", true, |s| s.set("tls.extra", json!(1)), keep),
+        m("an unknown key in workers", "extra", true, |s| s.set("workers.extra", json!(1)), keep),
+        m("an unknown key in auth", "extra", true, |s| s.set("auth.extra", json!(true)), keep),
+        m("the worker range starts below 1000", "uid_min", true, |s| s.set("workers.uid_min", json!(0)), keep),
+        m("the worker range is reversed", "uid_min", true, |s| {
+            s.set("workers.uid_min", json!(29999));
+            s.set("workers.uid_max", json!(20000));
+        }, keep),
+        m("the worker range ends at the largest id", "uid_max", true, |s| s.set("workers.uid_max", json!(4294967295u64)), keep),
+        m("listen is not an address", "listen", true, |s| s.set("listen", json!("everywhere")), |s| {
+            let port = s.port;
+            s.set("listen", json!(format!("127.0.0.1:{port}")));
+        }),
+        m("the data directory is relative", "data_dir", true, |s| s.set("data_dir", json!("data")), keep),
+        m("the runtime directory is relative", "runtime_dir", true, |s| s.set("runtime_dir", json!("run")), keep),
+        m("a sign-in provider without a client id", "client_id", true, |s| {
+            s.set("auth.oidc", json!([{"id": "corp", "name": "Company", "issuer": "https://idp.example.test", "client_id": "", "client_secret_file": "/no/such/secret"}]));
+        }, keep),
+        m("a sign-in provider with an http issuer", "issuer", true, |s| {
+            s.set("auth.oidc", json!([{"id": "corp", "name": "Company", "issuer": "http://idp.example.test", "client_id": "x", "client_secret_file": "/no/such/secret"}]));
+        }, keep),
+    ]
+}
+
+#[test]
+fn start_matrix_a_mistaken_configuration_exits_with_one_sentence_and_leaves_nothing_behind() {
+    let rows = mistakes();
+    let mut printed = Vec::new();
+    for row in &rows {
+        // The positive control of the builder: the same site with the mistake mended starts and is healthy.
+        let mut good = Site::new(None);
+        (row.good)(&mut good);
+        let key_text = std::fs::read(&good.key).unwrap_or_default();
+        let mut started = good.start();
+        assert!(started.is_running(), "{}: the control starts", row.name);
+        drop(started);
+
+        let mut site = Site::new(None);
+        let original_key = std::fs::read(&site.key).expect("the key");
+        let cert_key = site.config["tls"]["key_file"].as_str().map(|p| std::fs::read(p).unwrap_or_default()).unwrap_or_default();
+        (row.bad)(&mut site);
+        let refusal = site.refuse(row.with_key, Duration::from_secs(5));
+        let lines: Vec<&String> = refusal.stderr.iter().filter(|l| !l.trim().is_empty()).collect();
+        assert!(!refusal.still_running, "{}: the process ended on its own", row.name);
+        assert_eq!(refusal.code, Some(1), "{}: exit code", row.name);
+        assert!(refusal.elapsed < Duration::from_secs(5), "{}: ended within 5 seconds, took {:?}", row.name, refusal.elapsed);
+        assert_eq!(lines.len(), 1, "{}: exactly one line on standard error, got {:?}", row.name, refusal.stderr);
+        assert!(lines[0].contains(row.names), "{}: the sentence names {:?}: {}", row.name, row.names, lines[0]);
+        assert!(refusal.stdout.is_empty(), "{}: nothing on standard output: {:?}", row.name, refusal.stdout);
+        assert!(!refusal.listening, "{}: nothing listens on the configured port", row.name);
+        assert!(refusal.new_files.is_empty(), "{}: no new file: {:?}", row.name, refusal.new_files);
+        for secret in [&original_key, &cert_key, &key_text] {
+            let text = String::from_utf8_lossy(secret);
+            let trimmed = text.trim();
+            assert!(trimmed.len() < 8 || !lines[0].contains(trimmed), "{}: the sentence holds file content", row.name);
+        }
+        assert!(!lines[0].contains("PRIVATE KEY"), "{}: no key material in the sentence", row.name);
+        printed.push(format!("{}: exit 1 in {:?}, one line, stdout empty, nothing listening, no new file; control starts", row.name, refusal.elapsed));
+    }
+    println!("Start matrix: {} mistakes, each with the builder's positive control", rows.len());
+    for line in &printed {
+        println!("  {line}");
+    }
+    println!("Start matrix: workers.mode is covered by the image test where the release binary refuses the in-process mode; this test binary is built with the feature that allows it");
+}
+
+// =============================================================================================================================
+// No default account, no plain listener
+// =============================================================================================================================
+
+/// The names a default account might have, and the passwords such an account might have.
+const DEFAULT_NAMES: [&str; 6] = ["admin", "administrator", "root", "holzwave", "owner", "test"];
+const DEFAULT_PASSWORDS: [&str; 6] = ["admin", "password", "changeme", "holzwave", "admin123", "letmein"];
+
+/// The pairs to try: round robin over the names, never more than the throttle's limit for one address less a margin, and never
+/// more tries for one name than its own limit less one. Both limits are read from the limits module.
+fn default_pairs() -> Vec<(&'static str, &'static str)> {
+    let limits = holzwave_server::limits::Limits::DEFAULT;
+    let per_address = limits.password_attempts_per_address as usize - 4;
+    let per_account = limits.password_attempts_per_account as usize - 1;
+    let mut pairs = Vec::new();
+    let mut tries: BTreeMap<&str, usize> = BTreeMap::new();
+    'outer: for round in 0..DEFAULT_PASSWORDS.len() {
+        for (index, name) in DEFAULT_NAMES.iter().enumerate() {
+            if pairs.len() >= per_address {
+                break 'outer;
+            }
+            if *tries.get(name).unwrap_or(&0) >= per_account {
+                continue;
+            }
+            *tries.entry(name).or_default() += 1;
+            pairs.push((*name, DEFAULT_PASSWORDS[(round + index) % DEFAULT_PASSWORDS.len()]));
+        }
+    }
+    pairs
+}
+
+#[test]
+fn negative_control_default_pairs_stay_below_both_limits_and_cover_every_name() {
+    let pairs = default_pairs();
+    let limits = holzwave_server::limits::Limits::DEFAULT;
+    assert!(pairs.len() < limits.password_attempts_per_address as usize);
+    for name in DEFAULT_NAMES {
+        let tries = pairs.iter().filter(|(n, _)| *n == name).count();
+        assert!(tries >= 1 && tries < limits.password_attempts_per_account as usize, "{name}: {tries} tries");
+    }
+    assert_eq!(pairs.iter().collect::<BTreeSet<_>>().len(), pairs.len(), "no pair twice");
+}
+
+/// What a TCP connection to the TLS port that speaks plain HTTP reads back within 3 seconds.
+fn plain_tcp(addr: std::net::SocketAddr, send: &[u8]) -> Vec<u8> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(3)).expect("connect");
+    stream.set_read_timeout(Some(Duration::from_secs(3))).expect("timeout");
+    let _ = stream.write_all(send);
+    let mut got = Vec::new();
+    let mut buffer = [0u8; 4096];
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => got.extend_from_slice(&buffer[..n]),
+        }
+    }
+    got
+}
+
+#[test]
+fn default_admin_no_default_account_signs_in_and_the_tls_port_never_answers_plain_http() {
+    on_big_stack(async {
+        let server = Site::new(None).start();
+        let mut client = server.client();
+        let before = client.session().await;
+        assert_eq!(before["bootstrap"], json!(true), "a valid start with no account offers the setup");
+        let list = client.call("GET", "/api/admin/accounts", None).await;
+        assert_eq!(list.status, 401, "the account list needs a session: {}", list.text());
+
+        let pairs = default_pairs();
+        let mut sentences = BTreeSet::new();
+        let mut statuses = BTreeSet::new();
+        for (name, password) in &pairs {
+            let reply = client.call("POST", "/auth/password", Some(&json!({"username": name, "password": password}))).await;
+            statuses.insert(reply.status);
+            sentences.insert(reply.text());
+            assert!(reply.all("set-cookie").iter().all(|c| !c.starts_with("__Host-hw_session=") || c.contains("Max-Age=0")), "{name}: no session");
+        }
+        assert_eq!(statuses, BTreeSet::from([401]), "every pair is refused");
+        assert_eq!(sentences.len(), 1, "every pair gets the one sentence: {sentences:?}");
+        let after = client.session().await;
+        assert_eq!(after["bootstrap"], json!(true), "the attempts did not end the setup");
+        println!(
+            "Default admin: {} pairs ({} names x {} passwords, capped below the per-address limit {} and the per-account limit {}); status {statuses:?}; one sentence {:?}; bootstrap still true; account list without a session 401",
+            pairs.len(),
+            DEFAULT_NAMES.len(),
+            DEFAULT_PASSWORDS.len(),
+            holzwave_server::limits::Limits::DEFAULT.password_attempts_per_address,
+            holzwave_server::limits::Limits::DEFAULT.password_attempts_per_account,
+            sentences.iter().next().map(String::as_str).unwrap_or_default()
+        );
+        println!("Default admin pairs: {}", pairs.iter().map(|(n, p)| format!("{n}/{p}")).collect::<Vec<_>>().join(" "));
+
+        // Plain bytes on the TLS port.
+        let addr = server.site.addr();
+        for (what, bytes) in [("GET", &b"GET / HTTP/1.1\r\nHost: hw.example.test\r\n\r\n"[..]), ("CONNECT", &b"CONNECT hw.example.test:443 HTTP/1.1\r\nHost: hw.example.test:443\r\n\r\n"[..])] {
+            let got = plain_tcp(addr, bytes);
+            assert!(!got.starts_with(b"HTTP/") && !String::from_utf8_lossy(&got).contains("HTTP/1"), "{what}: the TLS port answers plain HTTP: {got:?}");
+            println!("Plain TCP: {what} sent as plain bytes to the TLS port; read {} bytes within 3 seconds, first bytes {:02x?}", got.len(), &got[..got.len().min(7)]);
+        }
+        // The control: the same port, with TLS, answers HTTP.
+        assert_eq!(client.session().await["bootstrap"], json!(true), "the port answers through TLS");
+    });
+}
+
+/// The sockets the process tree listens on, as text, on Linux; read from `/proc` and matched to the descriptors by inode.
+#[cfg(target_os = "linux")]
+fn listening_sockets(root: u32) -> Vec<String> {
+    fn children(of: u32) -> Vec<u32> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+            let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
+            let after = stat.rsplit(')').next().unwrap_or_default();
+            if after.split_whitespace().nth(1).and_then(|p| p.parse::<u32>().ok()) == Some(of) {
+                found.push(pid);
+            }
+        }
+        found
+    }
+    let mut tree = vec![root];
+    let mut at = 0;
+    while at < tree.len() {
+        let more = children(tree[at]);
+        tree.extend(more);
+        at += 1;
+    }
+    let mut inodes = BTreeSet::new();
+    for pid in &tree {
+        for fd in std::fs::read_dir(format!("/proc/{pid}/fd")).into_iter().flatten().flatten() {
+            if let Ok(target) = std::fs::read_link(fd.path()) {
+                let text = target.to_string_lossy().into_owned();
+                if let Some(inode) = text.strip_prefix("socket:[").and_then(|t| t.strip_suffix(']')) {
+                    inodes.insert(inode.to_owned());
+                }
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for pid in &tree {
+        for table in ["tcp", "tcp6"] {
+            for line in std::fs::read_to_string(format!("/proc/{pid}/net/{table}")).unwrap_or_default().lines().skip(1) {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                if fields.len() > 9 && fields[3] == "0A" && inodes.contains(fields[9]) {
+                    found.push(format!("{table} {}", fields[1]));
+                }
+            }
+        }
+        for line in std::fs::read_to_string(format!("/proc/{pid}/net/unix")).unwrap_or_default().lines().skip(1) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() >= 8 && inodes.contains(fields[6]) && fields[5] == "01" {
+                found.push(format!("unix {}", fields[7]));
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+#[test]
+fn listeners_the_process_tree_listens_on_the_configured_address_and_the_health_socket_only() {
+    #[cfg(target_os = "linux")]
+    {
+        let server = Site::new(None).start();
+        let found = listening_sockets(server.pid());
+        let port = server.site.port;
+        let health = server.site.run_dir().join("health.sock").display().to_string();
+        let wanted_tcp = format!("tcp 0100007F:{port:04X}");
+        let tcp: Vec<&String> = found.iter().filter(|f| f.starts_with("tcp")).collect();
+        let unix: Vec<&String> = found.iter().filter(|f| f.starts_with("unix")).collect();
+        assert_eq!(tcp, [&wanted_tcp], "one TCP listener, the configured address: {found:?}");
+        assert_eq!(unix, [&format!("unix {health}")], "one Unix socket, the health socket: {found:?}");
+        println!("Listeners: {found:?}");
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        println!("Listeners: NOT RUN: not Linux (the process tree's sockets are read from /proc; the Linux container run covers it)");
+    }
+}
+
+// =============================================================================================================================
+// The deployment files
+// =============================================================================================================================
+
+/// The environment variable that the sign-off run sets to allow a run without the deployment tools. Without it a missing tool
+/// fails the test.
+const TOOLFREE: &str = "HOLZWAVE_SECURITY_TOOLFREE";
+
+/// What is wrong with a Dockerfile text: the rules of the runtime contract that can be read from the text. Comment lines are
+/// not instructions and are ignored.
+fn dockerfile_problems(text: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    // Join continuation lines and drop comments.
+    let mut joined = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(stripped) = trimmed.strip_suffix('\\') {
+            joined.push_str(stripped);
+            joined.push(' ');
+        } else {
+            joined.push_str(trimmed);
+            joined.push('\n');
+        }
+    }
+    let lines: Vec<&str> = joined.lines().filter(|l| !l.trim().is_empty()).collect();
+    let froms: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| l.to_ascii_uppercase().starts_with("FROM ")).map(|(i, _)| i).collect();
+    let Some(&last_from) = froms.last() else {
+        return vec!["no FROM instruction".to_owned()];
+    };
+    for &at in &froms {
+        let image = lines[at].split_whitespace().nth(1).unwrap_or_default();
+        let reference = image.split('@').next().unwrap_or_default();
+        if reference.ends_with(":latest") || (!reference.contains(':') && !image.contains('@') && reference != "scratch") {
+            problems.push(format!("the image {image} has no pinned tag (latest)"));
+        }
+    }
+    let final_stage = &lines[last_from..];
+    match final_stage.iter().rev().find(|l| l.to_ascii_uppercase().starts_with("USER ")) {
+        None => problems.push("the final stage has no USER instruction".to_owned()),
+        Some(user) => {
+            let name = user.split_whitespace().nth(1).unwrap_or_default().split(':').next().unwrap_or_default();
+            if name == "root" || name == "0" {
+                problems.push("the final stage runs as root".to_owned());
+            }
+        }
+    }
+    if !final_stage.iter().any(|l| l.to_ascii_uppercase().starts_with("HEALTHCHECK ") && !l.to_ascii_uppercase().contains("NONE")) {
+        problems.push("the final stage has no HEALTHCHECK".to_owned());
+    }
+    let setcaps: Vec<&&str> = lines.iter().filter(|l| l.split(|c: char| !c.is_alphanumeric() && c != '-').any(|w| w == "setcap")).collect();
+    if setcaps.len() != 1 {
+        problems.push(format!("{} setcap instructions where exactly one is allowed", setcaps.len()));
+    }
+    for line in &setcaps {
+        let after = line.split("setcap").nth(1).unwrap_or_default();
+        let spec = after.split_whitespace().find(|w| w.contains("cap_")).unwrap_or_default();
+        let (caps, flags) = spec.split_once('=').unwrap_or((spec, ""));
+        let set: BTreeSet<&str> = caps.split(',').collect();
+        let wanted: BTreeSet<&str> = ["cap_setuid", "cap_setgid", "cap_chown", "cap_kill"].into_iter().collect();
+        if set != wanted || flags != "p" {
+            problems.push(format!("the file capabilities are {caps}={flags}, not the four of the contract with =p"));
+        }
+    }
+    for forbidden in ["--privileged", "no-new-privileges", "docker.sock", "/var/run/docker", "containerd.sock"] {
+        if lines.iter().any(|l| l.contains(forbidden)) {
+            problems.push(format!("the text names {forbidden}"));
+        }
+    }
+    problems
+}
+
+#[test]
+fn deploy_the_dockerfile_keeps_the_runtime_contract() {
+    let text = read(&repo_root().join("packaging/docker/Dockerfile"));
+    let problems = dockerfile_problems(&text);
+    assert!(problems.is_empty(), "the Dockerfile: {problems:?}");
+    println!("Deploy (Dockerfile): final stage USER 10001:10001, a HEALTHCHECK, pinned images, one setcap with the four capabilities =p, no privileged, socket or no-new-privileges instruction");
+}
+
+#[test]
+fn negative_control_deploy_each_rule_of_the_dockerfile_guard_reports_its_own_mistake() {
+    let good = read(&repo_root().join("packaging/docker/Dockerfile"));
+    assert!(dockerfile_problems(&good).is_empty(), "the real file passes");
+    let mutations: [(&str, Box<dyn Fn(&str) -> String>, &str); 9] = [
+        ("root", Box::new(|t| t.replace("USER 10001:10001", "USER root")), "root"),
+        ("no user", Box::new(|t| t.replace("USER 10001:10001", "")), "no USER"),
+        ("no healthcheck", Box::new(|t| t.lines().filter(|l| !l.starts_with("HEALTHCHECK")).collect::<Vec<_>>().join("\n")), "HEALTHCHECK"),
+        ("latest", Box::new(|t| t.replacen("debian:trixie-20261027-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4", "debian:latest", 1)), "latest"),
+        ("extra capability", Box::new(|t| t.replace("cap_setuid,cap_setgid,cap_chown,cap_kill=p", "cap_setuid,cap_setgid,cap_chown,cap_kill,cap_sys_admin=p")), "file capabilities"),
+        ("a second setcap", Box::new(|t| format!("{t}\nRUN setcap cap_chown=p /usr/bin/x\n")), "setcap"),
+        ("privileged", Box::new(|t| format!("{t}\nRUN docker run --privileged x\n")), "--privileged"),
+        ("no-new-privileges", Box::new(|t| format!("{t}\nRUN echo --security-opt no-new-privileges\n")), "no-new-privileges"),
+        ("socket", Box::new(|t| format!("{t}\nVOLUME /var/run/docker.sock\n")), "docker"),
+    ];
+    for (name, mutate, needle) in mutations {
+        let problems = dockerfile_problems(&mutate(&good));
+        assert!(problems.iter().any(|p| p.contains(needle)), "{name}: reported {problems:?}, wanted a problem naming {needle:?}");
+    }
+    // A comment that names a forbidden option is not an instruction.
+    assert!(dockerfile_problems(&format!("{good}\n# Do not add no-new-privileges or --privileged here\n")).is_empty(), "comments are ignored");
+}
+
+/// Runs a program in the repository root with `input` on standard input: exit code, standard output and standard error.
+fn run_tool(program: &str, args: &[&str], input: Option<&str>) -> Option<(i32, String, String)> {
+    use std::io::Write;
+    let mut command = std::process::Command::new(program);
+    command.args(args).current_dir(repo_root()).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => panic!("{program}: {e}"),
+    };
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        if let Some(input) = input {
+            let _ = stdin.write_all(input.as_bytes());
+        }
+    }
+    let out = child.wait_with_output().expect("the tool ends");
+    Some((out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned()))
+}
+
+/// Whether a tool is there. A missing tool prints `NOT RUN: <tool>` and fails the test unless the sign-off run allows a run
+/// without tools (the variable [`TOOLFREE`]).
+fn tool_there(tool: &str, probe: &[&str]) -> bool {
+    let present = run_tool(tool, probe, None).is_some_and(|(code, _, _)| code == 0);
+    if !present {
+        println!("NOT RUN: {tool}");
+        assert!(std::env::var(TOOLFREE).as_deref() == Ok("1"), "NOT RUN: {tool} is missing and {TOOLFREE}=1 is not set (only the sign-off run may allow it)");
+    }
+    present
+}
+
+#[test]
+fn deploy_the_checker_proves_itself_and_passes_compose_and_the_three_charts() {
+    if !tool_there("node", &["--version"]) {
+        return;
+    }
+    let (code, out, err) = run_tool("node", &["scripts/web-deploy-check.mjs", "self-test"], None).expect("node");
+    assert_eq!(code, 0, "self-test: {out} {err}");
+    let ok_lines = out.lines().filter(|l| l.starts_with("ok:")).count();
+    println!("Deploy (self-test): exit 0, {ok_lines} ok lines, last line {:?}", out.lines().last().unwrap_or_default());
+
+    // Compose.
+    if tool_there("docker", &["compose", "version"]) {
+        let (code, json, err) = run_tool("docker", &["compose", "--profile", "setup", "-f", "packaging/compose/docker-compose.yml", "config", "--format", "json"], None).expect("docker");
+        assert_eq!(code, 0, "compose config: {err}");
+        let (code, out, err) = run_tool("node", &["scripts/web-deploy-check.mjs", "compose"], Some(&json)).expect("node");
+        assert_eq!((code, out.trim()), (0, ""), "the shipped Compose file passes the checker: {out} {err}");
+        println!("Deploy (compose): the shipped file passes, exit 0, no violation");
+        // Negative controls: three unsafe copies.
+        let value: Value = serde_json::from_str(&json).expect("compose JSON");
+        let copies: [(&str, Box<dyn Fn(&mut Value)>, &str); 3] = [
+            ("privileged", Box::new(|v| v["services"]["holzwave"]["privileged"] = json!(true)), "violation: privileged"),
+            ("an extra capability", Box::new(|v| v["services"]["holzwave"]["cap_add"].as_array_mut().expect("cap_add").push(json!("SYS_ADMIN"))), "violation: cap-add"),
+            (
+                "the container socket mounted",
+                Box::new(|v| {
+                    v["services"]["holzwave"]["volumes"]
+                        .as_array_mut()
+                        .expect("volumes")
+                        .push(json!({"type": "bind", "source": "/var/run/docker.sock", "target": "/var/run/docker.sock"}))
+                }),
+                "violation: socket-mount",
+            ),
+        ];
+        for (name, mutate, expected) in copies {
+            let mut copy = value.clone();
+            mutate(&mut copy);
+            let (code, out, err) = run_tool("node", &["scripts/web-deploy-check.mjs", "compose"], Some(&copy.to_string())).expect("node");
+            assert_eq!(code, 1, "{name}: refused with exit 1, got {code}: {out} {err}");
+            assert!(out.contains(expected), "{name}: the checker names the rule {expected:?}: {out}");
+            println!("Deploy (negative control): compose with {name}: exit 1, {:?}", out.trim());
+        }
+    }
+
+    // The three chart renders.
+    if tool_there("helm", &["version"]) && tool_there("kubectl", &["version", "--client"]) {
+        for values in ["files", "acme", "proxy"] {
+            let file = format!("packaging/helm/holzwave/ci/{values}-values.yaml");
+            let (code, out, err) = run_tool("node", &["scripts/web-deploy-check.mjs", "chart-values", &file], None).expect("node");
+            assert_eq!((code, out.trim()), (0, ""), "the chart rendered with {file} passes the checker: {out} {err}");
+            println!("Deploy (chart): {file}: exit 0, no violation");
+        }
+    }
+}
+
+// =============================================================================================================================
+// The spawn guard: no worker for a forbidden user id
+// =============================================================================================================================
+
+#[test]
+fn spawn_guard_a_forbidden_user_id_never_reaches_the_helper_and_a_normal_one_does() {
+    on_big_stack(async {
+        use holzwave_server::clock::ManualClock;
+        use holzwave_server::supervisor::{AttachError, HelperClient, HelperLauncher, HelperTimeouts, Supervisor, SupervisorSettings};
+        use sup_env::{FakeHelper, START, account};
+
+        // The supervisor over the helper launcher and the fake helper, with the range of the configuration.
+        let (fake, end) = FakeHelper::start();
+        let timeouts = HelperTimeouts { request: Duration::from_millis(400), start: Duration::from_millis(400) };
+        let client = HelperClient::from_socket(end, timeouts).expect("the client").with_uid_range(20000, 29999);
+        let launcher = std::sync::Arc::new(HelperLauncher::new(client));
+        let clock = std::sync::Arc::new(ManualClock::new(START));
+        let supervisor = Supervisor::new(launcher, SupervisorSettings::default(), clock);
+
+        let mut refusals = Vec::new();
+        for (id, uid) in [(7i64, 0u32), (8, 19999), (9, 30000)] {
+            let result = supervisor.attach(account(id, uid)).await;
+            match result {
+                Err(AttachError::Launch(sentence)) => {
+                    assert!(!sentence.is_empty() && !sentence.contains('\n'), "uid {uid}: a sentence: {sentence:?}");
+                    refusals.push(format!("uid {uid}: {sentence}"));
+                }
+                other => panic!("uid {uid}: expected a refusal, got {:?}", other.map(|_| "attached")),
+            }
+        }
+        assert_eq!(fake.requests(), vec![], "no request of any kind reached the helper for 0, 19999 or 30000");
+        // The positive control: a normal account's request reaches the helper with the uid it owns, and the helper's request has
+        // no path: the home is the helper's own business (`<home base>/<uid>`).
+        let attached = supervisor.attach(account(10, 20008)).await;
+        assert!(attached.is_ok(), "a normal account attaches");
+        assert_eq!(fake.spawns(), vec![(20008, holzwave_spawn_helper::protocol::Mode::Serve)], "the uid the account owns, nothing else");
+        println!("Spawn guard (supervisor over the helper launcher and a recording fake helper, range 20000 to 29999): {refusals:?}; recording after the three refusals: empty; control: spawn of uid 20008 only");
+
+        // The accounts: every user id the service gave a person is inside the range, no two share one, and the workers the
+        // server asked for ran as the uids the accounts own.
+        let rig = Rig::start().await;
+        let mut people = vec![rig.admin.clone(), rig.bob.clone()];
+        for _ in 0..3 {
+            let (user, _) = rig.member().await;
+            people.push(user);
+        }
+        let uids: BTreeSet<u32> = people.iter().map(|p| p.key.uid).collect();
+        assert_eq!(uids.len(), people.len(), "no two people share a user id");
+        assert!(uids.iter().all(|u| edge::UID_RANGE.contains(u)), "{uids:?} are inside the range");
+        let requested: BTreeSet<u32> = rig.env.ws.launcher.requests().into_iter().map(|(uid, _)| uid).collect();
+        assert!(requested.is_subset(&uids), "the launcher was asked only for uids that accounts own: {requested:?} against {uids:?}");
+        let homes = std::fs::read_dir(rig.env.ws.launcher.home(*uids.iter().next().expect("a uid")).parent().expect("homes")).map(|d| d.flatten().count()).unwrap_or(0);
+        println!("Spawn guard (accounts): {} people with the uids {uids:?} inside the range, no duplicates; the launcher was asked for {requested:?}, a subset; {homes} homes under the homes directory", people.len());
+    });
+}
+
+#[test]
+fn negative_control_deploy_a_missing_tool_is_a_visible_failure_unless_the_sign_off_run_allows_it() {
+    let missing = "holzwave-no-such-deployment-tool";
+    if std::env::var(TOOLFREE).as_deref() == Ok("1") {
+        assert!(!tool_there(missing, &["--version"]), "a missing tool is reported as absent in the tool-free run");
+    } else {
+        let outcome = std::panic::catch_unwind(|| tool_there(missing, &["--version"]));
+        let message = outcome.expect_err("a missing tool fails by default").downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(message.contains("NOT RUN: holzwave-no-such-deployment-tool"), "the failure names the tool: {message}");
+    }
 }
