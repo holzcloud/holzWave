@@ -40,7 +40,8 @@ const str = (v: unknown, max: number): string | null => (typeof v === "string" &
 
 function readRow(raw: unknown): Row | null {
   if (!isObject(raw)) return null;
-  const id = str(raw.id, MAX_ID);
+  // The server numbers its accounts: the id arrives as a whole number and is kept as its digits, the form it has in a path.
+  const id = typeof raw.id === "number" ? (Number.isSafeInteger(raw.id) && raw.id >= 0 ? String(raw.id) : null) : str(raw.id, MAX_ID);
   const username = str(raw.username, MAX_NAME);
   const displayName = str(raw.display_name, MAX_NAME);
   if (id === null || id === "" || username === null || displayName === null) return null;

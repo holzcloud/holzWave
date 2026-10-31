@@ -55,6 +55,14 @@ test("readAccounts reads the documented shape and keeps only name, role, state a
   assert.deepEqual(Object.keys(extra.rows[0]).sort(), ["displayName", "id", "lastSigninMs", "role", "state", "username"]);
 });
 
+test("readAccounts takes the whole-number id the server sends and keeps its digits", () => {
+  const read = readAccounts(answer({ accounts: [row({ id: 7 }), row({ id: 0 })] }));
+  assert.deepEqual(read.rows.map((r) => r.id), ["7", "0"]);
+  for (const bad of [-1, 1.5, Number.NaN, 2 ** 53, true, null]) {
+    assert.equal(readAccounts(answer({ accounts: [row({ id: bad })] })), null, String(bad));
+  }
+});
+
 test("readAccounts gives null for more than 500 accounts and takes exactly 500", () => {
   const many = (n) => Array.from({ length: n }, (_, i) => row({ id: `a${i}` }));
   assert.equal(readAccounts(answer({ accounts: many(MAX_ACCOUNTS + 1) })), null);
