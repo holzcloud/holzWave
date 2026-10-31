@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use tokio::sync::broadcast;
 use zeroize::Zeroizing;
 
 use crate::clock::Clock;
@@ -105,11 +106,45 @@ pub struct Created {
     pub session: Session,
 }
 
+/// How many announcements of ended sessions wait for a slow listener before it is told that it missed some.
+const ENDED_BACKLOG: usize = 256;
+
+/// A session that was ended on purpose (a sign-out, a sign-out everywhere, a session that ran out when it was looked up), named
+/// by its stored identity and never by a cookie value. Open sockets listen for these so that nothing runs after a sign-out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ended {
+    /// One session, by the hash its row is stored under.
+    Session(TokenHash),
+    /// One session of an account, by the handle prefix of its hash.
+    Handle {
+        /// The account.
+        account: AccountId,
+        /// The first bytes of the hash.
+        prefix: [u8; HANDLE_BYTES],
+    },
+    /// Every session of the account.
+    Account(AccountId),
+}
+
+impl Ended {
+    /// Whether this announcement ends `session`.
+    pub fn ends(&self, session: &Session) -> bool {
+        match self {
+            Ended::Session(hash) => *hash == session.id_hash,
+            Ended::Handle { account, prefix } => {
+                *account == session.account_id && session.id_hash[..HANDLE_BYTES] == prefix[..]
+            }
+            Ended::Account(account) => *account == session.account_id,
+        }
+    }
+}
+
 /// The sessions of the server.
 pub struct SessionManager {
     store: Arc<Store>,
     clock: Arc<dyn Clock>,
     lifetimes: Sessions,
+    ended: broadcast::Sender<Ended>,
 }
 
 impl fmt::Debug for SessionManager {
@@ -125,7 +160,23 @@ fn expiry(created: i64, lifetime: std::time::Duration) -> i64 {
 impl SessionManager {
     /// A manager over `store` with the lifetimes of the configuration.
     pub fn new(store: Arc<Store>, clock: Arc<dyn Clock>, lifetimes: Sessions) -> SessionManager {
-        SessionManager { store, clock, lifetimes }
+        SessionManager { store, clock, lifetimes, ended: broadcast::channel(ENDED_BACKLOG).0 }
+    }
+
+    /// A listener for the sessions that are ended on purpose, from now on. A listener that falls behind is told so by the
+    /// channel and has to look at its session again.
+    pub fn subscribe_ended(&self) -> broadcast::Receiver<Ended> {
+        self.ended.subscribe()
+    }
+
+    /// The idle and absolute times and the step-up time this manager applies.
+    pub fn lifetimes(&self) -> Sessions {
+        self.lifetimes
+    }
+
+    fn announce(&self, ended: Ended) {
+        // No listener is not a failure.
+        let _ = self.ended.send(ended);
     }
 
     /// The time of the manager's clock in unix seconds.
@@ -179,19 +230,32 @@ impl SessionManager {
     /// not active, is deleted and refused.
     pub fn lookup(&self, value: &str, now: i64) -> Result<Session, SessionError> {
         let hash = parse_token(value)?;
+        self.lookup_hash(&hash, now)
+    }
+
+    /// The session stored under `session.id_hash`, if it is alive at `now`: the check of a session by the identity its row
+    /// carries, for code that holds a session (an open socket) and must not keep the cookie value. The same rules as
+    /// [`SessionManager::lookup`] apply, and a session that has run out is deleted and announced.
+    pub fn check(&self, session: &Session, now: i64) -> Result<Session, SessionError> {
+        self.lookup_hash(&session.id_hash, now)
+    }
+
+    fn lookup_hash(&self, hash: &TokenHash, now: i64) -> Result<Session, SessionError> {
         let (session, account) = self.store.read(|tx| {
-            let Some(session) = tx.session_get(&hash)? else { return Ok((None, None)) };
+            let Some(session) = tx.session_get(hash)? else { return Ok((None, None)) };
             let account = tx.account_get(session.account_id)?;
             Ok((Some(session), account))
         })?;
         let session = session.ok_or(SessionError::Unknown)?;
         let idle_ends = expiry(session.last_seen, self.lifetimes.idle);
         if now > idle_ends || now > session.absolute_expires {
-            self.store.write(|tx| tx.session_delete(&hash))?;
+            self.store.write(|tx| tx.session_delete(hash))?;
+            self.announce(Ended::Session(*hash));
             return Err(SessionError::Expired);
         }
         if !matches!(account, Some(ref found) if found.state == AccountState::Active) {
-            self.store.write(|tx| tx.session_delete(&hash))?;
+            self.store.write(|tx| tx.session_delete(hash))?;
+            self.announce(Ended::Session(*hash));
             return Err(SessionError::AccountDisabled);
         }
         Ok(session)
@@ -211,7 +275,11 @@ impl SessionManager {
     /// handle of another account's session, are `false` and change nothing. One statement matches the account and the handle.
     pub fn end_by_handle(&self, account: AccountId, handle: &str) -> Result<bool, SessionError> {
         let Some(prefix) = parse_handle(handle) else { return Ok(false) };
-        Ok(self.store.write(|tx| tx.session_delete_by_prefix(account, &prefix))?)
+        let ended = self.store.write(|tx| tx.session_delete_by_prefix(account, &prefix))?;
+        if ended {
+            self.announce(Ended::Handle { account, prefix });
+        }
+        Ok(ended)
     }
 
     /// Records activity: writes `last_seen = now` when the stored value is at least 30 seconds old, and answers whether it
@@ -245,12 +313,16 @@ impl SessionManager {
 
     /// Ends one session; answers whether it was still there.
     pub fn end(&self, session: &Session) -> Result<bool, SessionError> {
-        Ok(self.store.write(|tx| tx.session_delete(&session.id_hash))?)
+        let ended = self.store.write(|tx| tx.session_delete(&session.id_hash))?;
+        self.announce(Ended::Session(session.id_hash));
+        Ok(ended)
     }
 
     /// Ends every session of an account; answers how many there were.
     pub fn end_all(&self, account: AccountId) -> Result<usize, SessionError> {
-        Ok(self.store.write(|tx| tx.session_delete_all(account))?)
+        let count = self.store.write(|tx| tx.session_delete_all(account))?;
+        self.announce(Ended::Account(account));
+        Ok(count)
     }
 
     /// Removes sessions that are past their idle or absolute time at `now`, at most `max_rows` of them; answers how many it

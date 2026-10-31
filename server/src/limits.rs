@@ -345,6 +345,19 @@ limits! {
     ping_interval, PING_INTERVAL: Duration = secs(25), secs(1), minutes(10);
     /// How often the server checks that the session behind an open socket is still valid.
     session_recheck, SESSION_RECHECK: Duration = secs(30), secs(1), minutes(10);
+    /// The violations (a malformed message, an unknown command, a message over the cap of its command) one socket may commit within
+    /// the violation window; the next one closes the socket.
+    ws_violations, WS_VIOLATIONS: u32 = 8, 1, 10_000;
+    /// The span the violations of one socket are counted in.
+    ws_violation_window, WS_VIOLATION_WINDOW: Duration = minutes(1), secs(1), hours(1);
+    /// The commands refused for the rate in a row before the socket is closed.
+    ws_refusals_in_a_row, WS_REFUSALS_IN_A_ROW: u32 = 200, 1, 1_000_000;
+    /// How long a write to a socket may make no progress before the socket is closed.
+    ws_write_stall, WS_WRITE_STALL: Duration = secs(10), secs(1), minutes(10);
+    /// How long a socket may be silent (no message of any kind, a pong included) before it is closed.
+    ws_silence, WS_SILENCE: Duration = secs(50), secs(2), minutes(30);
+    /// The idle time left of a session, at most which the socket tells the page that the session is about to expire.
+    session_expiring, SESSION_EXPIRING: Duration = secs(60), secs(1), hours(1);
     /// The most Argon2 verifications that run at once, which bounds the memory a flood of sign-ins can take.
     argon2_concurrency, ARGON2_CONCURRENCY: u32 = 2, 1, 64;
     /// The wrong passwords per account within the window before the account is locked.
