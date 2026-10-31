@@ -358,6 +358,8 @@ limits! {
     ws_silence, WS_SILENCE: Duration = secs(50), secs(2), minutes(30);
     /// The idle time left of a session, at most which the socket tells the page that the session is about to expire.
     session_expiring, SESSION_EXPIRING: Duration = secs(60), secs(1), hours(1);
+    /// The longest the supervisor side of the secret store waits for a worker to answer one control.
+    gate_wait, GATE_WAIT: Duration = secs(8), secs(1), minutes(2);
     /// The most Argon2 verifications that run at once, which bounds the memory a flood of sign-ins can take.
     argon2_concurrency, ARGON2_CONCURRENCY: u32 = 2, 1, 64;
     /// The wrong passwords per account within the window before the account is locked.

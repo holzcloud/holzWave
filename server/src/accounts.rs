@@ -398,6 +398,17 @@ impl Accounts {
         }
     }
 
+    /// The token a start of the server prints: a new one when no account exists and no earlier token is still valid,
+    /// otherwise nothing (the earlier line was printed by the start that made it, and a token cannot be shown again).
+    pub fn bootstrap_for_start(&self) -> Result<Option<Issued>, AccountError> {
+        let now = self.clock.unix();
+        let (accounts, pending) = self.store.read(|tx| Ok((tx.account_count()?, tx.bootstrap_pending(now)?)))?;
+        if accounts > 0 || pending {
+            return Ok(None);
+        }
+        self.bootstrap_issue().map(Some)
+    }
+
     /// Redeems the bootstrap token: in one transaction the token is spent, no account is found to exist, the first
     /// administrator is made with the first user id of the range, and `enrol` runs with the open transaction and the new
     /// account (it stores the password and the authenticator, or the passkey). When `enrol` fails, or anything else does,

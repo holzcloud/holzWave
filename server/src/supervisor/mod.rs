@@ -2,13 +2,16 @@
 //!
 //! [`registry`] owns the workers and the sockets that are attached to them, [`socket`] holds the bounded queue of every
 //! browser socket, [`fanout`] turns what a worker says into what the page expects, [`idle`] ends workers nobody uses,
-//! [`launcher`] starts them and [`helper_client`] speaks to the spawn helper that does it as the person's own user.
+//! [`launcher`] starts them and [`helper_client`] speaks to the spawn helper that does it as the person's own user. [`gate`] is
+//! the supervisor side of the secret store and [`serve`] assembles the whole server around all of it.
 
 pub mod fanout;
+pub mod gate;
 pub mod helper_client;
 pub mod idle;
 pub mod launcher;
 pub mod registry;
+pub mod serve;
 pub mod socket;
 
 pub use helper_client::{HelperClient, HelperError, HelperSettings, HelperTimeouts, Spawned};

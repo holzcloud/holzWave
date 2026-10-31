@@ -764,6 +764,16 @@ impl Tx<'_> {
         Ok(())
     }
 
+    /// Whether a bootstrap token exists that is not redeemed and not expired at `now`.
+    pub fn bootstrap_pending(&self, now: i64) -> Result<bool> {
+        let found: i64 = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM bootstrap WHERE redeemed_at IS NULL AND expires_at > ?1)",
+            params![now],
+            |row| row.get(0),
+        )?;
+        Ok(found == 1)
+    }
+
     /// Redeems the bootstrap token, once, and only while no account exists. Call it in the same `write` that creates the
     /// first administrator, so a failure there gives the token back. An unknown, expired or used token and a token redeemed
     /// when an account exists are the same error.

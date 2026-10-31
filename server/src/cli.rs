@@ -26,6 +26,7 @@ usage: holzwave-server <subcommand> [options]
 
 subcommands:
   keygen [--out FILE]   create the server key file (FILE, or the file named by HOLZWAVE_SERVER_KEY_FILE)
+  serve                 run the server (the configuration and the key file come from the environment)
   check-config          check the configuration file and the key file, then exit
   bootstrap             print a one-time token that creates the first administrator (only while no account exists)
   healthcheck           ask the running server whether it is ready: prints healthy and exits 0, or one sentence and exits 1
@@ -125,6 +126,7 @@ fn usage_error(problem: &str) -> u8 {
 fn run(args: &[String], env: &Env) -> u8 {
     match args.first().map(String::as_str) {
         Some("keygen") => keygen(&args[1..], env),
+        Some("serve") => serve(&args[1..], env),
         Some("check-config") => check_config(&args[1..], env),
         Some("bootstrap") => bootstrap(&args[1..], env),
         Some("healthcheck") => healthcheck(&args[1..], env),
@@ -165,6 +167,35 @@ fn keygen(args: &[String], env: &Env) -> u8 {
             println!("wrote {}", keyfile::shown(Path::new(&path)));
             0
         }
+        Err(refusal) => {
+            eprintln!("holzwave-server: {refusal}");
+            FAILURE_STATUS
+        }
+    }
+}
+
+/// `serve`: runs the server until SIGTERM or SIGINT. A start that cannot be completed is one sentence on standard error and exit
+/// status 1, with nothing left listening. After the stop signal the shutdown runs in order and the status is 0.
+fn serve(args: &[String], env: &Env) -> u8 {
+    if let Some(arg) = args.first() {
+        return usage_error(&format!("serve takes no arguments, got {arg:?}"));
+    }
+    let prepared = match config::prepare(env, &RealProbe) {
+        Ok(prepared) => prepared,
+        Err(refusal) => {
+            eprintln!("holzwave-server: {refusal}");
+            return FAILURE_STATUS;
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().thread_name("hw-server").build() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("holzwave-server: the runtime cannot be started ({error})");
+            return FAILURE_STATUS;
+        }
+    };
+    match runtime.block_on(crate::supervisor::serve::run(prepared)) {
+        Ok(()) => 0,
         Err(refusal) => {
             eprintln!("holzwave-server: {refusal}");
             FAILURE_STATUS
