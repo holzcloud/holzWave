@@ -322,20 +322,58 @@ export function batchText(done: { ok: number; failed: readonly string[]; over: n
   return parts.map((p) => (p.endsWith(".") ? p : `${p}.`)).join(" ");
 }
 
-// ---- download (stubs) --------------------------------------------------------------------------------------------
+// ---- download ---------------------------------------------------------------------------------------------------------
 
+/** The most download grants the page keeps: the oldest is ended when a new one would make 17. */
 export const MAX_GRANTS = 16;
-export const DOWNLOAD_ONLY_SENTENCE = "";
+
+/** The status line says this when the core refuses a grant: it grants images, video, audio and PDF files only. */
+export const DOWNLOAD_ONLY_SENTENCE = "Download works for images, video, audio and PDF files.";
+
+/** The grants the page made for downloads, oldest first, at most 16. */
 export class GrantList {
-  add(_token: string): string | null {
-    return null;
+  private tokens: string[] = [];
+
+  /** Keep `token`; the token that has to go to make room (the oldest) is returned, else null. A token held already is not added again. */
+  add(token: string): string | null {
+    if (this.tokens.includes(token)) return null;
+    this.tokens.push(token);
+    return this.tokens.length > MAX_GRANTS ? (this.tokens.shift() ?? null) : null;
   }
+
+  /** The tokens held, oldest first; a copy. */
   all(): string[] {
-    return [];
+    return [...this.tokens];
   }
+
+  /** Forget every token and return them, oldest first. */
   clear(): string[] {
-    return [];
+    const gone = this.tokens;
+    this.tokens = [];
+    return gone;
   }
 }
-export const baseName = (path: string): string => path;
-export const readGrant = (_json: unknown): { url: string; token: string } | null => null;
+
+/** The longest token of a grant. */
+const TOKEN_MAX = 128;
+
+/**
+ * The part of an answer of `file_grant` the page uses: the address and the token. The address must be the same-origin path
+ * `/files/<token>` of the answer's own token (letters, digits, `-` and `_` only), so no address built by anything else is ever followed.
+ */
+export function readGrant(json: unknown): { url: string; token: string } | null {
+  const o = record(json);
+  if (o === null) return null;
+  const { url, token } = o;
+  if (typeof url !== "string" || typeof token !== "string") return null;
+  if (token.length === 0 || token.length > TOKEN_MAX || !/^[A-Za-z0-9_-]+$/.test(token)) return null;
+  return url === `/files/${token}` ? { url, token } : null;
+}
+
+/** The name a downloaded file is saved under: the last part of its path, without control characters; `download` when there is none. */
+export function baseName(path: string): string {
+  const last = path.split(/[\\/]/).pop() ?? "";
+  // eslint-disable-next-line no-control-regex
+  const clean = last.replace(/[\u0000-\u001f\u007f-\u009f]/g, "\ufffd");
+  return clean === "" ? "download" : clean;
+}

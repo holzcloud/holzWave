@@ -2475,9 +2475,22 @@ status line says what happens in words: `Uploading <name>` for the file on its w
 outcome the sentences follow each other (`Uploaded 2 files. Not uploaded: too large.`), and the sentences `Only 16 files at a time.` and
 `Folders are not uploaded.` end the run when they apply; a folder is never sent. When the session has ended nothing is sent.
 
-**Download.** A file of the file browser (6.5) has the menu entry `Download` in its row menu, with `Open preview`, and the palette has
-the entry `Download`, which acts on the selected row of the focused file browser and is absent when there is none. A refusal is said in
-the status line in words, as an upload's is.
+**Download.** A file that the core grants (it grants images, video, audio and PDF files) can be taken out by an explicit act only: the entry
+`Download` of the row menu of a file in the file browser (6.5), and the palette entry `Download`, which acts on the selected file of the
+focused file browser or on the file of a focused preview and is not listed otherwise. Nothing is downloaded or granted by selecting a row, by
+opening the menu or by looking at the palette. The act asks the core for a short-lived grant and follows its address on the page's own origin
+with a download link, so the browser saves the file under its own name. A kind that the core does not grant says
+`Download works for images, video, audio and PDF files.` in the status line, in words, as an upload's refusal is said. The page keeps at most 16
+grants of its own for downloads, ends the oldest when a 17th is made, and ends all of them when the page is closed.
+
+**The row menu.** In the browser build a file row of the file browser (and no other row; a folder row keeps the system's menu) opens a menu
+by the context-menu gesture (a right press, or the long press the system maps to it), by the context-menu key and by `Shift+F10`; the row becomes
+the selected one. The menu is a floating layer, as the palette is (the hairline, the 8 px radius and the one shadow of the floating layers), with one
+entry, `Download`, at least 28 px high, which has the keyboard when the menu opens; at the pointer it opens at the pointer, from the keyboard just
+under the left part of the row, and it is kept inside the window. `Enter`, `Space` or a click runs the entry; `ArrowDown`, `ArrowUp`, `Home` and
+`End` keep the one entry focused and the list below does not move; while the menu is open it takes every key. `Escape`, a press anywhere else, the
+entry losing the focus and a change of the panes' layout close it (the focus moving to another pane does not), and each of them puts the keyboard
+back in the terminal. The entry shows the focus with the 2 px ring and a rose wash; the words are the second cue. The desktop has no such menu.
 
 **Notifications.** The Settings dialog gets a group `Notifications` after Accessibility, in the browser build only, in the manner of 6.24: one
 row with the name `Notify me`, the dim meta `bell and attention`, the state as a word at the right, one sentence of advice and one button.

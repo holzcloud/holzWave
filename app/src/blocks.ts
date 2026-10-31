@@ -43,7 +43,15 @@ export interface Instance {
   update(info: BlockInfo): void;
   /** A key while this pane has the focus; true when it was used. */
   key(e: KeyboardEvent): boolean;
+  /** The file this block holds on to now: the selected file of a browser, the file of a preview; absent or null for the others. */
+  file?(): FileRef | null;
   dispose(): void;
+}
+
+/** A file on a source (`local` or the id of a saved connection) with its full path: what `file_grant` asks for. */
+export interface FileRef {
+  source: string;
+  path: string;
 }
 
 const instances = new Map<number, Instance>();
@@ -52,6 +60,12 @@ const asked = new Set<number>();
 /** Which preview pane a browser pane opens files in, so a second file reuses it. */
 const previewOf = new Map<number, number>();
 let refreshing = false;
+
+/** The file of the focused pane (the selected file of a file browser, or what a preview shows), or null when the pane has none. */
+export function focusedFile(): FileRef | null {
+  const focus = state.view?.focus;
+  return (focus === undefined ? undefined : instances.get(focus))?.file?.() ?? null;
+}
 
 // ---- asking the core ---------------------------------------------------------------------------------------------
 
@@ -154,6 +168,14 @@ function filesBlock(info: BlockInfo, root: HTMLElement): Instance {
         mark();
       });
       row.addEventListener("dblclick", () => void activate(entry));
+      // The browser build has a row menu for a file (webfiles.ts); the desktop has none and keeps the system's own.
+      row.addEventListener("contextmenu", (e) => {
+        if (state.os !== "web" || entry.kind !== "file") return;
+        e.preventDefault();
+        selected = i;
+        mark();
+        openRowMenu(entry, { x: e.clientX, y: e.clientY });
+      });
       frag.append(row);
     });
     listEl.append(frag);
@@ -194,6 +216,13 @@ function filesBlock(info: BlockInfo, root: HTMLElement): Instance {
       else loading = Math.max(0, loading - 1);
     }
     draw();
+  };
+
+  /** Open the row menu of a file entry at a point or at its row. Only in the browser build; the module is loaded now and not before. */
+  const openRowMenu = (entry: FileEntry, at: { x: number; y: number } | HTMLElement): void => {
+    if (state.os !== "web" || entry.kind !== "file" || !listing) return;
+    const file = { source: current.source, path: joinPath(listing.path, entry.name) };
+    void import("./webfiles.js").then((m) => m.openRowMenu(file, at)).catch(() => {});
   };
 
   const activate = async (entry: FileEntry): Promise<void> => {
@@ -246,7 +275,18 @@ function filesBlock(info: BlockInfo, root: HTMLElement): Instance {
       if (next.path !== current.path && next.path !== listing?.path) void load(next.path);
       current = next;
     },
+    file() {
+      const entry = shown[selected];
+      return listing && entry?.kind === "file" ? { source: current.source, path: joinPath(listing.path, entry.name) } : null;
+    },
     key(e) {
+      // The context-menu key and Shift+F10 open the row menu of the selected file in the browser build.
+      if (state.os === "web" && (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey))) {
+        const entry = shown[selected];
+        const row = listEl.children[selected];
+        if (entry && row instanceof HTMLElement) openRowMenu(entry, row);
+        return true;
+      }
       const page = Math.max(1, Math.floor(listEl.clientHeight / 24) - 1);
       switch (e.key) {
         case "ArrowDown":
@@ -500,6 +540,9 @@ function previewBlock(info: BlockInfo, root: HTMLElement): Instance {
     root,
     get info() {
       return current;
+    },
+    file() {
+      return current.path === "" ? null : { source: current.source, path: current.path };
     },
     update(next) {
       const changed = next.path !== current.path || next.source !== current.source;
@@ -787,6 +830,10 @@ function renderBlocks(): void {
                 ? integrationBlock(info, root, { applyView, changed: onBlocks })
                 : previewBlock(info, root);
       instances.set(id, inst);
+      // In the browser build the first file pane brings the palette entry `Download`; the desktop never loads the module.
+      if (state.os === "web" && (info.kind === "files" || info.kind === "preview")) {
+        void import("./webfiles.js").then((m) => m.offerDownload()).catch(() => {});
+      }
     } else {
       inst.update(info);
     }

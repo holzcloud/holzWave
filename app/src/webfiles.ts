@@ -8,17 +8,29 @@
 // status line, and types the returned path, quoted for the shell, through the paste path of the pane under the drop. A refusal says why
 // and types nothing. A drag that carries files is taken everywhere on the page, so the browser never navigates to a dropped file.
 //
+// The download. A file that the core grants (it grants images, video, audio and PDF files) can be taken out by an explicit act only: the
+// entry `Download` of the row menu of the file browser (opened by the context-menu gesture, the context-menu key or Shift+F10) or of the
+// palette. The act asks the core for a short-lived grant (`file_grant`), whose address is `/files/<token>` on the page's own origin, and
+// follows it with a link that has the `download` attribute. The page keeps at most 16 grants it made, ends the oldest beyond that and all of
+// them when the page is hidden for good. Selecting a row, opening the menu or listing the palette entry grants nothing.
+//
 // Nothing of a file (its name, its path) is kept: the upload folder shown on the label is held in memory until the page goes.
-import { HttpError, http } from "./bridge.js";
+import { registerAction } from "./actions.js";
+import { HttpError, call, http } from "./bridge.js";
+import { focusedFile } from "./blocks.js";
+import type { FileRef } from "./blocks.js";
 import { el, loadStyles } from "./dom.js";
 import { paneBlocks } from "./blockstate.js";
 import { paneAt, paneRect } from "./geometry.js";
 import { focusInput, pasteText } from "./keyboard.js";
+import { pushKeyHandler } from "./keystack.js";
+import { onOverlayRender } from "./overlay.js";
 import { state } from "./state.js";
 import { showNotice } from "./status.js";
 import { sessionEnded } from "./websession.js";
 import {
-  DROP_LABEL, MAX_DROP_FILES, batchText, readUploaded, refusalText, shellQuote, takeFiles, uploadFolder, uploadUrl, uploadingText,
+  DOWNLOAD_ONLY_SENTENCE, DROP_LABEL, GrantList, MAX_DROP_FILES, baseName, batchText, readGrant, readUploaded, refusalText, shellQuote,
+  takeFiles, uploadFolder, uploadUrl, uploadingText,
 } from "./webstate.js";
 
 /** One file waiting to be sent, with the pane under its drop and the count of paths already typed for that drop. */
@@ -249,10 +261,166 @@ async function run(): Promise<void> {
   showNotice(batchText(done));
 }
 
-/** Start the file code of the page: the listeners for dragged files. Called once by `web.ts`, on the web platform only. */
+// ---- download ---------------------------------------------------------------------------------------------------------
+
+/** The grants made for downloads, oldest first. */
+const grants = new GrantList();
+
+/** End a grant in the core; a failure is of no use to anyone. */
+function revoke(token: string): void {
+  void call("file_revoke", { token }).catch(() => {});
+}
+
+/** The grants end with the page: every one that is left is revoked, oldest first. */
+function revokeAll(): void {
+  for (const token of grants.clear()) revoke(token);
+}
+
+/** Take `file` out of the server: ask for a grant, follow its address with a download link, keep the grant in the bounded list. */
+export async function downloadFile(file: FileRef): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await call<unknown>("file_grant", { source: file.source, path: file.path });
+  } catch {
+    showNotice(DOWNLOAD_ONLY_SENTENCE); // the core refuses a kind it does not grant
+    return;
+  }
+  const granted = readGrant(raw);
+  if (granted === null) {
+    // An answer that is not a same-origin grant is not followed, and what it granted ends.
+    const token = typeof raw === "object" && raw !== null ? (raw as { token?: unknown }).token : undefined;
+    if (typeof token === "string") revoke(token);
+    showNotice(DOWNLOAD_ONLY_SENTENCE);
+    return;
+  }
+  const old = grants.add(granted.token);
+  if (old !== null) revoke(old);
+  const link = el("a", "web-download", document.body);
+  link.href = granted.url;
+  link.download = baseName(file.path);
+  link.rel = "noopener";
+  link.hidden = true;
+  link.click();
+  link.remove();
+}
+
+let offered = false;
+
+/** Add the palette entry `Download` (listed only while the focused pane has a file). Called by the file browser or preview when the first one is made. */
+export function offerDownload(): void {
+  if (offered) return;
+  offered = true;
+  registerAction({
+    id: "files.download",
+    title: "Download",
+    run: () => {
+      const file = focusedFile();
+      if (file !== null) void downloadFile(file);
+    },
+    available: () => focusedFile() !== null,
+  });
+}
+
+// ---- the row menu -------------------------------------------------------------------------------------------------------
+
+/** The open menu: its element, the way out of everything it listens to, and the layout it was opened over. */
+let menu: { node: HTMLElement; off: () => void } | null = null;
+
+/** The panes' rectangles and the canvas size as one text: a change of it is a change of layout (the focus moving is not). */
+function layoutKey(): string {
+  const m = state.metrics;
+  return JSON.stringify([state.view?.panes ?? [], m.width, m.height]);
+}
+
+/** Take the menu away. With `back` the keyboard returns to the terminal. */
+function closeMenu(back: boolean): void {
+  if (menu === null) return;
+  const open = menu;
+  menu = null;
+  open.off();
+  open.node.remove();
+  if (back) focusInput();
+}
+
+/**
+ * Open the row menu of `file` at a point (the pointer) or under an element (the selected row): a floating layer with the one entry
+ * `Download`, which has the keyboard. Escape, a press elsewhere, a blur and a change of layout close it and the keyboard goes back to the
+ * terminal; while it is open it takes every key.
+ */
+export function openRowMenu(file: FileRef, at: { x: number; y: number } | HTMLElement): void {
+  closeMenu(false);
+  const node = el("div", "web-menu", document.body);
+  node.setAttribute("role", "menu");
+  node.setAttribute("aria-label", `Actions for ${baseName(file.path)}`);
+  const item = el("button", "web-menu-item", node);
+  item.type = "button";
+  item.setAttribute("role", "menuitem");
+  item.textContent = "Download";
+  // A press on the entry must not take the focus from it first: some engines blur a button on press, and the blur would close the menu before the click.
+  node.addEventListener("mousedown", (e) => e.preventDefault());
+  item.addEventListener("click", () => {
+    closeMenu(true);
+    void downloadFile(file);
+  });
+
+  // Place it: at the pointer, or just under the left part of the row; then keep it inside the window.
+  let x: number;
+  let y: number;
+  if (at instanceof HTMLElement) {
+    const r = at.getBoundingClientRect();
+    x = r.left + 2 * (parseFloat(getComputedStyle(document.documentElement).fontSize) || 12);
+    y = r.bottom - 2;
+  } else {
+    x = at.x;
+    y = at.y;
+  }
+  const box = node.getBoundingClientRect();
+  const edge = 4;
+  node.style.left = `${Math.max(edge, Math.min(x, window.innerWidth - box.width - edge))}px`;
+  node.style.top = `${Math.max(edge, Math.min(y, window.innerHeight - box.height - edge))}px`;
+
+  const layout = layoutKey();
+  const press = (e: PointerEvent): void => {
+    if (!(e.target instanceof Node && node.contains(e.target))) closeMenu(true);
+  };
+  const blur = (e: FocusEvent): void => {
+    if (!(e.relatedTarget instanceof Node && node.contains(e.relatedTarget))) closeMenu(true);
+  };
+  const resize = (): void => closeMenu(true);
+  const stopRender = onOverlayRender(() => {
+    if (layoutKey() !== layout) closeMenu(true);
+  });
+  const stopKeys = pushKeyHandler((e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeMenu(true);
+    } else if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Home" || e.key === "End") {
+      e.preventDefault();
+      item.focus(); // the one entry keeps the keyboard
+    }
+    return true; // every key belongs to the menu while it is open; Enter and Space reach the entry as clicks
+  });
+  document.addEventListener("pointerdown", press, true);
+  node.addEventListener("focusout", blur);
+  window.addEventListener("resize", resize);
+  menu = {
+    node,
+    off: () => {
+      document.removeEventListener("pointerdown", press, true);
+      node.removeEventListener("focusout", blur);
+      window.removeEventListener("resize", resize);
+      stopRender();
+      stopKeys();
+    },
+  };
+  item.focus();
+}
+
+/** Start the file code of the page: the listeners for dragged files and the end of the grants. Called once by `web.ts`, on the web platform only. */
 export function initFiles(): void {
   if (started) return;
   started = true;
+  window.addEventListener("pagehide", revokeAll);
   void loadStyles("./web.css").catch(() => {
     // the target still works without its edge: the label is text
   });

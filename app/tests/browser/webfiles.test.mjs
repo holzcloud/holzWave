@@ -678,8 +678,21 @@ async function closeCase(page, url) {
   await menus(page).waitFor({ state: "detached" });
   await page.waitForFunction(() => document.activeElement?.id === "ime");
 
+  // The focus moving to another pane is no layout change; the panes changing their size is.
   await open();
-  await page.evaluate(async () => (await import(new URL("actions.js", location.href).href)).runAction("pane.focus_next"));
+  const move = (to) =>
+    page.evaluate(async (t) => {
+      const { state } = await import(new URL("state.js", location.href).href);
+      const { renderOverlay } = await import(new URL("overlay.js", location.href).href);
+      state.view = t === "focus"
+        ? { ...state.view, focus: 2 }
+        : { ...state.view, panes: state.view.panes.map(([id, r]) => (id === 1 ? [id, { ...r, w: 0.4 }] : [id, { ...r, x: 0.4, w: 0.6 }])) };
+      renderOverlay();
+    }, to);
+  await move("focus");
+  await settle(page);
+  assert.equal(await menus(page).count(), 1, "the focus moving does not close it");
+  await move("panes");
   await menus(page).waitFor({ state: "detached" });
   await page.waitForFunction(() => document.activeElement?.id === "ime");
 
@@ -727,6 +740,7 @@ async function paletteCase(page, url) {
   await page.locator(".block-preview").waitFor();
   await settle(page);
   assert.ok((await paletteTitles(page)).includes("Download"), "a preview is focused: listed");
+  await page.locator(".palette-input").fill("Download");
   await page.keyboard.press("Enter");
   await page.waitForFunction(() => window.__links.length === 1);
   assert.deepEqual(await grants(page), [{ source: "local", path: "/home/holz/mockup.png" }]);

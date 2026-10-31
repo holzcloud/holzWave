@@ -11,7 +11,6 @@
 import { registerAction, setAvailability } from "./actions.js";
 import { state } from "./state.js";
 import { showNotice } from "./status.js";
-import { initFiles } from "./webfiles.js";
 import { initNotice } from "./webnotice.js";
 import { DESKTOP_ONLY_ACTIONS, FULLSCREEN_NOTICE, LOCK_KEYS, canLockKeys } from "./webstate.js";
 
@@ -114,6 +113,7 @@ export function initWeb(): void {
   // The tab marks: the title and the icon while the page is hidden.
   void initNotice().catch(() => {});
   // Files: a dropped file is uploaded and its path typed, a granted file can be downloaded. The platform decides, like every web branch.
-  if (state.os === "web") initFiles();
+  // The module is loaded only on the web platform; the file browser loads it the same way for its row menu.
+  if (state.os === "web") void import("./webfiles.js").then((m) => m.initFiles()).catch(() => {});
   // The later browser-only modules are started here.
 }
