@@ -1,0 +1,13 @@
+{
+  "public_url": "https://holzwave.example.net",
+  "tls": {
+    "mode": "acme",
+    "contact": "mailto:admin@example.net",
+    "domains": ["holzwave.example.net"],
+    "terms_agreed": false
+  },
+  "auth": {
+    "passkey": true,
+    "password_totp": true
+  }
+}

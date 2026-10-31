@@ -452,15 +452,18 @@ IMG_DATA=$IMG_RUN-data
 IMG_KEY=$IMG_RUN-key
 IMG_TLS=$IMG_RUN-tls
 IMG_CONF=$IMG_RUN-conf
+IMG_OIDC=$IMG_RUN-oidc
 IMG_HOST=holzwave.test
 IMG_PORT=8443
 IMG_SCRATCH=
+IMG_COMPOSE_FILE=$root/packaging/compose/docker-compose.yml
 
 # The way the Compose file and the Helm chart start the server: no root, nothing writable but the volumes and the tmpfs, no
 # capability but the four the spawn helper needs. The option that stops a process from gaining privileges is left out on
 # purpose: it would stop the file capabilities of the helper.
-IMG_HARDEN="--read-only --user 10001:10001 --cap-drop ALL --cap-add CHOWN --cap-add KILL --cap-add SETGID --cap-add SETUID
-    --tmpfs /run/holzwave:rw,nosuid,nodev,noexec,uid=10001,gid=10001,mode=0700 --tmpfs /tmp:rw,nosuid,nodev,noexec,mode=1777"
+IMG_TMPFS="--tmpfs /run/holzwave:rw,nosuid,nodev,noexec,uid=10001,gid=10001,mode=0700 --tmpfs /tmp:rw,nosuid,nodev,noexec,mode=1777"
+IMG_HARDEN="--read-only --user 10001:10001 --cap-drop ALL --cap-add CHOWN --cap-add KILL --cap-add SETGID --cap-add SETUID $IMG_TMPFS"
+IMG_CONFINED="--read-only --user 10001:10001 --cap-drop ALL $IMG_TMPFS"
 
 img_ok() {
     echo "ok: $*"
@@ -477,17 +480,32 @@ img_fail() {
 }
 
 img_cleanup() {
+    docker compose -p "$IMG_RUN-compose" -f "$IMG_COMPOSE_FILE" down -v --remove-orphans >/dev/null 2>&1
     ids=$(docker ps -aq --filter "name=$IMG_RUN" 2>/dev/null)
     # shellcheck disable=SC2086 # a list of container ids
     [ -z "$ids" ] || docker rm -f $ids >/dev/null 2>&1
-    docker volume rm -f "$IMG_DATA" "$IMG_KEY" "$IMG_TLS" "$IMG_CONF" >/dev/null 2>&1
-    docker network rm "$IMG_NET" >/dev/null 2>&1
+    volumes=$(docker volume ls -q --filter "name=$IMG_RUN" 2>/dev/null)
+    # shellcheck disable=SC2086 # a list of volume names
+    [ -z "$volumes" ] || docker volume rm -f $volumes >/dev/null 2>&1
+    networks=$(docker network ls -q --filter "name=$IMG_RUN" 2>/dev/null)
+    # shellcheck disable=SC2086 # a list of network ids
+    [ -z "$networks" ] || docker network rm $networks >/dev/null 2>&1
     [ -z "$IMG_SCRATCH" ] || rm -rf "$IMG_SCRATCH"
+}
+
+# jq in the Linux test image (the Mac may not have it): the program is the arguments, the input is standard input.
+img_jq() {
+    docker run --rm -i "$BASE_IMAGE" jq "$@"
+}
+
+# The version of the workspace.
+img_version() {
+    sed -n 's/^version = "\(.*\)"$/\1/p' "$root/Cargo.toml" | head -n 1
 }
 
 # The image from the tree. The base images, the Zig and Rust toolchains and the Node image are pinned in the Dockerfile.
 img_build() {
-    version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/Cargo.toml" | head -n 1)
+    version=$(img_version)
     revision=$(git -C "$root" rev-parse HEAD 2>/dev/null || echo unknown)
     echo "+ docker build -t $IMG_TAG -f packaging/docker/Dockerfile $IMG_CONTEXT"
     docker build ${PLATFORM:+--platform "$PLATFORM"} -t "$IMG_TAG" -f "$IMG_CONTEXT/packaging/docker/Dockerfile" \
@@ -496,19 +514,32 @@ img_build() {
     img_ok "built $IMG_TAG ($(docker image inspect -f '{{.Size}}' "$IMG_TAG") bytes)"
 }
 
+# Replaces a text in a file of the examples, and fails when nothing changed (a replacement that changes nothing proves nothing).
+# $1 the example, $2 the new file, $3 the old text, $4 the new text.
+img_replace() {
+    sed "s#$3#$4#" "$1" >"$2" || img_fail "$1 cannot be read"
+    if cmp -s "$1" "$2"; then
+        img_fail "the replacement of '$3' in $1 changed nothing"
+    fi
+}
+
 # The operator's side: a key made by `keygen` in the key volume, a certificate for the test name in the certificate volume
-# (made and owned the way an operator's files are, not by the image), and the configuration in its own volume.
+# (made and owned the way an operator's files are, not by the image), a secret file for a single sign-on provider, and the
+# configurations in their own volume: the files example (with and without a provider), the ACME example, and a file with the
+# key of the in-process workers.
 img_materials() {
     docker network create "$IMG_NET" >/dev/null && docker volume create "$IMG_DATA" >/dev/null &&
         docker volume create "$IMG_KEY" >/dev/null && docker volume create "$IMG_TLS" >/dev/null &&
-        docker volume create "$IMG_CONF" >/dev/null || img_fail "the network or a volume could not be created"
+        docker volume create "$IMG_OIDC" >/dev/null && docker volume create "$IMG_CONF" >/dev/null ||
+        img_fail "the network or a volume could not be created"
 
-    # shellcheck disable=SC2086 # IMG_HARDEN is a list of options
-    docker run --rm $IMG_HARDEN -v "$IMG_KEY":/etc/holzwave/key "$IMG_TAG" keygen >/dev/null ||
+    # shellcheck disable=SC2086 # IMG_CONFINED is a list of options
+    docker run --rm $IMG_CONFINED -v "$IMG_KEY":/etc/holzwave/key "$IMG_TAG" keygen >/dev/null ||
         img_fail "keygen did not make the key"
     shape=$(docker run --rm --user 10001:10001 --read-only -v "$IMG_KEY":/etc/holzwave/key:ro --entrypoint stat "$IMG_TAG" \
         -c '%a %u:%g' /etc/holzwave/key/server.key) || img_fail "the key file cannot be read"
     [ "$shape" = "600 10001:10001" ] || img_fail "the key file has mode and owner '$shape', not '600 10001:10001'"
+    IMG_KEY_SHAPE=$shape
     img_ok "keygen made the key: mode and owner $shape"
 
     docker run --rm --user 0:0 -v "$IMG_TLS":/m "$BASE_IMAGE" sh -ec '
@@ -521,22 +552,39 @@ chmod 0600 /m/tls.key
 ' || img_fail "the test certificate could not be made"
     img_ok "a throwaway certificate for $IMG_HOST (P-256, 2 days)"
 
-    sed "s#https://holzwave.example.net#https://$IMG_HOST:$IMG_PORT#" "$root/packaging/compose/server.files.example.json" \
-        >"$IMG_SCRATCH/server.json" || img_fail "the example configuration cannot be read"
-    if cmp -s "$root/packaging/compose/server.files.example.json" "$IMG_SCRATCH/server.json"; then
-        img_fail "the public address of the example configuration was not replaced"
-    fi
-    docker run --rm -i --user 0:0 -v "$IMG_CONF":/m "$BASE_IMAGE" sh -ec 'cat >/m/server.json; chmod 0644 /m/server.json' \
-        <"$IMG_SCRATCH/server.json" || img_fail "the configuration could not be written"
-    img_ok "the configuration is the files example with https://$IMG_HOST:$IMG_PORT"
+    # A throwaway client secret of a single sign-on provider: a file the server reads, with a marker that must be found nowhere.
+    IMG_CANARY=$(docker run --rm "$BASE_IMAGE" sh -c 'echo CANARY-$(head -c 24 /dev/urandom | base64 | tr -d "=+/\n")')
+    docker run --rm --user 0:0 -v "$IMG_OIDC":/m "$BASE_IMAGE" sh -ec '
+echo "'"$IMG_CANARY"'" >/m/secret
+chown -R 10001:10001 /m
+chmod 0755 /m
+chmod 0600 /m/secret
+' || img_fail "the client secret file could not be made"
+
+    example=$root/packaging/compose/server.files.example.json
+    mkdir -p "$IMG_SCRATCH/conf"
+    img_replace "$example" "$IMG_SCRATCH/conf/files.json" "https://holzwave.example.net" "https://$IMG_HOST:$IMG_PORT"
+    img_jq '.auth.oidc = [{id: "corp", name: "Company", issuer: "https://idp.example.test", client_id: "holzwave",
+        client_secret_file: "/etc/holzwave/oidc/corp/secret"}]' <"$IMG_SCRATCH/conf/files.json" >"$IMG_SCRATCH/conf/server.json" ||
+        img_fail "the provider could not be added to the configuration"
+    img_jq '.workers = {mode: "in_process"}' <"$IMG_SCRATCH/conf/files.json" >"$IMG_SCRATCH/conf/in-process.json" ||
+        img_fail "the workers key could not be added to the configuration"
+    img_replace "$root/packaging/compose/server.acme.example.json" "$IMG_SCRATCH/conf/acme.json" "holzwave.example.net" "$IMG_HOST"
+    img_replace "$IMG_SCRATCH/conf/acme.json" "$IMG_SCRATCH/conf/acme-agreed.json" '"terms_agreed": false' '"terms_agreed": true'
+    COPYFILE_DISABLE=1 tar -c --no-xattrs -C "$IMG_SCRATCH/conf" . |
+        docker run --rm -i --user 0:0 -v "$IMG_CONF":/m "$BASE_IMAGE" sh -ec 'tar -x --no-same-owner -C /m; chmod 0755 /m; chmod 0644 /m/*' ||
+        img_fail "the configurations could not be written"
+    img_ok "the configurations are the examples with https://$IMG_HOST:$IMG_PORT (files, files with a provider, ACME, ACME agreed, in-process)"
 }
 
-# The server container as Compose and the chart start it, plus the options of a test: the name on the private network.
+# The server container as Compose and the chart start it, plus the options of a test: the name on the private network and a
+# fast health check (the command is the image's own).
 img_start() {
     # shellcheck disable=SC2086 # IMG_HARDEN is a list of options
     docker run -d --name "$IMG_SERVER" --network "$IMG_NET" --network-alias "$IMG_HOST" $IMG_HARDEN \
         --health-interval 2s --health-start-period 0s \
         -v "$IMG_DATA":/data -v "$IMG_KEY":/etc/holzwave/key:ro -v "$IMG_TLS":/etc/holzwave/tls:ro \
+        -v "$IMG_OIDC":/etc/holzwave/oidc/corp:ro \
         -v "$IMG_CONF":/etc/holzwave/conf:ro -e HOLZWAVE_SERVER_CONFIG=/etc/holzwave/conf/server.json \
         "$IMG_TAG" >/dev/null || img_fail "the server container did not start"
 }
@@ -583,6 +631,375 @@ cat /tmp/body
     img_ok "https://$IMG_HOST:$IMG_PORT/api/session: HTTP 200, $tls, ALPN $alpn, $body"
 }
 
+# The configuration of the image as the registry would show it.
+img_check_image_config() {
+    version=$(img_version)
+    docker image inspect -f '{{json .Config}}' "$IMG_TAG" | img_jq -e --arg version "$version" '
+        .User == "10001:10001"
+        and .Entrypoint[0] == "/usr/bin/tini"
+        and .Cmd == ["serve"]
+        and (.Healthcheck.Test | map(tostring) | join(" ") | contains("healthcheck"))
+        and ((.Volumes | keys) == ["/data"])
+        and ((.ExposedPorts | keys) == ["8443/tcp"])
+        and .Labels["org.opencontainers.image.source"] == "https://github.com/holzcloud/holzWave"
+        and .Labels["org.opencontainers.image.licenses"] == "GPL-3.0-only"
+        and .Labels["org.opencontainers.image.version"] == $version
+        and (([.Env[] | select(startswith("PATH=") | not)] | sort)
+            == ["HOLZWAVE_SERVER_CONFIG=/etc/holzwave/server.json", "HOLZWAVE_SERVER_KEY_FILE=/etc/holzwave/key/server.key", "LANG=C.UTF-8"])
+        and ([.Env[] | select(test("hws1:|hwb_|secret|password"; "i"))] | length) == 0' >/dev/null ||
+        img_fail "the configuration of the image is not the contract (user, entrypoint, command, health check, volume, port, labels, environment)"
+    img_ok "image configuration: user 10001:10001, tini, serve, health check on healthcheck, volume /data, port 8443, labels (version $version), environment of two paths and LANG"
+}
+
+img_keygen_twice() {
+    before=$(docker run --rm --user 10001:10001 --read-only -v "$IMG_KEY":/etc/holzwave/key:ro --entrypoint sha256sum "$IMG_TAG" \
+        /etc/holzwave/key/server.key)
+    # shellcheck disable=SC2086 # IMG_CONFINED is a list of options
+    docker run --rm $IMG_CONFINED -v "$IMG_KEY":/etc/holzwave/key "$IMG_TAG" keygen >"$IMG_SCRATCH/keygen.out" 2>"$IMG_SCRATCH/keygen.err"
+    code=$?
+    [ "$code" = 1 ] || img_fail "the second keygen exited $code, not 1"
+    after=$(docker run --rm --user 10001:10001 --read-only -v "$IMG_KEY":/etc/holzwave/key:ro --entrypoint sha256sum "$IMG_TAG" \
+        /etc/holzwave/key/server.key)
+    [ "$before" = "$after" ] || img_fail "the second keygen changed the key file"
+    [ ! -s "$IMG_SCRATCH/keygen.out" ] || img_fail "the second keygen printed on standard output"
+    img_ok "keygen twice: the second run exits 1 and the key file is unchanged ($(head -n 1 "$IMG_SCRATCH/keygen.err"))"
+}
+
+img_check_readonly() {
+    [ "$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$IMG_SERVER")" = true ] || img_fail "the root file system is not read-only"
+    docker exec "$IMG_SERVER" sh -c 'grep " / " /proc/mounts | head -n 1 | grep -Eq "[ ,]ro[ ,]"' ||
+        img_fail "the root mount is not read-only in /proc/mounts"
+    for dir in /usr/local/bin /etc /etc/holzwave /var/tmp /opt /usr/share/doc/holzwave; do
+        if docker exec "$IMG_SERVER" sh -c ": >$dir/hw-probe" 2>/dev/null; then
+            img_fail "a file could be written in $dir"
+        fi
+    done
+    for dir in /tmp /data /run/holzwave; do
+        docker exec "$IMG_SERVER" sh -c ": >$dir/hw-probe && rm $dir/hw-probe" || img_fail "$dir cannot be written, but it is a volume or a tmpfs"
+    done
+    img_ok "read-only root: no write outside the volumes and tmpfs; /tmp, /data and /run/holzwave are writable"
+}
+
+img_check_no_setid() {
+    found=$(docker run --rm --user 0:0 --entrypoint find "$IMG_TAG" / -xdev -perm /6000 -type f -print)
+    [ -z "$found" ] || img_fail "the image has setuid or setgid files: $found"
+    img_ok "no setuid or setgid file in the image"
+}
+
+# A person's user id (20001) must not execute the helper, and can run the server binary.
+img_check_person_cannot_run_helper() {
+    out=$(docker exec --user 20001:20001 "$IMG_SERVER" /usr/local/bin/holzwave-spawn-helper 2>&1)
+    code=$?
+    [ "$code" = 126 ] || img_fail "uid 20001 got status $code from the helper, not 126: $out"
+    echo "$out" | grep -qi 'permission denied' || img_fail "uid 20001 got no permission error from the helper: $out"
+    docker exec --user 20001:20001 "$IMG_SERVER" /usr/local/bin/holzwave-server >/dev/null 2>&1
+    code=$?
+    [ "$code" = 2 ] || img_fail "uid 20001 got status $code from the server binary, not the usage status 2"
+    img_ok "uid 20001: the helper is 'permission denied' (126), the server binary runs"
+}
+
+# Writes `pid|command line|ids|capability sets` of every process of a container to a file, and judges it: no uid 0 in any of the
+# four uid fields; the bounding set of process 1 and of the supervisor is the four capabilities; the supervisor holds none; the
+# helper holds exactly the four as permitted. $1 the container, $2 the file, $3 the label.
+img_check_procs() {
+    docker exec "$1" sh -c '
+for d in /proc/[0-9]*; do
+    [ -r "$d/status" ] || continue
+    printf "PROC %s|%s|" "${d#/proc/}" "$(tr "\0" " " <"$d/cmdline" 2>/dev/null)"
+    grep -E "^(Uid|Gid|CapInh|CapPrm|CapEff|CapBnd|CapAmb):" "$d/status" | tr -s "\t " " " | tr "\n" "|"
+    echo
+done' >"$2" || img_fail "the process list of $1 cannot be read"
+    awk -F'|' '
+function fields(line, n, a, i, name) {
+    for (i = 3; i <= NF; i++) {
+        n = split($i, a, " ")
+        if (n == 0) continue
+        name = a[1]
+        if (name == "Uid:") { for (j = 2; j <= 5; j++) if (a[j] == 0) printf "BAD uid0 pid %s\n", pid }
+        else if (name ~ /^Cap/) cap[pid, name] = a[2]
+    }
+}
+{
+    pid = $1; sub(/^PROC /, "", pid); cmd[pid] = $2; seen++
+    fields()
+    if (pid == 1) init = pid
+    if ($2 ~ /^\/usr\/local\/bin\/holzwave-server serve/) { server = pid; servers++ }
+    if ($2 ~ /^\/usr\/local\/bin\/holzwave-spawn-helper/) { helper = pid; helpers++ }
+}
+END {
+    if (seen < 3) print "BAD too few processes"
+    if (servers != 1) print "BAD supervisors found: " servers + 0
+    if (helpers != 1) print "BAD helpers found: " helpers + 0
+    full = "00000000000000e1"; none = "0000000000000000"
+    if (cap[init, "CapBnd:"] != full) print "BAD init CapBnd " cap[init, "CapBnd:"]
+    if (cap[server, "CapBnd:"] != full) print "BAD supervisor CapBnd " cap[server, "CapBnd:"]
+    if (cap[server, "CapPrm:"] != none) print "BAD supervisor CapPrm " cap[server, "CapPrm:"]
+    if (cap[server, "CapEff:"] != none) print "BAD supervisor CapEff " cap[server, "CapEff:"]
+    if (cap[helper, "CapPrm:"] != full) print "BAD helper CapPrm " cap[helper, "CapPrm:"]
+    printf "PROCS %d processes, none with uid 0\n", seen
+    printf "INIT pid %s CapBnd %s CapPrm %s CapEff %s\n", init, cap[init, "CapBnd:"], cap[init, "CapPrm:"], cap[init, "CapEff:"]
+    printf "SUPERVISOR pid %s CapBnd %s CapPrm %s CapEff %s\n", server, cap[server, "CapBnd:"], cap[server, "CapPrm:"], cap[server, "CapEff:"]
+    printf "HELPER pid %s CapBnd %s CapPrm %s CapEff %s\n", helper, cap[helper, "CapBnd:"], cap[helper, "CapPrm:"], cap[helper, "CapEff:"]
+}' "$2" >"$2.verdict"
+    if grep -q '^BAD' "$2.verdict"; then
+        img_fail "$3: the process list breaks the contract: $(grep '^BAD' "$2.verdict" | tr '\n' ';')"
+    fi
+    uids=$(grep -h '^PROC' "$2" | sed -n 's/^PROC \([0-9]*\)|.*|Uid: \([0-9]*\) \([0-9]*\) \([0-9]*\) \([0-9]*\)|.*/\1:\2,\3,\4,\5/p' | sort -u | tr '\n' ' ')
+    img_ok "$3: $(grep '^PROCS' "$2.verdict" | cut -d' ' -f2-); uid fields (pid:real,effective,saved,fs) $uids"
+    img_ok "$3: $(grep '^INIT' "$2.verdict" | cut -d' ' -f2-)"
+    img_ok "$3: $(grep '^SUPERVISOR' "$2.verdict" | cut -d' ' -f2-)"
+    img_ok "$3: $(grep '^HELPER' "$2.verdict" | cut -d' ' -f2-)"
+}
+
+# The key, the client secret and the setup token are in no process environment, no argument list, no log, no container
+# configuration and no image history. The same search is run on a file that holds the text, so that it is shown to find it.
+img_check_secrets() {
+    docker run --rm --user 10001:10001 --read-only -v "$IMG_KEY":/etc/holzwave/key:ro --entrypoint cat "$IMG_TAG" \
+        /etc/holzwave/key/server.key >"$IMG_SCRATCH/needles" || img_fail "the key cannot be read"
+    echo "$IMG_CANARY" >>"$IMG_SCRATCH/needles"
+    docker logs "$IMG_SERVER" 2>/dev/null | sed -n 's/.*\(hwb_[A-Za-z0-9_-]*\).*/\1/p' >"$IMG_SCRATCH/token"
+    [ -s "$IMG_SCRATCH/token" ] || img_fail "the setup token is not in the log"
+    docker exec "$IMG_SERVER" sh -c 'for f in /proc/[0-9]*/environ; do tr "\0" "\n" <"$f"; done 2>/dev/null' >"$IMG_SCRATCH/environ.txt"
+    docker exec "$IMG_SERVER" sh -c 'for f in /proc/[0-9]*/cmdline; do tr "\0" "\n" <"$f"; echo; done 2>/dev/null' >"$IMG_SCRATCH/cmdline.txt"
+    docker logs "$IMG_SERVER" >"$IMG_SCRATCH/logs.txt" 2>&1
+    docker inspect "$IMG_SERVER" >"$IMG_SCRATCH/inspect.txt"
+    docker history --no-trunc "$IMG_TAG" >"$IMG_SCRATCH/history.txt"
+    grep -q 'HOLZWAVE_SERVER_CONFIG=' "$IMG_SCRATCH/environ.txt" || img_fail "the environment search read nothing"
+    grep -q 'holzwave-server' "$IMG_SCRATCH/cmdline.txt" || img_fail "the argument search read nothing"
+    cp "$IMG_SCRATCH/needles" "$IMG_SCRATCH/control.txt"
+    [ "$(grep -c -F -f "$IMG_SCRATCH/needles" "$IMG_SCRATCH/control.txt")" -ge 2 ] || img_fail "the search does not find a text that is there"
+    report=
+    for place in environ cmdline logs inspect history; do
+        hits=$(grep -c -F -f "$IMG_SCRATCH/needles" "$IMG_SCRATCH/$place.txt")
+        [ "$hits" = 0 ] || img_fail "the key or the client secret is in the $place of the container ($hits lines)"
+        report="$report $place=0"
+    done
+    for place in environ cmdline inspect history; do
+        hits=$(grep -c -F -f "$IMG_SCRATCH/token" "$IMG_SCRATCH/$place.txt")
+        [ "$hits" = 0 ] || img_fail "the setup token is in the $place of the container ($hits lines)"
+    done
+    img_ok "secrets: the key and the client secret (and, apart from the log, the setup token) found in:$report; the search finds the text in a control file"
+}
+
+img_check_ldd() {
+    for binary in holzwave-server holzwave-spawn-helper; do
+        out=$(docker exec "$IMG_SERVER" ldd "/usr/local/bin/$binary" 2>&1)
+        if [ $? -ne 0 ] || echo "$out" | grep -q 'not found'; then
+            img_fail "ldd of $binary does not find every library: $out"
+        fi
+    done
+    img_ok "ldd: every library of holzwave-server and holzwave-spawn-helper is found"
+}
+
+# The first start prints one line with the one-time token on standard output and nothing secret anywhere else.
+img_check_token_line() {
+    out=$(docker logs "$IMG_SERVER" 2>/dev/null | grep -c 'hwb_')
+    err=$(docker logs "$IMG_SERVER" 2>&1 >/dev/null | grep -c 'hwb_')
+    [ "$out" = 1 ] || img_fail "standard output has $out lines with a setup token, not 1"
+    [ "$err" = 0 ] || img_fail "standard error has $err lines with a setup token"
+    img_ok "setup token: exactly 1 line on standard output, 0 on standard error"
+}
+
+# Plain HTTP to the TLS port gets no HTTP answer (what comes back, if anything, is a TLS alert, which is not text); an unknown
+# path is a bare 404.
+img_check_plain_and_404() {
+    out=$(img_client sh -c '
+curl -sS --http0.9 --http1.1 --max-time 10 -o /tmp/plain http://'"$IMG_HOST:$IMG_PORT"'/ 2>/tmp/plain.err; echo "curl=$?"; cat /tmp/plain.err
+echo "bytes=$(wc -c </tmp/plain 2>/dev/null || echo 0)"
+echo "http=$(grep -c "HTTP/" /tmp/plain 2>/dev/null)"
+echo "first=$(head -c 1 /tmp/plain 2>/dev/null | od -An -tx1 | tr -d " ")"
+curl -s --tlsv1.3 --cacert /m/tls.crt --max-time 10 -o /tmp/b -w "status=%{http_code}\n" https://'"$IMG_HOST:$IMG_PORT"'/no-such-path
+cat /tmp/b; echo
+') || img_fail "the client could not run"
+    code=$(echo "$out" | sed -n 's/^curl=//p')
+    case "$code" in 0 | 52 | 56) ;; *) img_fail "plain HTTP to the TLS port ended with curl status $code: $out" ;; esac
+    echo "$out" | grep -q '^http=0$' || img_fail "plain HTTP to the TLS port got an HTTP answer: $out"
+    echo "$out" | grep -q '^status=404$' || img_fail "an unknown path did not answer 404: $out"
+    [ "$(echo "$out" | tail -n 1)" = '{"code":"not_found"}' ] || img_fail "the 404 body is not the bare one: $out"
+    img_ok "plain HTTP to the TLS port: curl status $code, $(echo "$out" | grep '^bytes='), first byte 0x$(echo "$out" | sed -n 's/^first=//p') (a TLS alert), no HTTP; an unknown path: 404 {\"code\":\"not_found\"}"
+}
+
+# A container without the four capabilities does not become healthy and says why; nothing answers.
+img_check_fail_closed() {
+    name=$IMG_RUN-nocaps
+    docker volume create "$IMG_RUN-data2" >/dev/null || img_fail "a volume could not be created"
+    started=$(date +%s)
+    # shellcheck disable=SC2086 # IMG_CONFINED is a list of options
+    docker run -d --name "$name" --network "$IMG_NET" $IMG_CONFINED --health-interval 2s --health-start-period 0s \
+        -v "$IMG_RUN-data2":/data -v "$IMG_KEY":/etc/holzwave/key:ro -v "$IMG_TLS":/etc/holzwave/tls:ro \
+        -v "$IMG_OIDC":/etc/holzwave/oidc/corp:ro \
+        -v "$IMG_CONF":/etc/holzwave/conf:ro -e HOLZWAVE_SERVER_CONFIG=/etc/holzwave/conf/server.json \
+        "$IMG_TAG" >/dev/null || img_fail "the container without capabilities did not start"
+    while [ "$(docker inspect -f '{{.State.Running}}' "$name")" = true ]; do
+        [ $(($(date +%s) - started)) -lt 30 ] || img_fail "the container without the four capabilities was still running after 30 seconds"
+        [ "$(docker inspect -f '{{.State.Health.Status}}' "$name")" != healthy ] || img_fail "the container without the four capabilities became healthy"
+        sleep 1
+    done
+    code=$(docker inspect -f '{{.State.ExitCode}}' "$name")
+    took=$(($(date +%s) - started))
+    [ "$code" != 0 ] || img_fail "the container without the four capabilities exited 0"
+    docker logs "$name" >"$IMG_SCRATCH/nocaps.log" 2>&1
+    grep -q 'not permitted to the helper' "$IMG_SCRATCH/nocaps.log" ||
+        img_fail "the log of the container without capabilities does not say that the helper lacks them: $(cat "$IMG_SCRATCH/nocaps.log")"
+    img_client sh -c "curl -sk --max-time 5 -o /dev/null https://$name:$IMG_PORT/" >/dev/null 2>&1 &&
+        img_fail "something answered on the port of the container without capabilities"
+    sentence=$(grep 'not permitted to the helper' "$IMG_SCRATCH/nocaps.log" | head -n 1)
+    img_ok "fail closed: exit $code after $took s, never healthy, nothing answers; the log says: $sentence"
+    docker rm -f "$name" >/dev/null 2>&1
+}
+
+# Runs check-config of the image's server with the volumes mounted the way the server container has them. $1 the file in the
+# configuration volume, the rest are more options of docker run. Sets IMG_CC_CODE and IMG_CC_OUT.
+img_check_config() {
+    file=$1
+    shift
+    # shellcheck disable=SC2086 # IMG_CONFINED is a list of options
+    IMG_CC_OUT=$(docker run --rm $IMG_CONFINED -v "$IMG_KEY":/etc/holzwave/key:ro -v "$IMG_TLS":/etc/holzwave/tls:ro \
+        -v "$IMG_OIDC":/etc/holzwave/oidc/corp:ro -v "$IMG_CONF":/etc/holzwave/conf:ro \
+        -e "HOLZWAVE_SERVER_CONFIG=/etc/holzwave/conf/$file" "$@" "$IMG_TAG" check-config 2>&1)
+    IMG_CC_CODE=$?
+}
+
+# A release build has no in-process workers: the key is an unknown field.
+img_check_release_build() {
+    img_check_config in-process.json
+    [ "$IMG_CC_CODE" = 1 ] || img_fail "check-config with workers.mode exited $IMG_CC_CODE, not 1: $IMG_CC_OUT"
+    echo "$IMG_CC_OUT" | grep -q 'unknown field' || img_fail "the workers.mode refusal is not an unknown-field refusal: $IMG_CC_OUT"
+    img_ok "release build: workers.mode is refused (exit 1): $IMG_CC_OUT"
+}
+
+# The examples are judged by the real server.
+img_check_examples() {
+    img_check_config files.json
+    [ "$IMG_CC_CODE" = 0 ] && [ "$IMG_CC_OUT" = "configuration ok" ] || img_fail "check-config of the files example: $IMG_CC_OUT"
+    img_ok "example files: check-config says '$IMG_CC_OUT'"
+    img_check_config acme.json
+    [ "$IMG_CC_CODE" = 1 ] || img_fail "check-config of the ACME example as shipped exited $IMG_CC_CODE"
+    echo "$IMG_CC_OUT" | grep -q 'terms_agreed' || img_fail "the ACME example as shipped is not refused for the agreement: $IMG_CC_OUT"
+    img_ok "example ACME as shipped: refused (exit 1): $IMG_CC_OUT"
+    img_check_config acme-agreed.json
+    [ "$IMG_CC_CODE" = 0 ] && [ "$IMG_CC_OUT" = "configuration ok" ] || img_fail "check-config of the ACME example with the agreement set: $IMG_CC_OUT"
+    img_ok "example ACME with terms_agreed set by the test: check-config says '$IMG_CC_OUT'"
+}
+
+# The layout of a key mounted from a Kubernetes secret: owned by root, group 10001, mode 0440.
+img_check_mounted_key() {
+    k8s=$IMG_RUN-k8skey
+    docker volume create "$k8s" >/dev/null || img_fail "a volume could not be created"
+    docker run --rm --user 0:0 -v "$IMG_KEY":/src:ro -v "$k8s":/dst "$BASE_IMAGE" sh -ec '
+install -d -m 0755 /dst
+install -m 0440 -o 0 -g 10001 /src/server.key /dst/server.key
+ls -ln /dst/server.key' >"$IMG_SCRATCH/k8s.ls" || img_fail "the mounted key layout could not be made"
+    img_check_config files.json -v "$k8s":/etc/holzwave/k8skey:ro -e HOLZWAVE_SERVER_KEY_FILE=/etc/holzwave/k8skey/server.key
+    [ "$IMG_CC_CODE" = 0 ] && [ "$IMG_CC_OUT" = "configuration ok" ] || img_fail "a key owned by root with group 10001 and mode 0440 is refused: $IMG_CC_OUT"
+    img_ok "a mounted key (root:10001, 0440) is accepted by check-config as uid 10001: $(cut -d' ' -f1,3,4 "$IMG_SCRATCH/k8s.ls")"
+}
+
+# A restart keeps the volume and the server comes back healthy and within the contract.
+img_check_persistence() {
+    docker exec "$IMG_SERVER" sh -c 'echo marker-from-before-the-restart >/data/hw-marker'
+    docker exec "$IMG_SERVER" sh -c 'cd /data && find . -type f | sort' >"$IMG_SCRATCH/files.before"
+    [ -s "$IMG_SCRATCH/files.before" ] || img_fail "the data volume holds no file before the restart"
+    docker restart "$IMG_SERVER" >/dev/null || img_fail "the container did not restart"
+    img_wait_healthy
+    [ "$(docker exec "$IMG_SERVER" cat /data/hw-marker)" = marker-from-before-the-restart ] || img_fail "the marker file did not survive the restart"
+    docker exec "$IMG_SERVER" sh -c 'cd /data && find . -type f | sort' >"$IMG_SCRATCH/files.after"
+    lost=$(comm -23 "$IMG_SCRATCH/files.before" "$IMG_SCRATCH/files.after")
+    [ -z "$lost" ] || img_fail "the restart ended volume files: $lost"
+    img_tls_answer
+    img_check_procs "$IMG_SERVER" "$IMG_SCRATCH/procs.after" "after the restart"
+    img_ok "persistence: the marker and $(wc -l <"$IMG_SCRATCH/files.before" | tr -d ' ') files of /data survived docker restart ($(tr '\n' ' ' <"$IMG_SCRATCH/files.before")); healthy again"
+}
+
+# What a person's user id sees of the data volume.
+img_check_person_view() {
+    docker exec --user 20001:20001 "$IMG_SERVER" sh -c 'id; ls -ld /data /data/homes' >"$IMG_SCRATCH/person.txt" 2>&1 || img_fail "uid 20001 cannot run id and ls"
+    docker exec --user 20001:20001 "$IMG_SERVER" sh -c 'test -x /data && test -x /data/homes' || img_fail "uid 20001 cannot walk through /data and /data/homes"
+    if docker exec --user 20001:20001 "$IMG_SERVER" sh -c 'ls /data >/dev/null 2>&1 || ls /data/homes >/dev/null 2>&1'; then
+        img_fail "uid 20001 can list /data or /data/homes"
+    fi
+    entries=$(docker exec "$IMG_SERVER" ls /data)
+    [ "$(echo "$entries" | grep -vc '^homes$')" -ge 1 ] || img_fail "the data volume holds nothing but the homes: the server has made no file of its own"
+    for entry in $entries; do
+        if docker exec --user 20001:20001 "$IMG_SERVER" sh -c "ls /data/$entry >/dev/null 2>&1 || cat /data/$entry >/dev/null 2>&1"; then
+            img_fail "uid 20001 can list or read /data/$entry"
+        fi
+    done
+    img_ok "person view (uid 20001): $(tr '\n' ';' <"$IMG_SCRATCH/person.txt"); can walk through /data and /data/homes, cannot list or read any of: $(echo "$entries" | tr '\n' ' ')"
+}
+
+# The Compose example: valid, judged by the checker, and brought up for real with an override that points the configuration and
+# the certificates at the scratch area and the image at the test tag.
+img_compose() {
+    docker compose -f "$IMG_COMPOSE_FILE" config -q || img_fail "docker compose config of the shipped file fails"
+    img_ok "docker compose config -q passes with defaults for every variable"
+    docker compose --profile setup -f "$IMG_COMPOSE_FILE" config --format json >"$IMG_SCRATCH/compose.json" || img_fail "docker compose config --format json fails"
+    node "$here/web-deploy-check.mjs" compose <"$IMG_SCRATCH/compose.json" || img_fail "the Compose file breaks the deployment contract"
+    img_ok "web-deploy-check.mjs compose: no violation"
+
+    project=$IMG_RUN-compose
+    mkdir -p "$IMG_SCRATCH/compose"
+    cp "$IMG_SCRATCH/conf/files.json" "$IMG_SCRATCH/compose/server.json"
+    chmod 0755 "$IMG_SCRATCH/compose"
+    chmod 0644 "$IMG_SCRATCH/compose/server.json"
+    cat >"$IMG_SCRATCH/compose/override.yml" <<OVERRIDE
+services:
+  holzwave:
+    image: $IMG_TAG
+    pull_policy: never
+    volumes:
+      - $IMG_SCRATCH/compose/server.json:/etc/holzwave/server.json:ro
+      - tls:/etc/holzwave/tls:ro
+    networks:
+      default:
+        aliases:
+          - $IMG_HOST
+    healthcheck:
+      interval: 2s
+      start_period: 0s
+  keygen:
+    image: $IMG_TAG
+    pull_policy: never
+volumes:
+  tls:
+    external: true
+    name: $IMG_TLS
+OVERRIDE
+    port=$((20000 + $$ % 20000))
+    compose="docker compose -p $project -f $IMG_COMPOSE_FILE -f $IMG_SCRATCH/compose/override.yml"
+    # shellcheck disable=SC2086 # compose is a command with options
+    HOLZWAVE_PORT=$port $compose config -q || img_fail "docker compose config with the test override fails"
+    # shellcheck disable=SC2086
+    HOLZWAVE_PORT=$port $compose --profile setup run --rm keygen >"$IMG_SCRATCH/compose/keygen.log" 2>&1 ||
+        { cat "$IMG_SCRATCH/compose/keygen.log" >&2; img_fail "docker compose run keygen failed"; }
+    shape=$(docker run --rm --user 10001:10001 --read-only -v "$project"_key:/etc/holzwave/key:ro --entrypoint stat "$IMG_TAG" \
+        -c '%a %u:%g' /etc/holzwave/key/server.key) || img_fail "the key of the Compose project cannot be read"
+    [ "$shape" = "600 10001:10001" ] || img_fail "the key of the Compose project has mode and owner '$shape'"
+    img_ok "compose keygen: the key volume holds the key with mode and owner $shape without any command on the host"
+    started=$(date +%s)
+    # shellcheck disable=SC2086
+    HOLZWAVE_PORT=$port $compose up -d --wait --wait-timeout 120 >"$IMG_SCRATCH/compose/up.log" 2>&1 ||
+        { cat "$IMG_SCRATCH/compose/up.log" >&2; img_fail "docker compose up --wait did not bring the server up healthy"; }
+    healthy=$(($(date +%s) - started))
+    # shellcheck disable=SC2086
+    container=$($compose ps -q holzwave)
+    [ -n "$container" ] || img_fail "the Compose project has no server container"
+    img_ok "compose up --wait: healthy after $healthy s"
+    published=$(docker inspect -f '{{json .NetworkSettings.Ports}}' "$container" | img_jq -r 'keys | join(",")')
+    [ "$published" = "8443/tcp" ] || img_fail "the Compose server publishes '$published', not only 8443/tcp"
+    img_ok "compose: the only port is $published"
+    save_net=$IMG_NET save_server=$IMG_SERVER
+    IMG_NET=${project}_default IMG_SERVER=$(docker inspect -f '{{.Name}}' "$container" | tr -d '/')
+    img_tls_answer
+    img_check_procs "$container" "$IMG_SCRATCH/procs.compose" "compose"
+    IMG_NET=$save_net IMG_SERVER=$save_server
+    # shellcheck disable=SC2086
+    HOLZWAVE_PORT=$port $compose down -v >/dev/null 2>&1 || img_fail "docker compose down -v failed"
+    left=$(docker ps -a -q --filter "name=$project"; docker volume ls -q --filter "name=$project"; docker network ls -q --filter "name=$project")
+    [ -z "$left" ] || img_fail "docker compose down -v left something behind: $left"
+    img_ok "compose down -v leaves no container, volume or network"
+}
+
 mode_image() {
     sh "$here/linux-container-test.sh" image || {
         echo "web-container-test: the Linux test image $BASE_IMAGE could not be built" >&2
@@ -592,10 +1009,27 @@ mode_image() {
     img_cleanup
     IMG_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/holzwave-web-image.XXXXXX") || exit 2
     img_build
+    img_check_image_config
     img_materials
+    img_check_no_setid
     img_start
     img_wait_healthy
     img_tls_answer
+    img_keygen_twice
+    img_check_readonly
+    img_check_person_cannot_run_helper
+    img_check_procs "$IMG_SERVER" "$IMG_SCRATCH/procs.before" "the server container"
+    img_check_secrets
+    img_check_ldd
+    img_check_token_line
+    img_check_plain_and_404
+    img_check_fail_closed
+    img_check_release_build
+    img_check_examples
+    img_check_mounted_key
+    img_check_person_view
+    img_check_persistence
+    img_compose
 }
 
 # ---- dispatch -----------------------------------------------------------------------------------------------------

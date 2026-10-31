@@ -1,0 +1,75 @@
+# holzWave server with Docker Compose.
+#
+#   1. Make the configuration:   cp server.files.example.json server.json   (and set public_url; server.acme.example.json is
+#                                the example for a certificate from ACME)
+#   2. Bring the certificate:    put tls.crt and tls.key in ./tls (or point HOLZWAVE_TLS_DIR at the directory). The key file
+#                                must be readable by user 10001 and by nobody else: chown 10001:10001 and chmod 0600.
+#   3. Make the server key once: docker compose --profile setup run --rm keygen
+#   4. Start:                    docker compose up -d --wait
+#   5. Read the one-time token:  docker compose logs holzwave | grep hwb_
+#      Open the public address and make the first administrator with it.
+#
+# The server runs as 10001 with a read-only root and exactly four capabilities (CHOWN, KILL, SETGID, SETUID). The spawn helper
+# carries the same four as file capabilities, and it is how every person's terminal gets a user id of its own; the server
+# process itself holds none. The only published port is the TLS port. There is one server container: the store is SQLite on one
+# local volume, so never run a second one on the same volume.
+#
+# Variables (all optional):
+#   HOLZWAVE_IMAGE    the image name (default holzwave-server:local, built from this tree by `docker compose build`)
+#   HOLZWAVE_TLS_DIR  the directory with tls.crt and tls.key (default ./tls)
+#   HOLZWAVE_PORT     the port on the host (default 8443; with ACME use 443, which must reach the server from the internet)
+
+services:
+  holzwave:
+    build:
+      context: ../..
+      dockerfile: packaging/docker/Dockerfile
+    image: ${HOLZWAVE_IMAGE:-holzwave-server:local}
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    # Exactly these four, and nothing else. There is deliberately no security option here, because
+    # the option that stops a process from gaining privileges (no-new-privileges) would stop the file capabilities of the
+    # spawn helper, and the server would then refuse to start. Do not add it, and do not add a capability to this list.
+    cap_add:
+      - CHOWN
+      - KILL
+      - SETGID
+      - SETUID
+    tmpfs:
+      - /run/holzwave:rw,nosuid,nodev,noexec,uid=10001,gid=10001,mode=0700
+      - /tmp:rw,nosuid,nodev,noexec,mode=1777
+    volumes:
+      # The data volume holds the database, the audit log and the homes of the people.
+      - data:/data
+      # The key made by `keygen`. A named volume copies the owner of the image directory, so the file is mode 0600 and owned
+      # by 10001 without any command on the host.
+      - key:/etc/holzwave/key:ro
+      - ./server.json:/etc/holzwave/server.json:ro
+      - ${HOLZWAVE_TLS_DIR:-./tls}:/etc/holzwave/tls:ro
+      # An OpenID Connect client secret is a file, never a value in the configuration. Mount it read-only and name it in
+      # server.json as auth.oidc[].client_secret_file:
+      # - ./oidc-corp.secret:/etc/holzwave/oidc/corp/secret:ro
+    ports:
+      - "${HOLZWAVE_PORT:-8443}:8443"
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  # Makes the server key once, into the key volume. It refuses to overwrite a key that exists.
+  keygen:
+    profiles:
+      - setup
+    image: ${HOLZWAVE_IMAGE:-holzwave-server:local}
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    volumes:
+      - key:/etc/holzwave/key
+    command: ["keygen"]
+    restart: "no"
+
+volumes:
+  data:
+  key:

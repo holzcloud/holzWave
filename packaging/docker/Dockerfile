@@ -101,7 +101,7 @@ FROM debian:trixie-20261027-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c
 ARG EXTRA_PACKAGES=""
 ARG VERSION=0.0.1-beta1
 ARG REVISION=unknown
-ENV DEBIAN_FRONTEND=noninteractive
+ARG DEBIAN_FRONTEND=noninteractive
 
 # bash for the terminals, ca-certificates for single sign-on and ACME, tini as the first process, libcap2-bin until the file
 # capabilities are set. The user and the group 10001 have no home and no login shell. /data is the one volume, and
