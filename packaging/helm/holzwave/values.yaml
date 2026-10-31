@@ -1,0 +1,109 @@
+# Values of the holzWave chart.
+#
+# The server is one pod with one volume: the store is SQLite on a local volume, so there is deliberately no replica count
+# here, the strategy is Recreate and the claim is ReadWriteOnce. The chart has no value that could change that, and the
+# values schema rejects `replicaCount`.
+#
+# THE SECURITY CONTEXT IS FIXED AND IS NOT A VALUE. The pod runs as user and group 10001 with a read-only root file system, the
+# default seccomp profile, no service-account token, no host namespace and no host path. The container drops every capability
+# and adds exactly the four the spawn helper needs (CHOWN, KILL, SETGID, SETUID); the helper carries the same four as file
+# capabilities, and that is how each person's terminal gets a user id of its own. The server itself holds no capability.
+#
+# `allowPrivilegeEscalation` is left unset on purpose. Setting it to `false` sets the kernel's no_new_privs flag, and that stops
+# the file capabilities of the spawn helper: the server then refuses to start and says the helper lacks its capabilities. For
+# the same reason the namespace needs the Pod Security level `baseline` (all four capabilities are on its list) and the level
+# `restricted` cannot run this pod:
+#
+#   kubectl label namespace <namespace> pod-security.kubernetes.io/enforce=baseline
+#
+# The chart renders no Secret. The server key, the TLS material and the single sign-on client secrets are secrets that exist
+# already (see NOTES.txt for how to make the key).
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  # Build the image from packaging/docker/Dockerfile, push it to a registry you control and name it here.
+  repository: holzwave-server
+  # Defaults to the application version of the chart. `latest` is refused.
+  tag: ""
+  # When set, the digest is used instead of the tag: repository@sha256:...
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# The server's own configuration file, in its own (snake case) keys. The chart forces `data_dir`, `runtime_dir`, `listen` and
+# the paths of the TLS files, and fills in `client_secret_file` for every provider named in `oidcSecrets`. `public_url` has
+# no default. Everything else is judged by the server itself when it starts (`holzwave-server check-config`).
+config:
+  # public_url: https://holzwave.example.org
+  tls:
+    # files: a TLS secret (`tls.existingSecret`); acme: the server gets its certificate (set contact, domains and
+    # terms_agreed, which is your agreement to the terms of the certificate authority and has no default); proxy: plain HTTP
+    # inside the cluster behind an Ingress, for the addresses in `trusted_proxies` only (required, not empty).
+    mode: files
+    # trusted_proxies: []
+    # contact: mailto:admin@example.org
+    # domains: []
+    # terms_agreed: false
+  auth:
+    passkey: true
+    password_totp: true
+    oidc: []
+  sessions: {}
+  limits: {}
+  workers: {}
+  upload: {}
+  transport: {}
+
+# The server key made by `holzwave-server keygen`, in a Secret that exists already. It is mounted as one regular file with mode
+# 0440 and group 10001 (the pod's fsGroup), which the key reader accepts. `existingSecret` has no default.
+serverKey:
+  # existingSecret: holzwave-server-key
+  key: server.key
+
+# The TLS secret of the `files` mode: an existing Secret with the keys `tls.crt` and `tls.key`. The files are mounted as single
+# files (the server refuses a key file that is a link, and a Secret volume is made of links). After a renewal, restart the pod.
+tls:
+  existingSecret: ""
+
+# Client secrets of single sign-on providers, one existing Secret each. The secret is mounted at
+# /etc/holzwave/oidc/<id>/secret, and the provider with the same id in config.auth.oidc gets that path as client_secret_file.
+oidcSecrets: []
+#  - id: corp
+#    secretName: holzwave-oidc-corp
+#    key: client-secret
+
+persistence:
+  size: 10Gi
+  storageClass: ""
+  # Use a claim that exists already (it must be ReadWriteOnce). The claim the chart makes is kept when the release is removed.
+  existingClaim: ""
+
+service:
+  type: ClusterIP
+  # The port of the Service. The server listens on 8443; with `acme` the certificate authority must reach port 443.
+  port: 8443
+  annotations: {}
+
+# An Ingress exists for the `proxy` mode only. It is off by default.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: ""
+  tlsSecretName: ""
+
+terminationGracePeriodSeconds: 30
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+podLabels: {}
+
+serviceAccount:
+  # The service account has no token mounted. Leave empty for the name of the release.
+  name: ""

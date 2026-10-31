@@ -1,0 +1,34 @@
+holzWave {{ .Chart.AppVersion }} is installed as {{ include "holzwave.fullname" . }} in the namespace {{ .Release.Namespace }}.
+
+Before the pod can start, these must exist in the namespace:
+
+  1. The server key (a Secret named {{ .Values.serverKey.existingSecret }}, key {{ .Values.serverKey.key }}). Make the key once, on your side, and keep a copy:
+
+       docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/out" -e HOLZWAVE_SERVER_KEY_FILE=/out/{{ .Values.serverKey.key }} {{ include "holzwave.image" . }} keygen
+       kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.serverKey.existingSecret }} --from-file={{ .Values.serverKey.key }}=./{{ .Values.serverKey.key }}
+
+{{- if eq (include "holzwave.mode" .) "files" }}
+
+  2. The certificate (a Secret named {{ .Values.tls.existingSecret }} of the type kubernetes.io/tls, with tls.crt and tls.key). After a renewal, restart the pod: kubectl -n {{ .Release.Namespace }} rollout restart deployment/{{ include "holzwave.fullname" . }}
+{{- else if eq (include "holzwave.mode" .) "acme" }}
+
+  2. Port {{ .Values.service.port }} of the Service must be reachable from the internet at the public address: the certificate authority validates the name on the server's own TLS port.
+{{- else }}
+
+  2. An Ingress controller (or another proxy) that ends TLS and forwards plain HTTP to the Service. The server accepts connections from {{ join ", " .Values.config.tls.trusted_proxies }} only and believes their X-Forwarded-For and X-Forwarded-Proto headers.
+{{- if not .Values.ingress.enabled }}
+     (ingress.enabled is false: this chart made no Ingress.)
+{{- end }}
+{{- end }}
+
+The namespace needs the Pod Security level baseline. The pod adds the four capabilities CHOWN, KILL, SETGID and SETUID (and drops all others) because the spawn helper needs them to give every person's terminal a user id of its own; the level restricted forbids that:
+
+  kubectl label namespace {{ .Release.Namespace }} pod-security.kubernetes.io/enforce=baseline
+
+Do not set allowPrivilegeEscalation to false and do not add a security context of your own: the helper's file capabilities stop working under no_new_privs, and the server then refuses to start (a pod that fails with "not permitted to the helper" has been given one).
+
+The first start prints a one-time setup token on standard output. Open {{ .Values.config.public_url }} and use it to make the first administrator:
+
+  kubectl -n {{ .Release.Namespace }} logs deployment/{{ include "holzwave.fullname" . }} | grep hwb_
+
+There is exactly one server pod, and the chart has no replica value: the store is SQLite on one ReadWriteOnce volume, and a second writer would corrupt it. An upgrade stops the old pod before it starts the new one, and a restart ends the open terminals.

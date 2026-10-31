@@ -1,0 +1,20 @@
+{{- $mode := include "holzwave.mode" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "holzwave.fullname" . }}
+  labels:
+    {{- include "holzwave.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: {{ if eq $mode "proxy" }}http{{ else }}https{{ end }}
+      port: {{ .Values.service.port }}
+      targetPort: server
+      protocol: TCP
+  selector:
+    {{- include "holzwave.selectorLabels" . | nindent 4 }}

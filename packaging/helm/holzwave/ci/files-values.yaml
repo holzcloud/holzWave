@@ -1,0 +1,14 @@
+# A TLS secret of the operator's own. Made-up names.
+image:
+  repository: registry.example.net/holzwave/holzwave-server
+config:
+  public_url: https://holzwave.example.net
+  tls:
+    mode: files
+  auth:
+    passkey: true
+    password_totp: true
+serverKey:
+  existingSecret: holzwave-server-key
+tls:
+  existingSecret: holzwave-tls

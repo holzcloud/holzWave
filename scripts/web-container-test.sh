@@ -1,7 +1,7 @@
 #!/bin/sh
 # The container tests of the web build, from the Mac, in Docker.
 #
-#   sh scripts/web-container-test.sh [caps|acme|isolation|image|all] [-- <test filter>]    (default: all)
+#   sh scripts/web-container-test.sh [caps|acme|isolation|image|multiarch|all] [-- <test filter>]    (default: all)
 #
 # The words after `--` go to the test binary of the `isolation` mode as its filter (`tracer`, `homes`, `procs`, `caps`,
 # `limits`, `teardown` select a group).
@@ -26,6 +26,9 @@
 # dropped and exactly CHOWN, KILL, SETGID and SETUID added. It makes a key with `keygen`, a throwaway certificate for the name
 # `holzwave.test`, starts the server on a private network and asks it for the sign-in state over TLS 1.3 from a second
 # container. HOLZWAVE_WEB_CONTEXT names another build context than the repository root (a clean checkout, for example).
+# `multiarch` builds the image for linux/amd64 and linux/arm64, one platform at a time, and on each runs `uname -m`, `ldd`,
+# `keygen` and `check-config` on the example configuration with a generated certificate. A platform that cannot be built or
+# run on this machine is reported as `NOT RUN <platform>: <reason>` and the mode exits 1; it is never a pass.
 # `all` runs every mode there is. Later modes are added as one function and one line in the `case` at the end.
 #
 # The image `holzwave-linux-test` of scripts/linux-container-test.sh is the base; the first run adds `libcap2-bin` and
@@ -59,13 +62,13 @@ BASE_IMAGE=holzwave-linux-test$SUFFIX
 WEB_IMAGE=holzwave-web-test$SUFFIX
 
 usage() {
-    echo "usage: sh scripts/web-container-test.sh [caps|acme|isolation|image|all] [-- <test filter>]" >&2
+    echo "usage: sh scripts/web-container-test.sh [caps|acme|isolation|image|multiarch|all] [-- <test filter>]" >&2
     exit 2
 }
 
 mode=all
 case "${1:-}" in
-    caps | acme | isolation | image | all)
+    caps | acme | isolation | image | multiarch | all)
         mode=$1
         shift
         ;;
@@ -523,6 +526,19 @@ img_replace() {
     fi
 }
 
+# A certificate for the test name in the certificate volume, made and owned the way an operator's files are (not by the image).
+img_make_certificate() {
+    docker run --rm --user 0:0 -v "$IMG_TLS":/m "$BASE_IMAGE" sh -ec '
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 \
+    -keyout /m/tls.key -out /m/tls.crt -subj "/CN='"$IMG_HOST"'" -addext "subjectAltName=DNS:'"$IMG_HOST"'" 2>/dev/null
+chown -R 10001:10001 /m
+chmod 0755 /m
+chmod 0644 /m/tls.crt
+chmod 0600 /m/tls.key
+' || img_fail "the test certificate could not be made"
+    img_ok "a throwaway certificate for $IMG_HOST (P-256, 2 days)"
+}
+
 # The operator's side: a key made by `keygen` in the key volume, a certificate for the test name in the certificate volume
 # (made and owned the way an operator's files are, not by the image), a secret file for a single sign-on provider, and the
 # configurations in their own volume: the files example (with and without a provider), the ACME example, and a file with the
@@ -542,15 +558,7 @@ img_materials() {
     IMG_KEY_SHAPE=$shape
     img_ok "keygen made the key: mode and owner $shape"
 
-    docker run --rm --user 0:0 -v "$IMG_TLS":/m "$BASE_IMAGE" sh -ec '
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 \
-    -keyout /m/tls.key -out /m/tls.crt -subj "/CN='"$IMG_HOST"'" -addext "subjectAltName=DNS:'"$IMG_HOST"'" 2>/dev/null
-chown -R 10001:10001 /m
-chmod 0755 /m
-chmod 0644 /m/tls.crt
-chmod 0600 /m/tls.key
-' || img_fail "the test certificate could not be made"
-    img_ok "a throwaway certificate for $IMG_HOST (P-256, 2 days)"
+    img_make_certificate
 
     # A throwaway client secret of a single sign-on provider: a file the server reads, with a marker that must be found nowhere.
     IMG_CANARY=$(docker run --rm "$BASE_IMAGE" sh -c 'echo CANARY-$(head -c 24 /dev/urandom | base64 | tr -d "=+/\n")')
@@ -855,7 +863,7 @@ img_check_config() {
     shift
     # shellcheck disable=SC2086 # IMG_CONFINED is a list of options
     IMG_CC_OUT=$(docker run --rm $IMG_CONFINED -v "$IMG_KEY":/etc/holzwave/key:ro -v "$IMG_TLS":/etc/holzwave/tls:ro \
-        -v "$IMG_OIDC":/etc/holzwave/oidc/corp:ro -v "$IMG_CONF":/etc/holzwave/conf:ro \
+        -v "$IMG_OIDC":/etc/holzwave/oidc/corp:ro -v "${IMG_CC_CONF:-$IMG_CONF}":/etc/holzwave/conf:ro \
         -e "HOLZWAVE_SERVER_CONFIG=/etc/holzwave/conf/$file" "$@" "$IMG_TAG" check-config 2>&1)
     IMG_CC_CODE=$?
 }
@@ -1000,6 +1008,86 @@ OVERRIDE
     img_ok "compose down -v leaves no container, volume or network"
 }
 
+# ---- the chart ----
+
+# The Helm chart: lint, render for the three TLS modes, judged by the same checker as the Compose file, the configuration it
+# renders judged by the real server, and the refusals of the schema and the templates.
+img_chart() {
+    for tool in helm kubectl node; do
+        command -v "$tool" >/dev/null 2>&1 || {
+            echo "web-container-test: $tool is missing" >&2
+            exit 2
+        }
+    done
+    chart=$root/packaging/helm/holzwave
+    mkdir -p "$IMG_SCRATCH/chart/conf"
+    app=$(sed -n 's/^appVersion: "\(.*\)"$/\1/p' "$chart/Chart.yaml")
+    [ "$app" = "$(img_version)" ] || img_fail "appVersion '$app' of the chart is not the workspace version '$(img_version)'"
+    img_ok "chart appVersion $app is the workspace version"
+    for set in files acme proxy; do
+        values=$chart/ci/$set-values.yaml
+        out=$(helm lint --strict "$chart" -f "$values" 2>&1) || img_fail "helm lint --strict ($set) failed: $out"
+        lint=$(echo "$out" | tail -n 1)
+        helm template holzwave "$chart" -f "$values" >"$IMG_SCRATCH/chart/$set.yaml" || img_fail "helm template ($set) failed"
+        KUBECONFIG=/dev/null kubectl annotate --local -f "$IMG_SCRATCH/chart/$set.yaml" -o json holzwave.example/checked=yes \
+            >"$IMG_SCRATCH/chart/$set.json" || img_fail "kubectl could not convert the render of $set"
+        node "$here/web-deploy-check.mjs" chart <"$IMG_SCRATCH/chart/$set.json" || img_fail "the render of $set breaks the deployment contract"
+        [ "$(grep -c '^kind: Secret$' "$IMG_SCRATCH/chart/$set.yaml")" = 0 ] || img_fail "the chart renders a Secret ($set)"
+        [ "$(grep -c '^kind: Deployment$' "$IMG_SCRATCH/chart/$set.yaml")" = 1 ] || img_fail "the chart does not render one Deployment ($set)"
+        img_jq -r 'select(.kind == "ConfigMap") | .data["server.json"]' <"$IMG_SCRATCH/chart/$set.json" >"$IMG_SCRATCH/chart/conf/$set.json" ||
+            img_fail "the configuration of $set cannot be read from the render"
+        img_ok "chart $set: helm lint --strict ($lint); helm template; web-deploy-check.mjs chart: no violation; no Secret; one Deployment"
+    done
+    ingresses=$(grep -c '^kind: Ingress$' "$IMG_SCRATCH/chart/proxy.yaml")
+    [ "$ingresses" = 1 ] || img_fail "the proxy render has $ingresses Ingress objects, not 1"
+    for set in files acme; do
+        [ "$(grep -c '^kind: Ingress$' "$IMG_SCRATCH/chart/$set.yaml")" = 0 ] || img_fail "the $set render has an Ingress"
+    done
+    helm template holzwave "$chart" -f "$chart/ci/files-values.yaml" --set ingress.enabled=true >"$IMG_SCRATCH/chart/files-ingress.yaml" ||
+        img_fail "helm template with the Ingress enabled in the files mode failed"
+    [ "$(grep -c '^kind: Ingress$' "$IMG_SCRATCH/chart/files-ingress.yaml")" = 0 ] || img_fail "an Ingress was rendered in the files mode"
+    img_ok "ingress: rendered in the proxy mode only (proxy 1, files 0 even when enabled, acme 0)"
+
+    # The configuration each render holds, judged by the real server with the files mounted where the chart puts them.
+    chartconf=$IMG_RUN-chartconf
+    docker volume create "$chartconf" >/dev/null || img_fail "a volume could not be created"
+    COPYFILE_DISABLE=1 tar -c --no-xattrs -C "$IMG_SCRATCH/chart/conf" . |
+        docker run --rm -i --user 0:0 -v "$chartconf":/m "$BASE_IMAGE" sh -ec 'tar -x --no-same-owner -C /m; chmod 0755 /m; chmod 0644 /m/*' ||
+        img_fail "the rendered configurations could not be written"
+    IMG_CC_CONF=$chartconf
+    for set in files acme proxy; do
+        img_check_config "$set.json"
+        [ "$IMG_CC_CODE" = 0 ] && [ "$IMG_CC_OUT" = "configuration ok" ] || img_fail "check-config of the configuration rendered for $set: $IMG_CC_OUT"
+        img_ok "chart $set: the rendered server.json passes check-config of the image: '$IMG_CC_OUT'"
+    done
+    IMG_CC_CONF=
+
+    img_reject "replicaCount=2" replicaCount --set replicaCount=2
+    img_reject "a securityContext block" securityContext --set securityContext.runAsUser=0
+    img_reject "an unknown top-level key" bogus --set bogus=1
+    img_reject "config.tls.mode=ssh" mode --set config.tls.mode=ssh
+    img_reject "a missing serverKey.existingSecret" existingSecret --set serverKey.existingSecret=null
+    img_reject "a missing config.public_url" public_url --set config.public_url=null
+    img_reject "image.tag=latest" "image/tag" --set image.tag=latest
+    img_reject "a chart-owned key (config.data_dir)" data_dir --set config.data_dir=/elsewhere
+    out=$(helm template holzwave "$chart" -f "$chart/ci/proxy-values.yaml" --set-json 'config.tls.trusted_proxies=[]' 2>&1) &&
+        img_fail "the proxy mode rendered with an empty list of trusted proxies"
+    echo "$out" | grep -q 'trusted_proxies is required' || img_fail "the proxy refusal does not name trusted_proxies: $out"
+    img_ok "template: the proxy mode without trusted proxies is refused: $(echo "$out" | tr '\n' ' ' | cut -c1-200)"
+}
+
+# One refusal of the schema: $1 what, $2 a word the message must hold, the rest are options of helm template.
+img_reject() {
+    label=$1 word=$2
+    shift 2
+    chart=$root/packaging/helm/holzwave
+    if out=$(helm template holzwave "$chart" -f "$chart/ci/files-values.yaml" "$@" 2>&1); then
+        img_fail "the chart accepted $label"
+    fi
+    echo "$out" | grep -q "$word" || img_fail "the refusal of $label does not name '$word': $out"
+    img_ok "schema: $label is refused: $(echo "$out" | tr '\n' ' ' | cut -c1-220)"
+}
+
 mode_image() {
     sh "$here/linux-container-test.sh" image || {
         echo "web-container-test: the Linux test image $BASE_IMAGE could not be built" >&2
@@ -1030,6 +1118,71 @@ mode_image() {
     img_check_person_view
     img_check_persistence
     img_compose
+    img_chart
+}
+
+# ---- multiarch ----
+
+# The image for both architectures, one platform at a time (`--load` takes one): what the machine says it is, the libraries
+# found, a key made, and the real server's check of the example configuration with a generated certificate. A platform that
+# cannot be built or run here is NOT RUN with the reason, and the mode exits 1.
+mode_multiarch() {
+    docker buildx version >/dev/null 2>&1 || {
+        echo "web-container-test: docker buildx is missing" >&2
+        exit 2
+    }
+    sh "$here/linux-container-test.sh" image || {
+        echo "web-container-test: the Linux test image $BASE_IMAGE could not be built" >&2
+        exit 1
+    }
+    trap img_cleanup EXIT INT TERM
+    img_cleanup
+    IMG_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/holzwave-web-image.XXXXXX") || exit 2
+    docker volume create "$IMG_TLS" >/dev/null && docker volume create "$IMG_CONF" >/dev/null || img_fail "a volume could not be created"
+    img_make_certificate
+    mkdir -p "$IMG_SCRATCH/conf"
+    img_replace "$root/packaging/compose/server.files.example.json" "$IMG_SCRATCH/conf/files.json" "https://holzwave.example.net" "https://$IMG_HOST:$IMG_PORT"
+    COPYFILE_DISABLE=1 tar -c --no-xattrs -C "$IMG_SCRATCH/conf" . |
+        docker run --rm -i --user 0:0 -v "$IMG_CONF":/m "$BASE_IMAGE" sh -ec 'tar -x --no-same-owner -C /m; chmod 0755 /m; chmod 0644 /m/*' ||
+        img_fail "the configuration could not be written"
+    version=$(img_version)
+    revision=$(git -C "$root" rev-parse HEAD 2>/dev/null || echo unknown)
+    status=0
+    for platform in linux/amd64 linux/arm64; do
+        arch=${platform#linux/}
+        case "$arch" in amd64) machine=x86_64 ;; arm64) machine=aarch64 ;; esac
+        tag=holzwave-server-multiarch:$arch
+        echo "+ docker buildx build --platform $platform --load -t $tag -f packaging/docker/Dockerfile $IMG_CONTEXT"
+        if ! docker buildx build --platform "$platform" --load -t "$tag" -f "$IMG_CONTEXT/packaging/docker/Dockerfile" \
+            --build-arg "VERSION=$version" --build-arg "REVISION=$revision" "$IMG_CONTEXT" >"$IMG_SCRATCH/build-$arch.log" 2>&1; then
+            echo "multiarch: NOT RUN $platform: the image could not be built: $(tail -n 3 "$IMG_SCRATCH/build-$arch.log" | tr '\n' ' ')"
+            status=1
+            continue
+        fi
+        got=$(docker run --rm --platform "$platform" --entrypoint uname "$tag" -m 2>&1)
+        if [ "$got" != "$machine" ]; then
+            echo "multiarch: NOT RUN $platform: the container reports '$got', not $machine (the machine cannot run this platform)"
+            status=1
+            continue
+        fi
+        libs=$(docker run --rm --platform "$platform" --entrypoint ldd "$tag" /usr/local/bin/holzwave-server 2>&1)
+        if [ $? -ne 0 ] || echo "$libs" | grep -q 'not found'; then
+            echo "multiarch: FAILED $platform: ldd of the server: $libs"
+            status=1
+            continue
+        fi
+        # shellcheck disable=SC2086 # IMG_CONFINED is a list of options
+        out=$(docker run --rm --platform "$platform" $IMG_CONFINED --tmpfs /etc/holzwave/key:rw,nosuid,nodev,noexec,uid=10001,gid=10001,mode=0700 \
+            -v "$IMG_TLS":/etc/holzwave/tls:ro -v "$IMG_CONF":/etc/holzwave/conf:ro -e HOLZWAVE_SERVER_CONFIG=/etc/holzwave/conf/files.json \
+            --entrypoint sh "$tag" -ec '/usr/local/bin/holzwave-server keygen && /usr/local/bin/holzwave-server check-config' 2>&1)
+        if [ $? -ne 0 ] || ! echo "$out" | grep -q '^configuration ok$'; then
+            echo "multiarch: FAILED $platform: keygen and check-config: $out"
+            status=1
+            continue
+        fi
+        img_ok "multiarch $platform: uname -m $got; ldd finds every library; keygen made a key; check-config says 'configuration ok'"
+    done
+    [ "$status" = 0 ] || exit 1
 }
 
 # ---- dispatch -----------------------------------------------------------------------------------------------------
@@ -1039,11 +1192,13 @@ case "$mode" in
     acme) mode_acme ;;
     isolation) mode_isolation ;;
     image) mode_image ;;
+    multiarch) mode_multiarch ;;
     all)
         mode_caps
         mode_acme
         mode_isolation
         mode_image
+        mode_multiarch
         ;;
 esac
 echo "web-container-test: ok"

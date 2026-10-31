@@ -202,27 +202,33 @@ function checkPod(deployment, found) {
       if (SOCKET_PATTERN.test(String(mount.mountPath ?? ""))) found.push(["socket-mount", at]);
     }
   }
-  for (const container of containers) {
-    const security = container.securityContext ?? {};
-    const effective = (key) => security[key] ?? podSecurity[key];
-    if (effective("runAsNonRoot") !== true) found.push(["run-as-non-root", at]);
-    if (Number(effective("runAsUser")) !== USER) found.push(["user", at]);
-    if (Number(effective("runAsGroup") ?? USER) !== USER) found.push(["user", at]);
-    if (security.readOnlyRootFilesystem !== true) found.push(["writable-root", at]);
-    if (security.privileged === true) found.push(["privileged", at]);
-    if (security.allowPrivilegeEscalation === false) found.push(["allow-privilege-escalation", at]);
-    if (!sameSet(upper(security.capabilities?.drop), ["ALL"])) found.push(["cap-drop", at]);
-    if (!sameSet(upper(security.capabilities?.add), CAPABILITIES)) found.push(["cap-add", at]);
-    const seccomp = (security.seccompProfile ?? podSecurity.seccompProfile)?.type;
-    if (seccomp !== "RuntimeDefault") found.push(["seccomp", at]);
+  for (const container of list(pod.initContainers)) checkContainer(container, podSecurity, at, found, true);
+  for (const container of containers) checkContainer(container, podSecurity, at, found, false);
+}
+
+// The rules of one container. An init container runs without any capability and has no probes.
+function checkContainer(container, podSecurity, at, found, init) {
+  const security = container.securityContext ?? {};
+  const effective = (key) => security[key] ?? podSecurity[key];
+  if (effective("runAsNonRoot") !== true) found.push(["run-as-non-root", at]);
+  if (Number(effective("runAsUser")) !== USER) found.push(["user", at]);
+  if (Number(effective("runAsGroup") ?? USER) !== USER) found.push(["user", at]);
+  if (security.readOnlyRootFilesystem !== true) found.push(["writable-root", at]);
+  if (security.privileged === true) found.push(["privileged", at]);
+  if (security.allowPrivilegeEscalation === false) found.push(["allow-privilege-escalation", at]);
+  if (!sameSet(upper(security.capabilities?.drop), ["ALL"])) found.push(["cap-drop", at]);
+  if (!sameSet(upper(security.capabilities?.add), init ? [] : CAPABILITIES)) found.push(["cap-add", at]);
+  const seccomp = (security.seccompProfile ?? podSecurity.seccompProfile)?.type;
+  if (seccomp !== "RuntimeDefault") found.push(["seccomp", at]);
+  if (!init) {
     for (const probe of ["startupProbe", "readinessProbe", "livenessProbe"]) {
       const command = list(container[probe]?.exec?.command).map(String);
       if (!command.includes("healthcheck")) found.push(["probe", `${at} ${probe}`]);
     }
-    const image = String(container.image ?? "");
-    const tagged = /@sha256:[0-9a-f]{64}$/.test(image) || /^[^@]*:[^:/@]+$/.test(image.replace(/^[^/]*:\d+\//, ""));
-    if (image === "" || !tagged || /:latest(@|$)/.test(image)) found.push(["image-tag", at]);
   }
+  const image = String(container.image ?? "");
+  const tagged = /@sha256:[0-9a-f]{64}$/.test(image) || /^[^@]*:[^:/@]+$/.test(image.replace(/^[^/]*:\d+\//, ""));
+  if (image === "" || !tagged || /:latest(@|$)/.test(image)) found.push(["image-tag", at]);
 }
 
 export function checkChart(objects) {
@@ -302,12 +308,22 @@ function cleanChart() {
       runAsGroup: USER,
       readOnlyRootFilesystem: true,
       capabilities: { drop: ["ALL"], add: [...CAPABILITIES] },
-      seccompProfile: { type: "RuntimeDefault" },
     },
     startupProbe: { exec: { command: ["holzwave-server", "healthcheck"] } },
     readinessProbe: { exec: { command: ["holzwave-server", "healthcheck"] } },
     livenessProbe: { exec: { command: ["holzwave-server", "healthcheck"] } },
     volumeMounts: [{ name: "data", mountPath: DATA_DIR }],
+  };
+  const initContainer = {
+    name: "prepare",
+    image: container.image,
+    securityContext: {
+      runAsNonRoot: true,
+      runAsUser: USER,
+      runAsGroup: USER,
+      readOnlyRootFilesystem: true,
+      capabilities: { drop: ["ALL"] },
+    },
   };
   return [
     { apiVersion: "v1", kind: "ServiceAccount", metadata: { name: "holzwave" }, automountServiceAccountToken: false },
@@ -336,7 +352,8 @@ function cleanChart() {
         template: {
           spec: {
             automountServiceAccountToken: false,
-            securityContext: { fsGroup: USER },
+            securityContext: { fsGroup: USER, seccompProfile: { type: "RuntimeDefault" } },
+            initContainers: [initContainer],
             containers: [container],
             volumes: [{ name: "data", persistentVolumeClaim: { claimName: "holzwave" } }],
           },
@@ -349,6 +366,7 @@ function cleanChart() {
 const clone = (value) => structuredClone(value);
 const deploymentOf = (objects) => objects.find((object) => object.kind === "Deployment");
 const containerOf = (objects) => deploymentOf(objects).spec.template.spec.containers[0];
+const initOf = (objects) => deploymentOf(objects).spec.template.spec.initContainers[0];
 const configOf = (objects) => {
   const map = objects.find((object) => object.kind === "ConfigMap");
   const config = JSON.parse(map.data["server.json"]);
@@ -386,7 +404,10 @@ const CHART_CASES = [
   ["allow-privilege-escalation", (o) => { containerOf(o).securityContext.allowPrivilegeEscalation = false; }],
   ["cap-drop", (o) => { containerOf(o).securityContext.capabilities.drop = []; }],
   ["cap-add", (o) => { containerOf(o).securityContext.capabilities.add.push("SYS_ADMIN"); }],
-  ["seccomp", (o) => { delete containerOf(o).securityContext.seccompProfile; }],
+  ["seccomp", (o) => { delete deploymentOf(o).spec.template.spec.securityContext.seccompProfile; }],
+  ["privileged (init container)", (o) => { initOf(o).securityContext.privileged = true; }, ["privileged"]],
+  ["cap-add (init container)", (o) => { initOf(o).securityContext.capabilities.add = ["CHOWN"]; }, ["cap-add"]],
+  ["image-tag (init container)", (o) => { initOf(o).image = "registry.example.net/holzwave:latest"; }, ["image-tag"]],
   ["probe", (o) => { delete containerOf(o).readinessProbe; }],
   ["image-tag", (o) => { containerOf(o).image = "ghcr.io/holzcloud/holzwave:latest"; }],
   ["access-mode", (o) => { o.find((x) => x.kind === "PersistentVolumeClaim").spec.accessModes = ["ReadWriteMany"]; }],

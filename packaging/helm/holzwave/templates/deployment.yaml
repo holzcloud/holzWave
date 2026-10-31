@@ -1,0 +1,196 @@
+{{- $mode := include "holzwave.mode" . }}
+{{- $config := include "holzwave.config" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "holzwave.fullname" . }}
+  labels:
+    {{- include "holzwave.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "holzwave.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ $config | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "holzwave.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "holzwave.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Makes what the server expects to find: the directory the spawn helper keeps the homes of the people in, and a private
+        # directory inside the memory volume for the health socket (an emptyDir is writable by everyone, which the server refuses).
+        - name: prepare
+          image: {{ include "holzwave.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-ec", "install -d -m 0711 /data/homes && install -d -m 0700 /mnt/run/private"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: run
+              mountPath: /mnt/run
+      containers:
+        - name: holzwave
+          image: {{ include "holzwave.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: HOLZWAVE_SERVER_CONFIG
+              value: /etc/holzwave/server.json
+            - name: HOLZWAVE_SERVER_KEY_FILE
+              value: /etc/holzwave/key/server.key
+          ports:
+            - name: server
+              containerPort: 8443
+              protocol: TCP
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - CHOWN
+                - KILL
+                - SETGID
+                - SETUID
+          startupProbe:
+            exec:
+              command: ["/usr/local/bin/holzwave-server", "healthcheck"]
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 36
+          readinessProbe:
+            exec:
+              command: ["/usr/local/bin/holzwave-server", "healthcheck"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: ["/usr/local/bin/holzwave-server", "healthcheck"]
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: run
+              mountPath: /run/holzwave
+              subPath: private
+            - name: tmp
+              mountPath: /tmp
+            - name: config
+              mountPath: /etc/holzwave/server.json
+              subPath: server.json
+              readOnly: true
+            - name: server-key
+              mountPath: /etc/holzwave/key/server.key
+              subPath: server.key
+              readOnly: true
+            {{- if eq $mode "files" }}
+            - name: tls
+              mountPath: /etc/holzwave/tls/tls.crt
+              subPath: tls.crt
+              readOnly: true
+            - name: tls
+              mountPath: /etc/holzwave/tls/tls.key
+              subPath: tls.key
+              readOnly: true
+            {{- end }}
+            {{- range .Values.oidcSecrets }}
+            - name: oidc-{{ .id | replace "_" "-" }}
+              mountPath: /etc/holzwave/oidc/{{ .id }}/secret
+              subPath: secret
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ default (include "holzwave.fullname" .) .Values.persistence.existingClaim }}
+        - name: run
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: config
+          configMap:
+            name: {{ include "holzwave.fullname" . }}
+        - name: server-key
+          secret:
+            secretName: {{ required "serverKey.existingSecret is required: the Secret made from a keygen run" .Values.serverKey.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.serverKey.key }}
+                path: server.key
+        {{- if eq $mode "files" }}
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+        {{- end }}
+        {{- range .Values.oidcSecrets }}
+        - name: oidc-{{ .id | replace "_" "-" }}
+          secret:
+            secretName: {{ .secretName }}
+            defaultMode: 0440
+            items:
+              - key: {{ .key }}
+                path: secret
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

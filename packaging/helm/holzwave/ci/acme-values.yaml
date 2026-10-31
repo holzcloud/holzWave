@@ -1,0 +1,19 @@
+# The server gets its certificate itself. terms_agreed is the operator's agreement to the terms of the certificate authority.
+image:
+  repository: registry.example.net/holzwave/holzwave-server
+config:
+  public_url: https://holzwave.example.net
+  tls:
+    mode: acme
+    contact: mailto:admin@example.net
+    domains:
+      - holzwave.example.net
+    terms_agreed: true
+  auth:
+    passkey: true
+    password_totp: true
+serverKey:
+  existingSecret: holzwave-server-key
+service:
+  type: LoadBalancer
+  port: 443

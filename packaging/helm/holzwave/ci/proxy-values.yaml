@@ -1,0 +1,28 @@
+# Plain HTTP inside the cluster behind an Ingress; only the pod network of the proxies may connect.
+image:
+  repository: registry.example.net/holzwave/holzwave-server
+config:
+  public_url: https://holzwave.example.net
+  tls:
+    mode: proxy
+    trusted_proxies:
+      - 10.42.0.0/16
+  auth:
+    passkey: true
+    password_totp: true
+    oidc:
+      - id: corp
+        name: Company
+        issuer: https://idp.example.net
+        client_id: holzwave
+serverKey:
+  existingSecret: holzwave-server-key
+oidcSecrets:
+  - id: corp
+    secretName: holzwave-oidc-corp
+    key: client-secret
+ingress:
+  enabled: true
+  className: nginx
+  host: holzwave.example.net
+  tlsSecretName: holzwave-ingress-tls

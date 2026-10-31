@@ -1,0 +1,13 @@
+apiVersion: v2
+name: holzwave
+description: The holzWave terminal in the browser - one server, one volume, terminals that run under a user id of their own
+type: application
+version: 0.0.1-beta1
+appVersion: "0.0.1-beta1"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/holzcloud/holzWave
+sources:
+  - https://github.com/holzcloud/holzWave
+keywords:
+  - terminal
+  - browser
