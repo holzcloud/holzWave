@@ -110,6 +110,43 @@ scripts/linux-container-test.sh core`) cover the integrations too. Three notes: 
 with a printed reason, the fake tools are Unix scripts (the Windows file writes its own `.cmd` stand-ins), and the
 recorder writes sanitised output only and never runs a verb that changes a cluster, an account or a configuration.
 
+The web build (the server, the host crate, the spawn helper, the image and the browser page) has commands of its own. The
+first block runs on this machine; the second needs a Linux container and so a Docker host; the third needs the tools of
+the deployment files. Part 10 is the list for the real cluster, identity provider, authenticators, browsers and networks.
+
+```sh
+# on the Mac (or any machine with the toolchain of the first block): the server, the host crate and the spawn helper
+cargo test --locked --offline -p holzwave-host -p holzwave-spawn-helper
+cargo test --locked --offline -p holzwave-server                                    # the release shape: workers through the helper
+cargo test --locked --offline -p holzwave-server --features in-process-workers      # workers in the server's own process; the suites of the socket and the security checks need it
+npm --prefix app run test:web                                                       # the page against the product's own server, in WebKit and Chromium; needs the two browsers of the first block
+npm --prefix app run test:web -- --self-check                                       # the files with deliberately wrong expectations must fail in each engine
+sh scripts/test-names.sh check <file>                       # every test name of the list <file> (made earlier with `list > <file>`) is still listed for the desktop pair; the list may only grow
+
+# the deployment files: Docker, Helm and kubectl (the last only for --local, it never talks to a cluster)
+docker compose -f packaging/compose/docker-compose.yml config -q
+helm lint --strict packaging/helm/holzwave -f packaging/helm/holzwave/ci/files-values.yaml   # and acme-values.yaml, proxy-values.yaml
+helm template r packaging/helm/holzwave -f packaging/helm/holzwave/ci/files-values.yaml       # the same three value sets
+node scripts/web-deploy-check.mjs self-test                                         # the checker finds each rule it has when one sample breaks it
+docker compose --profile setup -f packaging/compose/docker-compose.yml config --format json | node scripts/web-deploy-check.mjs compose
+helm template r packaging/helm/holzwave -f packaging/helm/holzwave/ci/files-values.yaml | KUBECONFIG=/dev/null kubectl annotate --local -f - -o json holzwave.example/checked=yes | node scripts/web-deploy-check.mjs chart
+
+# a Docker host (Linux containers; the first run builds the test images and takes minutes, the image build about five)
+sh scripts/linux-container-test.sh server                    # host, server and spawn helper tests on Linux, where the isolation tests can run
+sh scripts/web-container-test.sh caps                        # the helper and its four file capabilities, in a container that has exactly those
+sh scripts/web-container-test.sh isolation                   # two people in one container: homes, processes, server files, descriptors, limits, teardown
+sh scripts/web-container-test.sh image                       # builds the server image and proves its contract: user, capabilities, TLS, health, restart, Compose and the chart files
+sh scripts/web-container-test.sh multiarch                   # the image for amd64 and arm64, one at a time; needs emulation or a machine of the other architecture
+sh scripts/web-container-test.sh acme                        # a real issuance, renewal and failed order against Pebble; pulls the Pebble image
+sh scripts/web-container-test.sh all                         # every mode above
+```
+
+Each mode of `scripts/web-container-test.sh` ends with a line that starts with `web-container-test:`; a mode that cannot run
+here says `NOT RUN` with the reason and exits non-zero, and a missing Docker is a failure and never a skip. A tree whose
+terminal engine needs another Zig than the Dockerfile's default is built with `HOLZWAVE_ZIG_VERSION=<version>`, and
+`HOLZWAVE_WEB_CONTEXT=<directory>` builds from another tree, such as an export of a commit. `docker compose` and `helm
+template` render the same three kinds of deployment that [server.md](server.md) describes.
+
 Notes:
 
 - `npm run test:browser` takes `--only <part of a file name>`, `--engine webkit|chromium` and
@@ -462,6 +499,32 @@ password never goes into a file of this repository or a command line that your s
 | # | Area | What to do | Expected | Result |
 |---|---|---|---|---|
 | SRV-K1 | Cluster at the baseline admission level | On a cluster you may use for a test: (1) `kubectl create namespace holzwave && kubectl label namespace holzwave pod-security.kubernetes.io/enforce=baseline`. (2) Make the key with `keygen` as the notes of the chart say, then `kubectl -n holzwave create secret generic holzwave-server-key --from-file=server.key=./server.key && kubectl -n holzwave create secret tls holzwave-tls --cert=tls.crt --key=tls.key`. (3) `helm install holzwave packaging/helm/holzwave -n holzwave -f packaging/helm/holzwave/ci/files-values.yaml --set image.repository=<registry>/holzwave-server --set config.public_url=https://<host>` with an image you built and pushed yourself. (4) Wait for the pod, read its log for the line with `hwb_`, open the address over TLS and make the first administrator. (5) Open a shell pane, run `ps -eo user,uid,pid,comm`, and run `kubectl -n holzwave get pod -o yaml` and read the security context. | (1) to (3) The install succeeds, the namespace accepts the pod and the pod becomes ready. (4) The log holds one line with the setup token and no key; the sign-in over TLS works. (5) A shell opens in the pane; no process in the list has uid 0 (`tini`, the server and the helper run as 10001, each person's shell as that person's own user id); the container drops all capabilities and adds CHOWN, KILL, SETGID and SETUID, and `allowPrivilegeEscalation` is not set. If the pod does not start, record the event text and the log: ____. | |
+| SRV-K2 | A stricter admission policy must make the pod fail closed | On a cluster where you can set the admission rules: (1) label the namespace `pod-security.kubernetes.io/enforce=restricted` and install the chart as in SRV-K1. (2) Remove that label, set the baseline label, and add a policy of your own that forces `allowPrivilegeEscalation: false` into every pod of the namespace (a mutating policy such as Kyverno or Gatekeeper, or an edit of the Deployment); start the pod again. (3) Read the pod events and the log of the container. (4) Remove the policy and start the pod again. | (1) The namespace refuses the pod and no pod runs. (2) and (3) The pod starts, the server exits with status 1 and never becomes ready, and its log says the capabilities are not permitted to the helper and that the container must add them; no server answers on the port. (4) With the policy gone the pod becomes ready. At no point does a pod run without the helper's capabilities. Write down which policy engine you used and the exact sentence: ____. | |
+| SRV-I1 | A real identity provider | Register the server with an OpenID Connect provider you use (Keycloak, Microsoft Entra ID, Google, Authentik or another): create a client with the redirect address `https://<host>/auth/oidc/callback`, put the client secret in a file as [server.md](server.md) says, and add the provider to `auth.oidc` with `allowed_domains` or `allowed_groups` set. Then: (1) sign in with an allowed account; (2) sign in with an account that the lists do not allow; (3) change the e-mail address of the first account at the provider and sign in again; (4) sign in with another provider account that has the same e-mail address as the first. | (1) A member account is made and the person is signed in. (2) The sign-in is refused with the sentence `Sign-in failed. Check your details or ask an admin.` and no account is made. (3) The same account is signed in, not a second one: accounts match by issuer and subject. (4) A second, separate account is made and it does not see the first account's files. Record the provider, its version and anything its page showed that the server did not expect: ____. | |
+| SRV-P1 | Real passkeys | With a platform passkey (Touch ID, Windows Hello, a phone through the browser) and with a hardware security key: (1) make a first administrator or an invited account with a passkey; (2) sign out and sign in with `Sign in with a passkey` without typing a name; (3) add the second kind of authenticator in the account dialog; (4) remove each passkey; (5) try to remove the last way in. | (1) and (2) The enrolment and the username-less sign-in work with each authenticator. (3) Both are listed with their names. (4) A removed passkey no longer signs in. (5) The last way in cannot be removed and the dialog says so. Record each browser, system and authenticator: ____. | |
+| SRV-P2 | Hardware keys with the PRF extension | With a security key that supports the WebAuthn PRF extension and one that does not: (1) enrol the PRF key as the only way in and open a shell pane; (2) save an assistant key or other secret, sign out, sign in again with the key; (3) enrol the key without PRF and sign in with it; (4) open the saved-passwords dialog and unlock with the passphrase or the recovery code. | (1) and (2) Signing in with the PRF key unlocks the saved passwords without a passphrase, and the secret is still there. (3) Signing in with the other key works but the saved passwords stay locked, shown as locked in the status line. (4) The passphrase or the recovery code unlocks them. Record the key models: ____. | |
+| SRV-T1 | A real certificate authority, issue and renewal | On a server whose name points at it and whose port 443 a certificate authority can reach: set `tls.mode` to `acme` with the authority's staging directory in `directory_url`, set `terms_agreed` yourself, start the server and open the address. Restart the server. Wait for a renewal (or lower the lifetime with an authority that issues short-lived certificates). Then break the challenge on purpose (close the port or change the name) and start a fresh server with an empty volume. Repeat the issue with the production directory once. | The first start gets a certificate and serves it over TLS 1.3. A restart serves the cached certificate at once. A renewal replaces the certificate without a restart and the serial changes. A failed challenge keeps the old certificate serving where there is one, and on a fresh volume the server says why it has none. Record the authority, the lifetime and the sentences: ____. | |
+| SRV-R1 | A real reverse proxy in front of the proxy mode | Put a reverse proxy or an ingress controller in front of the server (nginx, Traefik, Caddy or the ingress of your cluster), end TLS there, and set `tls.mode` to `proxy` with `trusted_proxies` naming the proxy. Sign in, open a shell, and keep it open for ten minutes; read the audit file for the address of a sign-in; make five wrong password attempts from another address and one from the first; connect once from a host that is not in `trusted_proxies`. | The page and the WebSocket upgrade work through the proxy and the pane stays connected. The audit line holds the address the proxy forwarded and not the proxy's own. The wrong attempts are counted for the forwarded address. The connection from outside the list is refused. Record the proxy, its version and any timeout setting you had to change: ____. | |
+| SRV-B1 | The browser matrix on real browsers | In the current Safari, Chrome, Firefox and Edge on the system you use: sign in with each method the browser offers; use a shell for a few minutes; paste and copy with the keyboard and with the pointer; allow notifications and let a pane end while the tab is hidden; Ctrl-click a printed link; toggle full screen from the palette and use the keys a browser keeps; put the computer to sleep for ten minutes and wake it. | Each browser shows the sign-in methods it supports and no others. Paste and copy work inside the gesture. The tab title and icon change while the page is hidden and the notification holds only the words of the mark. Only a Ctrl or Cmd click opens a link, and only http, https and mailto. After the sleep the page reconnects, reads the layout again and the panes are still there. Record what differs per browser: ____. | |
+| SRV-A1 | Both architectures on hardware | Build the image on an amd64 Linux machine and on an arm64 one (or an Apple Silicon Mac with Docker), start it natively on each as the Compose quick start says, make the first administrator and open a shell. | The container is healthy on both, the shell runs, and `uname -m` in the pane prints `x86_64` and `aarch64`. Record the machines: ____. | |
+| SRV-U1 | Two real people on one server | With two people on two machines, one administrator and one invited member: each opens a shell and writes a file in their home; each lists `/data`, `/tmp` and the process list; each runs a long command and the other watches the process list; the administrator resets the member's secrets. | Each person sees only their own home and cannot read the other's files. Both see the container's processes and network and the shared `/tmp`, as the known limits say. The administrator can reset the secrets and cannot read them. The member's shell keeps running while the administrator works. Record anything that surprised either person: ____. | |
+| SRV-S1 | Restart and data survival | Open two panes with a long-running command, then restart the container or the pod. Sign in again. | A server restart ends every pane: the commands stop. The layout of the tabs, the accounts, the sessions that were still valid, the passkeys and the saved settings are there after the restart. The sentence in the guide is true as written. Record the time to ready: ____. | |
+| SRV-E1 | Backup and restore on another host | Stop the server. Copy the data volume and, apart from it, the server key file. Start a new server on another host with the copy and the same public address. Sign in, open the saved passwords, open an old shell home file. Then try the copy without the key file. | The new server shows the same accounts, passkeys and homes, and the sign-in works with the same address. Without the key file the server refuses to start with the sentence about the key. Record the size of the volume and how long the copy took: ____. | |
+| SRV-L1 | Capacity on your box | On the box and the container limits you intend to use, sign in with as many people and open as many panes as you plan to have, run `cat` of a large file in several panes, and watch the memory and CPU of the container for ten minutes. | No pass or fail: record the number of people and panes, the memory and CPU the container used, and when the server answered the busy sentence or closed a socket. ____. | |
+
+Machines the rows need:
+
+- SRV-K1 and SRV-K2: a Kubernetes cluster at the baseline Pod Security level, one that lets you set a stricter level and a policy of your own, `helm`, `kubectl`, a registry you may push to and an image you built.
+- SRV-I1: an account with an OpenID Connect provider you may register a client with, with two test accounts and a group.
+- SRV-P1 and SRV-P2: a computer with a platform authenticator, a hardware security key and a second one that has the PRF extension.
+- SRV-T1: a domain name that points at the server, port 443 reachable from a certificate authority, and that authority's staging directory.
+- SRV-R1: a reverse proxy or ingress controller and a second host to connect from.
+- SRV-B1: current Safari, Chrome, Firefox and Edge on the systems you use.
+- SRV-A1: an amd64 Linux machine and an arm64 machine (an Apple Silicon Mac with Docker is enough for the second).
+- SRV-U1: two people with two machines. SRV-S1, SRV-E1 and SRV-L1: a Docker host or a cluster you may restart, and a second host for the restore.
+
+A failing row becomes a task of its own: the owner writes `fail` and what was seen, and a gap plan fixes it before the
+web build is called done.
 
 ## What to expect
 
@@ -525,3 +588,33 @@ Known limits of this build, so they are not reported as defects:
   ignored known defect; row INT-K4). The production guard follows the pane's own selection, so a `Make default…` toward a
   production context from a pane that is not on one names the target on its card but asks for one press.
 - The table of GAM7 output is limited to 2000 rows, and `kubectl` exec uses bash where the pod has it and sh otherwise.
+- The web build was built and tested against a test identity provider, virtual authenticators, the container tests and a
+  Pebble certificate authority on the author's machines. It has not been run against a real cluster (the chart is linted and
+  rendered, never applied), a real identity provider, hardware authenticators, a real certificate authority, a real reverse
+  proxy or real networks, and nothing of it ran on Windows or iOS. Part 10 is the list for those. The suites that need Linux
+  (the isolation tests, the file capabilities, the image) ran in a Linux container only; the passkey tests of the real-server
+  browser suite run in Chromium and are skipped in WebKit, and two browser tests (`blocks` in Chromium over the socket and
+  `aiauto` in WebKit) have failed in full runs and passed alone.
+- A server restart ends every pane. The accounts, the sessions that are still valid, the layout and the settings stay.
+- People share the container's network and process view, and `/tmp` is one directory for all of them. One container serves
+  one trust domain: run a second server for a second one. A person's user id has no entry in the container's `passwd`
+  file, so a shell may show a placeholder name in its prompt (bash prints `I have no name!`).
+- The server runs one replica on one local volume (the store is SQLite). The namespace needs the Pod Security level
+  `baseline`; the level `restricted` cannot run the pod, and `allowPrivilegeEscalation: false` stops the helper's file
+  capabilities, so the server refuses to start.
+- The audit files are daily and are not rotated or deleted by the server.
+- The lock holds two generations of the `rsa` crate: one comes with the SSH client and one with the OpenID Connect library.
+- A program's clipboard escape sequence does nothing in the browser, exactly as on the desktop. A paste and a copy use the
+  browser's own clipboard rules, inside the gesture.
+- A download works for the kinds the core grants (images, video, audio and PDF); any other file is refused with the
+  sentence `Download works for images, video, audio and PDF files.` The refusal says the same for every reason. A file
+  dropped on a shell pane is uploaded to the person's home; the chat pane and the file browser take no drop yet.
+- Background work while the saved passwords are locked (sync, an assistant turn) reports that secrets are locked; the
+  assistant turn keeps the core's sentence about the keychain, and a few error texts of the core quote an argument back
+  to the page.
+- Compression of the WebSocket is not adopted: `transport.compression` accepts only `off` in this build. The measured
+  library saved 79 to 94 percent of the bytes and refused decompression bombs within the memory bound, but left 18 cases of
+  the Autobahn suite unimplemented, which the rule for adopting it does not allow.
+- The web page has no mobile layout, no shared panes, no installable web app and no long-lived token for scripts; there is
+  no operator for Kubernetes. The tear-off controls, the local network list and self-update are not available in the
+  browser and say so.

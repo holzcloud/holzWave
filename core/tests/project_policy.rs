@@ -2967,7 +2967,10 @@ fn the_result_check_flags_a_filled_cell_and_accepts_an_empty_one() {
 /// real people, which no suite here can run. Every id is in the document exactly once, with an area, an instruction and an
 /// expected result; the Result cell is the owner's and stays empty until the owner has run the row. A slice, so that a row
 /// added later changes the list and not its type.
-const WEB_TEST_PLAN_ROWS: &[&str] = &["SRV-K1"];
+const WEB_TEST_PLAN_ROWS: &[&str] = &[
+    "SRV-K1", "SRV-K2", "SRV-I1", "SRV-P1", "SRV-P2", "SRV-T1", "SRV-R1", "SRV-B1", "SRV-A1", "SRV-U1", "SRV-S1", "SRV-E1",
+    "SRV-L1",
+];
 
 fn web_test_plan_row_ids() -> Vec<String> {
     WEB_TEST_PLAN_ROWS.iter().map(|id| (*id).to_owned()).collect()
