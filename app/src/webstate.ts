@@ -174,3 +174,24 @@ export const NOTIFY_GROUP = {
     },
   },
 } as const;
+
+// ---- upload by drop (stubs) --------------------------------------------------------------------------------------
+
+export const MAX_DROP_FILES = 16;
+export const DROP_LABEL = "";
+export const ONLY_SIXTEEN = "";
+export const FOLDERS_SKIPPED = "";
+export const shellQuote = (path: string): string => path;
+export const hasNewline = (_text: string): boolean => false;
+export const uploadUrl = (name: string): string => name;
+export const refusalText = (_status: number, _body: unknown): string => "";
+export const notUploaded = (words: string): string => words;
+export const readUploaded = (_json: unknown): { path: string; size: number } | null => null;
+export const uploadFolder = (path: string): string => path;
+export const takeFiles = <T extends { directory?: boolean }>(list: readonly T[]): { files: T[]; over: number; folders: number } => ({
+  files: [...list],
+  over: 0,
+  folders: 0,
+});
+export const uploadingText = (name: string): string => name;
+export const uploadedText = (_count: number): string => "";

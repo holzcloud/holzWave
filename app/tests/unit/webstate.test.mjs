@@ -6,6 +6,8 @@ import { actionIdFor, chordFor, setBindingTable, setOs } from "../../dist/chords
 import {
   CLIPBOARD_REFUSED, DESKTOP_ONLY_ACTIONS, FULLSCREEN_NOTICE, ICON_ATTENTION, ICON_PLAIN, LOCK_KEYS, NOT_AVAILABLE, Notices, canLockKeys,
   NOTIFY_FLAG_KEY, NOTIFY_GAP_MS, NOTIFY_GROUP, NOTIFY_TEXT, NotifyGate, commandKind, noticeIcon, noticeTitle, permissionState,
+  DROP_LABEL, FOLDERS_SKIPPED, MAX_DROP_FILES, ONLY_SIXTEEN, hasNewline, notUploaded, readUploaded, refusalText, shellQuote, takeFiles,
+  uploadFolder, uploadUrl, uploadedText, uploadingText,
 } from "../../dist/webstate.js";
 import { findTargets, isLinkModifier, linkAction } from "../../dist/links.js";
 import { isAvailable, listActions, listAvailableActions, registerAction, runAction, setAvailability } from "../../dist/actions.js";
@@ -343,4 +345,110 @@ test("the group Notifications has the sentences of the design in each of its thr
     button: "Check again",
   });
   assert.equal(NOTIFY_GROUP.checked, "Checked.");
+});
+
+// ---- upload by drop ---------------------------------------------------------------------------------------------------
+
+test("a path is quoted for the shell with single quotes, and a single quote inside it is closed, escaped and opened again", () => {
+  assert.equal(shellQuote("/home/p/uploads/a b.txt"), "'/home/p/uploads/a b.txt'");
+  assert.equal(shellQuote("/home/p/it's.txt"), "'/home/p/it'\\''s.txt'");
+  assert.equal(shellQuote("/home/p/''"), "'/home/p/'\\'''\\'''");
+  assert.equal(shellQuote("/home/p/-rf"), "'/home/p/-rf'", "a leading dash in the name is inside the quotes");
+  assert.equal(shellQuote(""), "''");
+  assert.equal(shellQuote("$(rm -rf ~) `x` ; & | > *"), "'$(rm -rf ~) `x` ; & | > *'", "no other character is special inside single quotes");
+});
+
+test("a newline stays inside the quotes and is reported, so the paste confirmation applies", () => {
+  const path = "/home/p/a\nb";
+  assert.equal(shellQuote(path), "'/home/p/a\nb'");
+  assert.equal(hasNewline(path), true);
+  assert.equal(hasNewline("/home/p/a\rb"), true);
+  assert.equal(hasNewline("/home/p/ab"), false);
+});
+
+test("the upload address carries the encoded name in the query, at most 200 bytes of it, cut on a character", () => {
+  assert.equal(uploadUrl("a b.txt"), "/api/upload?name=a%20b.txt");
+  assert.equal(uploadUrl("x/../&=?#"), "/api/upload?name=x%2F..%2F%26%3D%3F%23", "nothing of the name can leave the query");
+  assert.equal(uploadUrl("a".repeat(200)), `/api/upload?name=${"a".repeat(200)}`);
+  assert.equal(uploadUrl("a".repeat(201)), `/api/upload?name=${"a".repeat(200)}`);
+  const wide = "ä".repeat(101); // two bytes each: 202 bytes
+  assert.equal(uploadUrl(wide), `/api/upload?name=${encodeURIComponent("ä".repeat(100))}`, "a character is never cut in half");
+  const emoji = "\u{1F600}".repeat(60); // four bytes each: 240 bytes
+  assert.equal(uploadUrl(emoji), `/api/upload?name=${encodeURIComponent("\u{1F600}".repeat(50))}`);
+  assert.equal(uploadUrl(""), "/api/upload?name=upload");
+  assert.equal(uploadUrl("  \t "), "/api/upload?name=upload");
+  assert.doesNotThrow(() => uploadUrl("lone\ud800surrogate"), "a name that is not well formed is still a name");
+});
+
+test("a refusal is told in the words of the design, from the status and the member field only", () => {
+  assert.equal(refusalText(400, { code: "bad_request", field: "size" }), "too large");
+  assert.equal(refusalText(413, {}), "too large");
+  assert.equal(refusalText(400, { code: "bad_request", field: "name" }), "name not allowed");
+  assert.equal(refusalText(429, {}), "try again");
+  assert.equal(refusalText(503, { code: "busy" }), "try again");
+  assert.equal(refusalText(423, { code: "locked" }), "secrets are locked");
+  assert.equal(refusalText(401, {}), "sign in again");
+  assert.equal(refusalText(403, {}), "sign in again");
+  assert.equal(refusalText(500, {}), "upload failed");
+  assert.equal(refusalText(0, undefined), "upload failed", "no answer at all");
+  assert.equal(refusalText(400, { code: "bad_request" }), "upload failed", "a 400 without a field is not told");
+  assert.equal(refusalText(400, { field: 7 }), "upload failed", "a field that is not a string is ignored");
+  assert.equal(refusalText(400, "size"), "upload failed", "a body that is not an object is ignored");
+  assert.equal(refusalText(400, null), "upload failed");
+  assert.equal(refusalText(400, [{ field: "size" }]), "upload failed");
+  assert.equal(refusalText(400, { message: "size", error: "name" }), "upload failed", "no member but field counts");
+  assert.equal(refusalText(Number.NaN, {}), "upload failed");
+  assert.equal(notUploaded("too large"), "Not uploaded: too large.");
+});
+
+test("an answer of the upload is read only when it holds an absolute path and a size", () => {
+  assert.deepEqual(readUploaded({ path: "/home/p/uploads/a.txt", size: 12 }), { path: "/home/p/uploads/a.txt", size: 12 });
+  assert.deepEqual(readUploaded({ path: "/a", size: 0, extra: 1 }), { path: "/a", size: 0 });
+  assert.deepEqual(readUploaded({ path: "/home/p/a\nb", size: 1 }), { path: "/home/p/a\nb", size: 1 }, "a newline is quoted, not refused");
+  assert.equal(readUploaded({ path: `/${"a".repeat(4095)}`, size: 1 })?.size, 1, "4,096 characters are the limit");
+  assert.equal(readUploaded({ path: `/${"a".repeat(4096)}`, size: 1 }), null);
+  for (const bad of [
+    null, undefined, "x", 3, [], {}, { path: "/a" }, { size: 1 }, { path: "a/b", size: 1 }, { path: "", size: 1 }, { path: "~/a", size: 1 },
+    { path: "/a\u0000b", size: 1 }, { path: "/a\u001bb", size: 1 }, { path: "/a\tb", size: 1 }, { path: "/a\u007fb", size: 1 },
+    { path: 7, size: 1 }, { path: "/a", size: -1 }, { path: "/a", size: 1.5 }, { path: "/a", size: "1" },
+    { path: "/a", size: Number.MAX_SAFE_INTEGER + 1 }, { path: "/a", size: Number.NaN },
+  ]) {
+    assert.equal(readUploaded(bad), null, JSON.stringify(bad));
+  }
+});
+
+test("the folder of an answer is the directory part of its path", () => {
+  assert.equal(uploadFolder("/home/p/uploads/a b.txt"), "/home/p/uploads");
+  assert.equal(uploadFolder("/a.txt"), "/");
+  assert.equal(uploadFolder("/home/p/uploads/"), "/home/p/uploads");
+  assert.equal(uploadFolder("relative"), "");
+});
+
+test("at most 16 files are taken from a drop, folders are left and both are counted, not dropped silently", () => {
+  const files = (n) => Array.from({ length: n }, (_, i) => ({ id: i }));
+  assert.deepEqual(takeFiles([]), { files: [], over: 0, folders: 0 });
+  assert.equal(takeFiles(files(16)).files.length, 16);
+  assert.equal(takeFiles(files(16)).over, 0);
+  const many = takeFiles(files(17));
+  assert.deepEqual([many.files.length, many.over, many.folders], [16, 1, 0]);
+  assert.deepEqual(many.files.map((f) => f.id), Array.from({ length: 16 }, (_, i) => i), "the first 16, in order");
+  const mixed = takeFiles([{ id: 0 }, { id: 1, directory: true }, { id: 2, directory: false }, { id: 3, directory: true }]);
+  assert.deepEqual(mixed.files.map((f) => f.id), [0, 2]);
+  assert.deepEqual([mixed.over, mixed.folders], [0, 2]);
+  const folders = takeFiles(Array.from({ length: 20 }, () => ({ directory: true })));
+  assert.deepEqual([folders.files.length, folders.over, folders.folders], [0, 0, 20]);
+  const late = takeFiles([...Array.from({ length: 3 }, () => ({ directory: true })), ...files(18)]);
+  assert.deepEqual([late.files.length, late.over, late.folders], [16, 2, 3], "folders do not use up the 16");
+  assert.equal(MAX_DROP_FILES, 16);
+});
+
+test("the sentences of an upload are the ones the design gives", () => {
+  assert.equal(DROP_LABEL, "Drop to upload");
+  assert.equal(ONLY_SIXTEEN, "Only 16 files at a time.");
+  assert.equal(FOLDERS_SKIPPED, "Folders are not uploaded.");
+  assert.equal(uploadingText("a b.txt"), "Uploading a b.txt");
+  assert.equal(uploadingText("x\u0007y‮z"), "Uploading x�y�z", "a control or direction character in a name is shown as a replacement mark");
+  assert.equal(uploadingText("n".repeat(100)), `Uploading ${"n".repeat(47)}…`, "a long name is cut for the status line");
+  assert.equal(uploadedText(1), "Uploaded");
+  assert.equal(uploadedText(3), "Uploaded 3 files");
 });
