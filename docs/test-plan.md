@@ -1,10 +1,10 @@
 # Test plan
 
-Nine parts: how to run everything locally, the per-platform manual list for hardware the owner owns, the record of the
+Ten parts: how to run everything locally, the per-platform manual list for hardware the owner owns, the record of the
 macOS acceptance of Phase 2, the Windows and Linux list of Phase 2.2 (Part 4), connections (Part 5), files and previews
 with the extras (Part 6), the AI chat with the Apple on-device model and the rest of the extras (Part 7), the local
-network notice of macOS (Part 8), and the native integrations with Kubernetes, Talos, Azure CLI and GAM7 (Part 9). All of
-it runs locally; nothing here needs GitHub (D-04).
+network notice of macOS (Part 8), the native integrations with Kubernetes, Talos, Azure CLI and GAM7 (Part 9), and the web
+build with its server, image and browser page (Part 10). All of it runs locally; nothing here needs GitHub (D-04).
 
 ## Part 1: run everything locally
 
@@ -446,6 +446,22 @@ Machines the rows need:
 
 A failing row becomes a task of its own: the owner writes `fail` and what was seen, and a gap plan fixes it before the
 phase is called done.
+
+## Part 10: the web build (server, image, browser page)
+
+Nothing in this part is verified until you run the row and write `pass`, or `fail` with a line of what was seen, in its
+Result column. The web build is built and tested against a test identity provider, virtual authenticators, the container
+tests and a Pebble certificate authority on the author's machines. It has not been run against a real cluster, a real
+identity provider, hardware authenticators, a real certificate authority, a real reverse proxy or real networks, and it
+ran in a Linux container only. The rows below need exactly those things. A row that you do not run stays empty. A failing
+row becomes a task of its own.
+
+Use a throwaway server. Set it up with [server.md](server.md); the guide says what every step does. A key, a token or a
+password never goes into a file of this repository or a command line that your shell history keeps.
+
+| # | Area | What to do | Expected | Result |
+|---|---|---|---|---|
+| SRV-K1 | Cluster at the baseline admission level | On a cluster you may use for a test: (1) `kubectl create namespace holzwave && kubectl label namespace holzwave pod-security.kubernetes.io/enforce=baseline`. (2) Make the key with `keygen` as the notes of the chart say, then `kubectl -n holzwave create secret generic holzwave-server-key --from-file=server.key=./server.key && kubectl -n holzwave create secret tls holzwave-tls --cert=tls.crt --key=tls.key`. (3) `helm install holzwave packaging/helm/holzwave -n holzwave -f packaging/helm/holzwave/ci/files-values.yaml --set image.repository=<registry>/holzwave-server --set config.public_url=https://<host>` with an image you built and pushed yourself. (4) Wait for the pod, read its log for the line with `hwb_`, open the address over TLS and make the first administrator. (5) Open a shell pane, run `ps -eo user,uid,pid,comm`, and run `kubectl -n holzwave get pod -o yaml` and read the security context. | (1) to (3) The install succeeds, the namespace accepts the pod and the pod becomes ready. (4) The log holds one line with the setup token and no key; the sign-in over TLS works. (5) A shell opens in the pane; no process in the list has uid 0 (`tini`, the server and the helper run as 10001, each person's shell as that person's own user id); the container drops all capabilities and adds CHOWN, KILL, SETGID and SETUID, and `allowPrivilegeEscalation` is not set. If the pod does not start, record the event text and the log: ____. | |
 
 ## What to expect
 
