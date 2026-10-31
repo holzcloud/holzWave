@@ -293,7 +293,7 @@ fn sets(row: &Status) -> [(&'static str, u64); 4] {
     [("inheritable", row.cap_inh), ("permitted", row.cap_prm), ("effective", row.cap_eff), ("ambient", row.cap_amb)]
 }
 
-/// Checks a table against decision D-19 and the rules of the design. The result is empty when the table is clean, and
+/// Checks a table against the rules of the design for the process tree. The result is empty when the table is clean, and
 /// otherwise names every violation once per process and kind.
 pub fn audit(rows: &[Status], expect: &Expect) -> Vec<Violation> {
     let mut found = Vec::new();
