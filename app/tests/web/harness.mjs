@@ -149,6 +149,8 @@ export async function startHarness(options = {}) {
     hostname: url.hostname,
     port: Number(info.port),
     bootstrap: info.bootstrap,
+    /** `https://127.0.0.1:<port>` of the identity provider when the harness was started with `oidc`, else null. */
+    idpOrigin: info.idp_origin ?? null,
     certificate: info.cert_der_b64,
     command,
     /**
@@ -162,6 +164,17 @@ export async function startHarness(options = {}) {
       // The harness spent the step before the one it was in; this is a bound that is never too low.
       const authenticator = new Authenticator(person.secret, stepOf(Math.floor(Date.now() / 1000)) - 1);
       return { ...person, authenticator };
+    },
+    /** Set the identity the provider approves next: `{ sub, email, name, groups, email_verified, deny }`. */
+    async idp(identity) {
+      const answer = await command({ op: "idp", ...identity });
+      if (!answer.ok) throw new Error(`the harness could not set the identity: ${answer.error}`);
+    },
+    /** Make the person's sessions look like sign-ins from an hour ago, so that the next change asks for the password. */
+    async backdate(username) {
+      const answer = await command({ op: "backdate", name: username });
+      if (!answer.ok) throw new Error(`the harness could not backdate the sessions: ${answer.error}`);
+      return answer.sessions;
     },
     async stop() {
       if (exited) return;

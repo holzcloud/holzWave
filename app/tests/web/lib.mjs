@@ -75,7 +75,7 @@ export function equal(actual, expected, message) {
 export async function openContext(browser, harness, { allow = [], ...contextOptions } = {}) {
   const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1100, height: 700 }, ...contextOptions });
   const allowed = new Set([harness.origin, ...allow]);
-  const recorder = { hosts: new Set(), requests: 0, violations: [], sockets: [] };
+  const recorder = { hosts: new Set(), requests: 0, violations: [], sockets: [], urls: [] };
   const pageErrors = [];
   const policy = [];
   const consoleErrors = [];
@@ -90,6 +90,7 @@ export async function openContext(browser, harness, { allow = [], ...contextOpti
     }
     if (["data:", "blob:", "about:"].includes(url.protocol)) return;
     recorder.requests++;
+    recorder.urls.push(raw);
     recorder.hosts.add(url.host);
     if (!allowed.has(url.origin)) recorder.violations.push(`a request to ${url.origin}`);
   };
@@ -212,7 +213,7 @@ export async function oracle(page) {
     /** `call` that must succeed; resolves with the value of `ok`. */
     async ok(cmd, args = {}) {
       const answer = await self.call(cmd, args);
-      check(answer.ok !== undefined, `${cmd} failed: ${show(answer.error ?? answer)}`);
+      check(answer.ok !== undefined, `${cmd} failed: ${show(answer.err ?? answer)}`);
       return answer.ok;
     },
     /** Every event received so far, oldest first (the answers are kept apart). */
@@ -298,4 +299,130 @@ export async function runTest(name, harnessOptions, body) {
   }
   console.log(`ok ${name} [${engine}]`);
   process.exit(0);
+}
+
+// ---- the sign-in screens -------------------------------------------------------------------------------------------------
+
+/** Sign a person (from `harness.account`) in through the sign-in page: password, then the code. Ends on the application. */
+export async function signIn(page, harness, person) {
+  await page.goto(`${harness.origin}/`);
+  await page.waitForSelector(".lg-box");
+  await page.getByLabel("Username").fill(person.username);
+  await page.getByLabel("Password", { exact: true }).fill(person.password);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByLabel("Code").waitFor();
+  await page.getByLabel("Code").fill(await person.authenticator.next());
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.waitForSelector("canvas#term");
+}
+
+/** The one-line sentence under the sign-in form (`.lg-line`), whatever its role. */
+export const lineText = (page) => page.evaluate(() => (document.querySelector(".lg-line")?.textContent ?? "").trim());
+
+/** The text of the first visible `role=alert` element, or the empty string. */
+export const alertText = (page) =>
+  page.evaluate(() => {
+    for (const el of document.querySelectorAll('[role="alert"]')) {
+      if (el.hidden || el.closest("[hidden]") || el.getClientRects().length === 0) continue;
+      const text = el.textContent.trim();
+      if (text !== "") return text;
+    }
+    return "";
+  });
+
+/** Wait until the sign-in box is idle again and the line under the form has a sentence; resolves with the sentence. */
+export const answered = (page, what = "the sign-in line has a sentence") =>
+  poll(async () => {
+    const idle = await page.evaluate(() => document.querySelector(".lg-box")?.getAttribute("aria-busy") === "false");
+    const line = await lineText(page);
+    return idle && line !== "" ? line : undefined;
+  }, what);
+
+/** Open the command palette with the chord of the web build, type `query` and return the titles it lists. */
+export async function openPalette(page) {
+  // The page learns its key table a moment after it is drawn, so the chord is repeated until the palette answers.
+  await poll(async () => {
+    await page.keyboard.press("Control+Shift+P");
+    if ((await page.getByRole("combobox").count()) > 0) return true;
+    await page.waitForTimeout(300);
+    return (await page.getByRole("combobox").count()) > 0 ? true : undefined;
+  }, "the palette opens on its chord", 15_000);
+}
+
+export async function paletteTitles(page, query) {
+  await openPalette(page);
+  if (query) await page.keyboard.type(query);
+  return poll(async () => {
+    const titles = await page.getByRole("option").allTextContents();
+    return titles.length > 0 ? titles.map((t) => t.trim()) : undefined;
+  }, `the palette lists entries for "${query ?? ""}"`);
+}
+
+/**
+ * Run a palette entry by its title, as a person would: the chord, the first letters, Enter. The page registers some entries
+ * (People, Account, Sign out) a moment after it is drawn, when it has learned who the person is, so the palette is asked
+ * again until the entry is listed.
+ */
+export async function runEntry(page, title, query = title.replace(/…$/, "")) {
+  const wanted = title.replace(/…$/, "");
+  const pattern = new RegExp(`^\\s*${wanted.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`);
+  await poll(async () => {
+    await openPalette(page);
+    await page.keyboard.type(query);
+    // Some entries are registered a moment after the page is drawn: until then the query matches nothing and the palette is
+    // closed and asked again.
+    await page.getByRole("option").first().waitFor({ timeout: 1000 }).catch(() => {});
+    const match = page.getByRole("option").filter({ hasText: pattern }).first();
+    if ((await match.count()) > 0) {
+      await match.click();
+      return true;
+    }
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(300);
+    return undefined;
+  }, `the palette lists "${title}"`, 20_000);
+}
+
+/** Whether any address a context requested holds one of the secrets. The secrets are never shown. */
+export function addressesHold(opened, secrets) {
+  return opened.recorder.urls.some((url) => secrets.some((s) => url.includes(s)));
+}
+
+// ---- the people dialog ---------------------------------------------------------------------------------------------------
+
+/** The dialog of the people list, opened from the palette. */
+export async function openPeople(page) {
+  await page.locator("canvas#term").click();
+  await runEntry(page, "People…");
+  const dialog = page.getByRole("dialog", { name: "People", exact: true });
+  await dialog.waitFor();
+  await page.waitForSelector(".people tbody tr");
+  return dialog;
+}
+
+/**
+ * An invitation made the way an administrator makes it: the people dialog, the form, the step-up layer when the sign-in is old
+ * (the password of `admin` answers it), and the link read from the layer that shows it once. The dialog is closed again.
+ * Resolves with the link.
+ */
+export async function inviteLink(page, admin, { role = "Member" } = {}) {
+  const dialog = await openPeople(page);
+  await page.getByRole("button", { name: "Invite", exact: true }).click();
+  await page.getByRole("dialog", { name: "Invite", exact: true }).waitFor();
+  if (role !== "Member") await page.getByLabel(role, { exact: true }).check();
+  await page.getByRole("button", { name: "Create link" }).click();
+  const layer = page.getByRole("dialog", { name: "Confirm it is you" });
+  const shown = page.getByRole("dialog", { name: "Invitation link" });
+  // After a recent sign-in the link comes at once; after an old one the layer comes first.
+  const first = await poll(async () => ((await layer.count()) > 0 ? "step-up" : (await shown.count()) > 0 ? "link" : undefined), "the step-up layer or the link");
+  if (first === "step-up") {
+    await page.locator("#web-step-field").fill(admin.password);
+    await page.getByRole("button", { name: "Confirm" }).click();
+    await shown.waitFor();
+  }
+  const link = (await page.locator(".ppl-link-text").textContent()).trim();
+  const note = (await shown.innerText()).replace(/\s+/g, " ");
+  await page.getByRole("button", { name: "Done" }).click();
+  await dialog.getByRole("button", { name: "Close" }).click();
+  return { link, note, stepUp: first === "step-up" };
 }
