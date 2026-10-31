@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { actionIdFor, chordFor, setBindingTable, setOs } from "../../dist/chords.js";
 import {
   CLIPBOARD_REFUSED, DESKTOP_ONLY_ACTIONS, FULLSCREEN_NOTICE, ICON_ATTENTION, ICON_PLAIN, LOCK_KEYS, NOT_AVAILABLE, Notices, canLockKeys,
-  commandKind, noticeIcon, noticeTitle,
+  NOTIFY_FLAG_KEY, NOTIFY_GAP_MS, NOTIFY_GROUP, NOTIFY_TEXT, NotifyGate, commandKind, noticeIcon, noticeTitle, permissionState,
 } from "../../dist/webstate.js";
 import { findTargets, isLinkModifier, linkAction } from "../../dist/links.js";
 import { isAvailable, listActions, listAvailableActions, registerAction, runAction, setAvailability } from "../../dist/actions.js";
@@ -249,11 +249,13 @@ test("the two icon files are SVG with a viewBox, and the attention file is the p
   assert.ok(!/<circle\b/.test(plain), "the plain file has no dot");
 });
 
-test("the icon link and the title marks come from the browser-only module, which only web.js loads", () => {
+test("the icon link and the title marks come from the browser-only module, which web.js starts and the Settings dialog loads on demand", () => {
   const dist = new URL("../../dist/", import.meta.url);
   const files = readdirSync(dist).filter((f) => f.endsWith(".js"));
   const users = files.filter((f) => /["']\.\/webnotice\.js["']/.test(readFileSync(new URL(f, dist), "utf8"))).sort();
-  assert.deepEqual(users, ["web.js"]);
+  assert.deepEqual(users, ["settings-ui.js", "web.js"]);
+  assert.ok(/import\(["']\.\/webnotice\.js["']\)/.test(readFileSync(new URL("settings-ui.js", dist), "utf8")), "the dialog loads it with a dynamic import");
+  assert.ok(!/^import .*webnotice/m.test(readFileSync(new URL("settings-ui.js", dist), "utf8")), "and never with a static one");
   for (const page of ["index.html", "login.html"]) assert.ok(!/rel="[^"]*icon/.test(readFileSync(new URL(page, dist), "utf8")), `${page} has no icon link`);
 });
 
@@ -281,4 +283,64 @@ test("the attention store names the panes whose question waits, sorted, and tell
   store.provide("u", () => [5]);
   assert.deepEqual(store.waiting(), [2, 5], "unique across providers");
   off();
+});
+
+// ---- notifications ----------------------------------------------------------------------------------------------
+
+test("the state of the notifications is the permission and the person's flag together", () => {
+  assert.equal(permissionState("default", false), "off");
+  assert.equal(permissionState("default", true), "off", "a flag without the permission is off");
+  assert.equal(permissionState("granted", true), "on");
+  assert.equal(permissionState("granted", false), "off", "the browser allows it but the person did not turn it on");
+  assert.equal(permissionState("denied", false), "blocked by the browser");
+  assert.equal(permissionState("denied", true), "blocked by the browser", "whatever the flag says");
+  assert.equal(permissionState("unheard-of", true), "off");
+  assert.equal(permissionState(undefined, true), "off");
+});
+
+test("a notification says the words of the mark and never anything else", () => {
+  assert.deepEqual({ ...NOTIFY_TEXT }, { ask: "Waits for you", bell: "Rang the bell", failed: "Command failed", done: "Command finished" });
+  assert.equal(NOTIFY_GAP_MS, 5000);
+  assert.equal(NOTIFY_FLAG_KEY, "holzwave.notify");
+});
+
+test("a notification is made only while hidden and on, and at most one per kind in five seconds", () => {
+  const gate = new NotifyGate();
+  assert.equal(gate.next("bell", 0, false, "on"), null, "a visible page makes none");
+  assert.equal(gate.next("bell", 0, true, "off"), null, "off makes none");
+  assert.equal(gate.next("bell", 0, true, "blocked by the browser"), null);
+  assert.equal(gate.next("sound", 0, true, "on"), null, "an unknown kind makes none");
+  assert.equal(gate.next("__proto__", 0, true, "on"), null);
+  assert.equal(gate.next("bell", 1000, true, "on"), "Rang the bell", "the refusals above did not use the window");
+  assert.equal(gate.next("bell", 1001, true, "on"), null, "a second of the same kind within five seconds is refused");
+  assert.equal(gate.next("bell", 5999, true, "on"), null, "a refusal does not move the window");
+  assert.equal(gate.next("failed", 1002, true, "on"), "Command failed", "another kind is not");
+  assert.equal(gate.next("done", 1003, true, "on"), "Command finished");
+  assert.equal(gate.next("ask", 1004, true, "on"), "Waits for you");
+  assert.equal(gate.next("bell", 6000, true, "on"), "Rang the bell", "five seconds after the last shown one it may be shown again");
+  assert.equal(gate.next("bell", 6001, true, "on"), null);
+  assert.equal(gate.next("bell", 100, true, "on"), "Rang the bell", "a clock that went back does not silence it for good");
+});
+
+test("the group Notifications has the sentences of the design in each of its three states", () => {
+  assert.deepEqual(
+    { legend: NOTIFY_GROUP.legend, name: NOTIFY_GROUP.name, meta: NOTIFY_GROUP.meta },
+    { legend: "Notifications", name: "Notify me", meta: "bell and attention" },
+  );
+  assert.deepEqual(NOTIFY_GROUP.rows.off, {
+    tone: "plain",
+    advice: "Bell and attention marks also show in the tab title. Turn this on to get a browser notification as well.",
+    button: "Turn on",
+  });
+  assert.deepEqual(NOTIFY_GROUP.rows.on, {
+    tone: "ok",
+    advice: "A browser notification appears when a pane out of view rings the bell or needs you. It never contains terminal text.",
+    button: "Turn off",
+  });
+  assert.deepEqual(NOTIFY_GROUP.rows["blocked by the browser"], {
+    tone: "warn",
+    advice: "The browser blocks notifications for this site. Allow them in the site settings of the browser, then choose Check again.",
+    button: "Check again",
+  });
+  assert.equal(NOTIFY_GROUP.checked, "Checked.");
 });
