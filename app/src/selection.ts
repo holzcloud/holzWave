@@ -191,15 +191,17 @@ export function copyOnSelectAfter(pane: number, sent: Promise<void>): void {
   if (typeof ClipboardItem === "function" && typeof navigator.clipboard?.write === "function") {
     let empty = false;
     try {
-      const item = new ClipboardItem({
-        "text/plain": answer.then((text) => {
-          if (text === "") {
-            empty = true; // nothing is selected: the write fails and the clipboard keeps what it had
-            throw new Error("no selection");
-          }
-          return new Blob([text], { type: "text/plain" });
-        }),
+      const blob = answer.then((text) => {
+        if (text === "") {
+          empty = true; // nothing is selected: the write fails and the clipboard keeps what it had
+          throw new Error("no selection");
+        }
+        return new Blob([text], { type: "text/plain" });
       });
+      // The browser reads the item's promise itself. When it refuses the write before it looks (the document has no focus), nobody
+      // else would, and the rejection would be reported as an uncaught error of the page for a plain click.
+      blob.catch(() => {});
+      const item = new ClipboardItem({ "text/plain": blob });
       navigator.clipboard.write([item]).catch(() => {
         if (!empty) secondTry();
       });
