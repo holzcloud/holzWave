@@ -12,7 +12,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use holzwave_server::auth::session::{
-    MAX_SESSIONS_PER_ACCOUNT, Method, SessionError, SessionManager, generate_token, parse_token,
+    Ended, MAX_SESSIONS_PER_ACCOUNT, Method, SessionError, SessionManager, generate_token, handle_of, parse_token,
 };
 use holzwave_server::clock::ManualClock;
 use holzwave_server::config::Sessions;
@@ -500,4 +500,73 @@ fn a_session_that_cannot_be_made_leaves_the_last_sign_in_as_it_was() {
         .expect("trigger");
     assert!(f.manager.create(alice, Method::Passkey, NOW + 9, "x", None).is_err());
     assert_eq!(last_signin(&f, alice), None, "the rolled-back creation left no stamp");
+}
+
+#[test]
+fn check_finds_a_session_by_its_stored_identity_and_applies_the_lifetimes() {
+    let (f, alice) = fixture("session-check");
+    let (_, session) = make(&f, alice, NOW);
+    let found = f.manager.check(&session, NOW).expect("alive");
+    assert_eq!(found.id_hash, session.id_hash);
+    f.clock.advance(IDLE);
+    assert!(f.manager.check(&session, f.manager.now()).is_ok(), "valid on the last second");
+    f.clock.advance(1);
+    assert_eq!(f.manager.check(&session, f.manager.now()).expect_err("idle"), SessionError::Expired);
+    assert_eq!(rows(&f, alice), 0, "an expired session is removed, as a lookup removes it");
+    assert_eq!(f.manager.check(&session, f.manager.now()).expect_err("gone"), SessionError::Unknown);
+}
+
+#[test]
+fn check_refuses_a_disabled_account_and_the_absolute_end() {
+    let (f, alice) = fixture("session-check-disabled");
+    let (_, session) = make(&f, alice, NOW);
+    f.store.write(|tx| tx.account_set_state(alice, AccountState::Disabled)).expect("disable");
+    assert_eq!(f.manager.check(&session, NOW).expect_err("disabled"), SessionError::AccountDisabled);
+    let bob = account(&f.store, "bob");
+    let (_, session) = make(&f, bob, NOW);
+    // Idle for too long ends the session before the absolute end does.
+    assert!(f.manager.check(&session, NOW + IDLE).is_ok());
+    assert_eq!(f.manager.check(&session, NOW + IDLE + 1).expect_err("idle"), SessionError::Expired);
+    // Kept alive by activity, a session still ends at the absolute lifetime.
+    let (_, mut session) = make(&f, bob, NOW);
+    let mut at = NOW;
+    while at + 1000 < NOW + ABSOLUTE {
+        at += 1000;
+        f.manager.touch(&mut session, at).expect("touch");
+    }
+    assert!(f.manager.check(&session, at + 1).is_ok());
+    assert_eq!(f.manager.check(&session, NOW + ABSOLUTE + 1).expect_err("absolute"), SessionError::Expired);
+}
+
+#[test]
+fn ending_a_session_on_purpose_is_announced_by_identity() {
+    let (f, alice) = fixture("session-ended");
+    let mut listener = f.manager.subscribe_ended();
+    let (_, one) = make(&f, alice, NOW);
+    let (_, two) = make(&f, alice, NOW);
+    f.manager.end(&one).expect("end");
+    let told = listener.try_recv().expect("announced");
+    assert!(told.ends(&one) && !told.ends(&two), "only the named session");
+    assert!(f.manager.end_by_handle(alice, &handle_of(&two)).expect("end by handle"));
+    let told = listener.try_recv().expect("announced");
+    assert!(told.ends(&two) && !told.ends(&one));
+    assert!(!f.manager.end_by_handle(alice, &handle_of(&two)).expect("again"), "nothing to end");
+    assert!(listener.try_recv().is_err(), "nothing is announced for a handle that ended nothing");
+    let (_, three) = make(&f, alice, NOW);
+    let bob = account(&f.store, "bob");
+    let (_, other) = make(&f, bob, NOW);
+    f.manager.end_all(alice).expect("end all");
+    let told = listener.try_recv().expect("announced");
+    assert_eq!(told, Ended::Account(alice));
+    assert!(told.ends(&three) && !told.ends(&other), "another account is not named");
+}
+
+#[test]
+fn a_session_that_runs_out_when_it_is_looked_up_is_announced() {
+    let (f, alice) = fixture("session-ended-expired");
+    let mut listener = f.manager.subscribe_ended();
+    let (value, session) = make(&f, alice, NOW);
+    f.clock.advance(IDLE + 1);
+    assert_eq!(f.manager.lookup(&value, f.manager.now()).expect_err("idle"), SessionError::Expired);
+    assert!(listener.try_recv().expect("announced").ends(&session));
 }
