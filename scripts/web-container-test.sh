@@ -1,7 +1,7 @@
 #!/bin/sh
 # The container tests of the web build, from the Mac, in Docker.
 #
-#   sh scripts/web-container-test.sh [caps|acme|isolation|all] [-- <test filter>]    (default: all)
+#   sh scripts/web-container-test.sh [caps|acme|isolation|image|all] [-- <test filter>]    (default: all)
 #
 # The words after `--` go to the test binary of the `isolation` mode as its filter (`tracer`, `homes`, `procs`, `caps`,
 # `limits`, `teardown` select a group).
@@ -21,6 +21,11 @@
 # container on that network whose network alias is the test domain, so that Pebble finds the server's TLS port when it
 # validates the TLS-ALPN-01 challenge. The test proves a real issuance, serving, a renewal and a failed order that keeps the
 # old certificate. The containers, the network and the volume are removed on every exit path.
+# `image` builds the server image from the tree (packaging/docker/Dockerfile) and proves its runtime contract on a running
+# container started the way the Compose file and the Helm chart start it: a read-only root, user 10001, all capabilities
+# dropped and exactly CHOWN, KILL, SETGID and SETUID added. It makes a key with `keygen`, a throwaway certificate for the name
+# `holzwave.test`, starts the server on a private network and asks it for the sign-in state over TLS 1.3 from a second
+# container. HOLZWAVE_WEB_CONTEXT names another build context than the repository root (a clean checkout, for example).
 # `all` runs every mode there is. Later modes are added as one function and one line in the `case` at the end.
 #
 # The image `holzwave-linux-test` of scripts/linux-container-test.sh is the base; the first run adds `libcap2-bin` and
@@ -54,13 +59,13 @@ BASE_IMAGE=holzwave-linux-test$SUFFIX
 WEB_IMAGE=holzwave-web-test$SUFFIX
 
 usage() {
-    echo "usage: sh scripts/web-container-test.sh [caps|acme|isolation|all] [-- <test filter>]" >&2
+    echo "usage: sh scripts/web-container-test.sh [caps|acme|isolation|image|all] [-- <test filter>]" >&2
     exit 2
 }
 
 mode=all
 case "${1:-}" in
-    caps | acme | isolation | all)
+    caps | acme | isolation | image | all)
         mode=$1
         shift
         ;;
@@ -436,16 +441,175 @@ install -m 0755 "$test_bin" /opt/hw/acme
     fi
 }
 
+# ---- image --------------------------------------------------------------------------------------------------------
+
+IMG_TAG=holzwave-server-test$SUFFIX:local
+IMG_CONTEXT=${HOLZWAVE_WEB_CONTEXT:-$root}
+IMG_RUN=hwtest-$$
+IMG_NET=$IMG_RUN-net
+IMG_SERVER=$IMG_RUN-server
+IMG_DATA=$IMG_RUN-data
+IMG_KEY=$IMG_RUN-key
+IMG_TLS=$IMG_RUN-tls
+IMG_CONF=$IMG_RUN-conf
+IMG_HOST=holzwave.test
+IMG_PORT=8443
+IMG_SCRATCH=
+
+# The way the Compose file and the Helm chart start the server: no root, nothing writable but the volumes and the tmpfs, no
+# capability but the four the spawn helper needs. The option that stops a process from gaining privileges is left out on
+# purpose: it would stop the file capabilities of the helper.
+IMG_HARDEN="--read-only --user 10001:10001 --cap-drop ALL --cap-add CHOWN --cap-add KILL --cap-add SETGID --cap-add SETUID
+    --tmpfs /run/holzwave:rw,nosuid,nodev,noexec,uid=10001,gid=10001,mode=0700 --tmpfs /tmp:rw,nosuid,nodev,noexec,mode=1777"
+
+img_ok() {
+    echo "ok: $*"
+}
+
+# One failed step: what failed, the end of the log of the server container if there is one, and status 1.
+img_fail() {
+    echo "web-container-test: FAILED: $*" >&2
+    if docker inspect "$IMG_SERVER" >/dev/null 2>&1; then
+        echo "web-container-test: the last 40 lines of the log of $IMG_SERVER:" >&2
+        docker logs --tail 40 "$IMG_SERVER" >&2
+    fi
+    exit 1
+}
+
+img_cleanup() {
+    ids=$(docker ps -aq --filter "name=$IMG_RUN" 2>/dev/null)
+    # shellcheck disable=SC2086 # a list of container ids
+    [ -z "$ids" ] || docker rm -f $ids >/dev/null 2>&1
+    docker volume rm -f "$IMG_DATA" "$IMG_KEY" "$IMG_TLS" "$IMG_CONF" >/dev/null 2>&1
+    docker network rm "$IMG_NET" >/dev/null 2>&1
+    [ -z "$IMG_SCRATCH" ] || rm -rf "$IMG_SCRATCH"
+}
+
+# The image from the tree. The base images, the Zig and Rust toolchains and the Node image are pinned in the Dockerfile.
+img_build() {
+    version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/Cargo.toml" | head -n 1)
+    revision=$(git -C "$root" rev-parse HEAD 2>/dev/null || echo unknown)
+    echo "+ docker build -t $IMG_TAG -f packaging/docker/Dockerfile $IMG_CONTEXT"
+    docker build ${PLATFORM:+--platform "$PLATFORM"} -t "$IMG_TAG" -f "$IMG_CONTEXT/packaging/docker/Dockerfile" \
+        --build-arg "VERSION=$version" --build-arg "REVISION=$revision" "$IMG_CONTEXT" ||
+        img_fail "the image build failed (packaging/docker/Dockerfile)"
+    img_ok "built $IMG_TAG ($(docker image inspect -f '{{.Size}}' "$IMG_TAG") bytes)"
+}
+
+# The operator's side: a key made by `keygen` in the key volume, a certificate for the test name in the certificate volume
+# (made and owned the way an operator's files are, not by the image), and the configuration in its own volume.
+img_materials() {
+    docker network create "$IMG_NET" >/dev/null && docker volume create "$IMG_DATA" >/dev/null &&
+        docker volume create "$IMG_KEY" >/dev/null && docker volume create "$IMG_TLS" >/dev/null &&
+        docker volume create "$IMG_CONF" >/dev/null || img_fail "the network or a volume could not be created"
+
+    # shellcheck disable=SC2086 # IMG_HARDEN is a list of options
+    docker run --rm $IMG_HARDEN -v "$IMG_KEY":/etc/holzwave/key "$IMG_TAG" keygen >/dev/null ||
+        img_fail "keygen did not make the key"
+    shape=$(docker run --rm --user 10001:10001 --read-only -v "$IMG_KEY":/etc/holzwave/key:ro --entrypoint stat "$IMG_TAG" \
+        -c '%a %u:%g' /etc/holzwave/key/server.key) || img_fail "the key file cannot be read"
+    [ "$shape" = "600 10001:10001" ] || img_fail "the key file has mode and owner '$shape', not '600 10001:10001'"
+    img_ok "keygen made the key: mode and owner $shape"
+
+    docker run --rm --user 0:0 -v "$IMG_TLS":/m "$BASE_IMAGE" sh -ec '
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 \
+    -keyout /m/tls.key -out /m/tls.crt -subj "/CN='"$IMG_HOST"'" -addext "subjectAltName=DNS:'"$IMG_HOST"'" 2>/dev/null
+chown -R 10001:10001 /m
+chmod 0755 /m
+chmod 0644 /m/tls.crt
+chmod 0600 /m/tls.key
+' || img_fail "the test certificate could not be made"
+    img_ok "a throwaway certificate for $IMG_HOST (P-256, 2 days)"
+
+    sed "s#https://holzwave.example.net#https://$IMG_HOST:$IMG_PORT#" "$root/packaging/compose/server.files.example.json" \
+        >"$IMG_SCRATCH/server.json" || img_fail "the example configuration cannot be read"
+    if cmp -s "$root/packaging/compose/server.files.example.json" "$IMG_SCRATCH/server.json"; then
+        img_fail "the public address of the example configuration was not replaced"
+    fi
+    docker run --rm -i --user 0:0 -v "$IMG_CONF":/m "$BASE_IMAGE" sh -ec 'cat >/m/server.json; chmod 0644 /m/server.json' \
+        <"$IMG_SCRATCH/server.json" || img_fail "the configuration could not be written"
+    img_ok "the configuration is the files example with https://$IMG_HOST:$IMG_PORT"
+}
+
+# The server container as Compose and the chart start it, plus the options of a test: the name on the private network.
+img_start() {
+    # shellcheck disable=SC2086 # IMG_HARDEN is a list of options
+    docker run -d --name "$IMG_SERVER" --network "$IMG_NET" --network-alias "$IMG_HOST" $IMG_HARDEN \
+        --health-interval 2s --health-start-period 0s \
+        -v "$IMG_DATA":/data -v "$IMG_KEY":/etc/holzwave/key:ro -v "$IMG_TLS":/etc/holzwave/tls:ro \
+        -v "$IMG_CONF":/etc/holzwave/conf:ro -e HOLZWAVE_SERVER_CONFIG=/etc/holzwave/conf/server.json \
+        "$IMG_TAG" >/dev/null || img_fail "the server container did not start"
+}
+
+# Waits until the image's own health check prints `healthy`, and until docker reports the container healthy.
+img_wait_healthy() {
+    started=$(date +%s)
+    until docker exec "$IMG_SERVER" holzwave-server healthcheck >/dev/null 2>&1; do
+        [ "$(docker inspect -f '{{.State.Running}}' "$IMG_SERVER")" = true ] || img_fail "the server container stopped"
+        [ $(($(date +%s) - started)) -lt 90 ] || img_fail "the server did not become healthy within 90 seconds"
+        sleep 1
+    done
+    say=$(docker exec "$IMG_SERVER" holzwave-server healthcheck)
+    [ "$say" = healthy ] || img_fail "healthcheck printed '$say', not 'healthy'"
+    until [ "$(docker inspect -f '{{.State.Health.Status}}' "$IMG_SERVER")" = healthy ]; do
+        [ $(($(date +%s) - started)) -lt 90 ] || img_fail "docker does not report the container healthy within 90 seconds"
+        sleep 1
+    done
+    IMG_HEALTHY_AFTER=$(($(date +%s) - started))
+    img_ok "healthy by holzwave-server healthcheck and by docker inspect after $IMG_HEALTHY_AFTER s"
+}
+
+# A client container on the network: the sign-in state over TLS 1.3 with the certificate as the only trust root.
+img_client() {
+    docker run --rm --network "$IMG_NET" --user 10001:10001 --read-only --cap-drop ALL \
+        -v "$IMG_TLS":/m:ro "$BASE_IMAGE" "$@"
+}
+
+img_tls_answer() {
+    out=$(img_client sh -c '
+curl -sS -v --tlsv1.3 --http2 --cacert /m/tls.crt --max-time 20 -o /tmp/body -w "HTTP %{http_code}\n" \
+    https://'"$IMG_HOST:$IMG_PORT"'/api/session 2>/tmp/trace
+grep -E "SSL connection using|ALPN: server accepted" /tmp/trace
+if jq -e ".state == \"anonymous\" and .bootstrap == true" /tmp/body >/dev/null; then echo "STATE anonymous bootstrap"; fi
+cat /tmp/body
+') || img_fail "the client could not fetch /api/session over TLS"
+    echo "$out" | grep -q '^HTTP 200$' || img_fail "/api/session did not answer 200: $out"
+    tls=$(echo "$out" | sed -n 's/.*SSL connection using \(TLSv[0-9.]*\).*/\1/p')
+    [ "$tls" = TLSv1.3 ] || img_fail "the connection was not TLS 1.3: $out"
+    alpn=$(echo "$out" | sed -n 's/.*ALPN: server accepted \(.*\)$/\1/p')
+    [ "$alpn" = h2 ] || img_fail "HTTP/2 was not negotiated: $out"
+    echo "$out" | grep -q '^STATE anonymous bootstrap$' || img_fail "the sign-in state is not anonymous with bootstrap true: $out"
+    body=$(echo "$out" | tail -n 1)
+    img_ok "https://$IMG_HOST:$IMG_PORT/api/session: HTTP 200, $tls, ALPN $alpn, $body"
+}
+
+mode_image() {
+    sh "$here/linux-container-test.sh" image || {
+        echo "web-container-test: the Linux test image $BASE_IMAGE could not be built" >&2
+        exit 1
+    }
+    trap img_cleanup EXIT INT TERM
+    img_cleanup
+    IMG_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/holzwave-web-image.XXXXXX") || exit 2
+    img_build
+    img_materials
+    img_start
+    img_wait_healthy
+    img_tls_answer
+}
+
 # ---- dispatch -----------------------------------------------------------------------------------------------------
 
 case "$mode" in
     caps) mode_caps ;;
     acme) mode_acme ;;
     isolation) mode_isolation ;;
+    image) mode_image ;;
     all)
         mode_caps
         mode_acme
         mode_isolation
+        mode_image
         ;;
 esac
 echo "web-container-test: ok"
