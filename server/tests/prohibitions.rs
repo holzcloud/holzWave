@@ -1578,7 +1578,13 @@ fn mistakes() -> Vec<Mistake> {
 fn start_matrix_a_mistaken_configuration_exits_with_one_sentence_and_leaves_nothing_behind() {
     let rows = mistakes();
     let mut printed = Vec::new();
+    let root = rustix::process::geteuid().is_root();
     for row in &rows {
+        if root && row.name.contains("unreadable") {
+            // A process that runs as root reads every file, so this mistake cannot be made by a mode.
+            println!("Start matrix: NOT RUN as root: {}", row.name);
+            continue;
+        }
         // The positive control of the builder: the same site with the mistake mended starts and is healthy.
         let mut good = Site::new(None);
         (row.good)(&mut good);
@@ -1785,12 +1791,14 @@ fn listeners_the_process_tree_listens_on_the_configured_address_and_the_health_s
         let server = Site::new(None).start();
         let found = listening_sockets(server.pid());
         let port = server.site.port;
-        let health = server.site.run_dir().join("health.sock").display().to_string();
+        // The health socket is bound inside a private directory of the runtime directory and then moved to its name; the
+        // kernel lists the path it was bound at.
+        let run = server.site.run_dir().display().to_string();
         let wanted_tcp = format!("tcp 0100007F:{port:04X}");
         let tcp: Vec<&String> = found.iter().filter(|f| f.starts_with("tcp")).collect();
         let unix: Vec<&String> = found.iter().filter(|f| f.starts_with("unix")).collect();
         assert_eq!(tcp, [&wanted_tcp], "one TCP listener, the configured address: {found:?}");
-        assert_eq!(unix, [&format!("unix {health}")], "one Unix socket, the health socket: {found:?}");
+        assert!(unix.len() == 1 && unix[0].starts_with(&format!("unix {run}/")), "one Unix socket, inside the runtime directory: {found:?}");
         println!("Listeners: {found:?}");
     }
     #[cfg(not(target_os = "linux"))]
