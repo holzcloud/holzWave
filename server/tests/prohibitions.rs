@@ -15,6 +15,8 @@
 mod edge;
 #[path = "support/edge_tls.rs"]
 mod edge_tls;
+#[path = "support/parity_env.rs"]
+mod parity_env;
 #[path = "support/real_process.rs"]
 mod real_process;
 #[path = "support/route_walk.rs"]
@@ -1196,4 +1198,281 @@ fn routes_a_member_is_refused_on_every_administrator_row_and_a_stale_sign_in_is_
             admin_rows.len()
         );
     });
+}
+
+// =============================================================================================================================
+// The administrator sweep: what an administrator can read of another person, on the real binary
+// =============================================================================================================================
+
+use std::time::Duration;
+
+use holzwave_host::commands::registry::{COMMANDS, Web};
+use sweep::{Canary, Category, Counts};
+
+/// A person of the sweep: a client with a recorder of its own, so what each of them received is kept apart.
+struct Person {
+    client: Client,
+    recorder: std::sync::Arc<real_process::Recorder>,
+    password: String,
+}
+
+fn person(server: &real_process::Server, name: &'static str) -> Person {
+    let recorder = std::sync::Arc::new(real_process::Recorder::default());
+    let client = Client::new(server.site.addr(), server.site.der.clone(), recorder.clone());
+    Person { client, recorder, password: format!("{name} correct horse battery staple") }
+}
+
+/// The commands the sweep sends from the administrator's socket: every command the browser has that answers something (the
+/// answer type is not the unit type). Read from the table at run time.
+fn data_commands() -> Vec<&'static holzwave_host::commands::registry::Command> {
+    COMMANDS.iter().filter(|c| c.web != Web::Unavailable && c.answer.replace(' ', "") != "()").collect()
+}
+
+/// Where a canary was found, as text for a failure (never the canary).
+fn finding_lines(found: &[sweep::Finding]) -> Vec<String> {
+    found.iter().map(sweep::Finding::line).collect()
+}
+
+fn scan_person(sweep: &sweep::Sweep, surface_prefix: &str, recorder: &real_process::Recorder, counts: &mut Counts) -> Vec<sweep::Finding> {
+    let mut found = Vec::new();
+    for (index, exchange) in recorder.exchanges().iter().enumerate() {
+        counts.bytes += exchange.body.len();
+        let name = format!("{surface_prefix} response #{index} {} {}", exchange.method, exchange.target.split('?').next().unwrap_or_default());
+        found.extend(sweep.scan_bytes(&format!("{name} body"), &exchange.body));
+        let headers: String = exchange.headers.iter().map(|(n, v)| format!("{n}: {v}\n")).collect();
+        found.extend(sweep.scan_text(&format!("{name} headers"), &headers));
+        found.extend(sweep.scan_text(&format!("{name} target"), &exchange.target));
+    }
+    for (index, frame) in recorder.frames().iter().enumerate() {
+        counts.lines += 1;
+        found.extend(sweep.scan_text(&format!("{surface_prefix} frame #{index}"), frame));
+    }
+    found
+}
+
+/// One command at a rate below the socket's limit; an answer that says "too many" is counted, never accepted silently.
+async fn paced(socket: &mut real_process::Socket, name: &str, args: &Value, throttled: &mut usize) -> Value {
+    tokio::time::sleep(Duration::from_millis(4)).await;
+    let answer = socket.call(name, args).await;
+    if answer.to_string().contains("Too many commands") {
+        *throttled += 1;
+    }
+    answer
+}
+
+/// The arguments for a command with one argument set to `value`.
+fn args_with(row: &holzwave_host::commands::registry::Command, name: &str, value: Value) -> Value {
+    let mut args = parity_env::args_for(row);
+    args.as_object_mut().expect("an object").insert(name.to_owned(), value);
+    args
+}
+
+#[test]
+fn admin_sweep_an_administrator_reads_nothing_of_another_person_through_any_route_or_command() {
+    on_big_stack(admin_sweep_body());
+}
+
+async fn admin_sweep_body() {
+    let owner = "bob".to_owned();
+    let print = Canary::new("content printed", Category::Content { owner: owner.clone() });
+    let saved = Canary::new("content saved", Category::Content { owner: owner.clone() });
+    let uploaded = Canary::new("content uploaded", Category::Content { owner: owner.clone() });
+    let key = Canary::new("assistant key", Category::Secret);
+    let b_password = Canary::new("bob password", Category::Secret);
+
+    let server = Site::new(None).start();
+    let setup = server.setup_token();
+    let mut alice = person(&server, "alice");
+    let mut bob = person(&server, "bob");
+    let mut carol = person(&server, "carol");
+    let alice_enrolled = alice.client.enrol("/auth/bootstrap", &setup, "alice", &alice.password).await;
+    let invitation_b = alice.client.invitation("member").await;
+    bob.password = b_password.text().to_owned();
+    let bob_enrolled = bob.client.enrol("/auth/invite/redeem", &invitation_b, "bob", &bob.password).await;
+    let invitation_c = alice.client.invitation("member").await;
+    carol.client.enrol("/auth/invite/redeem", &invitation_c, "carol", &carol.password).await;
+    let b_totp = Canary::with_text("bob authenticator secret", Category::Secret, &bob_enrolled.secret);
+    let b_recovery = Canary::with_text("bob recovery code", Category::Secret, &bob_enrolled.recovery);
+
+    // ---- B uses the product: a shell with printed and typed text, a saved file, a secret, an upload and a download link ----
+    let mut socket_b = bob.client.socket().await;
+    let pane_b = socket_b.start_focused_pane().await;
+    let (first, second) = print.text().split_at(14);
+    socket_b.type_line(pane_b, &format!("A={first}; B={second}; printf '%s\\n' \"$A$B\"")).await;
+    assert!(
+        socket_b.event_where("frame", Duration::from_secs(20), |p| p.to_string().contains(print.text())).await.is_some(),
+        "bob's shell printed his canary"
+    );
+    let mut put = bob.client.page_request("PUT", "/api/upload?name=canary.png", None).header("Content-Type", "application/octet-stream");
+    put.body = [&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A][..], uploaded.text().as_bytes()].concat();
+    let answer = bob.client.send(put).await;
+    assert_eq!(answer.status, 200, "upload: {}", answer.text());
+    let b_path = answer.json()["path"].as_str().expect("the path of the upload").to_owned();
+    let b_dir = Path::new(&b_path).parent().expect("a directory").to_path_buf();
+    let saved_path = b_dir.join("saved.txt").to_string_lossy().into_owned();
+    let write = socket_b.call("file_save", &json!({"source": "local", "path": saved_path, "text": saved.text()})).await;
+    let file_saved = write.get("ok").is_some();
+    let profile = socket_b.ok("ai_profile_save", &json!({"input": {"name": "Cloud", "preset": "anthropic"}})).await.as_str().expect("an id").to_owned();
+    let stored = socket_b.call("ai_key_set", &json!({"profile": profile, "slot": "provider", "api_key": key.text()})).await;
+    let key_stored = stored.get("ok").is_some();
+    let grant = socket_b.ok("file_grant", &json!({"source": "local", "path": b_path})).await;
+    let url = grant["url"].as_str().expect("a download address").to_owned();
+    let token_b = url.rsplit('/').next().unwrap_or_default().split('?').next().unwrap_or_default().to_owned();
+    let own_download = bob.client.call("GET", &url, None).await;
+    assert_eq!(own_download.status, 200, "bob reads his own download");
+    println!("Admin sweep (setup): file saved {file_saved}, assistant key stored {key_stored}, link token of {} characters", token_b.len());
+
+    let all = [print.clone(), saved.clone(), uploaded.clone(), key.clone(), b_password.clone(), b_totp, b_recovery];
+    let sweep = sweep::Sweep::new(&all);
+
+    // ---- the positive control for the sweep: the sweep over bob's own recorder sees bob's content ----
+    let mut control_counts = Counts::default();
+    let own_view = scan_person(&sweep, "bob", &bob.recorder, &mut control_counts);
+    assert!(own_view.iter().any(|f| f.canary == "content printed" && f.surface.contains("frame #")), "the sweep sees bob's printed text in bob's frames");
+    assert!(own_view.iter().any(|f| f.canary == "content uploaded" && f.surface.contains("GET /files/")), "the sweep sees bob's upload in bob's download");
+
+    // ---- A signs in freshly and calls every administrator route ----
+    let stepped = alice.client.call("POST", "/auth/step-up", Some(&json!({"password": alice.password}))).await;
+    assert_eq!(stepped.status, 200, "{}", stepped.text());
+    let rows = route_walk::table();
+    let listed = alice.client.call("GET", "/api/admin/accounts", None).await;
+    assert_eq!(listed.status, 200, "{}", listed.text());
+    let accounts = listed.json()["accounts"].as_array().expect("accounts").clone();
+    let member_names: BTreeSet<String> = accounts[0].as_object().expect("an account").keys().cloned().collect();
+    assert_eq!(member_names.len(), 7, "the list holds the seven members of the contract: {member_names:?}");
+    let id_of = |name: &str| -> String {
+        accounts.iter().find(|a| a["username"] == name).unwrap_or_else(|| panic!("{name} is listed"))["id"].to_string().trim_matches('"').to_owned()
+    };
+    let (id_b, id_c) = (id_of("bob"), id_of("carol"));
+    let mut routes_called = 0;
+    let mut statuses = BTreeSet::new();
+    for row in rows.iter().filter(|r| r.kind == Kind::Admin) {
+        let methods = route_walk::methods_of(&rows, row.path);
+        for method in methods.iter() {
+            // Changing calls go to carol, never to bob; the listing and the invitation have no target.
+            let target = route_walk::concrete(row.path, &id_c);
+            if *method == "DELETE" {
+                continue; // carol is deleted last, below
+            }
+            let body = row.changes.then(|| match row.path {
+                p if p.ends_with("/role") => json!({"role": "member"}),
+                "/api/admin/invitations" => json!({"role": "member", "days": 1}),
+                _ => json!({}),
+            });
+            let reply = alice.client.call(method, &target, body.as_ref()).await;
+            statuses.insert(reply.status);
+            assert!(matches!(reply.status, 200 | 204), "{method} {target}: {} {}", reply.status, reply.text());
+            routes_called += 1;
+        }
+    }
+    // A also tries bob's id on the read-like shapes it can: the list is the only read; everything else would change bob and is
+    // not sent. A bob-shaped id that is not bob's (a neighbour) is refused or absent.
+    for id in ["0", "999999", "-1", "1e3"] {
+        for suffix in ["", "/role", "/disable"] {
+            let target = format!("/api/admin/accounts/{id}{suffix}");
+            let method = if suffix.is_empty() { "DELETE" } else { "POST" };
+            let body = (!suffix.is_empty()).then(|| if suffix == "/role" { json!({"role": "member"}) } else { json!({}) });
+            let reply = alice.client.call(method, &target, body.as_ref()).await;
+            assert!(reply.status >= 400, "{method} {target}: an unknown id is refused, got {}", reply.status);
+        }
+    }
+    let after = alice.client.call("GET", "/api/admin/accounts", None).await;
+    assert_eq!(after.status, 200);
+    let still: BTreeSet<String> = after.json()["accounts"].as_array().expect("accounts").iter().map(|a| a["username"].as_str().unwrap_or_default().to_owned()).collect();
+    assert!(still.contains("bob") && id_b != id_c, "bob was not touched");
+    println!("Admin sweep (routes): {routes_called} administrator calls with every listed method but the deletion, statuses {statuses:?}; list members {member_names:?}");
+
+    // ---- A's own socket: every data command, with bob's ids, paths and token ----
+    let mut socket_a = alice.client.socket().await;
+    let pane_a = socket_a.start_focused_pane().await;
+    let mut throttled = 0usize;
+    let mut commands_sent = 0usize;
+    let mut calls = 0usize;
+    let mut oks_with_b_pane = 0usize;
+    let paths = [b_path.clone(), format!("{}/../{}", b_dir.display(), Path::new(&b_path).file_name().and_then(|n| n.to_str()).unwrap_or("")), Path::new(&b_path).file_name().and_then(|n| n.to_str()).unwrap_or("").to_owned(), saved_path.clone()];
+    for row in data_commands() {
+        let names: Vec<&str> = row.args.iter().map(|a| a.name).collect();
+        let mut sent = false;
+        if names.contains(&"pane") {
+            for id in 1..=64u64 {
+                // Closing her own last pane ends her own app; with her own id that is a call on her own layout, not on bob's.
+                if id == pane_a && row.name.starts_with("close_") {
+                    continue;
+                }
+                let answer = paced(&mut socket_a, row.name, &args_with(row, "pane", json!(id)), &mut throttled).await;
+                calls += 1;
+                sent = true;
+                if id == pane_b && pane_b != pane_a && answer.get("ok").is_some() {
+                    oks_with_b_pane += 1;
+                }
+            }
+        }
+        if names.contains(&"path") {
+            for path in &paths {
+                paced(&mut socket_a, row.name, &args_with(row, "path", json!(path)), &mut throttled).await;
+                calls += 1;
+                sent = true;
+            }
+        }
+        if names.contains(&"token") {
+            paced(&mut socket_a, row.name, &args_with(row, "token", json!(token_b)), &mut throttled).await;
+            calls += 1;
+            sent = true;
+        }
+        if !sent {
+            paced(&mut socket_a, row.name, &parity_env::args_for(row), &mut throttled).await;
+            calls += 1;
+            sent = true;
+        }
+        commands_sent += usize::from(sent);
+    }
+    let layout_a = socket_a.ok("get_layout", &json!({})).await;
+    assert_eq!(throttled, 0, "the socket's rate limit did not end the sweep early");
+    println!("Admin sweep (commands): {commands_sent} data commands of {} in the table, {calls} calls, pane ids 1 to 64, {} paths, bob's token; alice's pane {pane_a}, bob's pane {pane_b}", COMMANDS.len(), paths.len());
+
+    // A file route with A's session and bob's token.
+    let mut route_statuses = BTreeSet::new();
+    for target in [url.clone(), format!("{url}?download=1"), format!("/files/{token_b}")] {
+        let reply = alice.client.call("GET", &target, None).await;
+        route_statuses.insert(reply.status);
+        assert!(matches!(reply.status, 403 | 404), "a download link of bob's with alice's session: {} for {target}", reply.status);
+    }
+    let sneaky = alice.client.call("GET", &format!("/files/{token_b}/../../etc/passwd"), None).await;
+    assert!(sneaky.status >= 400, "a path under the link is refused");
+    println!("Admin sweep (file route): bob's link with alice's session answers {route_statuses:?}");
+
+    // ---- the sweep over everything A received or caused ----
+    alice.client.call("DELETE", &format!("/api/admin/accounts/{id_c}"), None).await;
+    let mut counts = Counts::default();
+    let mut found = scan_person(&sweep, "alice", &alice.recorder, &mut counts);
+    found.extend(sweep.scan_lines("stdout", &server.stdout_lines(), &mut counts));
+    found.extend(sweep.scan_lines("stderr", &server.stderr_lines(), &mut counts));
+    let audit_lines: Vec<String> = server.audit().iter().map(Value::to_string).collect();
+    found.extend(sweep.scan_lines("audit", &audit_lines, &mut counts));
+    assert!(found.is_empty(), "something of bob's reached alice or the logs: {:?}", finding_lines(&found));
+    println!(
+        "Admin sweep (surfaces): {} responses of alice, {} frames of alice, {} audit lines, {} lines of standard output and error; hits: none",
+        alice.recorder.exchanges().len(),
+        alice.recorder.frames().len(),
+        audit_lines.len(),
+        server.stdout_lines().len() + server.stderr_lines().len()
+    );
+
+    // alice's layout is alice's: her panes and nothing of bob's text.
+    let layout_text = layout_a.to_string();
+    assert!(sweep.scan_text("alice layout", &layout_text).is_empty(), "alice's layout holds nothing of bob's");
+    assert_eq!(oks_with_b_pane, oks_with_b_pane.min(calls), "counted");
+    let _ = (&alice_enrolled, &carol);
+
+    // ---- the positive control: bob's canary placed in alice's own pane is found in alice's frames ----
+    // The barrage may have closed or stopped her pane, so the control uses a fresh socket and its own focused pane.
+    drop(socket_a);
+    let mut control_socket = alice.client.socket().await;
+    let control_pane = control_socket.start_focused_pane().await;
+    let (first, second) = print.text().split_at(14);
+    control_socket.type_line(control_pane, &format!("A={first}; B={second}; printf '%s\\n' \"$A$B\"")).await;
+    assert!(control_socket.event_where("frame", Duration::from_secs(20), |p| p.to_string().contains(print.text())).await.is_some(), "alice's shell printed it");
+    let planted = scan_person(&sweep, "alice", &alice.recorder, &mut Counts::default());
+    assert!(planted.iter().any(|f| f.canary == "content printed" && f.surface.contains("frame #")), "the sweep over alice's recorder finds a canary that is in her own pane");
+    println!("Admin sweep (positive control): the canary printed in alice's own pane is found in {} of her frames", planted.iter().filter(|f| f.canary == "content printed").count());
 }

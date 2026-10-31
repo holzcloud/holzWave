@@ -322,7 +322,7 @@ impl Server {
     }
 
     pub fn audit_dir(&self) -> PathBuf {
-        self.site.data_dir().join("audit")
+        self.site.data_dir().join("server").join("audit")
     }
 
     /// Every line of the audit files, parsed.
