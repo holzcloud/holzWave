@@ -319,3 +319,28 @@ async fn when_the_helper_is_gone_the_stats_say_so_and_a_later_attach_fails_with_
     let error = env.supervisor.attach(account(1, 20001)).await.err().expect("no helper, no worker");
     assert_eq!(error, AttachError::Launch("the spawn helper is gone".into()));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_user_id_zero_or_outside_the_range_is_refused_in_the_server_and_the_helper_sees_nothing() {
+    let (fake, end) = FakeHelper::start();
+    let client = HelperClient::from_socket(end, quick()).expect("the client").with_uid_range(20000, 29999);
+    for uid in [0u32, 1, 19999, 30000, u32::MAX] {
+        let error = client.spawn(uid, Mode::Serve).await.expect_err("outside the range");
+        assert!(error.sentence().contains("outside the range"), "{}", error.sentence());
+        assert!(!error.may_have_started(), "nothing was started");
+        client.kill_uid(uid, Signal::Kill).await.expect_err("kill outside the range");
+        client.remove_home(uid).await.expect_err("remove outside the range");
+    }
+    assert_eq!(fake.requests(), vec![], "no request for a forbidden value reached the helper");
+    // The edges of the range are allowed.
+    client.spawn(20000, Mode::Serve).await.expect("the first id");
+    client.spawn(29999, Mode::Serve).await.expect("the last id");
+    assert_eq!(fake.spawns(), vec![(20000, Mode::Serve), (29999, Mode::Serve)]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn user_id_zero_is_refused_even_when_the_client_has_no_range() {
+    let (client, fake) = client().await;
+    client.spawn(0, Mode::Serve).await.expect_err("root");
+    assert_eq!(fake.requests(), vec![]);
+}

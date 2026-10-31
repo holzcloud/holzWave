@@ -237,6 +237,8 @@ impl Drop for Guard {
 pub struct HelperClient {
     inner: Arc<Inner>,
     _guard: Arc<Guard>,
+    /// The user ids a request may name. User id 0 is never allowed; with no range every other id is.
+    uid_range: Option<(u32, u32)>,
 }
 
 impl fmt::Debug for HelperClient {
@@ -471,7 +473,25 @@ impl HelperClient {
             cancel: cancel.clone(),
         });
         tokio::spawn(read_loop(inner.clone()));
-        Ok(HelperClient { inner, _guard: Arc::new(Guard(cancel)) })
+        Ok(HelperClient { inner, _guard: Arc::new(Guard(cancel)), uid_range: None })
+    }
+
+    /// The same client, refusing in the server any request that names a user id outside `min..=max` before the helper sees
+    /// it. The helper checks the range as well; this is the second line, so that a wrong id in the store never leaves the
+    /// server.
+    #[must_use]
+    pub fn with_uid_range(mut self, min: u32, max: u32) -> HelperClient {
+        self.uid_range = Some((min, max));
+        self
+    }
+
+    /// Whether a request may name `uid`: never 0, and inside the range when there is one.
+    fn check_uid(&self, uid: u32) -> Result<(), HelperError> {
+        let outside = uid == 0 || self.uid_range.is_some_and(|(min, max)| uid < min || uid > max);
+        if outside {
+            return Err(HelperError::new(format!("the user id {uid} is outside the range workers may run as; nothing was sent to the spawn helper")));
+        }
+        Ok(())
     }
 
     /// Starts the helper with a sequenced-packet socket as its standard input and waits for its first answer. An early exit
@@ -522,8 +542,11 @@ impl HelperClient {
             })
             .map_err(|_| HelperError::new("the spawn helper could not be watched"))?;
 
-        let client = HelperClient::from_socket(ours, settings.timeouts)
+        let mut client = HelperClient::from_socket(ours, settings.timeouts)
             .map_err(|_| HelperError::new("the control socket for the spawn helper could not be used"))?;
+        if let Some((min, max)) = settings.uid_range {
+            client = client.with_uid_range(min, max);
+        }
         let first = tokio::select! {
             status = &mut exit_rx => Err(status),
             answer = tokio::time::timeout(settings.timeouts.start, client.ping()) => Ok(answer),
@@ -635,6 +658,7 @@ impl HelperClient {
 
     /// Starts a worker of the user `uid`. The user id is the only thing about the person that is sent.
     pub async fn spawn(&self, uid: u32, mode: Mode) -> Result<Spawned, HelperError> {
+        self.check_uid(uid)?;
         let (exit, ended) = watch::channel(None);
         let reply = self.request("spawn", serde_json::json!({ "uid": uid, "mode": mode.as_str() }), Kind::Spawn { exit }).await?;
         match (reply.pid, reply.fd, reply.exit) {
@@ -645,6 +669,7 @@ impl HelperClient {
 
     /// Signals every process of the user `uid`; how many were signalled.
     pub async fn kill_uid(&self, uid: u32, signal: Signal) -> Result<u32, HelperError> {
+        self.check_uid(uid)?;
         let word = match signal {
             Signal::Term => "term",
             Signal::Kill => "kill",
@@ -655,6 +680,7 @@ impl HelperClient {
 
     /// Removes the home of the user `uid`.
     pub async fn remove_home(&self, uid: u32) -> Result<(), HelperError> {
+        self.check_uid(uid)?;
         self.request("remove_home", serde_json::json!({ "uid": uid }), Kind::Remove).await.map(|_| ())
     }
 }
