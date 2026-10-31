@@ -14,12 +14,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use holzwave_host::state::ShellSpec;
+use holzwave_server::accounts::Accounts;
+use holzwave_server::auth::passkey::Passkeys;
+use holzwave_server::auth::password::ArgonGate;
+use holzwave_server::auth::signin::SignIn;
 use holzwave_server::clock::{Clock, ManualClock};
-use holzwave_server::http::app::Shutdown;
-use holzwave_server::http::router::{self, Part};
+use holzwave_server::config::{Sessions, Upload};
+use holzwave_server::http::app::{App, AppInit, PublicOrigin, Shutdown};
+use holzwave_server::limits::Limits;
+use holzwave_server::sealed::Sealer;
+use holzwave_server::unlock::Kdf;
+use holzwave_server::http::router;
 use holzwave_server::http::ws::{self, SocketSettings, WsState};
 use holzwave_server::proxy::{Admission, Mode, TrustedProxies};
 use holzwave_server::store::Role;
+use holzwave_server::supervisor::gate::{GateServices, SupervisorGate};
+use holzwave_server::supervisor::serve::{Services, router_parts};
 use holzwave_server::supervisor::{AccountKey, InProcessLauncher, Supervisor, SupervisorSettings};
 use holzwave_server::tls::{self, FileResolver};
 use rustls::pki_types::{CertificateDer, ServerName};
@@ -35,7 +45,7 @@ use crate::edge::{self, HOST, ORIGIN, Signed, TestApp};
 use crate::edge_tls::{Conn, Reply, Request};
 
 #[path = "scratch.rs"]
-mod scratch;
+pub mod scratch;
 use scratch::Scratch;
 
 /// The longest a helper waits for the server before it fails the test.
@@ -51,6 +61,9 @@ pub struct WsOptions {
     pub tune: Option<fn(&mut SocketSettings)>,
     /// Replaces the settings of the supervisor.
     pub supervisor: Option<SupervisorSettings>,
+    /// Builds the routes with the list of the assembly and the supervisor side of the secret store instead of the endpoint
+    /// alone.
+    pub real_gate: bool,
 }
 
 /// What the server holds for one person.
@@ -80,6 +93,8 @@ pub struct WsEnv {
     pub state: Arc<WsState>,
     pub shutdown: Shutdown,
     pub supervisor_clock: Arc<ManualClock>,
+    /// The supervisor side of the secret store, when the environment was started with it.
+    pub gate: Option<Arc<SupervisorGate>>,
     task: Option<JoinHandle<()>>,
     der: CertificateDer<'static>,
     _scratch: Scratch,
@@ -114,9 +129,74 @@ impl WsEnv {
         if let Some(tune) = options.tune {
             tune(&mut settings);
         }
-        let state = WsState::with_settings(test.app.clone(), supervisor.clone(), settings);
-        let parts: Vec<Part> = ws::parts(state.clone());
-        let router = router::build(test.app.clone(), parts);
+        let (app, state, parts, gate) = if options.real_gate {
+            let dyn_clock: Arc<dyn Clock> = test.clock.clone();
+            let argon = ArgonGate::new(2, Kdf::lower_bound());
+            let gate = Arc::new(SupervisorGate::new(GateServices {
+                supervisor: supervisor.clone(),
+                store: test.store.clone(),
+                sessions: test.sessions.clone(),
+                audit: test.app.audit.clone(),
+                clock: dyn_clock.clone(),
+                argon: argon.clone(),
+            }));
+            let app = App::new(
+                AppInit {
+                    origin: PublicOrigin::parse(ORIGIN).expect("the public url"),
+                    auth: test.app.auth.clone(),
+                    sessions: Sessions::default(),
+                    limits: Limits::DEFAULT,
+                    mode: Mode::Files,
+                    proxies: TrustedProxies::none(),
+                    store: test.store.clone(),
+                    session_manager: test.sessions.clone(),
+                    audit: test.app.audit.clone(),
+                    clock: dyn_clock.clone(),
+                    view: gate.clone(),
+                },
+                &edge::server_key(),
+            );
+            let state = WsState::with_settings(app.clone(), supervisor.clone(), settings);
+            let sealer = Arc::new(Sealer::new(&edge::server_key()));
+            let accounts = Arc::new(
+                Accounts::new(test.store.clone(), dyn_clock.clone(), test.app.audit.clone(), edge::UID_RANGE)
+                    .with_observer(Arc::new(supervisor.clone())),
+            );
+            let signin = Arc::new(SignIn::new(
+                test.store.clone(),
+                dyn_clock.clone(),
+                test.app.audit.clone(),
+                test.sessions.clone(),
+                argon.clone(),
+                sealer.clone(),
+            ));
+            let passkeys = Arc::new(
+                Passkeys::new(ORIGIN, "holzWave", test.store.clone(), test.sessions.clone(), test.app.audit.clone(), dyn_clock.clone())
+                    .expect("the relying party builds"),
+            );
+            let services = Services {
+                supervisor: supervisor.clone(),
+                app: app.clone(),
+                sessions: test.sessions.clone(),
+                store: test.store.clone(),
+                accounts,
+                audit: test.app.audit.clone(),
+                clock: dyn_clock,
+                gate: gate.clone(),
+                signin,
+                passkeys,
+                oidc: None,
+                argon,
+                sealer,
+                ws: state.clone(),
+                upload: Upload::default(),
+            };
+            (app, state, router_parts(&services), Some(gate))
+        } else {
+            let state = WsState::with_settings(test.app.clone(), supervisor.clone(), settings);
+            (test.app.clone(), state.clone(), ws::parts(state), None)
+        };
+        let router = router::build(app, parts);
 
         let made = rcgen::generate_simple_self_signed(vec![HOST.to_owned()]).expect("generate a certificate");
         let cert = scratch.write_file("cert.pem", made.cert.pem().as_bytes(), 0o644);
@@ -137,6 +217,7 @@ impl WsEnv {
             state,
             shutdown,
             supervisor_clock,
+            gate,
             task: Some(task),
             der: made.cert.der().clone(),
             _scratch: scratch,
@@ -176,24 +257,8 @@ impl WsEnv {
         (stats.workers, stats.sockets)
     }
 
-    /// A client configuration that trusts the generated certificate and nothing else.
-    fn client_config(&self) -> ClientConfig {
-        let mut store = RootCertStore::empty();
-        store.add(self.der.clone()).expect("trust the generated certificate");
-        let mut config = ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .expect("client protocol versions")
-            .with_root_certificates(store)
-            .with_no_client_auth();
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
-        config
-    }
-
     async fn tls(&self) -> TlsStream<TcpStream> {
-        let tcp = tokio::time::timeout(PATIENCE, TcpStream::connect(self.addr)).await.expect("connect in time").expect("connect");
-        let name = ServerName::try_from(HOST).expect("server name");
-        let connector = TlsConnector::from(Arc::new(self.client_config()));
-        tokio::time::timeout(PATIENCE, connector.connect(name, tcp)).await.expect("a handshake in time").expect("the TLS handshake")
+        tls_to(self.addr, &self.der).await
     }
 
     /// One plain HTTP request on its own connection.
@@ -232,15 +297,7 @@ impl WsEnv {
 
     /// Opens a socket with a request of the test's making.
     pub async fn try_connect_request(&self, request: Request) -> Result<WsClient, Reply> {
-        let mut conn = Conn::new(self.tls().await);
-        conn.send(&request.bytes()).await;
-        let mut client = WsClient::new(conn);
-        let reply = client.read_head().await;
-        if reply.status != 101 {
-            return Err(reply);
-        }
-        assert_eq!(reply.header("sec-websocket-accept"), Some("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="), "the accept key");
-        Ok(client)
+        WsClient::upgrade(self.tls().await, request).await
     }
 
     /// Opens a socket as the person sees it in a browser: the session cookie and the public Origin.
@@ -325,7 +382,36 @@ pub struct WsClient {
     ended: bool,
 }
 
+/// A TLS connection to `addr` that trusts `der` and nothing else, for HTTP/1.1.
+pub async fn tls_to(addr: SocketAddr, der: &CertificateDer<'static>) -> TlsStream<TcpStream> {
+    let mut store = RootCertStore::empty();
+    store.add(der.clone()).expect("trust the generated certificate");
+    let mut config = ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("client protocol versions")
+        .with_root_certificates(store)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let tcp = tokio::time::timeout(PATIENCE, TcpStream::connect(addr)).await.expect("connect in time").expect("connect");
+    let name = ServerName::try_from(HOST).expect("server name");
+    let connector = TlsConnector::from(Arc::new(config));
+    tokio::time::timeout(PATIENCE, connector.connect(name, tcp)).await.expect("a handshake in time").expect("the TLS handshake")
+}
+
 impl WsClient {
+    /// Sends an upgrade request over `stream`; `Err` holds the plain answer when the server did not switch.
+    pub async fn upgrade(stream: TlsStream<TcpStream>, request: Request) -> Result<WsClient, Reply> {
+        let mut conn = Conn::new(stream);
+        conn.send(&request.bytes()).await;
+        let mut client = WsClient::new(conn);
+        let reply = client.read_head().await;
+        if reply.status != 101 {
+            return Err(reply);
+        }
+        assert_eq!(reply.header("sec-websocket-accept"), Some("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="), "the accept key");
+        Ok(client)
+    }
+
     fn new(conn: Conn<TlsStream<TcpStream>>) -> WsClient {
         WsClient { conn, buffer: Vec::new(), backlog: VecDeque::new(), next: 1, auto_pong: true, ended: false }
     }
@@ -631,8 +717,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use holzwave_server::auth::session::Ended;
 use holzwave_server::http::transport::{Inbound as In, Outgoing, Transport, TransportError};
 use holzwave_server::http::ws::{Attached, PortError, SessionPort, Wiring, serve_socket};
-use holzwave_server::limits::Limits;
-use holzwave_server::config::Sessions;
 use holzwave_server::store::{AccountId, Session};
 use tokio::sync::{broadcast, mpsc};
 

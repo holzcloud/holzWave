@@ -19,12 +19,22 @@ pub struct Scratch {
 impl Scratch {
     /// A new, empty directory whose name holds `tag`, the process id, a counter and random bytes.
     pub fn new(tag: &str) -> Scratch {
+        Scratch::under(&std::env::temp_dir(), &format!("holzwave-server-{tag}"))
+    }
+
+    /// A new directory with a short path, for a Unix socket: the path of a socket has a hard limit of about a hundred bytes,
+    /// which the long per-user temporary directory of some systems exceeds.
+    pub fn short(tag: &str) -> Scratch {
+        Scratch::under(Path::new("/tmp"), &format!("hw-{tag}"))
+    }
+
+    fn under(base: &Path, stem: &str) -> Scratch {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut random = [0u8; 6];
         getrandom::fill(&mut random).expect("the operating system gives random bytes");
         let random: String = random.iter().map(|b| format!("{b:02x}")).collect();
-        let path = std::env::temp_dir().join(format!("holzwave-server-{tag}-{}-{n}-{random}", std::process::id()));
+        let path = base.join(format!("{stem}-{}-{n}-{random}", std::process::id()));
         DirBuilder::new()
             .mode(0o700)
             .create(&path)

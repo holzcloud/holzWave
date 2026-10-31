@@ -1210,11 +1210,16 @@ fn cli_check_config_with_no_environment_names_the_missing_variable() {
 }
 
 #[test]
-fn cli_the_usage_lists_both_commands_and_a_bad_call_is_status_two() {
+fn cli_the_usage_lists_the_commands_and_a_bad_call_is_status_two() {
     let out = server(&[], &[]);
     assert_eq!(out.status.code(), Some(2));
     let usage = text(&out.stderr);
-    assert!(usage.contains("keygen") && usage.contains("check-config"), "{usage}");
+    assert!(usage.contains("keygen") && usage.contains("check-config") && usage.contains("serve"), "{usage}");
     assert_eq!(server(&["check-config", "extra"], &[]).status.code(), Some(2));
-    assert_eq!(server(&["serve"], &[]).status.code(), Some(2), "a command that does not exist yet is not run");
+    assert_eq!(server(&["serve", "extra"], &[]).status.code(), Some(2), "serve takes no arguments");
+    // With no environment `serve` is refused by the same check as `check-config`: status 1, one sentence, nothing started.
+    let out = server(&["serve"], &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert!(text(&out.stderr).contains("HOLZWAVE_SERVER_KEY_FILE"), "{}", text(&out.stderr));
 }
