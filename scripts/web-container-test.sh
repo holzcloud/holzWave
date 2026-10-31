@@ -25,7 +25,8 @@
 # container started the way the Compose file and the Helm chart start it: a read-only root, user 10001, all capabilities
 # dropped and exactly CHOWN, KILL, SETGID and SETUID added. It makes a key with `keygen`, a throwaway certificate for the name
 # `holzwave.test`, starts the server on a private network and asks it for the sign-in state over TLS 1.3 from a second
-# container. HOLZWAVE_WEB_CONTEXT names another build context than the repository root (a clean checkout, for example).
+# container. HOLZWAVE_WEB_CONTEXT names another build context than the repository root (a clean checkout, for example), and
+# HOLZWAVE_ZIG_VERSION another Zig than the default of the Dockerfile (0.16.0) for a tree whose terminal engine needs it.
 # `multiarch` builds the image for linux/amd64 and linux/arm64, one platform at a time, and on each runs `uname -m`, `ldd`,
 # `keygen` and `check-config` on the example configuration with a generated certificate. A platform that cannot be built or
 # run on this machine is reported as `NOT RUN <platform>: <reason>` and the mode exits 1; it is never a pass.
@@ -460,6 +461,16 @@ IMG_HOST=holzwave.test
 IMG_PORT=8443
 IMG_SCRATCH=
 IMG_COMPOSE_FILE=$root/packaging/compose/docker-compose.yml
+# The Zig the terminal engine is built with: the default of the Dockerfile, or HOLZWAVE_ZIG_VERSION when the tree needs another.
+IMG_ZIG_ARG=
+case "${HOLZWAVE_ZIG_VERSION:-}" in
+    "") ;;
+    *[!0-9.]*)
+        echo "web-container-test: HOLZWAVE_ZIG_VERSION may hold digits and dots only" >&2
+        exit 2
+        ;;
+    *) IMG_ZIG_ARG="--build-arg ZIG_VERSION=$HOLZWAVE_ZIG_VERSION" ;;
+esac
 
 # The way the Compose file and the Helm chart start the server: no root, nothing writable but the volumes and the tmpfs, no
 # capability but the four the spawn helper needs. The option that stops a process from gaining privileges is left out on
@@ -511,7 +522,8 @@ img_build() {
     version=$(img_version)
     revision=$(git -C "$root" rev-parse HEAD 2>/dev/null || echo unknown)
     echo "+ docker build -t $IMG_TAG -f packaging/docker/Dockerfile $IMG_CONTEXT"
-    docker build ${PLATFORM:+--platform "$PLATFORM"} -t "$IMG_TAG" -f "$IMG_CONTEXT/packaging/docker/Dockerfile" \
+    # shellcheck disable=SC2086 # IMG_ZIG_ARG is empty or one option
+    docker build ${PLATFORM:+--platform "$PLATFORM"} -t "$IMG_TAG" -f "$IMG_CONTEXT/packaging/docker/Dockerfile" $IMG_ZIG_ARG \
         --build-arg "VERSION=$version" --build-arg "REVISION=$revision" "$IMG_CONTEXT" ||
         img_fail "the image build failed (packaging/docker/Dockerfile)"
     img_ok "built $IMG_TAG ($(docker image inspect -f '{{.Size}}' "$IMG_TAG") bytes)"
@@ -1153,7 +1165,8 @@ mode_multiarch() {
         case "$arch" in amd64) machine=x86_64 ;; arm64) machine=aarch64 ;; esac
         tag=holzwave-server-multiarch:$arch
         echo "+ docker buildx build --platform $platform --load -t $tag -f packaging/docker/Dockerfile $IMG_CONTEXT"
-        if ! docker buildx build --platform "$platform" --load -t "$tag" -f "$IMG_CONTEXT/packaging/docker/Dockerfile" \
+        # shellcheck disable=SC2086 # IMG_ZIG_ARG is empty or one option
+        if ! docker buildx build --platform "$platform" --load -t "$tag" -f "$IMG_CONTEXT/packaging/docker/Dockerfile" $IMG_ZIG_ARG \
             --build-arg "VERSION=$version" --build-arg "REVISION=$revision" "$IMG_CONTEXT" >"$IMG_SCRATCH/build-$arch.log" 2>&1; then
             echo "multiarch: NOT RUN $platform: the image could not be built: $(tail -n 3 "$IMG_SCRATCH/build-$arch.log" | tr '\n' ' ')"
             status=1
