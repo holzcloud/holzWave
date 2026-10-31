@@ -179,9 +179,16 @@ export function createHttp(deps: HttpDeps): Http {
 
     const headers: Record<string, string> = { Accept: "application/json" };
     let payload: unknown;
-    if (body === undefined) payload = undefined;
-    else if (typeof Blob !== "undefined" && body instanceof Blob) payload = body;
-    else {
+    // The server checks the content type of every change before it looks at the route: JSON for the API (also for a change that has
+    // no body, such as a DELETE) and a byte stream for an upload. A file carries its own type (`image/png`), which the server would
+    // refuse, so the type is named here and the browser takes the header before the type of the Blob.
+    if (body === undefined) {
+      payload = undefined;
+      if (verb !== "GET") headers["Content-Type"] = "application/json";
+    } else if (typeof Blob !== "undefined" && body instanceof Blob) {
+      payload = body;
+      headers["Content-Type"] = "application/octet-stream";
+    } else {
       headers["Content-Type"] = "application/json";
       payload = JSON.stringify(body);
     }

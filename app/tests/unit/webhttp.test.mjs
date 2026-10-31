@@ -91,21 +91,23 @@ test("two requests at once ask for the token once", async () => {
   assert.equal(log.filter((l) => l.url.endsWith("/api/session")).length, 1);
 });
 
-test("a Blob body is sent as it is, without a JSON content type", async () => {
+test("a Blob body is sent as it is, as a byte stream whatever type the file has", async () => {
   const { http, log } = setup({ "GET /api/session": session("t"), "PUT /api/upload": answer(200, { n: 3 }) });
-  const blob = new Blob(["abc"], { type: "application/octet-stream" });
+  const blob = new Blob(["abc"], { type: "image/png" });
   assert.deepEqual(await http("PUT", "/api/upload", blob), { n: 3 });
   const put = log.at(-1);
   assert.equal(put.init.body, blob);
-  assert.equal(put.init.headers["Content-Type"], undefined);
+  assert.equal(put.init.headers["Content-Type"], "application/octet-stream", "the server takes an upload only as a byte stream");
   assert.equal(put.init.headers["X-CSRF-Token"], "t");
 });
 
-test("a request without a body sends none", async () => {
+test("a change without a body sends none but names the JSON type the server demands of every change", async () => {
   const { http, log } = setup({ "GET /api/session": session("t"), "DELETE /api/a/1": answer(204) });
   assert.equal(await http("DELETE", "/api/a/1"), undefined);
   assert.equal("body" in log.at(-1).init, false);
-  assert.equal(log.at(-1).init.headers["Content-Type"], undefined);
+  assert.equal(log.at(-1).init.headers["Content-Type"], "application/json");
+  await http("GET", "/api/session");
+  assert.equal(log.at(-1).init.headers["Content-Type"], undefined, "a GET has no content type");
 });
 
 test("a 403 drops the token and is not retried", async () => {
