@@ -4,6 +4,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { actionIdFor, chordFor, setBindingTable, setOs } from "../../dist/chords.js";
 import { CLIPBOARD_REFUSED, FULLSCREEN_NOTICE, LOCK_KEYS, canLockKeys } from "../../dist/webstate.js";
+import { findTargets, isLinkModifier, linkAction } from "../../dist/links.js";
 
 const CLIPBOARD = [
   ["Ctrl+Shift+C", "edit.copy"],
@@ -73,4 +74,37 @@ test("canLockKeys is true only for a navigator whose keyboard has a lock functio
 
 test("the full-screen notice is the sentence the design gives", () => {
   assert.equal(FULLSCREEN_NOTICE, "Browser shortcuts are off in full screen. Hold Escape to leave.");
+});
+
+// ---- links ----------------------------------------------------------------------------------------------------------
+
+test("on the web the link modifier is Ctrl or Cmd, and neither alone is no modifier", () => {
+  assert.equal(isLinkModifier({ ctrlKey: true }, "web"), true, "Ctrl");
+  assert.equal(isLinkModifier({ metaKey: true }, "web"), true, "Cmd");
+  assert.equal(isLinkModifier({ ctrlKey: true, metaKey: true }, "web"), true, "both");
+  assert.equal(isLinkModifier({}, "web"), false, "neither");
+  assert.equal(isLinkModifier({ ctrlKey: false, metaKey: false, shiftKey: true }, "web"), false, "Shift is not a link modifier");
+});
+
+test("the link modifier of macOS and of the other platforms is what it was", () => {
+  assert.equal(isLinkModifier({ metaKey: true }, "macos"), true);
+  assert.equal(isLinkModifier({ ctrlKey: true }, "macos"), false, "Ctrl+click is the menu on macOS");
+  assert.equal(isLinkModifier({ ctrlKey: true }, "linux"), true);
+  assert.equal(isLinkModifier({ metaKey: true }, "linux"), false);
+  assert.equal(isLinkModifier({ ctrlKey: true }, "windows"), true);
+  assert.equal(isLinkModifier({}, "linux"), false);
+});
+
+test("a path is no link where a folder cannot be shown, and a URL is the same action either way", () => {
+  const [url] = findTargets(Array.from("https://example.com/a?b=1"));
+  const [path] = findTargets(Array.from("./src/main.rs"));
+  assert.equal(url.kind, "url");
+  assert.equal(path.kind, "path");
+  const want = { command: "open_url", args: { url: "https://example.com/a?b=1" } };
+  assert.deepEqual(linkAction(url, "/home/u", false), want);
+  assert.deepEqual(linkAction(url, "/home/u"), want, "the default keeps every existing call");
+  assert.deepEqual(linkAction(url, "/home/u", true), want);
+  assert.equal(linkAction(path, "/home/u", false), null, "no path where nothing can be revealed");
+  assert.deepEqual(linkAction(path, "/home/u"), { command: "reveal_path", args: { path: "./src/main.rs", base: "/home/u" } });
+  assert.deepEqual(linkAction(path, null, true), { command: "reveal_path", args: { path: "./src/main.rs", base: null } });
 });
