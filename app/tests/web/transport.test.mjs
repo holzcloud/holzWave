@@ -32,7 +32,7 @@ await runTest("transport", {}, async ({ harness, open }) => {
   await page.evaluate(() => {
     window.__marks = new Set();
     const note = () => document.querySelectorAll(".web-mark").forEach((m) => window.__marks.add(m.dataset.mark));
-    new MutationObserver(note).observe(document.getElementById("status"), { childList: true, subtree: true });
+    new MutationObserver(note).observe(document.body, { childList: true, subtree: true });
     note();
   });
 
