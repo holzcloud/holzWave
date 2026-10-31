@@ -440,7 +440,7 @@ fn audit_once_every_action_of_the_vocabulary_writes_exactly_its_one_line() {
             let (rows, secrets) = trigger(case.action).await;
             println!("  {:<22} {:?}", case.action, rows.iter().map(|r| format!("{}/{} actor={} target={} {}", r.action, r.result, r.actor, r.target, r.detail)).collect::<Vec<_>>());
             check_case(case, &rows, &secrets);
-            printed.push(format!("{}: {} line(s) in all, the case's own once ({}, {}, actor {}, target {})", case.action, rows.len(), case.environment, case.result, case.actor, case.target));
+            printed.push(format!("{}: {} line(s) in all, the case's own once ({}; {}; {}, actor {}, target {})", case.action, rows.len(), case.environment, case.trigger, case.result, case.actor, case.target));
         }
         println!("Audit once: {} cases, one per action of the vocabulary ({} actions)", table.len(), vocabulary().len());
         for line in &printed {

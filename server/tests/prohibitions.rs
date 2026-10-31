@@ -2055,3 +2055,371 @@ fn negative_control_deploy_a_missing_tool_is_a_visible_failure_unless_the_sign_o
         assert!(message.contains("NOT RUN: holzwave-no-such-deployment-tool"), "the failure names the tool: {message}");
     }
 }
+
+// =============================================================================================================================
+// Source guards: what the text of the crates must not contain
+// =============================================================================================================================
+
+/// Words in the name of a field or a variant that mark a value as a secret.
+const SECRET_WORDS: [&str; 9] = ["password", "passphrase", "secret", "token", "recovery", "key", "prf", "cookie", "verifier"];
+
+/// Types that derive `Debug` and have a member with a secret word in its name, with the reason that is true of each. A type is
+/// named as `path-suffix::Type`. An entry that no longer matches anything fails the guard, so the list cannot go stale.
+const DEBUG_ALLOWED: &[(&str, &str)] = &[
+    ("host/src/ai_host.rs::RemovalView", "`key_deleted` is a boolean that says a stored assistant key was removed; the view holds no key material"),
+    ("host/src/state.rs::SettingsView", "`keybindings` are the keyboard shortcuts of the person (chords and action names), not a cryptographic key"),
+];
+
+/// A type that derives `Debug` and the members whose names hold a secret word.
+#[derive(Debug, PartialEq, Eq)]
+struct DebugFinding {
+    type_name: String,
+    members: Vec<String>,
+}
+
+/// The identifiers at member positions of a type body: `name:` in a struct or in a struct-like variant, and the names of the
+/// variants of an enum.
+fn member_names(body: &str, is_enum: bool) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut depth = 0usize;
+    let bytes = body.as_bytes();
+    let mut at = 0;
+    let mut word_start: Option<usize> = None;
+    while at <= bytes.len() {
+        let byte = bytes.get(at).copied().unwrap_or(b' ');
+        let is_word = byte.is_ascii_alphanumeric() || byte == b'_';
+        if is_word && word_start.is_none() {
+            word_start = Some(at);
+        }
+        if !is_word {
+            if let Some(start) = word_start.take() {
+                let word = &body[start..at];
+                let next = body[at..].trim_start();
+                let capitalised = word.chars().next().is_some_and(char::is_uppercase);
+                if next.starts_with(':') && !next.starts_with("::") && !capitalised {
+                    names.push(word.to_owned());
+                } else if is_enum && depth == 1 && capitalised && body[..start].trim_end().ends_with(['{', ',']) {
+                    names.push(word.to_owned());
+                }
+            }
+            match byte {
+                b'{' | b'(' | b'[' | b'<' => depth += 1,
+                b'}' | b')' | b']' | b'>' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        at += 1;
+    }
+    names
+}
+
+/// The types of a source text that derive `Debug` and have a member named after a secret.
+fn debug_findings(source: &str) -> Vec<DebugFinding> {
+    let mut found = Vec::new();
+    let lines: Vec<&str> = source.lines().collect();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index].trim();
+        if !(line.starts_with("#[derive(") && line.contains("Debug")) {
+            index += 1;
+            continue;
+        }
+        // The type declaration follows, after more attributes and documentation.
+        let mut at = index + 1;
+        while at < lines.len() {
+            let next = lines[at].trim();
+            if next.starts_with("#[") || next.starts_with("///") || next.is_empty() {
+                at += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(declaration) = lines.get(at).map(|l| l.trim()) else { break };
+        let after = declaration.trim_start_matches("pub(crate) ").trim_start_matches("pub ");
+        let (is_enum, rest) = match (after.strip_prefix("struct "), after.strip_prefix("enum ")) {
+            (Some(rest), _) => (false, rest),
+            (_, Some(rest)) => (true, rest),
+            _ => {
+                index = at + 1;
+                continue;
+            }
+        };
+        let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        // The body: from the first `{` or `(` of the declaration to its match.
+        let text = lines[at..].join("\n");
+        let open = text.find(['{', '(', ';']);
+        let body = match open {
+            Some(start) if text.as_bytes()[start] != b';' => {
+                let (opener, closer) = if text.as_bytes()[start] == b'{' { (b'{', b'}') } else { (b'(', b')') };
+                let mut depth = 0usize;
+                let mut end = text.len();
+                for (offset, byte) in text.bytes().enumerate().skip(start) {
+                    if byte == opener {
+                        depth += 1;
+                    } else if byte == closer {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = offset;
+                            break;
+                        }
+                    }
+                }
+                text[start..=end.min(text.len() - 1)].to_owned()
+            }
+            _ => String::new(),
+        };
+        let members: Vec<String> = member_names(&body, is_enum)
+            .into_iter()
+            .filter(|m| SECRET_WORDS.iter().any(|w| m.to_ascii_lowercase().contains(w)))
+            .collect();
+        if !members.is_empty() {
+            found.push(DebugFinding { type_name: name, members });
+        }
+        index = at + 1;
+    }
+    found
+}
+
+fn sources_below(dir: &Path) -> Vec<(String, String)> {
+    let mut files = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|x| x == "rs") {
+                let shown = path.strip_prefix(repo_root()).unwrap_or(&path).display().to_string();
+                files.push((shown, read(&path)));
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+#[test]
+fn negative_control_source_guards_derived_debug_with_a_secret_member_is_flagged_and_a_manual_impl_is_not() {
+    let derived = "#[derive(Debug, Clone)]\npub struct Login {\n    pub name: String,\n    pub password: String,\n}\n";
+    assert_eq!(debug_findings(derived), [DebugFinding { type_name: "Login".to_owned(), members: vec!["password".to_owned()] }]);
+    let manual = "pub struct Login {\n    pub name: String,\n    pub password: String,\n}\nimpl std::fmt::Debug for Login {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        f.write_str(\"Login(..)\")\n    }\n}\n";
+    assert!(debug_findings(manual).is_empty(), "a manual implementation that prints a marker is not flagged");
+    let variant = "#[derive(Debug)]\nenum Held {\n    Totp([u8; 20]),\n    RecoveryCode(String),\n    Passkey { prf_salt: Vec<u8> },\n}\n";
+    let found = debug_findings(variant);
+    assert_eq!(found.len(), 1);
+    assert!(found[0].members.contains(&"RecoveryCode".to_owned()) && found[0].members.contains(&"prf_salt".to_owned()), "{found:?}");
+    let clean = "#[derive(Debug)]\nstruct Point {\n    x: i32,\n    y: i32,\n}\n";
+    assert!(debug_findings(clean).is_empty());
+    let nested = "#[derive(Debug)]\nstruct Wrapper {\n    inner: Option<Box<[u8]>>,\n    cookie_jar: Vec<String>,\n}\n";
+    assert_eq!(debug_findings(nested)[0].members, ["cookie_jar"]);
+}
+
+#[test]
+fn source_guards_no_type_that_derives_debug_in_host_or_the_spawn_helper_has_a_member_named_after_a_secret() {
+    let mut findings = Vec::new();
+    let mut used = BTreeSet::new();
+    let mut scanned = 0;
+    for crate_dir in ["host/src", "spawn-helper/src"] {
+        for (file, text) in sources_below(&repo_root().join(crate_dir)) {
+            scanned += 1;
+            for finding in debug_findings(&text) {
+                let id = format!("{file}::{}", finding.type_name);
+                if DEBUG_ALLOWED.iter().any(|(allowed, _)| *allowed == id) {
+                    used.insert(id);
+                } else {
+                    findings.push(format!("{id}: {:?}", finding.members));
+                }
+            }
+        }
+    }
+    let stale: Vec<&str> = DEBUG_ALLOWED.iter().map(|(id, _)| *id).filter(|id| !used.contains(*id)).collect();
+    println!("Source guards (Debug): {scanned} files in host/src and spawn-helper/src; {} allowed types: {:?}; findings: {findings:?}", DEBUG_ALLOWED.len(), DEBUG_ALLOWED);
+    assert!(findings.is_empty(), "a derived Debug on a type with a secret member:\n{}", findings.join("\n"));
+    assert!(stale.is_empty(), "allow-list entries that match nothing: {stale:?}");
+}
+
+/// Files of `server/src` that may print: the command line (its sentences and its three one-line answers).
+/// An entry says why.
+const PRINT_ALLOWED: &[(&str, &str)] = &[
+    ("server/src/cli.rs", "the command line: one sentence on standard error for a refusal, and the answers of keygen, check-config and healthcheck"),
+];
+
+/// The lines of a source text that print through a macro that goes to standard output or standard error. Comments are not code.
+fn print_lines(source: &str) -> Vec<usize> {
+    source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            let code = line.trim_start();
+            !code.starts_with("//") && ["println!", "eprintln!", "dbg!", "print!", "eprint!"].iter().any(|m| code.contains(m))
+        })
+        .map(|(n, _)| n + 1)
+        .collect()
+}
+
+#[test]
+fn negative_control_source_guards_a_print_macro_in_code_is_flagged_and_one_in_a_comment_is_not() {
+    assert_eq!(print_lines("fn a() {\n    println!(\"x\");\n}\n"), [2]);
+    assert_eq!(print_lines("fn a() {\n    dbg!(1);\n    eprintln!(\"x\");\n}\n"), [2, 3]);
+    assert!(print_lines("// println!(\"x\")\n/// eprintln!(\"y\")\nfn a() {}\n").is_empty());
+}
+
+#[test]
+fn source_guards_the_server_prints_only_where_the_command_line_does() {
+    let mut findings = Vec::new();
+    let mut used = BTreeSet::new();
+    let mut scanned = 0;
+    for (file, text) in sources_below(&server_root().join("src")) {
+        scanned += 1;
+        let lines = print_lines(&text);
+        if lines.is_empty() {
+            continue;
+        }
+        if PRINT_ALLOWED.iter().any(|(allowed, _)| *allowed == file) {
+            used.insert(file);
+        } else {
+            findings.push(format!("{file}: lines {lines:?}"));
+        }
+    }
+    assert!(findings.is_empty(), "a print macro outside the command line:\n{}", findings.join("\n"));
+    let stale: Vec<&str> = PRINT_ALLOWED.iter().map(|(f, _)| *f).filter(|f| !used.contains(*f)).collect();
+    assert!(stale.is_empty(), "allow-list entries that print nothing (a file that no longer prints must leave the list): {stale:?}");
+    println!("Source guards (print): {scanned} files in server/src; allowed: {PRINT_ALLOWED:?}");
+}
+
+/// The files that must not know where a person's home is: the HTTP layer, the sign-in code, the accounts service, the audit log
+/// and the store. The home of a person is the helper's and the supervisor's business.
+fn home_unaware_files() -> Vec<(String, String)> {
+    let root = server_root().join("src");
+    let mut files = Vec::new();
+    for part in ["http", "auth"] {
+        files.extend(sources_below(&root.join(part)));
+    }
+    for single in ["accounts.rs", "audit.rs", "store.rs"] {
+        let path = root.join(single);
+        if path.exists() {
+            files.push((format!("server/src/{single}"), read(&path)));
+        } else if path.with_extension("").is_dir() {
+            files.extend(sources_below(&path.with_extension("")));
+        }
+    }
+    files
+}
+
+/// The lines that name the function that makes a home path, the directory that holds the homes, or a home directory by path.
+fn home_path_lines(source: &str) -> Vec<usize> {
+    source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            let code = line.trim_start();
+            !code.starts_with("//") && (code.contains("home_path") || code.contains("\"homes\"") || code.contains("/homes/") || code.contains("home_base"))
+        })
+        .map(|(n, _)| n + 1)
+        .collect()
+}
+
+#[test]
+fn negative_control_source_guards_a_home_path_in_the_http_layer_is_flagged() {
+    assert_eq!(home_path_lines("let h = home_path(base, uid);\n"), [1]);
+    assert_eq!(home_path_lines("let h = data.join(\"homes\");\n"), [1]);
+    assert!(home_path_lines("// the homes directory is the helper's\nlet x = 1;\n").is_empty());
+}
+
+#[test]
+fn source_guards_the_http_sign_in_accounts_audit_and_store_code_never_names_a_home() {
+    let files = home_unaware_files();
+    assert!(files.len() > 10, "the guard reads the files: {}", files.len());
+    let findings: Vec<String> = files.iter().filter_map(|(file, text)| {
+        let lines = home_path_lines(text);
+        (!lines.is_empty()).then(|| format!("{file}: lines {lines:?}"))
+    }).collect();
+    assert!(findings.is_empty(), "a home path in a layer that must not know it:\n{}", findings.join("\n"));
+    println!("Source guards (home path): {} files of server/src/http, server/src/auth, accounts, audit and store name no home directory", files.len());
+}
+
+/// What is wrong with the way `run` and `run_overrides` build the overrides of the running server, and with the declaration of
+/// the fields of `Overrides`: `run` takes the overrides from `run_overrides()`, which is `Overrides::default()` and nothing
+/// else, no field is set in either, and no `cfg(` attribute stands within three lines of a field of the struct.
+fn overrides_problems(source: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    let body_of = |name: &str| -> Option<String> {
+        let start = source.find(&format!("fn {name}("))?;
+        let open = start + source[start..].find('{')?;
+        let mut depth = 0usize;
+        for (offset, byte) in source.bytes().enumerate().skip(open) {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(source[open + 1..offset].to_owned());
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    };
+    let fields = ["listen", "token_writer", "grace", "clock", "oidc_client"];
+    for name in ["run", "run_overrides"] {
+        match body_of(name) {
+            None => problems.push(format!("the function {name} is missing")),
+            Some(body) => {
+                for field in fields {
+                    if body.contains(&format!("{field}:")) || body.contains(&format!(".{field} =")) || body.contains(&format!(".{field}=")) {
+                        problems.push(format!("{name} sets the override {field}"));
+                    }
+                }
+                if body.contains("cfg!(") || body.contains("#[cfg") {
+                    problems.push(format!("{name} selects something by cfg"));
+                }
+            }
+        }
+    }
+    if let Some(body) = body_of("run") {
+        if !body.contains("run_overrides()") {
+            problems.push("run does not take its overrides from run_overrides()".to_owned());
+        }
+    }
+    if let Some(body) = body_of("run_overrides") {
+        if body.trim() != "Overrides::default()" {
+            problems.push("run_overrides is not Overrides::default()".to_owned());
+        }
+    }
+    // No attribute that selects by configuration stands near a field of the struct.
+    let lines: Vec<&str> = source.lines().collect();
+    for (index, line) in lines.iter().enumerate() {
+        let code = line.trim_start();
+        if fields.iter().any(|f| code.starts_with(&format!("pub {f}:"))) {
+            let from = index.saturating_sub(3);
+            let to = (index + 3).min(lines.len() - 1);
+            if lines[from..=to].iter().any(|l| l.contains("cfg(") && !l.trim_start().starts_with("//")) {
+                problems.push(format!("a cfg attribute stands within three lines of the field on line {}", index + 1));
+            }
+        }
+    }
+    problems
+}
+
+#[test]
+fn negative_control_source_guards_run_that_sets_a_field_or_a_cfg_beside_a_field_is_flagged() {
+    let good = "pub struct Overrides {\n    pub listen: Option<u16>,\n    pub oidc_client: Option<u8>,\n}\nfn run_overrides() -> Overrides {\n    Overrides::default()\n}\npub async fn run(p: u8) {\n    let o = run_overrides();\n}\n";
+    assert!(overrides_problems(good).is_empty(), "{:?}", overrides_problems(good));
+    let sets = good.replace("let o = run_overrides();", "let o = run_overrides();\n    let x = Overrides { oidc_client: Some(1), ..o };");
+    assert!(overrides_problems(&sets).iter().any(|p| p.contains("sets the override oidc_client")), "{:?}", overrides_problems(&sets));
+    let cfg = good.replace("    pub listen", "    #[cfg(test)]\n    pub listen");
+    assert!(overrides_problems(&cfg).iter().any(|p| p.contains("cfg attribute")), "{:?}", overrides_problems(&cfg));
+    let other = good.replace("Overrides::default()", "Overrides { listen: None }");
+    assert!(!overrides_problems(&other).is_empty());
+    let skipped = good.replace("let o = run_overrides();", "let o = Overrides::default();");
+    assert!(overrides_problems(&skipped).iter().any(|p| p.contains("does not take")), "{:?}", overrides_problems(&skipped));
+}
+
+#[test]
+fn source_guards_the_running_server_is_built_from_the_default_overrides_and_no_attribute_selects_one() {
+    let source = read(&server_root().join("src/supervisor/serve.rs"));
+    let problems = overrides_problems(&source);
+    assert!(problems.is_empty(), "{problems:?}");
+    println!("Source guards (overrides): run takes run_overrides(), which is Overrides::default(); no field is set and no cfg stands near a field");
+}
