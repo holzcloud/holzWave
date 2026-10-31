@@ -295,6 +295,9 @@ export async function runTest(name, harnessOptions, body) {
   }
   if (failure) {
     console.error(`FAIL ${name} [${engine}]: ${String(failure.message ?? failure).split("\n").slice(0, 12).join("\n")}`);
+    // The line of the test file that was running when it failed.
+    const where = String(failure.stack ?? "").split("\n").find((line) => /\.test\.mjs:\d+/.test(line));
+    if (where) console.error(`  ${where.trim()}`);
     process.exit(1);
   }
   console.log(`ok ${name} [${engine}]`);
@@ -425,4 +428,75 @@ export async function inviteLink(page, admin, { role = "Member" } = {}) {
   await page.getByRole("button", { name: "Done" }).click();
   await dialog.getByRole("button", { name: "Close" }).click();
   return { link, note, stepUp: first === "step-up" };
+}
+
+/** The row of the people list that belongs to the person with this username. */
+export const personRow = (page, username) =>
+  page.locator(".people tbody tr", { has: page.locator(".ppl-user", { hasText: new RegExp(`^${username.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) }) });
+
+/** What the list says about a person: the role and the state word. */
+export async function personFacts(page, username) {
+  const row = personRow(page, username);
+  return { role: (await row.locator(".ppl-role").innerText()).trim(), state: (await row.locator(".ppl-state .ppl-word").innerText()).trim() };
+}
+
+/** Open the menu of a person's row and resolve with the entries (label, whether it is held back). */
+export async function openMenu(page, username) {
+  await personRow(page, username).locator("button.ppl-more").click();
+  const menu = page.getByRole("menu");
+  await menu.waitFor();
+  const items = menu.getByRole("menuitem");
+  const out = [];
+  for (const item of await items.all()) out.push({ label: (await item.innerText()).trim(), held: (await item.getAttribute("aria-disabled")) === "true" });
+  return { menu, out };
+}
+
+/** The step-up layer, answered with the password. Resolves when it is gone. */
+export async function confirmItsYou(page, password) {
+  const layer = page.getByRole("dialog", { name: "Confirm it is you" });
+  await layer.waitFor();
+  await page.locator("#web-step-field").fill(password);
+  await page.getByRole("button", { name: "Confirm" }).click();
+  await layer.waitFor({ state: "detached" });
+}
+
+/** Make `provoked` runs of wrong passwords for a person in a context of its own until the server says to wait. */
+export async function provokeLockout(open, harness, username) {
+  const context = await open();
+  const page = await openPage(context, harness, "/");
+  await page.waitForSelector(".lg-box");
+  for (let attempt = 1; attempt <= 7; attempt++) {
+    await page.getByLabel("Username").fill(username);
+    await page.getByLabel("Password", { exact: true }).fill("this is not the password");
+    await page.getByRole("button", { name: "Continue" }).click();
+    const sentence = await answered(page);
+    if (sentence.startsWith("Too many attempts")) {
+      await page.close();
+      return attempt;
+    }
+  }
+  throw new Error("the server did not ask to wait after seven wrong passwords");
+}
+
+/**
+ * Open one WebSocket to the server from the page, as a script of the page would, and report how it ended: `{ opened, code }`.
+ * The code is the one the server closed with (4401 for a session that is over), or 1006 when the upgrade was refused.
+ */
+export function socketOutcome(page, ms = 10_000) {
+  return page.evaluate(
+    (limit) =>
+      new Promise((resolve) => {
+        const socket = new WebSocket(`wss://${location.host}/ws`);
+        let opened = false;
+        const timer = setTimeout(() => resolve({ opened, code: null }), limit);
+        socket.onopen = () => {
+          opened = true;
+        };
+        socket.onclose = (e) => {
+          clearTimeout(timer);
+          resolve({ opened, code: e.code });
+        };
+      }),
+    ms,
+  );
 }
