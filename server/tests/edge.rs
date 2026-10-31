@@ -197,6 +197,10 @@ fn quoted_after(source: &str, markers: &[&str]) -> Vec<String> {
 fn resolve(from: &str, spec: &str) -> String {
     let mut parts: Vec<&str> = from.split('/').collect();
     parts.pop();
+    if spec.starts_with('/') {
+        // A name from the root does not depend on where the file that names it lives.
+        parts = vec![""];
+    }
     for piece in spec.split('/') {
         match piece {
             "." | "" => {}
@@ -210,8 +214,9 @@ fn resolve(from: &str, spec: &str) -> String {
     if joined.starts_with('/') { joined } else { format!("/{joined}") }
 }
 
+/// A name inside this site: relative to the file that names it, or from the root (never a scheme or a `//` host).
 fn relative(spec: &str) -> bool {
-    spec.starts_with("./") || spec.starts_with("../")
+    spec.starts_with("./") || spec.starts_with("../") || (spec.starts_with('/') && !spec.starts_with("//"))
 }
 
 /// Everything the sign-in page uses, found by following the built files: the script and the styles the page names, the
