@@ -620,3 +620,199 @@ pub fn focus(view: &Value) -> u64 {
 pub fn key() -> holzwave_server::keyfile::ServerKey {
     edge::server_key()
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A socket without a network
+// ---------------------------------------------------------------------------------------------------------------------
+
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use holzwave_server::auth::session::Ended;
+use holzwave_server::http::transport::{Inbound as In, Outgoing, Transport, TransportError};
+use holzwave_server::http::ws::{Attached, PortError, SessionPort, Wiring, serve_socket};
+use holzwave_server::limits::Limits;
+use holzwave_server::config::Sessions;
+use holzwave_server::store::{AccountId, Session};
+use tokio::sync::{broadcast, mpsc};
+
+/// What a [`FakeTransport`] was asked to write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sent {
+    Text(String),
+    Binary(usize),
+    Ping,
+    Close(u16, String),
+}
+
+/// A transport the test drives by hand: frames go in through a channel, writes are recorded, and a write can be made to never
+/// finish (a peer that does not read).
+pub struct FakeTransport {
+    inbound: mpsc::UnboundedReceiver<Result<In, TransportError>>,
+    log: Arc<Mutex<Vec<Sent>>>,
+    stall: Arc<AtomicBool>,
+    stall_ping: Arc<AtomicBool>,
+}
+
+impl Transport for FakeTransport {
+    async fn recv(&mut self) -> Result<In, TransportError> {
+        match self.inbound.recv().await {
+            Some(frame) => frame,
+            None => Err(TransportError::Closed),
+        }
+    }
+
+    async fn send(&mut self, message: Outgoing) -> Result<(), TransportError> {
+        if self.stall.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        let sent = match message {
+            Outgoing::Text(text) => Sent::Text(text),
+            Outgoing::Binary(bytes) => Sent::Binary(bytes.len()),
+        };
+        self.log.lock().expect("lock").push(sent);
+        Ok(())
+    }
+
+    async fn ping(&mut self) -> Result<(), TransportError> {
+        if self.stall_ping.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        self.log.lock().expect("lock").push(Sent::Ping);
+        Ok(())
+    }
+
+    async fn close(&mut self, code: u16, reason: &'static str) {
+        self.log.lock().expect("lock").push(Sent::Close(code, reason.to_owned()));
+    }
+}
+
+/// A [`SessionPort`] the test sets: what the checks answer and whether the store is locked.
+pub struct FakePort {
+    pub check_answer: Mutex<Result<(), PortError>>,
+    pub touch_answer: Mutex<Result<(), PortError>>,
+    pub locked: AtomicBool,
+    pub checks: AtomicUsize,
+    pub touches: AtomicUsize,
+    pub ended: broadcast::Sender<Ended>,
+}
+
+impl FakePort {
+    pub fn new() -> Arc<FakePort> {
+        Arc::new(FakePort {
+            check_answer: Mutex::new(Ok(())),
+            touch_answer: Mutex::new(Ok(())),
+            locked: AtomicBool::new(false),
+            checks: AtomicUsize::new(0),
+            touches: AtomicUsize::new(0),
+            ended: broadcast::channel(4).0,
+        })
+    }
+}
+
+/// The port as the loop holds it: a clone of the test's handle.
+pub struct PortHandle(pub Arc<FakePort>);
+
+impl SessionPort for PortHandle {
+    async fn check(&self, session: &Session, _now: i64) -> Result<Session, PortError> {
+        self.0.checks.fetch_add(1, Ordering::SeqCst);
+        (*self.0.check_answer.lock().expect("lock")).map(|()| session.clone())
+    }
+
+    async fn touch(&self, session: &Session, _now: i64) -> Result<Session, PortError> {
+        self.0.touches.fetch_add(1, Ordering::SeqCst);
+        (*self.0.touch_answer.lock().expect("lock")).map(|()| session.clone())
+    }
+
+    async fn locked(&self, _account: AccountId) -> bool {
+        self.0.locked.load(Ordering::SeqCst)
+    }
+
+    fn ended(&self) -> broadcast::Receiver<Ended> {
+        self.0.ended.subscribe()
+    }
+}
+
+/// A socket loop on a fake transport, attached to a real worker of the environment.
+pub struct Rig {
+    pub frames: mpsc::UnboundedSender<Result<In, TransportError>>,
+    pub log: Arc<Mutex<Vec<Sent>>>,
+    pub stall: Arc<AtomicBool>,
+    pub stall_ping: Arc<AtomicBool>,
+    pub port: Arc<FakePort>,
+    pub shutdown: Shutdown,
+    pub task: JoinHandle<()>,
+}
+
+impl Rig {
+    /// Attaches a socket of `person` and serves it over a fake transport with the settings of the limits in force, changed by
+    /// `tune`.
+    pub async fn start(env: &WsEnv, person: &Person, tune: fn(&mut SocketSettings)) -> Rig {
+        let mut settings = SocketSettings::from_limits(&Limits::DEFAULT, Sessions::default());
+        tune(&mut settings);
+        let (handle, rx) = env.supervisor.attach(person.key).await.expect("attach");
+        let (frames, inbound) = mpsc::unbounded_channel();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let stall = Arc::new(AtomicBool::new(false));
+        let stall_ping = Arc::new(AtomicBool::new(false));
+        let transport = FakeTransport { inbound, log: log.clone(), stall: stall.clone(), stall_ping: stall_ping.clone() };
+        let port = FakePort::new();
+        let shutdown = Shutdown::new();
+        let clock = env.test.app.clock.clone();
+        let wiring = Wiring { port: PortHandle(port.clone()), clock, settings, shutdown: shutdown.clone() };
+        let session = person.signed.session.clone();
+        let task = tokio::spawn(serve_socket(transport, session, Attached { handle, rx }, wiring));
+        // The loop listens for the end of sessions as soon as it runs; a test that announces one waits for that.
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        while port.ended.receiver_count() == 0 {
+            assert!(tokio::time::Instant::now() < deadline, "the loop did not start");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        Rig { frames, log, stall, stall_ping, port, shutdown, task }
+    }
+
+    /// Hands the loop a frame as if the peer had sent it.
+    pub fn feed(&self, frame: Result<In, TransportError>) {
+        let _ = self.frames.send(frame);
+    }
+
+    pub fn text(&self, text: &str) {
+        self.feed(Ok(In::Text(text.to_owned())));
+    }
+
+    /// Everything written so far.
+    pub fn sent(&self) -> Vec<Sent> {
+        self.log.lock().expect("lock").clone()
+    }
+
+    /// The close message the loop wrote, if it wrote one.
+    pub fn closed_with(&self) -> Option<(u16, String)> {
+        self.sent().into_iter().find_map(|s| if let Sent::Close(code, reason) = s { Some((code, reason)) } else { None })
+    }
+
+    /// Waits until the loop has ended.
+    pub async fn finished(&mut self, within: Duration) -> bool {
+        tokio::time::timeout(within, &mut self.task).await.is_ok()
+    }
+
+    /// Waits until `check` holds for what was written.
+    pub async fn wait_sent(&self, what: &str, within: Duration, check: impl Fn(&[Sent]) -> bool) {
+        let deadline = tokio::time::Instant::now() + within;
+        while !check(&self.sent()) {
+            assert!(tokio::time::Instant::now() < deadline, "{what} was not written in time; wrote {:?}", self.sent());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// The `hw-session` states written so far.
+    pub fn session_states(&self) -> Vec<String> {
+        self.sent()
+            .into_iter()
+            .filter_map(|s| match s {
+                Sent::Text(t) => serde_json::from_str::<Value>(&t).ok().filter(|v| v["event"] == "hw-session"),
+                _ => None,
+            })
+            .map(|v| v["payload"]["state"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+}
