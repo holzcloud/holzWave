@@ -1,5 +1,11 @@
 //! The routes that move files between the browser and the person's home directory.
 //!
+//! `PUT /api/upload?name=<file name>` takes a file as the raw request body and has the person's own worker write it into the
+//! upload folder of the person's home. The route checks everything it can before it reads a byte (the name, the declared
+//! length, the number of uploads running), cleans the name, and then passes the body on in pieces of at most 1 MiB, one in
+//! flight, to the worker. The worker never trusts what it gets, and the supervisor opens no path. An upload that ends in any
+//! way but a complete body is aborted, and the worker removes what it wrote.
+//!
 //! `GET /files/{token}` (and `HEAD`) serves a file that the person's own `file_grant` made available, with the answers of the
 //! desktop's `holzfile` scheme: the whole file when it is small and no range was asked, `206` for one range of at most the
 //! chunk limit, `416` for a range that cannot be satisfied and `413` for a large file asked for without a range. The route
@@ -11,38 +17,134 @@
 //! takes the one before, so a response holds one piece, a client that goes away stops the reads, and a worker that fails ends
 //! the response with a closed connection, never with a short body and a success status.
 
+use std::collections::HashMap;
 use std::future::Future;
+use std::path::{Component, Path};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 
+use axum::Json;
 use axum::body::{Body, Bytes};
-use axum::extract::Request;
-use axum::http::header::{self, HeaderName, HeaderValue};
-use axum::http::{Method, StatusCode};
+use axum::extract::{Query, Request};
+use axum::http::header::{self, HeaderMap, HeaderName, HeaderValue};
+use axum::http::{Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, put};
 use axum::{Extension, Router};
 use holzwave_host::ranges::{CHUNK, Range, WHOLE, parse_range};
+use http_body_util::BodyExt;
 use hyper::body::{Body as HttpBody, Frame, SizeHint};
 use serde::Deserialize;
+use tokio::sync::broadcast::error::RecvError;
 
+use super::app::App;
+use super::csrf;
 use super::router::{Access, ApiError, Authed, Part};
+use crate::auth::session::SessionManager;
 use crate::limits;
+use crate::store::AccountId;
 use crate::supervisor::serve::Services;
 use crate::supervisor::{AccountKey, FileError, Supervisor};
 use crate::wire::{Ctl, FileWhat, ResBody, valid_token};
+use crate::worker::files::valid_dir;
 
-/// What a download of a file needs from the rest of the server.
+/// What the file routes need from the rest of the server.
 struct FileState {
     supervisor: Supervisor,
+    app: Arc<App>,
+    sessions: Arc<SessionManager>,
+    /// The upload folder below a person's home, as `a/b` (None when the configuration holds something the worker would
+    /// refuse, which the configuration check prevents).
+    folder: Option<String>,
+    /// The largest upload in bytes.
+    upload_max: u64,
+    /// The uploads running.
+    uploads: Arc<Slots>,
 }
 
-/// The routes of this module: the download under a session.
+/// The routes of this module: the download under a session and the upload.
 pub fn parts(services: &Services) -> Vec<Part> {
-    let state = Arc::new(FileState { supervisor: services.supervisor.clone() });
-    let download = Router::new().route("/files/{token}", get(download)).layer(Extension(state));
-    vec![Part { access: Access::Session, router: download }]
+    let limits = services.app.limits;
+    let state = Arc::new(FileState {
+        supervisor: services.supervisor.clone(),
+        app: services.app.clone(),
+        sessions: services.sessions.clone(),
+        folder: folder_of(&services.upload.dir),
+        upload_max: services.upload.max_bytes,
+        uploads: Slots::new(limits.uploads_per_person, limits.uploads_total),
+    });
+    let download = Router::new().route("/files/{token}", get(download)).layer(Extension(state.clone()));
+    let upload = Router::new().route("/api/upload", put(upload)).layer(Extension(state));
+    vec![Part { access: Access::Session, router: download }, Part { access: Access::Upload, router: upload }]
+}
+
+/// The configured upload folder as the worker wants it: the plain components joined with `/`.
+fn folder_of(dir: &Path) -> Option<String> {
+    let mut parts = Vec::new();
+    for component in dir.components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_str()?),
+            _ => return None,
+        }
+    }
+    let folder = parts.join("/");
+    valid_dir(&folder).then_some(folder)
+}
+
+// ---- the places ---------------------------------------------------------------------------------------------------------
+
+/// Counts the transfers of each person and of the whole server. A person's transfer holds a [`Permit`] for as long as it
+/// runs; the place goes back when the permit drops, wherever the transfer ended.
+struct Slots {
+    per_person: usize,
+    total: usize,
+    held: Mutex<Held>,
+}
+
+#[derive(Default)]
+struct Held {
+    all: usize,
+    by_person: HashMap<AccountId, usize>,
+}
+
+impl Slots {
+    fn new(per_person: u32, total: u32) -> Arc<Slots> {
+        let size = |n: u32| usize::try_from(n).unwrap_or(usize::MAX);
+        Arc::new(Slots { per_person: size(per_person), total: size(total), held: Mutex::new(Held::default()) })
+    }
+
+    /// A place for `account`, or none when the person or the server is full.
+    fn take(self: &Arc<Slots>, account: AccountId) -> Option<Permit> {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        let mine = held.by_person.get(&account).copied().unwrap_or(0);
+        if held.all >= self.total || mine >= self.per_person {
+            return None;
+        }
+        held.all += 1;
+        held.by_person.insert(account, mine + 1);
+        drop(held);
+        Some(Permit { slots: self.clone(), account })
+    }
+}
+
+/// A place in [`Slots`].
+struct Permit {
+    slots: Arc<Slots>,
+    account: AccountId,
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        let mut held = self.slots.held.lock().unwrap_or_else(PoisonError::into_inner);
+        held.all = held.all.saturating_sub(1);
+        if let Some(mine) = held.by_person.get_mut(&self.account) {
+            *mine = mine.saturating_sub(1);
+            if *mine == 0 {
+                held.by_person.remove(&self.account);
+            }
+        }
+    }
 }
 
 // ---- the headers --------------------------------------------------------------------------------------------------------
@@ -196,7 +298,7 @@ struct Plan {
 
 /// The answer to a range header for a file of `size` bytes, as the desktop's file scheme gives it: `Err` is the response to
 /// send instead.
-fn plan(range_header: Option<&str>, size: u64) -> Result<Plan, Response> {
+fn plan(range_header: Option<&str>, size: u64) -> Result<Plan, Box<Response>> {
     match parse_range(range_header, size) {
         Range::Unsatisfiable => {
             let mut response = Response::new(Body::empty());
@@ -206,7 +308,7 @@ fn plan(range_header: Option<&str>, size: u64) -> Result<Plan, Response> {
                 headers.insert(header::CONTENT_RANGE, value);
             }
             headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
-            Err(hardened(response))
+            Err(Box::new(hardened(response)))
         }
         Range::Bytes(start, end) => {
             let end = end.min(start.saturating_add(CHUNK - 1));
@@ -218,7 +320,7 @@ fn plan(range_header: Option<&str>, size: u64) -> Result<Plan, Response> {
             })
         }
         Range::Whole if size <= WHOLE => Ok(Plan { status: StatusCode::OK, start: 0, length: size, range: None }),
-        Range::Whole => Err(too_large()),
+        Range::Whole => Err(Box::new(too_large())),
     }
 }
 
@@ -255,7 +357,7 @@ async fn download(request: Request) -> Response {
     };
     let plan = match plan(range_header(&request), size) {
         Ok(plan) => plan,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let Ok(mime) = HeaderValue::from_str(&mime) else { return refuse(ApiError::Busy) };
 
@@ -283,4 +385,286 @@ async fn download(request: Request) -> Response {
         headers.insert(header::CONTENT_RANGE, value);
     }
     hardened(response)
+}
+
+// ---- the name -----------------------------------------------------------------------------------------------------------
+
+/// The name given to a file whose own name is nothing a file system should hold.
+pub const FALLBACK_NAME: &str = "upload";
+
+/// Whether `c` is a character a name must not carry: a control character, an invisible formatting or direction character, or a
+/// line or paragraph separator.
+fn unwanted(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061C}'
+                | '\u{06DD}'
+                | '\u{070F}'
+                | '\u{08E2}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{110BD}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0001}'
+                | '\u{E0020}'..='\u{E007F}'
+        )
+}
+
+/// The longest prefix of `text` that is at most `max` bytes and ends on a character boundary.
+fn cut(text: &str, max: usize) -> &str {
+    let mut end = max.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// A file name that is safe to create, made from the name the page gave: the part after the last `/` or `\`, every control,
+/// invisible or direction character as `_`, no space or dot at either end (so no hidden file and no `..`), at most
+/// [`limits::UPLOAD_NAME_BYTES`] bytes on a character boundary with a short extension kept, and [`FALLBACK_NAME`] when nothing
+/// is left. The worker checks the result again.
+pub fn clean_name(raw: &str) -> String {
+    let last = raw.rsplit(['/', '\\']).next().unwrap_or("");
+    let replaced: String = last.chars().map(|c| if unwanted(c) { '_' } else { c }).collect();
+    let trim = |text: &str| text.trim_matches(|c: char| c == ' ' || c == '.').to_owned();
+    let mut name = trim(&replaced);
+    if name.len() > limits::UPLOAD_NAME_BYTES {
+        let extension = name
+            .rfind('.')
+            .filter(|at| *at > 0 && name.len() - *at <= limits::UPLOAD_EXTENSION_KEEP)
+            .map(|at| name[at..].to_owned());
+        name = match extension {
+            Some(extension) => {
+                let stem = trim(cut(&name[..name.len() - extension.len()], limits::UPLOAD_NAME_BYTES - extension.len()));
+                if stem.is_empty() { cut(&format!("{FALLBACK_NAME}{extension}"), limits::UPLOAD_NAME_BYTES).to_owned() } else { format!("{stem}{extension}") }
+            }
+            None => trim(cut(&name, limits::UPLOAD_NAME_BYTES)),
+        };
+    }
+    if name.is_empty() { FALLBACK_NAME.to_owned() } else { name }
+}
+
+/// The name of the upload from the query: exactly one parameter, `name`, of reasonable length.
+fn name_of(uri: &Uri) -> Result<String, ApiError> {
+    let bad = ApiError::BadRequest { field: Some("name") };
+    let raw = uri.query().ok_or(bad)?;
+    if raw.len() > limits::UPLOAD_QUERY_BYTES {
+        return Err(bad);
+    }
+    let Query(pairs) = Query::<Vec<(String, String)>>::try_from_uri(uri).map_err(|_| bad)?;
+    let [(key, value)] = pairs.as_slice() else { return Err(bad) };
+    if key != "name" || value.len() > limits::UPLOAD_NAME_INPUT_BYTES {
+        return Err(bad);
+    }
+    Ok(clean_name(value))
+}
+
+/// The length the request declares, which must be there, must not be chunked and must not be over the limit.
+fn declared_size(headers: &HeaderMap, max: u64) -> Result<u64, ApiError> {
+    let bad = ApiError::BadRequest { field: Some("size") };
+    if headers.contains_key(header::TRANSFER_ENCODING) {
+        return Err(bad);
+    }
+    match csrf::declared_length(headers) {
+        Ok(Some(size)) if size <= max => Ok(size),
+        _ => Err(bad),
+    }
+}
+
+// ---- the upload ---------------------------------------------------------------------------------------------------------
+
+/// What the worker answers to the close of an upload that was kept.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Stored {
+    path: String,
+    size: u64,
+}
+
+/// The path and size of a kept upload, if the worker's answer is what a worker may say: UTF-8, absolute, bounded, without a
+/// control character and with the size that was declared.
+fn read_stored(text: &str, size: u64) -> Option<Stored> {
+    if text.len() > limits::UPLOAD_PATH_BYTES + 64 {
+        return None;
+    }
+    let stored: Stored = serde_json::from_str(text).ok()?;
+    let fine = stored.size == size
+        && stored.path.starts_with('/')
+        && stored.path.len() <= limits::UPLOAD_PATH_BYTES
+        && !stored.path.chars().any(char::is_control);
+    fine.then_some(stored)
+}
+
+/// An upload that is open in a worker. Ending it is [`Transfer::abort`] or a close; when the handler is dropped in between (the
+/// client went away) the drop sends the abort, so the worker removes the part file whatever happened.
+struct Transfer {
+    supervisor: Supervisor,
+    key: AccountKey,
+    id: u64,
+    open: bool,
+    permit: Option<Permit>,
+}
+
+impl Transfer {
+    /// Tells the worker to drop the upload and remove what it wrote.
+    async fn abort(&mut self) {
+        if self.open {
+            self.open = false;
+            let _ = self.supervisor.file_call(self.key, Ctl::UploadClose { id: self.id, commit: false }, false).await;
+        }
+    }
+
+    /// One piece, answered when it is on the disk. An answer of the worker that is not a success has ended the upload there.
+    async fn piece(&mut self, bytes: Vec<u8>) -> Result<(), ApiError> {
+        match self.supervisor.file_call(self.key, Ctl::UploadPiece { id: self.id, bytes }, false).await {
+            Ok(ResBody::Ok(_)) => Ok(()),
+            Ok(_) => {
+                self.open = false;
+                Err(ApiError::Busy)
+            }
+            Err(_) => Err(ApiError::Busy),
+        }
+    }
+}
+
+impl Drop for Transfer {
+    fn drop(&mut self) {
+        if !self.open {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
+        let (supervisor, key, id, permit) = (self.supervisor.clone(), self.key, self.id, self.permit.take());
+        runtime.spawn(async move {
+            let _ = supervisor.file_call(key, Ctl::UploadClose { id, commit: false }, false).await;
+            drop(permit);
+        });
+    }
+}
+
+/// Whether the session has ended; a store that cannot be read counts as ended.
+async fn session_gone(state: &FileState, authed: &Authed) -> bool {
+    let (sessions, session, now) = (state.sessions.clone(), authed.session.clone(), state.app.clock.unix());
+    tokio::task::spawn_blocking(move || sessions.check(&session, now).is_err()).await.unwrap_or(true)
+}
+
+async fn upload(request: Request) -> Response {
+    upload_checked(request).await.unwrap_or_else(IntoResponse::into_response)
+}
+
+async fn upload_checked(request: Request) -> Result<Response, ApiError> {
+    let state = request.extensions().get::<Arc<FileState>>().cloned().ok_or(ApiError::Busy)?;
+    let authed = request.extensions().get::<Authed>().cloned().ok_or(ApiError::Invalid)?;
+    let key = AccountKey { id: authed.account.id, uid: authed.account.uid };
+    if request.method() != Method::PUT {
+        return Err(ApiError::MethodNotAllowed);
+    }
+    // Everything that can be refused before a byte of the body is read.
+    let name = name_of(request.uri())?;
+    let size = declared_size(request.headers(), state.upload_max)?;
+    let folder = state.folder.clone().ok_or(ApiError::Busy)?;
+    let permit = state.uploads.take(authed.account.id).ok_or(ApiError::Busy)?;
+
+    let id = state.supervisor.file_id();
+    let mut transfer = Transfer { supervisor: state.supervisor.clone(), key, id, open: true, permit: Some(permit) };
+    let open = Ctl::UploadOpen { id, size, folder, name };
+    match state.supervisor.file_call(key, open, true).await {
+        Ok(ResBody::Ok(_)) => {}
+        Ok(_) => {
+            transfer.open = false;
+            return Err(ApiError::Busy);
+        }
+        Err(_) => {
+            transfer.abort().await;
+            return Err(ApiError::Busy);
+        }
+    }
+    let outcome = receive(&state, &authed, &mut transfer, request, size).await;
+    if outcome.is_err() {
+        transfer.abort().await;
+    }
+    outcome
+}
+
+/// Reads the body, passes it on and closes the upload.
+async fn receive(
+    state: &FileState,
+    authed: &Authed,
+    transfer: &mut Transfer,
+    request: Request,
+    size: u64,
+) -> Result<Response, ApiError> {
+    let stall = state.app.limits.upload_stall;
+    let mut ended = state.sessions.subscribe_ended();
+    // A sign-out between the check of the guard and the subscription is not announced to this receiver.
+    if session_gone(state, authed).await {
+        return Err(ApiError::Invalid);
+    }
+    let mut body = request.into_body();
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut received: u64 = 0;
+    loop {
+        let frame = tokio::select! {
+            told = ended.recv() => {
+                match told {
+                    Ok(ended) if ended.ends(&authed.session) => return Err(ApiError::Invalid),
+                    Ok(_) => {}
+                    Err(RecvError::Lagged(_)) => {
+                        if session_gone(state, authed).await {
+                            return Err(ApiError::Invalid);
+                        }
+                    }
+                    Err(RecvError::Closed) => return Err(ApiError::Busy),
+                }
+                continue;
+            }
+            frame = tokio::time::timeout(stall, body.frame()) => frame,
+        };
+        let Ok(frame) = frame else { return Err(ApiError::BadRequest { field: None }) };
+        match frame {
+            None => break,
+            Some(Err(_)) => return Err(ApiError::BadRequest { field: None }),
+            Some(Ok(frame)) => {
+                let Ok(data) = frame.into_data() else { continue };
+                received += data.len() as u64;
+                if received > size {
+                    return Err(ApiError::BadRequest { field: Some("size") });
+                }
+                buffer.extend_from_slice(&data);
+                while buffer.len() >= limits::FILE_PIECE_BYTES {
+                    let rest = buffer.split_off(limits::FILE_PIECE_BYTES);
+                    let piece = std::mem::replace(&mut buffer, rest);
+                    transfer.piece(piece).await?;
+                }
+            }
+        }
+    }
+    if received != size {
+        return Err(ApiError::BadRequest { field: Some("size") });
+    }
+    if !buffer.is_empty() {
+        transfer.piece(std::mem::take(&mut buffer)).await?;
+    }
+    match transfer.supervisor.file_call(transfer.key, Ctl::UploadClose { id: transfer.id, commit: true }, false).await {
+        Ok(ResBody::Ok(text)) => {
+            transfer.open = false;
+            let stored = read_stored(&text, size).ok_or(ApiError::Busy)?;
+            let mut response = Json(serde_json::json!({ "path": stored.path, "size": stored.size })).into_response();
+            response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            Ok(response)
+        }
+        Ok(_) => {
+            transfer.open = false;
+            Err(ApiError::Busy)
+        }
+        Err(_) => Err(ApiError::Busy),
+    }
 }

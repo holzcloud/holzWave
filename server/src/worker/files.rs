@@ -196,10 +196,11 @@ impl Grants {
     /// A grant was made: it counts as used now. The oldest record is forgotten when there are too many.
     fn record(&self, token: &str) {
         let mut used = self.lock();
-        if used.len() >= limits::GRANT_RECORDS && !used.contains_key(token) {
-            if let Some(oldest) = used.iter().min_by_key(|(_, at)| **at).map(|(token, _)| token.clone()) {
-                used.remove(&oldest);
-            }
+        if used.len() >= limits::GRANT_RECORDS
+            && !used.contains_key(token)
+            && let Some(oldest) = used.iter().min_by_key(|(_, at)| **at).map(|(token, _)| token.clone())
+        {
+            used.remove(&oldest);
         }
         used.insert(token.to_owned(), Instant::now());
     }
@@ -219,10 +220,11 @@ impl Grants {
                 false
             }
             _ => {
-                if used.len() >= limits::GRANT_RECORDS && !used.contains_key(token) {
-                    if let Some(oldest) = used.iter().min_by_key(|(_, at)| **at).map(|(token, _)| token.clone()) {
-                        used.remove(&oldest);
-                    }
+                if used.len() >= limits::GRANT_RECORDS
+                    && !used.contains_key(token)
+                    && let Some(oldest) = used.iter().min_by_key(|(_, at)| **at).map(|(token, _)| token.clone())
+                {
+                    used.remove(&oldest);
                 }
                 used.insert(token.to_owned(), now);
                 true
