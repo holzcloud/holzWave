@@ -606,7 +606,7 @@ impl Default for Upload {
     }
 }
 
-/// Whether the WebSocket compresses messages.
+/// Whether the WebSocket compresses messages. A value that this build cannot honour is refused by [`prepare`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
 pub enum Compression {
@@ -784,6 +784,7 @@ pub fn prepare(env: &Env, probe: &dyn Probe) -> Result<Prepared, Refusal> {
     let sessions = check_sessions(&config.sessions)?;
     let limits = Limits::resolve(&config.limits)?;
     let upload = check_upload(&config.upload)?;
+    crate::http::transport::check(config.transport.compression).map_err(Refusal::new)?;
 
     let key = probe.load_key(&key_path)?;
 

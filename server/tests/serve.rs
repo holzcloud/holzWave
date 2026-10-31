@@ -238,9 +238,11 @@ async fn assemble_lets_a_person_open_the_socket_and_call_a_command() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn assemble_refuses_compression_with_the_sentence_of_the_transport() {
-    let mut site = Site::new();
-    site.set("transport.compression", json!("deflate"));
-    let prepared = site.prepared().expect("the file is valid");
+    let site = Site::new();
+    // The configuration check refuses `deflate` already (see the tests of the compression switch), so the value is put into the
+    // checked configuration by hand: the assembly must refuse it with the same sentence on its own.
+    let mut prepared = site.prepared().expect("the file is valid");
+    prepared.transport.compression = holzwave_server::config::Compression::Deflate;
     let refusal = assemble(prepared, Overrides::default()).await.err().expect("a refusal");
     assert!(refusal.sentence().contains("compression") && refusal.sentence().contains("deflate"), "{refusal}");
     assert!(!refusal.sentence().contains('\n'));

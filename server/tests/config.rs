@@ -526,7 +526,7 @@ fn config_every_key_of_the_file_is_accepted() {
             "nproc": 512, "nofile": 2048, "helper_path": "/opt/hw/helper", "worker_path": "/opt/hw/server"
         },
         "upload": {"dir": "incoming/files", "max_bytes": 1048576},
-        "transport": {"compression": "deflate"}
+        "transport": {"compression": "off"}
     });
     let p = prepare_json(&s, &full).expect("a file with every key");
     assert_eq!(p.origin.as_str(), "https://hw.example.test:8443");
@@ -536,7 +536,7 @@ fn config_every_key_of_the_file_is_accepted() {
     assert_eq!(p.limits.ping_interval, Duration::from_secs(20));
     assert_eq!(p.workers.uid_min, 30_000);
     assert_eq!(p.upload.dir, PathBuf::from("incoming/files"));
-    assert_eq!(p.transport.compression, Compression::Deflate);
+    assert_eq!(p.transport.compression, Compression::Off);
     assert_eq!(p.auth.oidc[0].groups_claim.as_deref(), Some("roles"));
 
     // A variable replaces data_dir.

@@ -391,6 +391,8 @@ pub struct WsClient {
     /// Whether a ping of the server is answered by a pong.
     pub auto_pong: bool,
     ended: bool,
+    /// The header lines of the 101 answer, in the order they came.
+    pub handshake: Vec<(String, String)>,
 }
 
 /// A TLS connection to `addr` that trusts `der` and nothing else, for HTTP/1.1.
@@ -420,11 +422,12 @@ impl WsClient {
             return Err(reply);
         }
         assert_eq!(reply.header("sec-websocket-accept"), Some("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="), "the accept key");
+        client.handshake = reply.headers;
         Ok(client)
     }
 
     fn new(conn: Conn<TlsStream<TcpStream>>) -> WsClient {
-        WsClient { conn, buffer: Vec::new(), backlog: VecDeque::new(), next: 1, auto_pong: true, ended: false }
+        WsClient { conn, buffer: Vec::new(), backlog: VecDeque::new(), next: 1, auto_pong: true, ended: false, handshake: Vec::new() }
     }
 
     /// Reads the head of the answer to the upgrade (and its body when it is not a switch); what follows stays in the buffer.

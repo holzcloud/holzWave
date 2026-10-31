@@ -181,13 +181,28 @@ impl Transport for AxumTransport {
     }
 }
 
+/// Whether this build has a compressing WebSocket. It has none: the measurement of `permessage-deflate` did not pass its
+/// rule, so the extension is never offered and a configuration that asks for it is refused with [`check`]'s sentence.
+pub const COMPRESSED_AVAILABLE: bool = false;
+
+/// The one check of the configured `transport.compression`: `Ok` when this build can honour it, and otherwise the sentence
+/// that says what to change. [`select`] and the configuration check (`serve` and `check-config`) both call it, so the two
+/// never disagree and the words exist once.
+pub fn check(compression: Compression) -> Result<(), &'static str> {
+    match compression {
+        Compression::Off => Ok(()),
+        Compression::Deflate if COMPRESSED_AVAILABLE => Ok(()),
+        Compression::Deflate => {
+            Err("transport.compression is deflate, but compression is not available in this build; it must be off")
+        }
+    }
+}
+
 /// The transport a configuration asks for: the one implementation for `off`, and the sentence that stops the server from
 /// starting for `deflate` (no compressing transport is built; running uncompressed in silence would be a lie).
 pub fn select(compression: Compression) -> Result<Kind, &'static str> {
-    match compression {
-        Compression::Off => Ok(Kind::Plain),
-        Compression::Deflate => Err("transport.compression is deflate, but this server has no compressing WebSocket; set it to off"),
-    }
+    check(compression)?;
+    Ok(Kind::Plain)
 }
 
 /// Which transport [`select`] chose.
