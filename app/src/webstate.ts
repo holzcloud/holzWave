@@ -101,3 +101,76 @@ export function noticeIcon(kinds: readonly string[]): string {
 export function commandKind(code: unknown): "done" | "failed" {
   return typeof code === "number" && Number.isSafeInteger(code) && code > 0 ? "failed" : "done";
 }
+
+// ---- notifications ----------------------------------------------------------------------------------------------
+
+/** The one value the page keeps in local storage for the notifications: `"1"` while the person has them on. */
+export const NOTIFY_FLAG_KEY = "holzwave.notify";
+
+/** The shortest time between two notifications of one kind, in milliseconds. */
+export const NOTIFY_GAP_MS = 5000;
+
+/** The text of a notification: the words of the mark and nothing else. Never a pane's name, a command or output. */
+export const NOTIFY_TEXT: Readonly<Record<Kind, string>> = {
+  ask: "Waits for you",
+  bell: "Rang the bell",
+  failed: "Command failed",
+  done: "Command finished",
+};
+
+/** The state of the notifications as the Settings group says it. */
+export type NotifyWord = "off" | "on" | "blocked by the browser";
+
+/**
+ * The state from the browser's permission (`default`, `granted` or `denied`) and the person's flag: blocked whenever the browser
+ * says `denied`; on only when the browser allows it and the person turned it on; off in every other case.
+ */
+export function permissionState(permission: unknown, flag: boolean): NotifyWord {
+  if (permission === "denied") return "blocked by the browser";
+  return permission === "granted" && flag ? "on" : "off";
+}
+
+/** The rule that decides whether a notification is made: hidden, on, and at most one of a kind in `NOTIFY_GAP_MS`. */
+export class NotifyGate {
+  private last = new Map<Kind, number>();
+
+  /**
+   * The text to show for `kind` at time `now` (milliseconds on a monotonic clock), or null for none. Only a shown notification
+   * starts the window of its kind, so a refusal does not extend it; a clock that went back does not hold a kind back.
+   */
+  next(kind: string, now: number, hidden: boolean, word: string): string | null {
+    if (!hidden || word !== "on" || !isKind(kind)) return null;
+    const before = this.last.get(kind);
+    if (before !== undefined && now >= before && now - before < NOTIFY_GAP_MS) return null;
+    this.last.set(kind, now);
+    return NOTIFY_TEXT[kind];
+  }
+}
+
+/** The group `Notifications` of the Settings dialog (design 6.30): its legend, the row's name and meta, and the row of each state. */
+export const NOTIFY_GROUP = {
+  legend: "Notifications",
+  name: "Notify me",
+  meta: "bell and attention",
+  /** The line after `Check again`. */
+  checked: "Checked.",
+  /** The line when the browser did not answer the request. */
+  failed: "The browser did not answer. Try again.",
+  rows: {
+    off: {
+      tone: "plain",
+      advice: "Bell and attention marks also show in the tab title. Turn this on to get a browser notification as well.",
+      button: "Turn on",
+    },
+    on: {
+      tone: "ok",
+      advice: "A browser notification appears when a pane out of view rings the bell or needs you. It never contains terminal text.",
+      button: "Turn off",
+    },
+    "blocked by the browser": {
+      tone: "warn",
+      advice: "The browser blocks notifications for this site. Allow them in the site settings of the browser, then choose Check again.",
+      button: "Check again",
+    },
+  },
+} as const;

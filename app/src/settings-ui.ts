@@ -269,6 +269,15 @@ async function show(api: SettingsApi): Promise<void> {
     close.textContent = "Close";
     // The group sits after Accessibility and before the buttons; it reads the permission itself and leaves when the system has none.
     const removeNetwork = state.os === "macos" ? mountLocalNetworkGroup(box, actions) : null;
+    // The browser build has a group for notifications in the same place. Its module is loaded on demand, so the desktop never loads it.
+    let removeNotify: (() => void) | null = null;
+    if (state.os === "web") {
+      void import("./webnotice.js")
+        .then((m) => {
+          if (!done) removeNotify = m.mountNotificationsGroup(box, actions);
+        })
+        .catch(() => {});
+    }
 
     // ---- showing the state -----------------------------------------------------------------------
 
@@ -308,6 +317,7 @@ async function show(api: SettingsApi): Promise<void> {
       if (done) return;
       done = true;
       removeNetwork?.();
+      removeNotify?.();
       stop();
       pop();
       backdrop.remove();

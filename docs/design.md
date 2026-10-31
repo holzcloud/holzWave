@@ -2477,6 +2477,12 @@ They are off until the person turns them on, and the browser is asked only when 
 | `on` | on | ok; the word | A browser notification appears when a pane out of view rings the bell or needs you. It never contains terminal text. | `Turn off` |
 | `blocked` | blocked by the browser | warn; the word, an underline and `!` | The browser blocks notifications for this site. Allow them in the site settings of the browser, then choose Check again. | `Check again` |
 
+A notification says only the words of the mark (`Waits for you`, `Rang the bell`, `Command failed`, `Command finished`), never a pane name, a command or
+output, and it has no sound. It is made only while the page is hidden and the state is `on`, and at most one for each kind in five seconds. Pressing
+it brings the tab forward. The choice is one flag in the local storage of the browser on this device and nothing else is stored. The button is one
+button that changes with the state; `Check again` reads the permission of the browser again and never asks. The group is absent where the browser
+has no notification API, and on the desktop. The row is drawn in the three states on the web window view (off, on, blocked by the browser).
+
 **Tab marks.** While the page is hidden (the tab is in the background or the window is minimised) the title of the browser tab starts with the
 glyphs of the kinds of 6.23 that happened or wait, in the fixed order `?`, `▲`, `!`, `✓`, each followed by a space, then `holzWave` (`? ▲ holzWave`);
 with none, the title is `holzWave`. The icon of the tab changes to the holzWave mark with a small dot in `--hw-rose` at its top right corner: rose

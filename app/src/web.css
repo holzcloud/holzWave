@@ -1,0 +1,28 @@
+/* The styles of the browser build's own page code (web.ts and its neighbours), loaded with `loadStyles("./web.css")` by the modules that
+   need them, never from index.html, so the desktop page does not read them. Every colour is a `--hw-*` token (the theme replaces the
+   values) and every size is in rem, so the UI scale moves it with the rest of the chrome; a pixel value appears only for the 28 px
+   desktop minimum of a target and the 2 px focus ring. Flat and hairline, no shadow, nothing moves. */
+
+/* ---- the group `Notifications` of the Settings dialog (webnotice.ts, docs/design.md section 6.30) -----------------------------------
+   One row in the manner of the Local network group (6.24): the name, the dim meta and the state, then one sentence and one button.
+   The state is words first; the state that needs attention is also underlined and marked "!". Rose is not used here. */
+.settings .set-notify-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0 .667rem; box-sizing: border-box;
+                            min-height: max(28px, calc(28rem / 12)); }
+.settings .set-notify-name { flex: none; color: var(--hw-ink); }
+.settings .set-notify-meta { min-width: 0; color: var(--hw-dim); }
+.settings .set-notify-state { min-width: 0; margin-left: auto; color: var(--hw-dim); text-align: right; overflow-wrap: anywhere; }
+.settings .set-notify-row[data-tone="ok"] .set-notify-state { color: var(--hw-ok); }
+.settings .set-notify-row[data-tone="warn"] .set-notify-state { color: var(--hw-warn); text-decoration: underline; }
+.settings .set-notify-row[data-tone="warn"] .set-notify-state::before { content: "! "; font-weight: 700; }
+.settings .set-notify-advice { flex: 1 0 100%; margin: .167rem 0 .333rem; color: var(--hw-dim); overflow-wrap: anywhere; }
+.settings .set-notify-advice:empty { display: none; }
+.settings .set-notify-buttons { display: flex; flex: 1 0 100%; flex-wrap: wrap; gap: .333rem .5rem; }
+.settings .set-notify-buttons button { display: inline-flex; flex: none; align-items: center; justify-content: center;
+                                       min-height: max(28px, calc(28rem / 12)); font-size: calc(11rem / 12); }
+.settings .set-notify-line { min-height: 1.4em; margin: .333rem 0 0; color: var(--hw-dim); overflow-wrap: anywhere; }
+
+/* ---- forced colours: system colours outline the row; the group keeps its border -------------------------------------------------- */
+
+@media (forced-colors: active) {
+  :root .settings .set-notify-row { outline: 2px solid CanvasText; outline-offset: -2px; }
+}
