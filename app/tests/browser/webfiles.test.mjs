@@ -93,6 +93,7 @@ async function open(page, url, { answer = () => stored("x", 0), os = "web", bloc
             address,
             headers: Object.keys(init.headers ?? {}),
             token: (init.headers ?? {})["X-CSRF-Token"] ?? null,
+            contentType: (init.headers ?? {})["Content-Type"] ?? null,
             type: init.body.type,
             bytes: Array.from(new Uint8Array(await init.body.arrayBuffer())),
             credentials: init.credentials,
@@ -353,7 +354,9 @@ async function uploadCase(page, url) {
   assert.equal(sent.length, 1);
   assert.deepEqual(sent[0].bytes, f.bytes, "the body is the file's bytes");
   assert.equal(sent[0].type, "text/plain", "the file's own content type");
-  assert.deepEqual([...sent[0].headers].sort(), ["Accept", "X-CSRF-Token"], "the request function adds the token and nothing of the person's data");
+  // The server takes an upload only as a byte stream, so the request names that type itself and the file's own type stays off the wire.
+  assert.deepEqual([...sent[0].headers].sort(), ["Accept", "Content-Type", "X-CSRF-Token"], "the request function adds the token and the byte-stream type and nothing of the person's data");
+  assert.equal(sent[0].contentType, "application/octet-stream", "the upload is sent as a byte stream whatever type the file has");
   assert.equal(sent[0].token, "csrf-token-1");
   assert.equal(sent[0].credentials, "same-origin");
   assert.equal(sent[0].redirect, "error");
@@ -393,7 +396,8 @@ async function queueCase(page, url) {
   assert.ok(log[1].requestedAt >= log[0].answeredAt, "the second request starts after the first was answered");
   assert.ok(log[2].requestedAt >= log[1].answeredAt, "and the third after the second");
   const sent = await page.evaluate(() => window.__sent.map((s) => [s.method, s.headers.slice().sort(), s.bytes.length]));
-  assert.deepEqual(sent, [["PUT", ["Accept", "X-CSRF-Token"], 10], ["PUT", ["Accept", "X-CSRF-Token"], 10], ["PUT", ["Accept", "X-CSRF-Token"], 12]]);
+  const headers = ["Accept", "Content-Type", "X-CSRF-Token"];
+  assert.deepEqual(sent, [["PUT", headers, 10], ["PUT", headers, 10], ["PUT", headers, 12]]);
   assert.deepEqual(
     (await pastes(page)).map((p) => [p.pane, p.text]),
     [[1, `'${FOLDER}/a.txt'`], [1, ` '${FOLDER}/b.txt'`], [1, ` '${FOLDER}/c d.txt'`]],
