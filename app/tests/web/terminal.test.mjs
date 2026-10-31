@@ -65,6 +65,84 @@ await runTest("terminal", {}, async ({ engine, harness, open }) => {
   check(screen.includes("printf"), "the typed command is on the screen too, as the shell echoes it");
   check(!screen.split("\n").some((line) => line.includes("hw-roundtrip") && line.includes("printf")), "the typed text never contains the joined word");
 
+  // ---- reattach: the pane outlives the page ---------------------------------------------------------------------------------------
+  const lines = (text) => text.split("\n").map((l) => l.trim());
+  const typeLine = async (p, text) => {
+    await p.locator("canvas#term").click();
+    await p.keyboard.type(text);
+    await p.keyboard.press("Enter");
+  };
+  const sawLines = (socketOfPage, paneId, wanted, what, ms = 15_000) =>
+    poll(async () => {
+      const seen = lines(await socketOfPage.screen(paneId));
+      return wanted.every((w) => seen.includes(w)) ? seen : undefined;
+    }, what, ms);
+
+  await typeLine(page, "printf 'mark-%s\\n' one two three; sh -c 'sleep 2; printf \"late-%s\\n\" done'");
+  await sawLines(socket, pane, ["mark-one", "mark-two", "mark-three"], "the markers are on the screen before the page goes");
+  const goneAt = Date.now();
+  await socket.close();
+  await page.close();
+
+  const again = await stranger.context.newPage();
+  await again.goto(`${harness.origin}/`);
+  await again.waitForSelector("canvas#term");
+  const socketAgain = await oracle(again);
+  const afterwards = await poll(async () => {
+    const layout = await socketAgain.layout();
+    return layout.panes?.length > 0 ? layout : undefined;
+  }, "the new page finds the layout", 20_000);
+  check(afterwards.panes.some((p) => (p.id ?? p) === pane) || afterwards.focus === pane, "the pane is still there after the page was closed");
+  const reattached = await sawLines(socketAgain, pane, ["mark-one", "mark-two", "mark-three", "late-done"], "the late line appears on the reattached pane", 10_000);
+  const order = ["mark-one", "mark-two", "mark-three", "late-done"].map((w) => reattached.indexOf(w));
+  check(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1])), `the markers are in order and none is missing (${order.join(" < ")})`);
+  const lateAfter = (Date.now() - goneAt) / 1000;
+
+  // ---- a second tab of the same person --------------------------------------------------------------------------------------------------
+  const second = await stranger.context.newPage();
+  await second.goto(`${harness.origin}/`);
+  await second.waitForSelector("canvas#term");
+  const socketSecond = await oracle(second);
+  const layoutSecond = await poll(async () => {
+    const layout = await socketSecond.layout();
+    return layout.panes?.length > 0 ? layout : undefined;
+  }, "the second tab finds the layout", 20_000);
+  equal(JSON.stringify(layoutSecond.panes.map((p) => p.id ?? p)), JSON.stringify((await socketAgain.layout()).panes.map((p) => p.id ?? p)), "both tabs show the same pane ids");
+  await typeLine(second, "printf 'tab-%s\\n' two");
+  await sawLines(socketAgain, pane, ["tab-two"], "text typed in the second tab appears on the first tab's screen");
+  await typeLine(again, "printf 'tab-%s\\n' one");
+  await sawLines(socketSecond, pane, ["tab-one"], "text typed in the first tab appears on the second tab's screen");
+
+  // ---- a second browser of the same person: the same cookies in another context -------------------------------------------------------
+  const other = await open({ storageState: await stranger.context.storageState() });
+  const third = await other.context.newPage();
+  await third.goto(`${harness.origin}/`);
+  await third.waitForSelector("canvas#term");
+  const socketThird = await oracle(third);
+  await sawLines(socketThird, pane, ["mark-one", "late-done", "tab-one", "tab-two"], "a second browser sees the same output");
+  other.expectClean("the second browser");
+
+  // ---- the chords of the web table -------------------------------------------------------------------------------------------------------
+  await again.bringToFront();
+  await again.locator("canvas#term").click();
+  const panesBefore = (await socketAgain.layout()).panes.length;
+  await again.keyboard.press("Control+W");
+  equal(again.isClosed(), false, "Control+W does not close the page");
+  equal((await socketAgain.layout()).panes.length, panesBefore, "Control+W is not a chord of the page: the layout is unchanged");
+  await again.keyboard.press("Control+Shift+D");
+  const split = await poll(async () => {
+    const layout = await socketAgain.layout();
+    return layout.panes.length === panesBefore + 1 ? layout : undefined;
+  }, "the split chord adds a pane");
+  await again.keyboard.press("Alt+Shift+W");
+  await poll(async () => ((await socketAgain.layout()).panes.length === panesBefore ? true : undefined), "the close-pane chord of the web table closes the new pane");
+  const chordPanes = `${panesBefore} -> ${split.panes.length} -> ${panesBefore}`;
+  await socketAgain.close();
+  await socketSecond.close();
+  await socketThird.close();
+  await second.close();
+  stranger.expectClean("the first administrator's context, reattached");
+
   if (SELF_CHECK) {
     // Two expectations that cannot hold. Each must fail; the runner counts the lines.
     const expectFailure = async (name, attempt) => {
@@ -98,6 +176,6 @@ await runTest("terminal", {}, async ({ engine, harness, open }) => {
   console.log(
     `tracer: screens passed: set-up, authenticator, recovery, application; panes in the layout: ${panes}; ` +
       `the screen has the line hw-roundtrip; requests: ${recorder.requests}, hosts: ${[...recorder.hosts].join(", ")}; ` +
-      `sockets: ${recorder.sockets.length}; engine: ${engine}`,
+      `sockets: ${recorder.sockets.length}; engine: ${engine}; reattach: markers in order, late line after ${lateAfter.toFixed(1)} s; second tab and second browser see the same output; chords: Control+W ignored, panes ${chordPanes}`,
   );
 });
