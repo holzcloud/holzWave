@@ -80,6 +80,32 @@ pub fn golden_at(path: &str) -> Option<&'static Value> {
 // The structural comparison
 // ---------------------------------------------------------------------------------------------------------------------
 
+/// What the golden says about the shape of a value. A golden `null` is [`Schema::Any`]; the elements of a golden list are merged,
+/// so a member that is absent from some of them is optional and a member that is `null` in some of them takes anything.
+#[derive(Debug, Clone, PartialEq)]
+enum Schema {
+    Any,
+    Bool,
+    Number,
+    Text,
+    List(Box<Schema>),
+    Tuple(Vec<Schema>),
+    Object(std::collections::BTreeMap<String, (Schema, bool)>),
+}
+
+impl Schema {
+    fn name(&self) -> &'static str {
+        match self {
+            Schema::Any => "anything",
+            Schema::Bool => "a boolean",
+            Schema::Number => "a number",
+            Schema::Text => "a string",
+            Schema::List(_) | Schema::Tuple(_) => "an array",
+            Schema::Object(_) => "an object",
+        }
+    }
+}
+
 fn kind(value: &Value) -> &'static str {
     match value {
         Value::Null => "null",
@@ -91,69 +117,86 @@ fn kind(value: &Value) -> &'static str {
     }
 }
 
-/// Whether the elements of a golden array are one shape (a list) and not a fixed tuple of different shapes.
-fn is_list(golden: &[Value]) -> bool {
-    match golden.split_first() {
-        Some((first, rest)) => rest.iter().all(|other| {
-            same_shape(other, first).is_ok() || same_shape(first, other).is_ok() || is_null(first) || is_null(other)
-        }),
-        None => true,
+fn merge(a: Schema, b: Schema) -> Schema {
+    match (a, b) {
+        (Schema::Bool, Schema::Bool) => Schema::Bool,
+        (Schema::Number, Schema::Number) => Schema::Number,
+        (Schema::Text, Schema::Text) => Schema::Text,
+        (Schema::List(x), Schema::List(y)) => Schema::List(Box::new(merge(*x, *y))),
+        (Schema::Tuple(x), Schema::Tuple(y)) if x.len() == y.len() => Schema::Tuple(x.into_iter().zip(y).map(|(p, q)| merge(p, q)).collect()),
+        (Schema::Object(x), Schema::Object(y)) => {
+            let mut out = std::collections::BTreeMap::new();
+            for (key, (schema, required)) in &x {
+                match y.get(key) {
+                    Some((other, other_required)) => {
+                        out.insert(key.clone(), (merge(schema.clone(), other.clone()), *required && *other_required));
+                    }
+                    None => {
+                        out.insert(key.clone(), (schema.clone(), false));
+                    }
+                }
+            }
+            for (key, (schema, _)) in y {
+                out.entry(key).or_insert((schema, false));
+            }
+            Schema::Object(out)
+        }
+        // A null in one instance, or two shapes that cannot be merged: anything goes.
+        _ => Schema::Any,
     }
 }
 
-fn is_null(value: &Value) -> bool {
-    value.is_null()
+fn schema_of(golden: &Value) -> Schema {
+    match golden {
+        Value::Null => Schema::Any,
+        Value::Bool(_) => Schema::Bool,
+        Value::Number(_) => Schema::Number,
+        Value::String(_) => Schema::Text,
+        Value::Object(map) => Schema::Object(map.iter().map(|(k, v)| (k.clone(), (schema_of(v), true))).collect()),
+        Value::Array(items) => {
+            let schemas: Vec<Schema> = items.iter().map(schema_of).collect();
+            // Elements of different kinds (a number and an object) are a fixed tuple; otherwise the elements are instances of one
+            // shape.
+            let kinds: BTreeSet<&'static str> = items.iter().filter(|v| !v.is_null()).map(kind).collect();
+            if kinds.len() > 1 {
+                Schema::Tuple(schemas)
+            } else {
+                Schema::List(Box::new(schemas.into_iter().reduce(merge).unwrap_or(Schema::Any)))
+            }
+        }
+    }
 }
 
-/// Compares the structure of `actual` with the golden value: the same member names at every level, arrays by the shape of
-/// the first golden element (an empty golden array accepts any array, and a golden array whose elements differ in shape is a
-/// tuple that is compared position by position), scalars by JSON type, a golden `null` accepts anything. The error names
-/// the path of the first difference and never holds a value.
-pub fn same_shape(actual: &Value, golden: &Value) -> Result<(), String> {
-    shape_at(actual, golden, "$")
-}
-
-fn shape_at(actual: &Value, golden: &Value, path: &str) -> Result<(), String> {
-    match (actual, golden) {
-        (_, Value::Null) => Ok(()),
-        (Value::Bool(_), Value::Bool(_)) | (Value::Number(_), Value::Number(_)) | (Value::String(_), Value::String(_)) => Ok(()),
-        (Value::Object(a), Value::Object(g)) => {
-            let missing: Vec<&String> = g.keys().filter(|k| !a.contains_key(*k)).collect();
-            let extra: Vec<&String> = a.keys().filter(|k| !g.contains_key(*k)).collect();
+fn check(actual: &Value, schema: &Schema, path: &str) -> Result<(), String> {
+    match (actual, schema) {
+        (_, Schema::Any) | (Value::Bool(_), Schema::Bool) | (Value::Number(_), Schema::Number) | (Value::String(_), Schema::Text) => Ok(()),
+        (Value::Array(items), Schema::List(element)) => {
+            items.iter().enumerate().try_for_each(|(i, item)| check(item, element, &format!("{path}[{i}]")))
+        }
+        (Value::Array(items), Schema::Tuple(parts)) => {
+            if items.len() != parts.len() {
+                return Err(format!("{path}: {} elements where the golden tuple has {}", items.len(), parts.len()));
+            }
+            items.iter().zip(parts).enumerate().try_for_each(|(i, (item, part))| check(item, part, &format!("{path}[{i}]")))
+        }
+        (Value::Object(map), Schema::Object(members)) => {
+            let missing: Vec<&String> = members.iter().filter(|(k, (_, required))| *required && !map.contains_key(*k)).map(|(k, _)| k).collect();
+            let extra: Vec<&String> = map.keys().filter(|k| !members.contains_key(*k)).collect();
             if !missing.is_empty() || !extra.is_empty() {
                 return Err(format!("{path}: missing members {missing:?}, extra members {extra:?}"));
             }
-            for (key, member) in g {
-                shape_at(&a[key], member, &format!("{path}.{key}"))?;
-            }
-            Ok(())
+            map.iter().try_for_each(|(key, value)| check(value, &members[key].0, &format!("{path}.{key}")))
         }
-        (Value::Array(a), Value::Array(g)) => {
-            if g.is_empty() {
-                return Ok(());
-            }
-            if is_list(g) {
-                // The golden holds a few instances of the element; an element is right when one of them accepts it (a
-                // member that is `null` in one instance and a string in another is an optional member).
-                for (i, element) in a.iter().enumerate() {
-                    if g.iter().any(|instance| shape_at(element, instance, "$").is_ok()) {
-                        continue;
-                    }
-                    shape_at(element, &g[0], &format!("{path}[{i}]"))?;
-                }
-                Ok(())
-            } else {
-                if a.len() != g.len() {
-                    return Err(format!("{path}: {} elements where the golden tuple has {}", a.len(), g.len()));
-                }
-                for (i, (element, member)) in a.iter().zip(g).enumerate() {
-                    shape_at(element, member, &format!("{path}[{i}]"))?;
-                }
-                Ok(())
-            }
-        }
-        (a, g) => Err(format!("{path}: {} where the golden has {}", kind(a), kind(g))),
+        (value, schema) => Err(format!("{path}: {} where the golden has {}", kind(value), schema.name())),
     }
+}
+
+/// Compares the structure of `actual` with the golden value: the same member names at every level (a member that some of the
+/// golden instances of a list lack is optional), arrays by the shape of their golden elements (an empty golden array accepts any
+/// array, and a golden array of elements of different kinds is a tuple compared position by position), scalars by JSON type, a
+/// golden `null` accepts anything. The error names the path of the first difference and never holds a value.
+pub fn same_shape(actual: &Value, golden: &Value) -> Result<(), String> {
+    check(actual, &schema_of(golden), "$")
 }
 
 /// Compares `actual` with any of the golden values (one of a golden list of variants); the error of the closest is returned.
@@ -211,6 +254,7 @@ pub fn benign_value(ty: &str) -> Option<Value> {
         "MouseActionMsg" => json!("motion"),
         "MouseButtonMsg" => json!("none"),
         "BlockKind" => json!("files"),
+        "Selection" => json!({}),
         "SelectOpMsg" | "SearchOpMsg" => json!({"kind": "clear"}),
         "CopyOpMsg" => json!({"kind": "exit"}),
         "SecretChange" => json!({"kind": "keep"}),
@@ -259,22 +303,36 @@ pub fn nested(depth: usize) -> Value {
     value
 }
 
-/// The hostile replacements of one argument: `(label, value)` for `null`, `true`, `-1`, `1.5`, `1e309`, the empty string, a
-/// string with a NUL, path-traversal characters, an array nested 50 deep and an object.
-pub fn hostile_values(canary: &str) -> Vec<(&'static str, Value)> {
-    let overflow: Value = serde_json::from_str("1e309").unwrap_or(Value::Null);
+/// The hostile replacements of one argument as JSON text: `null`, `true`, `-1`, `1.5`, `1e309`, the empty string, a string
+/// with a NUL, path-traversal characters, an array nested 50 deep and an object. They are text because `1e309` is not a number
+/// a `Value` can hold. The strings carry `canary` so that a test can search for it.
+pub fn hostile_texts(canary: &str) -> Vec<(&'static str, String)> {
+    let quote = |s: String| serde_json::to_string(&s).unwrap_or_else(|_| String::from("\"\""));
     vec![
-        ("null", Value::Null),
-        ("true", json!(true)),
-        ("minus one", json!(-1)),
-        ("one and a half", json!(1.5)),
-        ("overflow", overflow),
-        ("empty string", json!("")),
-        ("nul string", json!(format!("{canary}\u{0}x"))),
-        ("traversal", json!(format!("{canary}{TRAVERSAL}"))),
-        ("nested 50", nested(50)),
-        ("object", json!({"a": canary})),
+        ("null", String::from("null")),
+        ("true", String::from("true")),
+        ("minus one", String::from("-1")),
+        ("one and a half", String::from("1.5")),
+        ("overflow", String::from("1e309")),
+        ("empty string", String::from("\"\"")),
+        ("nul string", quote(format!("{canary}\u{0}x"))),
+        ("traversal", quote(format!("{canary}{TRAVERSAL}"))),
+        ("nested 50", nested(50).to_string()),
+        ("object", json!({"a": canary}).to_string()),
     ]
+}
+
+/// The text of the `args` object of `row` with the benign value everywhere except at argument `at`, which gets `text`
+/// (JSON text). An optional argument that is not replaced is left out.
+pub fn args_text_with(row: &Command, at: usize, text: &str) -> String {
+    let mut parts = Vec::new();
+    for (i, arg) in row.args.iter().enumerate() {
+        let value = if i == at { Some(text.to_owned()) } else { benign_for(arg.name, arg.ty).map(|v| v.to_string()) };
+        if let Some(value) = value {
+            parts.push(format!("{}:{value}", serde_json::to_string(arg.name).unwrap_or_default()));
+        }
+    }
+    format!("{{{}}}", parts.join(","))
 }
 
 /// The hostile replacements of the whole `args`, as the text to put after `"args":`.
@@ -320,6 +378,16 @@ impl Line {
     pub async fn send(&mut self, name: &str, args: &Value) -> u64 {
         assert!(lookup(name).is_some(), "refusing to send the name {name:?}: it is not in the command table");
         self.send_unchecked(name, args).await
+    }
+
+    /// Sends a registered name with `args` as text, exactly as given (it may be anything, even text that is not JSON).
+    pub async fn send_args_text(&mut self, name: &str, args: &str) -> u64 {
+        assert!(lookup(name).is_some(), "refusing to send the name {name:?}: it is not in the command table");
+        let id = self.next;
+        self.next += 1;
+        let name = serde_json::to_string(name).unwrap_or_default();
+        self.client.send_text(&format!("{{\"id\":{id},\"cmd\":{name},\"args\":{args}}}")).await;
+        id
     }
 
     /// Sends any name. Only the tests of the unregistered names use it, and they say so.
@@ -786,13 +854,29 @@ mod pure {
 
     #[test]
     fn pure_hostile_values_cover_the_named_kinds() {
-        let values = hostile_values("CANARY");
+        let values = hostile_texts("CANARY");
         assert_eq!(values.len(), 10);
-        assert!(values.iter().any(|(_, v)| v.is_null()));
-        assert!(values.iter().any(|(_, v)| v.as_str().is_some_and(|s| s.contains('\0'))));
-        assert!(values.iter().any(|(_, v)| v.is_object()));
+        assert!(values.iter().any(|(_, v)| v == "null"));
+        assert!(values.iter().any(|(_, v)| v == "1e309"));
+        assert!(values.iter().any(|(_, v)| v.contains("\\u0000") && v.contains("CANARY")));
+        assert!(values.iter().any(|(_, v)| v.starts_with('{')));
+        for (label, text) in &values {
+            if *label != "overflow" {
+                assert!(serde_json::from_str::<Value>(text).is_ok(), "{label}: {text}");
+            }
+        }
         assert_eq!(nested(50).to_string().matches('[').count(), 50);
         assert_eq!(hostile_whole_args().len(), 4);
+    }
+
+    #[test]
+    fn pure_the_args_text_replaces_one_argument_and_keeps_the_others_benign() {
+        let row = lookup("rename_pane").expect("a row");
+        let text = args_text_with(row, 1, "1e309");
+        assert_eq!(text, format!("{{\"pane\":{NOWHERE},\"name\":1e309}}"));
+        let optional = lookup("start_pane").expect("a row");
+        let text = args_text_with(optional, 3, "-1");
+        assert!(text.contains("\"cell_w\":-1") && !text.contains("cell_h"), "{text}");
     }
 
     #[test]
