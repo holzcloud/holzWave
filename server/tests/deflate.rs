@@ -38,6 +38,10 @@ fn wide(settings: &mut SocketSettings) {
     settings.per_second = 10_000;
 }
 
+/// True only when the verdict is `pass` and the owner declined to put the compressing library into the server: the candidate was
+/// not approved for production, so the default stays `off`. It is false because the verdict is not `pass`; nothing else may set it.
+const CANDIDATE_NOT_APPROVED_FOR_PRODUCTION: bool = false;
+
 // ---- the tracer ---------------------------------------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
@@ -125,5 +129,48 @@ async fn tracer_deflate_is_refused_by_prepare_and_by_assemble_with_one_sentence(
     for transport in [None, Some(json!({})), Some(json!({"compression": "off"}))] {
         let prepared = deflate_env::prepare_text(&deflate_env::minimal(transport)).expect("off is valid");
         assert_eq!(prepared.transport.compression, Compression::Off);
+    }
+}
+
+// ---- the decision of the measurement ---------------------------------------------------------------------------------------
+
+/// The default that the verdict file asks for: compression is on only for a measurement that passed and a candidate that was
+/// approved.
+fn default_the_verdict_asks_for() -> Compression {
+    if deflate_env::verdict() == "pass" && !CANDIDATE_NOT_APPROVED_FOR_PRODUCTION { Compression::Deflate } else { Compression::Off }
+}
+
+#[test]
+fn the_default_of_compression_matches_the_verdict() {
+    let wanted = default_the_verdict_asks_for();
+    for transport in [None, Some(json!({}))] {
+        let prepared = deflate_env::prepare_text(&deflate_env::minimal(transport))
+            .unwrap_or_else(|e| panic!("a file without the key is valid: {e}"));
+        assert_eq!(
+            prepared.transport.compression, wanted,
+            "the default of transport.compression and the first line of the verdict file ({:?}) disagree",
+            deflate_env::verdict()
+        );
+    }
+    assert_eq!(
+        transport::COMPRESSED_AVAILABLE,
+        wanted == Compression::Deflate,
+        "the build has a compressing transport exactly when the verdict asks for one"
+    );
+    // The value the build cannot honour is refused, and the one it can is accepted.
+    let on = deflate_env::prepare_text(&deflate_env::minimal(Some(json!({"compression": "deflate"}))));
+    assert_eq!(on.is_ok(), transport::COMPRESSED_AVAILABLE);
+    assert!(deflate_env::prepare_text(&deflate_env::minimal(Some(json!({"compression": "off"})))).is_ok());
+}
+
+#[test]
+fn the_verdict_file_has_a_first_line_of_pass_or_fail_and_its_criteria() {
+    let lines = deflate_env::verdict_lines();
+    assert!(lines.len() > 1, "the verdict file names its criteria after the first line");
+    assert!(matches!(deflate_env::verdict().as_str(), "pass" | "fail"));
+    if deflate_env::verdict() == "pass" {
+        assert!(lines[1..].iter().all(|l| !l.contains("NOT MET")), "a pass has no criterion that was not met: {lines:?}");
+    } else {
+        assert!(lines[1..].iter().any(|l| l.contains("NOT MET") || l.contains("not run")), "a fail names the criterion: {lines:?}");
     }
 }
