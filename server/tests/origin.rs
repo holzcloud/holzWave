@@ -765,6 +765,19 @@ async fn methods_a_wrong_method_and_an_unknown_path_have_the_plain_json_error() 
 }
 
 #[tokio::test]
+async fn methods_a_wrong_method_on_a_session_route_names_no_allowed_method_to_anyone() {
+    // `/t/admin` answers GET and POST. The session check comes first, so a caller without a session gets 401, and that answer
+    // must not carry the list of methods the path has either (the method router adds it to every answer it wraps).
+    let (app, alice) = probed();
+    let without = app.send(app.change(Method::PUT, "/t/admin")).await;
+    assert_eq!(without.status, 401);
+    assert!(without.headers.get("allow").is_none(), "401 on a wrong method: {:?}", without.header_names());
+    let with = app.send(app.change_as(Method::PUT, "/t/admin", &alice)).await;
+    assert_eq!(with.status, 405);
+    assert!(with.headers.get("allow").is_none(), "405 on a wrong method: {:?}", with.header_names());
+}
+
+#[tokio::test]
 async fn methods_a_route_cannot_add_a_sharing_header() {
     let (app, _) = probed();
     let answer = app.send(app.req(Method::GET, "/t/cors").header("origin", "https://evil.example")).await;

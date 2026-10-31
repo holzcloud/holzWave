@@ -567,15 +567,15 @@ async fn not_found() -> ApiError {
     ApiError::NotFound
 }
 
-/// Gives every 405 the plain JSON error and no `Allow` list: the router does not describe itself.
+/// Gives every 405 the plain JSON error and no `Allow` list: the router does not describe itself. The method router adds the
+/// list to every answer it wraps, so a 401 for a wrong method on a route that needs a session carried it too; it is removed
+/// from every answer, whatever the status.
 async fn plain_errors(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
-    if response.status() == StatusCode::METHOD_NOT_ALLOWED {
-        if !response.headers().contains_key(header::CONTENT_TYPE) {
-            return ApiError::MethodNotAllowed.into_response();
-        }
-        response.headers_mut().remove(header::ALLOW);
+    if response.status() == StatusCode::METHOD_NOT_ALLOWED && !response.headers().contains_key(header::CONTENT_TYPE) {
+        return ApiError::MethodNotAllowed.into_response();
     }
+    response.headers_mut().remove(header::ALLOW);
     response
 }
 
