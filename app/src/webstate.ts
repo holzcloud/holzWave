@@ -175,23 +175,149 @@ export const NOTIFY_GROUP = {
   },
 } as const;
 
-// ---- upload by drop (stubs) --------------------------------------------------------------------------------------
+// ---- upload by drop --------------------------------------------------------------------------------------------------
 
+/** The most files taken from one drop (and waiting at one time): the rest are said, not sent. */
 export const MAX_DROP_FILES = 16;
-export const DROP_LABEL = "";
-export const ONLY_SIXTEEN = "";
-export const FOLDERS_SKIPPED = "";
-export const shellQuote = (path: string): string => path;
-export const hasNewline = (_text: string): boolean => false;
-export const uploadUrl = (name: string): string => name;
-export const refusalText = (_status: number, _body: unknown): string => "";
-export const notUploaded = (words: string): string => words;
-export const readUploaded = (_json: unknown): { path: string; size: number } | null => null;
-export const uploadFolder = (path: string): string => path;
-export const takeFiles = <T extends { directory?: boolean }>(list: readonly T[]): { files: T[]; over: number; folders: number } => ({
-  files: [...list],
-  over: 0,
-  folders: 0,
-});
-export const uploadingText = (name: string): string => name;
-export const uploadedText = (_count: number): string => "";
+
+/** The label of the drop target on a pane (design 6.30). */
+export const DROP_LABEL = "Drop to upload";
+
+/** The status line says this when a drop held more files than are taken. */
+export const ONLY_SIXTEEN = "Only 16 files at a time.";
+
+/** The status line says this when a drop held a folder: only files are sent. */
+export const FOLDERS_SKIPPED = "Folders are not uploaded.";
+
+/** The longest file name the address carries, in UTF-8 bytes. */
+const NAME_BYTES = 200;
+
+/** The name for a file whose name is empty or blank. */
+const FALLBACK_NAME = "upload";
+
+/** The longest name the status line shows, in characters, ellipsis included. */
+const SHOWN_CHARS = 48;
+
+/** Wrap `path` in single quotes for a POSIX shell: a single quote inside is closed, escaped and opened again; nothing else is special. */
+export function shellQuote(path: string): string {
+  return `'${path.replaceAll("'", "'\\''")}'`;
+}
+
+/** Whether `text` holds a line break: the core then asks the person before it types the text. */
+export function hasNewline(text: string): boolean {
+  return /[\r\n]/.test(text);
+}
+
+/** The UTF-8 length of one code point. */
+const utf8Length = (cp: number): number => (cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4);
+
+/** The characters of `name` as whole code points; a lone surrogate (not text) becomes the replacement character. */
+function wholeCharacters(name: string): string[] {
+  return Array.from(name, (ch) => {
+    const cp = ch.codePointAt(0) ?? 0;
+    return ch.length === 1 && cp >= 0xd800 && cp <= 0xdfff ? "\ufffd" : ch;
+  });
+}
+
+/** The address of an upload: the name in the query, encoded, at most 200 bytes of it cut on a character; `upload` for a blank name. */
+export function uploadUrl(name: string): string {
+  const characters = wholeCharacters(name);
+  if (name.trim() === "") return `/api/upload?name=${FALLBACK_NAME}`;
+  let bytes = 0;
+  let kept = "";
+  for (const ch of characters) {
+    bytes += utf8Length(ch.codePointAt(0) ?? 0);
+    if (bytes > NAME_BYTES) break;
+    kept += ch;
+  }
+  return `/api/upload?name=${encodeURIComponent(kept)}`;
+}
+
+/** A parsed JSON object that is not an array, or null. */
+function record(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+/** The words for a refused upload, from the status and the member `field` of the body (nothing else of the body is read). */
+export function refusalText(status: number, body: unknown): string {
+  const field = record(body)?.field;
+  if (status === 413) return "too large";
+  if (status === 400 && field === "size") return "too large";
+  if (status === 400 && field === "name") return "name not allowed";
+  if (status === 423) return "secrets are locked";
+  if (status === 429 || status === 503) return "try again";
+  if (status === 401 || status === 403) return "sign in again";
+  return "upload failed";
+}
+
+/** The status line for a refusal: `Not uploaded: too large.` */
+export const notUploaded = (words: string): string => `Not uploaded: ${words}.`;
+
+/** Control characters other than a line break: a path with one is not typed anywhere. */
+// eslint-disable-next-line no-control-regex
+const PATH_CONTROL = /[\u0000-\u0009\u000b\u000c\u000e-\u001f\u007f]/;
+
+/** The longest path of an answer, in characters. */
+const PATH_MAX = 4096;
+
+/** The answer of a finished upload: an absolute path of at most 4,096 characters without control characters (a line break is allowed, it is quoted) and a size. */
+export function readUploaded(json: unknown): { path: string; size: number } | null {
+  const o = record(json);
+  if (o === null) return null;
+  const { path, size } = o;
+  if (typeof path !== "string" || path[0] !== "/" || path.length > PATH_MAX || PATH_CONTROL.test(path)) return null;
+  if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) return null;
+  return { path, size };
+}
+
+/** The folder an answer's path lies in: everything before the last slash (`/` for a file in the root), empty for a path that is not absolute. */
+export function uploadFolder(path: string): string {
+  if (path[0] !== "/") return "";
+  const at = path.lastIndexOf("/");
+  return at === 0 ? "/" : path.slice(0, at);
+}
+
+/**
+ * The files to send from a drop: at most 16 in the order they came, folders left out. Nothing is dropped silently: `over` counts the
+ * files beyond the 16 and `folders` the folders, and the page says both. An item is a folder only when it says so (`directory`).
+ */
+export function takeFiles<T extends { directory?: boolean }>(list: readonly T[]): { files: T[]; over: number; folders: number } {
+  const files: T[] = [];
+  let over = 0;
+  let folders = 0;
+  for (const item of list) {
+    if (item.directory === true) folders++;
+    else if (files.length < MAX_DROP_FILES) files.push(item);
+    else over++;
+  }
+  return { files, over, folders };
+}
+
+/** A file name as the status line shows it: no control or direction character, at most 48 characters. */
+function shownName(name: string): string {
+  // eslint-disable-next-line no-control-regex
+  const clean = name.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "\ufffd");
+  const characters = Array.from(clean);
+  return characters.length <= SHOWN_CHARS ? clean : `${characters.slice(0, SHOWN_CHARS - 1).join("")}\u2026`;
+}
+
+/** The status line while a file is on its way. */
+export const uploadingText = (name: string): string => `Uploading ${shownName(name)}`;
+
+/** The status line for files that arrived. */
+export const uploadedText = (count: number): string => (count === 1 ? "Uploaded" : `Uploaded ${count} files`);
+
+/**
+ * What the status line says when a run of uploads ends: how many arrived, the words of the last refusal, and the files and folders
+ * that were not taken. One part stands alone; several are sentences.
+ */
+export function batchText(done: { ok: number; failed: readonly string[]; over: number; folders: number }): string {
+  const parts: string[] = [];
+  if (done.ok > 0) parts.push(uploadedText(done.ok));
+  const last = done.failed.at(-1);
+  if (last !== undefined) parts.push(notUploaded(last));
+  if (done.over > 0) parts.push(ONLY_SIXTEEN);
+  if (done.folders > 0) parts.push(FOLDERS_SKIPPED);
+  if (parts.length < 2) return parts[0] ?? "";
+  return parts.map((p) => (p.endsWith(".") ? p : `${p}.`)).join(" ");
+}

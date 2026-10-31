@@ -6,7 +6,7 @@ import { actionIdFor, chordFor, setBindingTable, setOs } from "../../dist/chords
 import {
   CLIPBOARD_REFUSED, DESKTOP_ONLY_ACTIONS, FULLSCREEN_NOTICE, ICON_ATTENTION, ICON_PLAIN, LOCK_KEYS, NOT_AVAILABLE, Notices, canLockKeys,
   NOTIFY_FLAG_KEY, NOTIFY_GAP_MS, NOTIFY_GROUP, NOTIFY_TEXT, NotifyGate, commandKind, noticeIcon, noticeTitle, permissionState,
-  DROP_LABEL, FOLDERS_SKIPPED, MAX_DROP_FILES, ONLY_SIXTEEN, hasNewline, notUploaded, readUploaded, refusalText, shellQuote, takeFiles,
+  DROP_LABEL, FOLDERS_SKIPPED, MAX_DROP_FILES, batchText, ONLY_SIXTEEN, hasNewline, notUploaded, readUploaded, refusalText, shellQuote, takeFiles,
   uploadFolder, uploadUrl, uploadedText, uploadingText,
 } from "../../dist/webstate.js";
 import { findTargets, isLinkModifier, linkAction } from "../../dist/links.js";
@@ -451,4 +451,18 @@ test("the sentences of an upload are the ones the design gives", () => {
   assert.equal(uploadingText("n".repeat(100)), `Uploading ${"n".repeat(47)}…`, "a long name is cut for the status line");
   assert.equal(uploadedText(1), "Uploaded");
   assert.equal(uploadedText(3), "Uploaded 3 files");
+});
+
+test("the end of a run of uploads says how many arrived, the last refusal, and what was left out", () => {
+  const none = { ok: 0, failed: [], over: 0, folders: 0 };
+  assert.equal(batchText({ ...none, ok: 1 }), "Uploaded");
+  assert.equal(batchText({ ...none, ok: 3 }), "Uploaded 3 files");
+  assert.equal(batchText({ ...none, failed: ["too large"] }), "Not uploaded: too large.");
+  assert.equal(batchText({ ...none, failed: ["name not allowed", "try again"] }), "Not uploaded: try again.", "the last refusal speaks");
+  assert.equal(batchText({ ...none, ok: 2, failed: ["too large"] }), "Uploaded 2 files. Not uploaded: too large.");
+  assert.equal(batchText({ ...none, ok: 16, over: 1 }), "Uploaded 16 files. Only 16 files at a time.");
+  assert.equal(batchText({ ...none, ok: 1, folders: 2 }), "Uploaded. Folders are not uploaded.");
+  assert.equal(batchText({ ...none, folders: 1 }), "Folders are not uploaded.");
+  assert.equal(batchText({ ...none, over: 3, folders: 1 }), "Only 16 files at a time. Folders are not uploaded.");
+  assert.equal(batchText(none), "");
 });

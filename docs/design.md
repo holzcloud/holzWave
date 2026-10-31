@@ -2457,11 +2457,23 @@ the mark `offline` stays for good, no layer opens and nothing reconnects. The ma
 is shown then), offline or reconnecting, session ends, secrets locked. The status line shows no mark while the page cannot learn its session.
 
 **Upload by drop.** While a file is dragged over a pane that runs a shell, the pane shows a hairline dashed edge (1 px, `--hw-rose`, with
-`--hw-rose-wash` inside) and, centred, a small box with the label `Drop to upload` (uppercase, tracked) over `to` and the upload folder in mono. Rose
-marks the target of the action. A drag that carries no file (text, a link) shows nothing, and a pane that runs no shell shows no edge and
-accepts nothing. A finished upload types the server's path into the pane like a paste, never followed by `Enter`, several paths separated by
-spaces, and the status line says `Uploaded.` (`Uploaded 3 files.`). A refusal says why in words and puts nothing in the pane:
-`Not uploaded: too large.` or `Not uploaded: name not allowed.`
+`--hw-rose-wash` inside, 2 px inside the pane's box so that it does not meet a divider) and, centred, a small box with the label `Drop to upload`
+(uppercase, tracked). Once the page has seen an answer of the server the box also says `to` and the upload folder in mono; the first drop after the
+page loads shows the label alone, because the page does not know the folder yet. Rose marks the target of the action. A drag that carries no
+file shows nothing; a pane that runs no shell (a file browser, a preview, the monitor, a chat) shows no edge and accepts nothing, and the cursor
+says so. A drag of files is the page's wherever it is: a drop on the title bar, the status line, a pane that takes nothing or while a layer is open
+uploads nothing, and the browser never opens the dropped file or leaves the page; a link dragged in from another page is not followed either,
+and a text field keeps its own drop.
+
+Each file goes to the server on its own, one after the other, at most 16 for a drop (the 17th and the rest are not sent, and the status line says
+so). When a file has arrived its path, quoted for the shell with single quotes, is typed into the pane under the drop like a paste, never followed by
+`Enter`; several paths are separated by a space. A path with a line break in it is quoted and goes through the confirmation of every paste. The
+status line says what happens in words: `Uploading <name>` for the file on its way (a long name is cut with an ellipsis), then `Uploaded`
+(`Uploaded 3 files`) when the run ends. A refusal says why and types nothing: `Not uploaded: too large.`, `Not uploaded: name not allowed.`,
+`Not uploaded: try again.` (too many requests, or the server is busy), `Not uploaded: secrets are locked.`, `Not uploaded: sign in again.` and
+`Not uploaded: upload failed.` for any other answer, an answer that is not an upload and a connection that failed. After a run with more than one
+outcome the sentences follow each other (`Uploaded 2 files. Not uploaded: too large.`), and the sentences `Only 16 files at a time.` and
+`Folders are not uploaded.` end the run when they apply; a folder is never sent. When the session has ended nothing is sent.
 
 **Download.** A file of the file browser (6.5) has the menu entry `Download` in its row menu, with `Open preview`, and the palette has
 the entry `Download`, which acts on the selected row of the focused file browser and is absent when there is none. A refusal is said in

@@ -37,6 +37,9 @@ async function open(page, url, { answer = () => stored("x", 0), os = "web", bloc
         const directory = f !== null && f.name.startsWith("dir-");
         return { isDirectory: directory, isFile: !directory };
       };
+      // Init scripts of earlier cases run again on every load: the recorders are made once, the answers above come from the newest script.
+      if (window.__recording) return;
+      window.__recording = true;
       // The page's request function is `fetch`: record the body of an upload before it goes on.
       window.__sent = [];
       const real = window.fetch.bind(window);
@@ -123,6 +126,9 @@ const drag = (page, kind, at, { files = [], text = null, uri = null, key = "dt",
       let dt = window[spec.key];
       if (!dt || k === "dragenter") {
         dt = new DataTransfer();
+        // A transfer made by a script is not a drag of the system and ignores `dropEffect`; this one keeps what the page set.
+        let effect = "none";
+        Object.defineProperty(dt, "dropEffect", { get: () => effect, set: (v) => void (effect = v) });
         for (const f of spec.files) dt.items.add(new File([new Uint8Array(f.bytes)], f.name, { type: f.type }));
         if (spec.text !== null) dt.setData("text/plain", spec.text);
         if (spec.uri !== null) dt.setData("text/uri-list", spec.uri);
@@ -224,7 +230,7 @@ async function dragCase(page, url) {
   const shown = await targetOf(page);
   assert.equal(shown.length, 1, "one target");
   const t = shown[0];
-  assert.ok(Math.abs(t.x - one.left) <= 1 && Math.abs(t.y - one.top) <= 1 && Math.abs(t.w - one.w) <= 1 && Math.abs(t.h - one.h) <= 1, `the edge is the pane's box ${JSON.stringify([t, one])}`);
+  assert.ok(Math.abs(t.x - (one.left + 2)) <= 1 && Math.abs(t.y - (one.top + 2)) <= 1 && Math.abs(t.w - (one.w - 4)) <= 1 && Math.abs(t.h - (one.h - 4)) <= 1, `the edge is the pane's box, 2 px inside ${JSON.stringify([t, one])}`);
   assert.equal(t.label, "Drop to upload");
   assert.equal(t.folder, null, "no folder is named before the page has seen one");
   assert.equal(t.style, "dashed", "a dashed edge");
@@ -236,7 +242,7 @@ async function dragCase(page, url) {
   await drag(page, "dragover", two, { files: f });
   const moved = await targetOf(page);
   assert.equal(moved.length, 1);
-  assert.ok(Math.abs(moved[0].x - two.left) <= 1 && Math.abs(moved[0].w - two.w) <= 1, "the edge follows the pane under the pointer");
+  assert.ok(Math.abs(moved[0].x - (two.left + 2)) <= 1 && Math.abs(moved[0].w - (two.w - 4)) <= 1, "the edge follows the pane under the pointer");
 
   // Over nothing that is a pane (the title bar): no edge, no copy.
   const bar = { x: 40, y: 4 };
@@ -450,7 +456,7 @@ async function outsideCase(page, url) {
 async function endedCase(page, url) {
   const { log } = await open(page, url);
   await page.evaluate(() => window.__MOCK__.emit("hw-session", { state: "ended" }));
-  await page.locator('[role="dialog"]').waitFor({ state: "visible" });
+  await page.locator(".web-ended").waitFor({ state: "visible" });
   const before = await page.evaluate(() => location.href);
   const shell = await paneBox(page, 2);
   const r = await dropAt(page, shell, [file("a.txt")]);

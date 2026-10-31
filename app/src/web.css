@@ -26,3 +26,23 @@
 @media (forced-colors: active) {
   :root .settings .set-notify-row { outline: 2px solid CanvasText; outline-offset: -2px; }
 }
+
+/* ---- upload by drop (webfiles.ts, docs/design.md section 6.30) -------------------------------------------------------------------
+   While a file is dragged over a pane that runs a shell, the pane shows a hairline dashed edge in rose (rose marks the target of the
+   action) with a wash inside, and in the middle a small box with the label and, once the page has seen it, the folder in mono. The
+   edge is 2 px inside the pane so it does not meet the divider. The words and the dashes are the cues; nothing moves; the layer takes
+   no press. */
+.web-drop { position: fixed; z-index: 40; box-sizing: border-box; display: flex; align-items: center; justify-content: center;
+            pointer-events: none; color: var(--hw-ink); background: var(--hw-rose-wash); border: 1px dashed var(--hw-rose); }
+.web-drop-box { display: flex; flex-direction: column; align-items: center; gap: .25rem; box-sizing: border-box; max-width: 80%;
+                padding: .5rem 1.1rem; text-align: center; background: var(--hw-ground-2); border: 1px solid var(--hw-line);
+                border-radius: 6px; }
+.web-drop-label { font-weight: 700; }
+.web-drop-to { color: var(--hw-dim); overflow-wrap: anywhere; }
+.web-drop-folder { color: var(--hw-ink); }
+:root.contrast-high .web-drop { border-width: 2px; }
+
+@media (forced-colors: active) {
+  .web-drop { background: Canvas; border-color: Highlight; }
+  .web-drop-box { border-color: CanvasText; }
+}
