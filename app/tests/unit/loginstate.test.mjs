@@ -227,8 +227,11 @@ test("the_login_page_takes_nothing_but_http_from_the_bridge_and_uses_no_network_
 
 test("the_entry_document_has_no_inline_script_or_style", () => {
   const html = readFileSync(join(DIST, "login.html"), "utf8");
-  assert.deepEqual([...html.matchAll(/<script\b[^>]*>/g)].map((m) => m[0]), ['<script type="module" src="./login.js">']);
+  assert.deepEqual([...html.matchAll(/<script\b[^>]*>/g)].map((m) => m[0]), ['<script type="module" src="/login.js">']);
   assert.doesNotMatch(html, /<style\b|\sstyle=|\son[a-z]+=|javascript:/i);
-  assert.match(html, /href="\.\/app\.css"/);
-  assert.match(html, /href="\.\/login\.css"/);
+  // The server answers this document at `/auth/oidc/callback` too, so the files are named from the root: a relative name would
+  // be looked for under `/auth/oidc/` and the page would stay blank after a single sign-on.
+  assert.match(html, /href="\/app\.css"/);
+  assert.match(html, /href="\/login\.css"/);
+  assert.doesNotMatch(html, /(?:href|src)="\./);
 });
