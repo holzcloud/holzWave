@@ -139,7 +139,12 @@ impl LocalSource {
     }
 
     fn entry_of(name: String, path: &Path) -> Option<Entry> {
-        let link_meta = fs::symlink_metadata(path).ok()?;
+        Self::entry_at(name, path).ok()
+    }
+
+    /// The entry at `path`, or the operating system's own error for why there is none.
+    fn entry_at(name: String, path: &Path) -> std::io::Result<Entry> {
+        let link_meta = fs::symlink_metadata(path)?;
         let link = link_meta.file_type().is_symlink();
         // A link is shown as what it points to; a broken link as an other entry.
         let meta = if link { fs::metadata(path).ok() } else { Some(link_meta) };
@@ -150,7 +155,7 @@ impl LocalSource {
             None => (Kind::Other, 0, None),
         };
         let hidden = name.starts_with('.');
-        Some(Entry { name, kind, link, size, modified, hidden })
+        Ok(Entry { name, kind, link, size, modified, hidden })
     }
 }
 
@@ -186,7 +191,12 @@ impl FileSource for LocalSource {
     fn stat(&self, path: &str) -> Result<Entry> {
         let p = self.resolve(path)?;
         let name = p.file_name().map_or_else(|| p.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
-        Self::entry_of(name, &p).ok_or_else(|| Error::Unsupported(format!("no such file: {path}")))
+        // Only a path that is not there is "no such file". A path that exists but cannot be reached (a directory the
+        // person may not enter) keeps the operating system's own words, so that a refusal is not mistaken for an absence.
+        Self::entry_at(name, &p).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => Error::Unsupported(format!("no such file: {path}")),
+            _ => Error::Io(e),
+        })
     }
 
     fn read(&self, path: &str, limit: u64) -> Result<Vec<u8>> {
@@ -597,6 +607,28 @@ mod tests {
         assert!(src.list("").is_err());
         assert!(src.read("a\0b", 10).is_err());
         assert!(src.read(&"x".repeat(MAX_PATH + 1), 10).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_cannot_be_reached_is_a_refusal_and_a_path_that_is_not_there_is_an_absence() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch("stat-refusal");
+        let closed = d.join("closed");
+        fs::create_dir(&closed).unwrap();
+        fs::write(closed.join("inside.txt"), "x").unwrap();
+        let src = LocalSource::new(Some(d.clone()));
+        let missing = src.stat(d.join("nothing.txt").to_str().unwrap()).unwrap_err().to_string();
+        assert!(missing.contains("no such file"), "{missing}");
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+        // The superuser can enter any directory; then there is no refusal to look at.
+        if fs::metadata(closed.join("inside.txt")).is_err() {
+            let refused = src.stat(closed.join("inside.txt").to_str().unwrap()).unwrap_err().to_string();
+            assert!(refused.to_lowercase().contains("permission denied"), "the operating system's words, not an absence: {refused}");
+            assert!(!refused.contains("no such file"), "{refused}");
+        }
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o700)).unwrap();
         let _ = fs::remove_dir_all(&d);
     }
 
