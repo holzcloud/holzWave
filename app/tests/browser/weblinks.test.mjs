@@ -121,6 +121,7 @@ export default async function ({ page, url, errors }) {
   await hintCase(page, url);
   await chatCase(page, url);
   await sidebarCase(page, url);
+  await unavailableCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -312,4 +313,66 @@ async function sidebarCase(page, url) {
   await page.getByRole("button", { name: /Docs/ }).click();
   assert.deepEqual(await opened(page), [["https://example.org/docs", "_blank", FEATURES]], "the item opens in a new tab");
   assert.equal(await shellCalls(page), 0, "the shell's open_url is not called");
+}
+
+const UNAVAILABLE = "Not available in the browser.";
+const TEAR_OFF = ["Move pane to new window", "Move tab to new window"];
+const notice = (page) => page.evaluate(() => document.querySelector("#status .notice")?.textContent ?? "");
+const titlesOfRegistry = (page) =>
+  page.evaluate(async () => (await import(new URL("actions.js", location.href).href)).listActions().map((a) => a.title));
+const run = (page, id) =>
+  page.evaluate(async (i) => (await import(new URL("actions.js", location.href).href)).runAction(i), id);
+const tearOffCalls = async (page) =>
+  (await callsOf(page, "tear_off_pane")).length + (await callsOf(page, "tear_off_tab")).length +
+  (await callsOf(page, "release_outside")).length + (await callsOf(page, "drag_over")).length + (await callsOf(page, "drag_end")).length;
+
+/** The palette does not list the two tear-off entries, lists every other, and the registry still answers in words. */
+async function unavailableCase(page, url) {
+  await open(page, url);
+  const all = await titlesOfRegistry(page);
+  for (const t of TEAR_OFF) assert.ok(all.includes(t), `the registry holds "${t}"`);
+
+  assert.equal(await run(page, "palette.open"), true);
+  await page.waitForSelector(".palette-row");
+  const listed = await page.evaluate(() => [...document.querySelectorAll(".palette-row .palette-title")].map((n) => n.textContent));
+  for (const t of TEAR_OFF) assert.ok(!listed.includes(t), `the palette does not list "${t}"`);
+  assert.deepEqual(
+    [...listed].sort(),
+    all.filter((t) => !TEAR_OFF.includes(t)).sort(),
+    "every other action is listed",
+  );
+  await page.locator(".palette-input").fill("new window");
+  assert.equal(await page.locator(".palette-row").count(), 0, "a search for the words finds neither entry");
+  await page.keyboard.press("Escape");
+
+  // Run by a stored shortcut or a script: the sentence, and no call of the shell.
+  await page.evaluate(() => window.__MOCK__.reset());
+  for (const id of ["pane.move_to_new_window", "tab.move_to_new_window"]) {
+    assert.equal(await run(page, id), true, `${id} is still a registered action`);
+    await page.waitForFunction((t) => document.querySelector("#status .notice")?.textContent === t, UNAVAILABLE);
+    assert.equal(await notice(page), UNAVAILABLE);
+  }
+  assert.equal(await tearOffCalls(page), 0, "no tear-off call reached the shell");
+  const panes = async () => page.evaluate(() => document.querySelectorAll(".panehead").length);
+  const before = await panes();
+  assert.ok(before >= 2);
+
+  // A pane dragged out of the window and released: the same sentence, and it stays.
+  await page.evaluate(() => window.__MOCK__.reset());
+  await page.waitForFunction(() => !document.querySelector("#status .notice")?.textContent, null, { timeout: 8000 }); // the earlier notice ran out
+  const view = await page.evaluate(() => window.__MOCK__.view());
+  const c = await page.locator("canvas").first().boundingBox();
+  const unit = view.panes[0][1];
+  const grip = { x: c.x + (unit.x + unit.w) * c.width - 60, y: c.y + unit.y * c.height + 8 };
+  const width = await page.evaluate(() => window.innerWidth);
+  await page.mouse.move(grip.x, grip.y);
+  await page.mouse.down();
+  await page.mouse.move(width + 40, grip.y + 10, { steps: 6 });
+  await page.waitForTimeout(300);
+  await page.mouse.up();
+  await page.waitForFunction((t) => document.querySelector("#status .notice")?.textContent === t, UNAVAILABLE);
+  assert.equal(await tearOffCalls(page), 0, "a drag released outside the page asks the shell for nothing, not even the outline");
+  assert.equal((await callsOf(page, "move_pane")).length, 0, "and moves nothing");
+  assert.equal(await panes(), before, "the pane stays where it was");
+  assert.equal((await page.evaluate(() => window.__MOCK__.view())).panes.length, view.panes.length);
 }

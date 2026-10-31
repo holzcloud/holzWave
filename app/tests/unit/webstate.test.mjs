@@ -3,8 +3,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { actionIdFor, chordFor, setBindingTable, setOs } from "../../dist/chords.js";
-import { CLIPBOARD_REFUSED, FULLSCREEN_NOTICE, LOCK_KEYS, canLockKeys } from "../../dist/webstate.js";
+import {
+  CLIPBOARD_REFUSED, DESKTOP_ONLY_ACTIONS, FULLSCREEN_NOTICE, LOCK_KEYS, NOT_AVAILABLE, canLockKeys,
+} from "../../dist/webstate.js";
 import { findTargets, isLinkModifier, linkAction } from "../../dist/links.js";
+import { isAvailable, listActions, listAvailableActions, registerAction, runAction, setAvailability } from "../../dist/actions.js";
+import { readdirSync, readFileSync } from "node:fs";
 
 const CLIPBOARD = [
   ["Ctrl+Shift+C", "edit.copy"],
@@ -107,4 +111,52 @@ test("a path is no link where a folder cannot be shown, and a URL is the same ac
   assert.equal(linkAction(path, "/home/u", false), null, "no path where nothing can be revealed");
   assert.deepEqual(linkAction(path, "/home/u"), { command: "reveal_path", args: { path: "./src/main.rs", base: "/home/u" } });
   assert.deepEqual(linkAction(path, null, true), { command: "reveal_path", args: { path: "./src/main.rs", base: null } });
+});
+
+// ---- controls the browser does not have -----------------------------------------------------------------------------
+
+test("the answer for a control the browser does not have is the sentence the design gives", () => {
+  assert.equal(NOT_AVAILABLE, "Not available in the browser.");
+});
+
+test("the two tear-off actions are the ones the browser build cannot offer", () => {
+  assert.deepEqual([...DESKTOP_ONLY_ACTIONS], ["pane.move_to_new_window", "tab.move_to_new_window"]);
+});
+
+test("an action is available unless it carries a test that says no; unavailable actions stay in the registry and still run", () => {
+  let ran = 0;
+  registerAction({ id: "t45.plain", title: "Plain", run: () => ran++ });
+  registerAction({ id: "t45.gated", title: "Gated", run: () => ran++ });
+  assert.equal(setAvailability("t45.gated", () => false), true);
+  assert.equal(setAvailability("t45.unknown", () => false), false, "an unknown id is not an error");
+  const plain = listActions().find((a) => a.id === "t45.plain");
+  const gated = listActions().find((a) => a.id === "t45.gated");
+  assert.equal(isAvailable(plain), true, "no test: available, as every action was before");
+  assert.equal(isAvailable(gated), false);
+  assert.ok(listActions().some((a) => a.id === "t45.gated"), "the registry still holds it");
+  const listed = listAvailableActions().map((a) => a.id);
+  assert.ok(listed.includes("t45.plain"));
+  assert.ok(!listed.includes("t45.gated"), "the palette's list leaves it out");
+  assert.equal(runAction("t45.gated"), true);
+  assert.equal(ran, 1, "a stored shortcut or a script still reaches it");
+  setAvailability("t45.gated", () => true);
+  assert.ok(listAvailableActions().some((a) => a.id === "t45.gated"), "the test is asked each time");
+});
+
+test("an availability test that throws makes the action unavailable, not the palette broken", () => {
+  registerAction({ id: "t45.broken", title: "Broken", run: () => {} });
+  setAvailability("t45.broken", () => {
+    throw new Error("boom");
+  });
+  assert.equal(isAvailable(listActions().find((a) => a.id === "t45.broken")), false);
+  assert.ok(Array.isArray(listAvailableActions()));
+});
+
+test("only the browser build's entry file sets an availability test", () => {
+  const dist = new URL("../../dist/", import.meta.url);
+  const users = readdirSync(dist)
+    .filter((f) => f.endsWith(".js"))
+    .filter((f) => /\bsetAvailability\(/.test(readFileSync(new URL(f, dist), "utf8")))
+    .sort();
+  assert.deepEqual(users, ["actions.js", "web.js"]);
 });
