@@ -1,12 +1,21 @@
 #!/bin/sh
 # The container tests of the web build, from the Mac, in Docker.
 #
-#   sh scripts/web-container-test.sh [caps|acme|all]    (default: all)
+#   sh scripts/web-container-test.sh [caps|acme|isolation|all] [-- <test filter>]    (default: all)
+#
+# The words after `--` go to the test binary of the `isolation` mode as its filter (`tracer`, `homes`, `procs`, `caps`,
+# `limits`, `teardown` select a group).
 #
 # Modes: `caps` builds the privileged helper and its container test binary inside the Linux test image, gives one copy
 # of the helper the file capabilities `cap_setuid,cap_setgid,cap_chown,cap_kill=p` and another none, and runs the test
 # binary as an unprivileged user in a container that adds exactly those four capabilities. It proves what a worker is left
 # with (no capability, no extra descriptor, a fixed environment) and that the helper refuses to run without its capabilities.
+# `isolation` proves what keeps two people apart in one container, the way the product runs it. It builds the server binary
+# (the worker) and the test binary without the `in-process-workers` feature, lays the same capability-bearing copy of the
+# helper out on a volume as `caps` does, and runs the ignored tests of server/tests/isolation.rs in a container with the same
+# flags as `caps`: the test process is the supervisor (user 10001, no capability), the helper is the real one, the workers
+# and the shells are real, and the people have the first user ids of the range. It fails when fewer container tests ran than
+# the test binary declares.
 # `acme` builds the ACME test binary in the Linux test image, starts Pebble (the ACME test server of Let's Encrypt,
 # ghcr.io/letsencrypt/pebble:2.10.1) on a user-defined Docker network, and runs the ignored test `acme_pebble` in a second
 # container on that network whose network alias is the test domain, so that Pebble finds the server's TLS port when it
@@ -45,20 +54,37 @@ BASE_IMAGE=holzwave-linux-test$SUFFIX
 WEB_IMAGE=holzwave-web-test$SUFFIX
 
 usage() {
-    echo "usage: sh scripts/web-container-test.sh [caps|acme|all]" >&2
+    echo "usage: sh scripts/web-container-test.sh [caps|acme|isolation|all] [-- <test filter>]" >&2
     exit 2
 }
 
 mode=all
 case "${1:-}" in
-    caps | acme | all)
+    caps | acme | isolation | all)
         mode=$1
         shift
         ;;
-    "") ;;
+    "" | --) ;;
     *) usage ;;
 esac
-[ $# -eq 0 ] || usage
+# `-- <filter>` is for the isolation tests; any other leftover is a mistake.
+if [ "${1:-}" = "--" ]; then
+    shift
+    case "$mode" in
+        isolation | all) ;;
+        *) usage ;;
+    esac
+    FILTER="$*"
+    case "$FILTER" in
+        *[!A-Za-z0-9_\ :]*)
+            echo "web-container-test: a test filter may hold letters, digits, underscores, colons and spaces only" >&2
+            exit 2
+            ;;
+    esac
+else
+    FILTER=
+    [ $# -eq 0 ] || usage
+fi
 
 if ! command -v docker >/dev/null 2>&1; then
     echo "web-container-test: docker is missing: install Docker Desktop" >&2
@@ -109,18 +135,21 @@ CAPS_TESTS="spawns_a_worker_as_the_person_with_nothing_left fails_closed_without
     remove_home_removes_the_tree_and_the_directory the_helper_ends_its_workers_when_the_control_socket_closes
     no_process_in_the_container_has_uid_zero the_stand_in_supervisor_has_no_capabilities"
 
-# Builds the helper and the test binary as root, and lays out /opt/hw on the volume: the helper twice (0750, root and the
-# group of the test user, so that a person's worker cannot execute it), the file capabilities on one copy only, the test
-# binary and the stand-in worker. The file mode and owner are set before `setcap`: a change of owner removes file capabilities.
-caps_build() {
-    docker volume rm -f "$CAPS_VOLUME" >/dev/null || return 1
-    docker volume create "$CAPS_VOLUME" >/dev/null || return 1
+# Builds the helper as root and lays out /opt/hw on a fresh volume: the helper (0750, root and the group of the test user, so
+# that a person's worker cannot execute it) with the file capabilities, then whatever `$2` adds. `$1` is the volume, `$2` the
+# shell commands that follow in the build container (they build and install the test binary). The file mode and owner are
+# set before `setcap`: a change of owner removes file capabilities. Both modes that need the helper call this function.
+web_build() {
+    volume=$1
+    extra=$2
+    docker volume rm -f "$volume" >/dev/null || return 1
+    docker volume create "$volume" >/dev/null || return 1
     echo "+ docker run $WEB_IMAGE (build the helper and the test binary, apply the file capabilities)"
     tree_stream | docker run --rm -i --init ${PLATFORM:+--platform "$PLATFORM"} \
         -v holzwave-linux-cargo-registry:/root/.cargo/registry \
         -v holzwave-linux-cargo-git:/root/.cargo/git \
         -v holzwave-linux-target$SUFFIX:/work/target \
-        -v "$CAPS_VOLUME":/opt/hw \
+        -v "$volume":/opt/hw \
         -e CARGO_TERM_COLOR=never \
         ${CARGO_BUILD_JOBS:+-e CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS"} \
         "$WEB_IMAGE" sh -c '
@@ -128,19 +157,25 @@ set -eu
 tar -x --no-same-owner -C /work
 cd /work
 cargo build --locked -p holzwave-spawn-helper
+chown root:root /opt/hw
+chmod 0755 /opt/hw
+install -m 0750 -o root -g 10001 target/debug/holzwave-spawn-helper /opt/hw/helper
+setcap cap_setuid,cap_setgid,cap_chown,cap_kill=p /opt/hw/helper
+'"$extra"'
+ls -l /opt/hw
+'
+}
+
+# The `caps` build: the test binary of the helper, a copy of the helper without file capabilities, the stand-in worker.
+caps_build() {
+    web_build "$CAPS_VOLUME" '
 test_bin=$(cargo test --locked -p holzwave-spawn-helper --test caps_container --no-run --message-format=json \
     | jq -r "select(.reason == \"compiler-artifact\" and .target.name == \"caps_container\" and .profile.test == true) | .executable" \
     | tail -n 1)
 test -x "$test_bin"
-chown root:root /opt/hw
-chmod 0755 /opt/hw
-install -m 0750 -o root -g 10001 target/debug/holzwave-spawn-helper /opt/hw/helper
 install -m 0750 -o root -g 10001 target/debug/holzwave-spawn-helper /opt/hw/helper-plain
-setcap cap_setuid,cap_setgid,cap_chown,cap_kill=p /opt/hw/helper
 install -m 0755 -o root -g root "$test_bin" /opt/hw/caps_container
-install -m 0755 -o root -g root spawn-helper/tests/support/fake-worker.sh /opt/hw/worker.sh
-ls -l /opt/hw
-'
+install -m 0755 -o root -g root spawn-helper/tests/support/fake-worker.sh /opt/hw/worker.sh'
 }
 
 # Runs the ignored tests as user 10001 with exactly four added capabilities, and checks what they reported.
@@ -197,6 +232,83 @@ mode_caps() {
         exit 1
     }
     caps_run
+}
+
+# ---- isolation ----------------------------------------------------------------------------------------------------
+
+ISO_VOLUME=holzwave-web-iso$SUFFIX
+
+# The `isolation` build: the helper as for `caps`, the server binary (the worker the helper starts) and the test binary, both
+# built without the `in-process-workers` feature (the default), so that the supervisor under test can only use the helper.
+isolation_build() {
+    web_build "$ISO_VOLUME" '
+cargo build --locked -p holzwave-server
+test_bin=$(cargo test --locked -p holzwave-server --test isolation --no-run --message-format=json \
+    | jq -r "select(.reason == \"compiler-artifact\" and .target.name == \"isolation\" and .profile.test == true) | .executable" \
+    | tail -n 1)
+test -x "$test_bin"
+install -m 0755 -o root -g root target/debug/holzwave-server /opt/hw/holzwave-server
+install -m 0755 -o root -g root "$test_bin" /opt/hw/isolation'
+}
+
+# Runs the ignored tests as user 10001 with exactly four added capabilities, counts what ran against what the test binary
+# declares, and prints the per-binary counts. The same flags as the `caps` run; nothing is added.
+isolation_run() {
+    log=$(mktemp "${TMPDIR:-/tmp}/holzwave-web-test.XXXXXX") || exit 2
+    code=$(mktemp "${TMPDIR:-/tmp}/holzwave-web-test-code.XXXXXX") || exit 2
+    echo "+ docker run --rm --init --user 10001:10001 --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add CHOWN --cap-add KILL --read-only --tmpfs /data --tmpfs /tmp -v $ISO_VOLUME:/opt/hw:ro $WEB_IMAGE /opt/hw/isolation --ignored --test-threads=1 $FILTER"
+    {
+        # shellcheck disable=SC2086 # $FILTER is a list of plain words, checked at the start
+        docker run --rm --init ${PLATFORM:+--platform "$PLATFORM"} \
+            --user 10001:10001 \
+            --cap-drop ALL --cap-add SETUID --cap-add SETGID --cap-add CHOWN --cap-add KILL \
+            --read-only \
+            --tmpfs /data:rw,nosuid,nodev,noexec,uid=10001,gid=10001,mode=0711 \
+            --tmpfs /tmp:rw,nosuid,nodev,noexec,mode=1777 \
+            -v "$ISO_VOLUME":/opt/hw:ro \
+            -e HW_HELPER=/opt/hw/helper -e HW_WORKER=/opt/hw/holzwave-server -e HW_DATA=/data \
+            "$WEB_IMAGE" sh -c '
+set -eu
+getcap /opt/hw/helper
+getcap /opt/hw/helper | grep -Eq "cap_chown,cap_kill,cap_setgid,cap_setuid[ =+]*p" \
+    || { echo "web-container-test: the helper does not carry the file capabilities" >&2; exit 1; }
+ls -ld /opt/hw/helper /opt/hw/holzwave-server /opt/hw/isolation
+echo "web-container-test: declared: $(/opt/hw/isolation --list --ignored "$@" 2>/dev/null | grep -c ": test\$")"
+exec /opt/hw/isolation --ignored --show-output --test-threads=1 "$@"
+' sh $FILTER
+        echo $? >"$code"
+    } 2>&1 | tee "$log"
+
+    status=$(cat "$code")
+    declared=$(sed -n 's/^web-container-test: declared: \([0-9][0-9]*\)$/\1/p' "$log" | tail -n 1)
+    # The counts come from the summary line of the test binary: the helper writes to the same stream, so the `ok` of a test
+    # can land on a later line than its name.
+    result=$(grep '^test result: ' "$log" | tail -n 1)
+    passed=$(echo "$result" | sed -n 's/^test result: [A-Za-z]*\. \([0-9][0-9]*\) passed; \([0-9][0-9]*\) failed; \([0-9][0-9]*\) ignored.*$/\1/p')
+    failed=$(echo "$result" | sed -n 's/^test result: [A-Za-z]*\. \([0-9][0-9]*\) passed; \([0-9][0-9]*\) failed; \([0-9][0-9]*\) ignored.*$/\2/p')
+    ignored=$(echo "$result" | sed -n 's/^test result: [A-Za-z]*\. \([0-9][0-9]*\) passed; \([0-9][0-9]*\) failed; \([0-9][0-9]*\) ignored.*$/\3/p')
+    passed=${passed:-0}
+    failed=${failed:-0}
+    rm -f "$log" "$code"
+    echo
+    echo "web-container-test: isolation: declared ${declared:-0}, passed $passed, failed $failed, ignored ${ignored:-0}"
+    if [ "$status" != 0 ] || [ "$failed" != 0 ]; then
+        echo "web-container-test: FAILED (docker exit $status)" >&2
+        exit 1
+    fi
+    if [ "${declared:-0}" = 0 ] || [ "$passed" != "${declared:-0}" ]; then
+        echo "web-container-test: FAILED: ${declared:-0} container tests declared and $passed passed: a test did not run" >&2
+        exit 1
+    fi
+}
+
+mode_isolation() {
+    ensure_images
+    isolation_build || {
+        echo "web-container-test: the build in the container failed" >&2
+        exit 1
+    }
+    isolation_run
 }
 
 # ---- acme ---------------------------------------------------------------------------------------------------------
@@ -329,9 +441,11 @@ install -m 0755 "$test_bin" /opt/hw/acme
 case "$mode" in
     caps) mode_caps ;;
     acme) mode_acme ;;
+    isolation) mode_isolation ;;
     all)
         mode_caps
         mode_acme
+        mode_isolation
         ;;
 esac
 echo "web-container-test: ok"
