@@ -8,9 +8,10 @@
 // page never enters full screen by itself: only the palette entry `Toggle full screen`, run by a person, does. The lock is
 // requested only after full screen was granted and released on every way out (the entry run again, the person holding
 // Escape, the browser leaving), so keys are never held outside full screen.
-import { registerAction } from "./actions.js";
+import { registerAction, setAvailability } from "./actions.js";
+import { state } from "./state.js";
 import { showNotice } from "./status.js";
-import { FULLSCREEN_NOTICE, LOCK_KEYS, canLockKeys } from "./webstate.js";
+import { DESKTOP_ONLY_ACTIONS, FULLSCREEN_NOTICE, LOCK_KEYS, canLockKeys } from "./webstate.js";
 
 /** The part of `navigator.keyboard` the page uses (Chromium only). */
 interface KeyboardLock {
@@ -105,5 +106,8 @@ export function initWeb(): void {
   document.addEventListener("fullscreenchange", () => {
     if (document.fullscreenElement === null) releaseKeys();
   });
+  // The controls that need a window of the desktop shell are not offered by the palette; run by a stored shortcut or a script
+  // they answer in words (dragdrop.ts) and call nothing. The test asks the platform each time, like every web branch of the page.
+  for (const id of DESKTOP_ONLY_ACTIONS) setAvailability(id, () => state.os !== "web");
   // The later browser-only modules are started here.
 }

@@ -9,7 +9,7 @@
 //
 // Every string is put in with `textContent`. The matching, the section of an id and the chord label are pure and
 // node imports this file for the unit tests: the DOM and the keyboard are reached from `initPalette` only.
-import { listActions, registerAction, runAction } from "./actions.js";
+import { listAvailableActions, registerAction, runAction } from "./actions.js";
 import type { Action } from "./actions.js";
 import { chordFor } from "./chords.js";
 import { el, loadStyles, setAttr, setText } from "./dom.js";
@@ -147,7 +147,7 @@ function rowIndexOf(target: EventTarget | null): number {
 function render(): void {
   if (!ui) return;
   const query = ui.input.value.trim();
-  shown = rank(query, listActions(), (a) => a.title).map((r) => r.item);
+  shown = rank(query, listAvailableActions(), (a) => a.title).map((r) => r.item);
 
   const rows = ui.rows;
   while (rows.length < shown.length) rows.push(makeRow(ui.list, rows.length));

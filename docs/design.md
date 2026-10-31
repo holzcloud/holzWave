@@ -2484,7 +2484,9 @@ the tab gets a small dot in `--hw-warn` while any kind is present.
 **Controls the browser does not have.** Tear-off entries (`Move pane to new window`, `Move tab to new window`), the text size from the system,
 the group `Local network` and `Reveal in folder` are absent from menus, the palette and the Settings, not disabled. When a stored shortcut
 or a script calls one of them anyway, the answer is `Not available in the browser.`, said as the notice of the status line for as long as a
-notice lasts (rule 5 of section 6). Copying and pasting use the clipboard of the browser (section 7).
+notice lasts (rule 5 of section 6), and nothing is asked of the server. A pane or tab that is dragged out of the window and released says the
+same sentence and stays where it was; no outline is asked for on the way out. The palette lists every other entry as it does on the desktop.
+Copying and pasting use the clipboard of the browser (section 7).
 
 **Links.** A link in the visible output of a pane opens by the person's deliberate act, the same act as on the desktop: a click with `Ctrl` or
 `Cmd` held, either of the two. While the modifier is held the link under the pointer gets the underline and the pointer cursor (section 2, rule 4:

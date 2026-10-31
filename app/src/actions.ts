@@ -13,6 +13,11 @@ export interface Action {
    * that the browser fires its `paste` event into the terminal input.
    */
   keepDefault?: boolean;
+  /**
+   * Whether the action is offered by the command palette. Absent means always. It is asked each time the list is built and only
+   * decides what is listed: the registry still holds the action and `runAction` still runs it.
+   */
+  available?: () => boolean;
 }
 
 // A Map keeps the registration order and has no inherited keys ("constructor" is just an unknown id).
@@ -27,6 +32,24 @@ export function registerAction(action: Action): void {
 /** Take over an id: the new behaviour keeps the old position in the list; an unknown id is registered. */
 export function replaceAction(action: Action): void {
   actions.set(action.id, { ...action });
+}
+
+/** Give a registered action an availability test (`Action.available`); false when there is no such action. */
+export function setAvailability(id: string, available: () => boolean): boolean {
+  const action = actions.get(id);
+  if (!action) return false;
+  action.available = available;
+  return true;
+}
+
+/** Whether `action` is offered by the palette: a test that says no or throws means it is not. */
+export function isAvailable(action: Action): boolean {
+  if (action.available === undefined) return true;
+  try {
+    return action.available() === true;
+  } catch {
+    return false;
+  }
 }
 
 /** Remove an action; true if there was one. */
@@ -91,4 +114,9 @@ export function runAction(id: string, options: RunOptions = {}): boolean {
 /** Every registered action in registration order; the array is a copy. */
 export function listActions(): Action[] {
   return [...actions.values()];
+}
+
+/** The registered actions that the palette offers, in registration order: `listActions` without those that are not available. */
+export function listAvailableActions(): Action[] {
+  return [...actions.values()].filter(isAvailable);
 }

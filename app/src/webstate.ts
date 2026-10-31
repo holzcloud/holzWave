@@ -34,3 +34,11 @@ export const LINK_FEATURES = "noopener,noreferrer";
 export function webLinkModifier(e: { metaKey?: boolean; ctrlKey?: boolean }): boolean {
   return e.ctrlKey === true || e.metaKey === true;
 }
+
+// ---- controls the browser does not have -----------------------------------------------------------------------------
+
+/** The status line says this when a control that exists only on a desktop is run in the browser. */
+export const NOT_AVAILABLE = "Not available in the browser.";
+
+/** The actions that need a window of the desktop shell: the palette does not list them in the browser build. */
+export const DESKTOP_ONLY_ACTIONS: readonly string[] = ["pane.move_to_new_window", "tab.move_to_new_window"];

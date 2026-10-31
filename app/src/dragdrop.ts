@@ -39,6 +39,7 @@ import { refusalText } from "./labels.js";
 import { canvas, markLeaving, unmarkLeaving } from "./scene.js";
 import { state } from "./state.js";
 import { showNotice } from "./status.js";
+import { NOT_AVAILABLE } from "./webstate.js";
 import type { View } from "./types.js";
 
 type Source = { kind: "pane"; pane: number } | { kind: "tab"; index: number };
@@ -170,6 +171,7 @@ let hoverPending = false;
 let hoverChain: Promise<unknown> = Promise.resolve();
 
 function pollHover(): void {
+  if (state.os === "web") return; // a browser has no second window to show the outline in
   const view = state.view;
   const gone = press?.active && view ? leavingPanes(press.source, view) : null;
   if (!gone || hoverPending) return; // a slow shell is not asked again before it answered
@@ -260,6 +262,10 @@ function refused(kind: "pane" | "tab", ids: number[], reason: unknown): void {
  * Nothing moves when the shell cancels (a lone pane or tab, no other place to put it) or fails.
  */
 function releaseOutside(source: Source): void {
+  if (state.os === "web") {
+    showNotice(NOT_AVAILABLE); // a browser cannot give a pane a window: it stays where it is
+    return;
+  }
   const view = state.view;
   const gone = view && leavingPanes(source, view);
   if (!gone) return;
@@ -326,6 +332,10 @@ function moveToTab(step: 1 | -1): void {
 
 /** Give the focused pane, or the shown tab, a window of its own, beside this one. A lone pane or tab is refused. */
 function moveToNewWindow(kind: "pane" | "tab"): void {
+  if (state.os === "web") {
+    showNotice(NOT_AVAILABLE); // the palette does not list it in a browser; a stored shortcut or a script gets the answer in words
+    return;
+  }
   const view = state.view;
   if (!view) return;
   const ids = kind === "pane" ? [view.focus] : view.panes.map(([id]) => id);
