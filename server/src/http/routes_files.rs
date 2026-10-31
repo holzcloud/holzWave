@@ -61,6 +61,8 @@ struct FileState {
     upload_max: u64,
     /// The uploads running.
     uploads: Arc<Slots>,
+    /// The downloads that are being streamed.
+    downloads: Arc<Slots>,
 }
 
 /// The routes of this module: the download under a session and the upload.
@@ -73,6 +75,7 @@ pub fn parts(services: &Services) -> Vec<Part> {
         folder: folder_of(&services.upload.dir),
         upload_max: services.upload.max_bytes,
         uploads: Slots::new(limits.uploads_per_person, limits.uploads_total),
+        downloads: Slots::new(limits.downloads_per_person, limits.downloads_total),
     });
     let download = Router::new().route("/files/{token}", get(download)).layer(Extension(state.clone()));
     let upload = Router::new().route("/api/upload", put(upload)).layer(Extension(state));
@@ -243,6 +246,12 @@ struct FileBody {
     offset: u64,
     left: u64,
     pending: Option<(Piece, u32)>,
+    /// The first piece, read before the head of the response was sent, so that a file that cannot be read at all is an error
+    /// status and not a success status with a body that breaks.
+    first: Option<Bytes>,
+    /// The place of this download among the person's and the server's; it goes back when the body is dropped, whether it was
+    /// read to the end, the client went away or the connection closed.
+    _place: Permit,
 }
 
 impl HttpBody for FileBody {
@@ -251,6 +260,12 @@ impl HttpBody for FileBody {
 
     fn poll_frame(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, std::io::Error>>> {
         let this = &mut *self;
+        if let Some(bytes) = this.first.take() {
+            let length = bytes.len() as u64;
+            this.offset += length;
+            this.left = this.left.saturating_sub(length);
+            return Poll::Ready(Some(Ok(Frame::data(bytes))));
+        }
         if this.pending.is_none() {
             if this.left == 0 {
                 return Poll::Ready(None);
@@ -278,7 +293,7 @@ impl HttpBody for FileBody {
     }
 
     fn is_end_stream(&self) -> bool {
-        self.pending.is_none() && self.left == 0
+        self.first.is_none() && self.pending.is_none() && self.left == 0
     }
 
     fn size_hint(&self) -> SizeHint {
@@ -365,6 +380,13 @@ async fn download(request: Request) -> Response {
     let body = if head || plan.length == 0 {
         Body::empty()
     } else {
+        // A place for the stream: the next download of a person who has all theirs running is answered busy, not queued.
+        let Some(place) = state.downloads.take(authed.account.id) else { return refuse(ApiError::Busy) };
+        let first_length = u32::try_from(plan.length.min(limits::FILE_PIECE_BYTES as u64)).unwrap_or(0);
+        let Ok(first) = read_piece(state.supervisor.clone(), key, token.clone(), plan.start, first_length).await else {
+            // The grant was there a moment ago and the file cannot be read now: it is gone, as far as the client can tell.
+            return refuse(ApiError::NotFound);
+        };
         Body::new(FileBody {
             supervisor: state.supervisor.clone(),
             key,
@@ -372,6 +394,8 @@ async fn download(request: Request) -> Response {
             offset: plan.start,
             left: plan.length,
             pending: None,
+            first: Some(first),
+            _place: place,
         })
     };
     let mut response = Response::new(body);
