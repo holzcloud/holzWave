@@ -22,7 +22,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
-use files_env::{FilesEnv, Opts, assert_file_headers, encode, names, png, tree};
+use files_env::{FilesEnv, MIB, Opts, assert_file_headers, encode, names, png, sparse_bytes, tree};
 use holzwave_server::config::Upload;
 use holzwave_server::http::routes_files::clean_name;
 use holzwave_server::limits::Limits;
@@ -1167,4 +1167,575 @@ async fn nothing_but_the_file_is_in_the_folder_after_any_mix_of_good_and_refused
     env.env.eventually("only complete files", |_| uploads_of(&env, &alice) == vec!["a.txt".to_owned(), "c.txt".to_owned()]).await;
     let kinds: Vec<(String, u64, u32)> = tree(&env.home(&alice).join("uploads"));
     assert_eq!(kinds, vec![("a.txt".to_owned(), 3, 0o600), ("c.txt".to_owned(), 5, 0o600)]);
+}
+
+// ==== the download, completed =================================================================================================
+
+const BIG: u64 = 70 * MIB;
+const CHUNK: u64 = 8 * MIB;
+
+/// A person with a worker and a sparse WAV file of `len` bytes granted: the socket (keep it alive), the grant.
+async fn with_big_file(env: &FilesEnv, person: &ws_env::Person, len: u64) -> (ws_env::WsClient, files_env::Granted) {
+    let mut ws = env.worker(person).await;
+    let path = env.put_sparse_wav(person, "media/big.wav", len);
+    let grant = env.grant(&mut ws, &path).await;
+    (ws, grant)
+}
+
+/// A request without `Connection: close`, for a connection that carries several.
+fn keep_alive(env: &FilesEnv, who: &edge::Signed, target: &str) -> edge_tls::Request {
+    let mut request = env.get_request(Some(who), target, None);
+    request.headers.retain(|(n, _)| !n.eq_ignore_ascii_case("connection"));
+    request
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_range_is_a_206_with_its_content_range_its_length_and_exactly_its_bytes() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let (_ws, grant) = with_big_file(&env, &alice, BIG).await;
+    assert!(grant.mime.starts_with("audio/"), "{}", grant.mime);
+    assert_eq!(grant.size, BIG);
+    let last = BIG - 1;
+    let cases: [(&str, u64, u64); 9] = [
+        ("bytes=0-99", 0, 99),
+        ("bytes=100-199", 100, 199),
+        ("bytes=0-0", 0, 0),
+        ("bytes=1048000-2097300", 1_048_000, 2_097_300),
+        ("bytes=-50", BIG - 50, last),
+        ("bytes=73400000-", 73_400_000, last),
+        ("bytes=100-", 100, 100 + CHUNK - 1),
+        ("bytes=0-99999999999", 0, CHUNK - 1),
+        ("bytes=8388000-9999999", 8_388_000, 9_999_999),
+    ];
+    for (header, start, end) in cases {
+        let reply = env.get_range(&alice.signed, &grant.url, header).await;
+        assert_eq!(reply.status, 206, "{header}");
+        assert_eq!(reply.header("content-range"), Some(format!("bytes {start}-{end}/{BIG}").as_str()), "{header}");
+        assert_eq!(reply.header("content-length"), Some((end - start + 1).to_string().as_str()), "{header}");
+        assert_eq!(reply.header("content-type"), Some(grant.mime.as_str()), "{header}");
+        assert_eq!(reply.body.len() as u64, end - start + 1, "{header}");
+        assert!(reply.body == sparse_bytes(start, end - start + 1), "{header}: the bytes are not the bytes of that range");
+        assert_file_headers(&reply);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_range_that_cannot_be_satisfied_is_416_with_the_size_and_no_body() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let (_ws, grant) = with_big_file(&env, &alice, BIG).await;
+    let reads = env.probe.reads();
+    for header in ["bytes=73400320-", "bytes=999999999999-", "bytes=50-10"] {
+        let reply = env.get_range(&alice.signed, &grant.url, header).await;
+        assert_eq!(reply.status, 416, "{header}");
+        assert_eq!(reply.header("content-range"), Some(format!("bytes */{BIG}").as_str()), "{header}");
+        assert!(reply.body.is_empty(), "{header}");
+        assert_file_headers(&reply);
+    }
+    assert_eq!(env.probe.reads(), reads, "no byte was read for a range that cannot be met");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_over_the_whole_file_limit_without_a_range_is_413_with_the_field_range_and_reads_nothing() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let (_ws, grant) = with_big_file(&env, &alice, BIG).await;
+    let reply = env.get(&alice.signed, &grant.url).await;
+    assert_eq!(reply.status, 413);
+    assert_eq!(reply.json(), json!({ "code": "bad_request", "field": "range" }));
+    assert_file_headers(&reply);
+    assert_eq!(env.probe.reads(), 0);
+    // A header that is not one plain range is the whole file too, and so is refused the same way.
+    let reply = env.get_range(&alice.signed, &grant.url, "bytes=0-1,5-6").await;
+    assert_eq!(reply.status, 413);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_range_header_that_is_not_one_plain_range_gets_the_whole_small_file() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let path = env.put_png(&alice, "p.png", 3000);
+    let mut ws = env.worker(&alice).await;
+    let grant = env.grant(&mut ws, &path).await;
+    for header in ["bytes=0-1,5-6", "items=0-1", "bytes=x-y", "bytes=-0", "", "bytes", "bytes=", "BYTES=0-5"] {
+        let reply = env.get_range(&alice.signed, &grant.url, header).await;
+        assert_eq!(reply.status, 200, "{header:?}");
+        assert_eq!(reply.body, png(3000), "{header:?}");
+    }
+    // Two Range headers are not one range.
+    let request = env.get_request(Some(&alice.signed), &grant.url, Some("bytes=0-9")).header("Range", "bytes=10-19");
+    let reply = env.send(request).await;
+    assert_eq!((reply.status, reply.body.len()), (200, 3000));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_whole_file_is_streamed_in_pieces_of_1_mib_and_every_byte_arrives() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let size = 5 * MIB + 777;
+    let path = env.put_png(&alice, "big.png", usize::try_from(size).expect("small"));
+    let mut ws = env.worker(&alice).await;
+    let grant = env.grant(&mut ws, &path).await;
+    let reply = env.get(&alice.signed, &grant.url).await;
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.header("content-length"), Some(size.to_string().as_str()));
+    assert!(reply.body == png(usize::try_from(size).expect("small")));
+    assert_eq!(env.probe.reads(), 6, "five full pieces and the rest");
+    assert_eq!(env.probe.read_bytes(), size);
+    assert_file_headers(&reply);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn head_answers_the_headers_of_the_get_with_no_body_and_reads_nothing() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let (_ws, grant) = with_big_file(&env, &alice, BIG).await;
+    let mut conn = env.env.connection().await;
+    let mut head = keep_alive(&env, &alice.signed, &grant.url);
+    head.method = "HEAD".into();
+    head = head.header("Range", "bytes=1048576-2097151");
+    conn.send(&head.bytes()).await;
+    let reply = conn.reply(true).await.expect("an answer");
+    assert_eq!(reply.status, 206);
+    assert_eq!(reply.header("content-range"), Some(format!("bytes 1048576-2097151/{BIG}").as_str()));
+    assert_eq!(reply.header("content-length"), Some("1048576"));
+    assert_eq!(reply.header("content-type"), Some(grant.mime.as_str()));
+    assert_file_headers(&reply);
+    // On the same connection: HEAD of the whole file is the 413 of the GET, and HEAD of an unknown token is a 404.
+    let mut head = keep_alive(&env, &alice.signed, &grant.url);
+    head.method = "HEAD".into();
+    conn.send(&head.bytes()).await;
+    assert_eq!(conn.reply(true).await.expect("an answer").status, 413);
+    let mut head = keep_alive(&env, &alice.signed, "/files/0123456789abcdef0123456789abcdef");
+    head.method = "HEAD".into();
+    conn.send(&head.bytes()).await;
+    assert_eq!(conn.reply(true).await.expect("an answer").status, 404);
+    assert_eq!(env.probe.reads(), 0, "a HEAD reads no byte");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_reader_holds_back_the_reads_and_a_client_that_leaves_stops_them() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let size = 40 * MIB;
+    let (_ws, grant) = with_big_file(&env, &alice, size).await;
+    let mut slow = files_env::SlowGet::start(&env, env.get_request(Some(&alice.signed), &grant.url, None)).await;
+    assert_eq!(slow.status, 200);
+    assert_eq!(slow.header("content-length"), Some(size.to_string().as_str()));
+    // The client reads nothing: the server stops asking the worker once what the connection can hold is full.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let held = env.probe.read_bytes();
+    assert!(held < 24 * MIB, "the worker read {held} bytes for a client that read none of 40 MiB");
+    assert!(held > 0);
+    // Reading some lets it go on, but only as far as the client has taken.
+    let mut taken = slow.early.len() as u64;
+    while taken < 4 * MIB {
+        let n = slow.read(64 * 1024).await;
+        assert!(n > 0);
+        taken += n as u64;
+    }
+    slow.close().await;
+    // The client left: the reads stop, far from the end of the file.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let (reads, bytes) = (env.probe.reads(), env.probe.read_bytes());
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!((env.probe.reads(), env.probe.read_bytes()), (reads, bytes), "reads went on after the client left");
+    assert!(bytes < size, "{bytes}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worker_that_dies_in_the_middle_ends_the_connection_before_the_promised_length() {
+    use holzwave_server::supervisor::launcher::WorkerLauncher;
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let size = 40 * MIB;
+    let (_ws, grant) = with_big_file(&env, &alice, size).await;
+    let mut slow = files_env::SlowGet::start(&env, env.get_request(Some(&alice.signed), &grant.url, None)).await;
+    assert_eq!(slow.status, 200);
+    let mut taken = slow.early.len() as u64;
+    while taken < MIB {
+        let n = slow.read(64 * 1024).await;
+        assert!(n > 0);
+        taken += n as u64;
+    }
+    env.env.launcher.kill_uid(alice.key.uid).await.expect("kill");
+    let started = Instant::now();
+    let rest = slow.rest().await;
+    assert!(taken + (rest.len() as u64) < size, "the body ended short ({} of {size})", taken + rest.len() as u64);
+    assert!(started.elapsed() < Duration::from_secs(10), "the connection ended at once, not by a timeout");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_that_is_gone_after_the_grant_is_a_404_and_not_a_200_with_a_broken_body() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let path = env.put_png(&alice, "p.png", 3000);
+    let mut ws = env.worker(&alice).await;
+    let grant = env.grant(&mut ws, &path).await;
+    assert_eq!(env.get(&alice.signed, &grant.url).await.status, 200);
+    std::fs::remove_file(&path).expect("remove");
+    let reply = env.get(&alice.signed, &grant.url).await;
+    assert_eq!(reply.status, 404);
+    assert_eq!(reply.json(), json!({ "code": "not_found" }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_eighth_download_of_a_person_and_the_sixty_fifth_of_all_are_503_busy_until_one_ends() {
+    let limits = Limits { downloads_per_person: 1, downloads_total: 2, ..Limits::DEFAULT };
+    let env = FilesEnv::start_with(Opts { limits: Some(limits), ..Opts::default() }).await;
+    let (alice, bob, carol) = (env.person("alice"), env.person("bob"), env.person("carol"));
+    let (_wa, ga) = with_big_file(&env, &alice, 40 * MIB).await;
+    let (_wb, gb) = with_big_file(&env, &bob, 40 * MIB).await;
+    let (_wc, gc) = with_big_file(&env, &carol, 40 * MIB).await;
+    let first = files_env::SlowGet::start(&env, env.get_request(Some(&alice.signed), &ga.url, None)).await;
+    assert_eq!(first.status, 200);
+    let again = env.get(&alice.signed, &ga.url).await;
+    assert_eq!((again.status, again.json()), (503, json!({ "code": "busy" })), "one per person");
+    assert_file_headers(&again);
+    let second = files_env::SlowGet::start(&env, env.get_request(Some(&bob.signed), &gb.url, None)).await;
+    assert_eq!(second.status, 200);
+    let full = env.get(&carol.signed, &gc.url).await;
+    assert_eq!((full.status, full.json()), (503, json!({ "code": "busy" })), "the server is full");
+    // A small answer without a stream needs no place: a range of one byte is still a stream, a 416 is not.
+    assert_eq!(env.get_range(&carol.signed, &gc.url, "bytes=999999999999-").await.status, 416);
+    first.close().await;
+    let mut freed = 0;
+    for _ in 0..40 {
+        let retry = env.get_range(&carol.signed, &gc.url, "bytes=0-9").await;
+        if retry.status == 206 {
+            freed += 1;
+            break;
+        }
+        assert_eq!(retry.status, 503);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(freed, 1, "the place came back when the first download ended");
+    second.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_grant_stops_working_after_the_idle_time_and_each_use_renews_it() {
+    let env = FilesEnv::start_with(Opts { grant_idle: Some(Duration::from_millis(1200)), ..Opts::default() }).await;
+    let alice = env.person("alice");
+    let path = env.put_png(&alice, "p.png", 500);
+    let mut ws = env.worker(&alice).await;
+
+    let idle = env.grant(&mut ws, &path).await;
+    assert_eq!(env.get(&alice.signed, &idle.url).await.status, 200);
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+    let reply = env.get(&alice.signed, &idle.url).await;
+    assert_eq!((reply.status, reply.json()), (404, json!({ "code": "not_found" })), "unused for longer than the idle time");
+
+    let used = env.grant(&mut ws, &path).await;
+    for _ in 0..5 {
+        assert_eq!(env.get(&alice.signed, &used.url).await.status, 200);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+    assert_eq!(env.get(&alice.signed, &used.url).await.status, 404);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoked_grant_is_a_404_at_once_and_a_new_grant_is_a_new_token() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let path = env.put_png(&alice, "p.png", 500);
+    let mut ws = env.worker(&alice).await;
+    let grant = env.grant(&mut ws, &path).await;
+    assert_eq!(env.get(&alice.signed, &grant.url).await.status, 200);
+    ws.ok("file_revoke", &json!({ "token": grant.token }).to_string()).await;
+    assert_eq!(env.get(&alice.signed, &grant.url).await.status, 404);
+    let again = env.grant(&mut ws, &path).await;
+    assert_ne!(again.token, grant.token);
+    assert_eq!(env.get(&alice.signed, &again.url).await.status, 200);
+    assert_eq!(env.get(&alice.signed, &grant.url).await.status, 404, "the old token stays dead");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_needs_the_session_at_every_request_and_a_signed_out_one_is_401() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let path = env.put_png(&alice, "p.png", 500);
+    let mut ws = env.worker(&alice).await;
+    let grant = env.grant(&mut ws, &path).await;
+    assert_eq!(env.get(&alice.signed, &grant.url).await.status, 200);
+    env.env.test.sessions.end(&alice.signed.session).expect("end");
+    let reply = env.get(&alice.signed, &grant.url).await;
+    assert_eq!((reply.status, reply.json()), (401, json!({ "code": "invalid" })));
+    assert_eq!(reply.header("x-content-type-options"), Some("nosniff"));
+    // A new sign-in of the same person gets the same file with the same token.
+    let again = env.env.sign_in_again(&alice);
+    assert_eq!(env.get(&again, &grant.url).await.status, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worker_that_was_killed_has_lost_its_grants_and_the_route_does_not_start_one() {
+    use holzwave_server::supervisor::launcher::WorkerLauncher;
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let path = env.put_png(&alice, "p.png", 500);
+    let mut ws = env.worker(&alice).await;
+    let grant = env.grant(&mut ws, &path).await;
+    env.env.launcher.kill_uid(alice.key.uid).await.expect("kill");
+    drop(ws);
+    env.env.eventually("the worker is gone", |e| e.counts(&alice).workers == 0).await;
+    let launches = env.env.launcher.launches();
+    let reply = env.get(&alice.signed, &grant.url).await;
+    assert_eq!((reply.status, reply.json()), (404, json!({ "code": "not_found" })));
+    assert_eq!(env.env.launcher.launches(), launches, "a download starts no worker");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_people_each_get_their_own_file_and_each_others_token_is_a_404() {
+    let env = FilesEnv::start().await;
+    let (alice, bob) = (env.person("alice"), env.person("bob"));
+    let pa = env.put_png(&alice, "a.png", 1000);
+    let pb = env.put_png(&bob, "b.png", 2000);
+    let (mut wa, mut wb) = (env.worker(&alice).await, env.worker(&bob).await);
+    let (ga, gb) = (env.grant(&mut wa, &pa).await, env.grant(&mut wb, &pb).await);
+    assert_ne!(ga.token, gb.token);
+    assert_eq!(env.get(&alice.signed, &ga.url).await.body, png(1000));
+    assert_eq!(env.get(&bob.signed, &gb.url).await.body, png(2000));
+    for (who, url) in [(&alice, &gb.url), (&bob, &ga.url)] {
+        let reply = env.get(&who.signed, url).await;
+        assert_eq!((reply.status, reply.json()), (404, json!({ "code": "not_found" })), "{}", who.name);
+    }
+}
+
+/// The headers of an answer that say something about the request, in a fixed order, without the date and the connection.
+fn comparable(reply: &edge_tls::Reply) -> Vec<(String, String)> {
+    let mut headers: Vec<(String, String)> = reply
+        .headers
+        .iter()
+        .filter(|(n, _)| !n.eq_ignore_ascii_case("date") && !n.eq_ignore_ascii_case("connection"))
+        .map(|(n, v)| (n.to_ascii_lowercase(), v.clone()))
+        .collect();
+    headers.sort();
+    headers
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_thousand_random_tokens_and_a_foreign_token_get_one_and_the_same_404() {
+    let env = FilesEnv::start().await;
+    let (alice, bob) = (env.person("alice"), env.person("bob"));
+    let path = env.put_png(&alice, "p.png", 500);
+    let (mut wa, _wb) = (env.worker(&alice).await, env.worker(&bob).await);
+    let grant = env.grant(&mut wa, &path).await;
+
+    let reference = env.get(&alice.signed, "/files/00000000000000000000000000000000").await;
+    assert_eq!(reference.status, 404);
+    let reference_headers = comparable(&reference);
+    let reference_body = reference.body.clone();
+
+    let mut state = 0xDEAD_BEEF_CAFE_F00Du64;
+    let mut random_token = move || {
+        let mut text = String::new();
+        for _ in 0..4 {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            text.push_str(&format!("{:08x}", (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) as u32));
+        }
+        text
+    };
+    let calls = env.env.supervisor.stats().file_calls;
+    let mut unknown_times = Vec::new();
+    for _ in 0..4 {
+        let mut conn = env.env.connection().await;
+        for _ in 0..500 {
+            let token = random_token();
+            assert_ne!(token, grant.token);
+            let request = keep_alive(&env, &alice.signed, &format!("/files/{token}"));
+            let started = Instant::now();
+            conn.send(&request.bytes()).await;
+            let reply = conn.reply(false).await.expect("an answer");
+            unknown_times.push(started.elapsed());
+            assert_eq!(reply.status, 404);
+            assert_eq!(reply.body, reference_body);
+            assert_eq!(comparable(&reply), reference_headers);
+        }
+    }
+    assert_eq!(env.env.supervisor.stats().file_calls, calls + 2000, "each one asked alice's worker once, and only hers");
+
+    // Bob, who has a worker too, asking for alice's real token: the same answer to the byte. The time of that and of an unknown
+    // token is measured the same way, on a new connection each.
+    let mut foreign_times = Vec::new();
+    let mut unknown_new_times = Vec::new();
+    for _ in 0..200 {
+        let started = Instant::now();
+        let reply = env.get(&bob.signed, &grant.url).await;
+        foreign_times.push(started.elapsed());
+        assert_eq!(reply.status, 404);
+        assert_eq!(reply.body, reference_body);
+        assert_eq!(comparable(&reply), reference_headers);
+        let started = Instant::now();
+        let reply = env.get(&bob.signed, &format!("/files/{}", random_token())).await;
+        unknown_new_times.push(started.elapsed());
+        assert_eq!((reply.status, reply.body), (404, reference_body.clone()));
+    }
+    // The time is recorded, not pinned to a number: the median of an unknown token and of a foreign one are of one order.
+    unknown_times.sort();
+    foreign_times.sort();
+    unknown_new_times.sort();
+    let median = |times: &[Duration]| times[times.len() / 2];
+    let (kept, foreign, unknown) = (median(&unknown_times), median(&foreign_times), median(&unknown_new_times));
+    eprintln!("TIMING median of 2000 unknown tokens on a kept connection {kept:?}; on new connections: 200 unknown {unknown:?}, 200 foreign {foreign:?}");
+    assert!(kept < Duration::from_millis(200) && foreign < Duration::from_millis(500) && unknown < Duration::from_millis(500));
+    let (low, high) = (foreign.min(unknown), foreign.max(unknown));
+    assert!(high < low * 4 + Duration::from_millis(2), "foreign {foreign:?} and unknown {unknown:?} differ by more than noise");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hostile_paths_are_a_404_and_no_worker_is_asked() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let path = env.put_png(&alice, "p.png", 500);
+    let mut ws = env.worker(&alice).await;
+    let grant = env.grant(&mut ws, &path).await;
+    let t = grant.token.clone();
+    let upper = t.to_uppercase();
+    let targets = [
+        "/files".to_owned(),
+        "/files/".to_owned(),
+        "/files//".to_owned(),
+        "//files/x".to_owned(),
+        format!("//files/{t}"),
+        "/files/..".to_owned(),
+        "/files/../api/session".to_owned(),
+        "/files/%2e%2e".to_owned(),
+        "/files/%2e%2e%2f".to_owned(),
+        format!("/files/{t}/"),
+        format!("/files/{t}/x"),
+        format!("/files/{t}/../{t}"),
+        format!("/files/{t}%2f"),
+        format!("/files/{t}%00"),
+        format!("/files/{t}%20"),
+        format!("/files/{t}.png"),
+        format!("/files/%{:02x}{}", t.as_bytes()[0], &t[1..]),
+        format!("/files/{upper}"),
+        format!("/FILES/{t}"),
+        format!("/files/{}", "a".repeat(5000)),
+        "/files/\u{e9}".replace('\u{e9}', "%C3%A9"),
+        format!("/files/{t};x=y"),
+        format!("/files/{t}\\"),
+        "/files/%00".to_owned(),
+        "/files/%25".to_owned(),
+        format!("/files/{}%25{}", &t[..10], &t[12..]),
+    ];
+    let calls = env.env.supervisor.stats().file_calls;
+    for target in &targets {
+        let reply = env.get(&alice.signed, target).await;
+        assert_eq!(reply.status, 404, "{:.60}", target);
+        assert_eq!(reply.json(), json!({ "code": "not_found" }), "{:.60}", target);
+    }
+    assert_eq!(env.env.supervisor.stats().file_calls, calls, "no hostile path reached a worker");
+    // The query string is not part of the token and is ignored.
+    assert_eq!(env.get(&alice.signed, &format!("/files/{t}?token=other&x=1")).await.status, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn other_methods_on_a_file_path_are_405_with_the_plain_error() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let path = env.put_png(&alice, "p.png", 500);
+    let mut ws = env.worker(&alice).await;
+    let grant = env.grant(&mut ws, &path).await;
+    for method in ["POST", "PUT", "DELETE", "PATCH"] {
+        let request = env
+            .upload_request(&alice.signed, "", b"{}")
+            .header("X-Unused", "1");
+        let mut request = request;
+        request.method = method.to_owned();
+        request.target = grant.url.clone();
+        request.headers.retain(|(n, _)| !n.eq_ignore_ascii_case("content-type"));
+        request = request.header("Content-Type", "application/json");
+        let reply = env.send(request).await;
+        assert_eq!(reply.status, 405, "{method}");
+        assert_eq!(reply.json(), json!({ "code": "bad_request" }), "{method}");
+    }
+    assert_eq!(env.env.supervisor.stats().file_calls, 0, "no worker was asked for a method that is not served");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_response_of_the_download_route_carries_the_same_header_set() {
+    let limits = Limits { downloads_per_person: 1, ..Limits::DEFAULT };
+    let env = FilesEnv::start_with(Opts { limits: Some(limits), ..Opts::default() }).await;
+    let alice = env.person("alice");
+    let (_ws, big) = with_big_file(&env, &alice, BIG).await;
+    let small_path = env.put_png(&alice, "p.png", 500);
+    let mut ws = env.worker(&alice).await;
+    let small = env.grant(&mut ws, &small_path).await;
+
+    let ok = env.get(&alice.signed, &small.url).await;
+    let partial = env.get_range(&alice.signed, &big.url, "bytes=0-9").await;
+    let unknown = env.get(&alice.signed, "/files/ffffffffffffffffffffffffffffffff").await;
+    let malformed = env.get(&alice.signed, "/files/short").await;
+    let too_large = env.get(&alice.signed, &big.url).await;
+    let unsatisfiable = env.get_range(&alice.signed, &big.url, "bytes=999999999999-").await;
+    let hold = files_env::SlowGet::start(&env, env.get_request(Some(&alice.signed), &big.url, Some("bytes=0-8388607"))).await;
+    let busy = env.get(&alice.signed, &small.url).await;
+    hold.close().await;
+
+    let expected = [(&ok, 200), (&partial, 206), (&unknown, 404), (&malformed, 404), (&too_large, 413), (&unsatisfiable, 416), (&busy, 503)];
+    for (reply, status) in expected {
+        assert_eq!(reply.status, status);
+        assert_file_headers(reply);
+        assert!(reply.header("strict-transport-security").is_some(), "{status}");
+        assert!(reply.header("referrer-policy").is_some(), "{status}");
+        assert!(reply.all("access-control-allow-origin").is_empty(), "{status}");
+        assert!(reply.all("set-cookie").is_empty(), "{status}");
+        assert!(reply.all("content-disposition").is_empty(), "{status}");
+    }
+    assert_eq!(ok.header("content-type"), Some("image/png"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_what_file_grant_allows_can_be_downloaded_a_text_file_gets_no_token() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let text = env.put_file(&alice, "notes.txt", b"just text");
+    let mut ws = env.worker(&alice).await;
+    let args = json!({ "source": "local", "path": text.to_str().expect("UTF-8") }).to_string();
+    let answer = ws.call("file_grant", &args).await;
+    assert!(answer.get("err").is_some(), "{answer}");
+    assert_eq!(env.env.supervisor.stats().file_calls, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nothing_a_person_does_with_files_reaches_the_logs_the_audit_log_or_another_persons_home() {
+    let env = FilesEnv::start().await;
+    let (alice, bob) = (env.person("alice"), env.person("bob"));
+    let marker = b"CANARY-CONTENT-8f3a1c";
+    let mut content = png(300);
+    content.extend_from_slice(marker);
+    let path = env.put_file(&alice, "private-name-9d2e.png", &content);
+    let mut ws = env.worker(&alice).await;
+    let _bob_ws = env.worker(&bob).await;
+    let grant = env.grant(&mut ws, &path).await;
+    assert_eq!(env.get(&alice.signed, &grant.url).await.status, 200);
+    let up = env.upload(&alice.signed, "uploaded-name-4b7c.txt", marker).await;
+    assert_eq!(up.status, 200);
+    // Hostile and refused requests too.
+    for target in ["/files/ffffffffffffffffffffffffffffffff", "/files/../x"] {
+        let _ = env.get(&alice.signed, target).await;
+    }
+    let _ = env.get(&bob.signed, &grant.url).await;
+
+    let root = env.home(&alice).parent().and_then(Path::parent).expect("the root of the homes").to_path_buf();
+    // The bytes of the file are in alice's home and nowhere else.
+    let holding = files_env::files_holding(&root, marker);
+    assert_eq!(holding.len(), 2, "{holding:?}");
+    assert!(holding.iter().all(|p| p.starts_with(env.home(&alice))), "{holding:?}");
+    // The token, the cookie and the anti-forgery token are in no file of the server: not the store, not the audit log, not a home.
+    for secret in [grant.token.as_bytes(), alice.signed.cookie.as_bytes(), alice.signed.csrf.as_bytes()] {
+        let found = files_env::files_holding(&root, secret);
+        assert!(found.is_empty(), "a secret is in {found:?}");
+    }
+    let audit = files_env::files_holding(&env.env.test.audit_dir, b"private-name-9d2e");
+    assert!(audit.is_empty(), "{audit:?}");
+    let audit = files_env::files_holding(&env.env.test.audit_dir, b"uploaded-name-4b7c");
+    assert!(audit.is_empty(), "{audit:?}");
+    // Bob's home holds nothing of alice's.
+    assert!(files_env::tree(&env.home(&bob)).iter().all(|(p, _, _)| !p.contains("uploads") && !p.contains("private-name")));
 }

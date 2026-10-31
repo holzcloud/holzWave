@@ -185,6 +185,36 @@ impl FilesEnv {
         self.put_file(person, relative, &png(len))
     }
 
+    /// A sparse WAV file of `len` bytes in the home of `person`: the file system holds only the marked bytes (see
+    /// [`sparse_byte`]), so a file of 70 MiB costs a few blocks.
+    pub fn put_sparse_wav(&self, person: &Person, relative: &str, len: u64) -> PathBuf {
+        use std::io::{Seek, SeekFrom};
+        let path = self.home(person).join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("the folders");
+        }
+        let mut file = std::fs::File::create(&path).expect("the file");
+        file.set_len(len).expect("the length");
+        file.write_all(&sparse_bytes(0, 12.min(len))).expect("the header");
+        let mut block = 0;
+        while block * MIB < len {
+            let start = block * MIB;
+            let head = 32.min(len - start);
+            file.seek(SeekFrom::Start(start)).expect("seek");
+            let from = if start == 0 { 12.min(head) } else { 0 };
+            file.seek(SeekFrom::Start(start + from)).expect("seek");
+            file.write_all(&sparse_bytes(start + from, head - from)).expect("a mark");
+            let tail_start = (start + MIB).min(len).saturating_sub(32).max(start + head);
+            let tail_end = (start + MIB).min(len);
+            if tail_end > tail_start {
+                file.seek(SeekFrom::Start(tail_start)).expect("seek");
+                file.write_all(&sparse_bytes(tail_start, tail_end - tail_start)).expect("a mark");
+            }
+            block += 1;
+        }
+        path
+    }
+
     /// A WAV file of `len` bytes in the home of `person`, written without holding it in memory.
     pub fn put_wav(&self, person: &Person, relative: &str, len: u64) -> PathBuf {
         let path = self.home(person).join(relative);
@@ -238,6 +268,26 @@ pub fn wav_byte(at: u64) -> u8 {
         Ok(at) if at < HEAD.len() => HEAD[at],
         _ => u8::try_from((at.wrapping_mul(31).wrapping_add(7)) % 253).expect("a byte"),
     }
+}
+
+/// One mebibyte.
+pub const MIB: u64 = 1 << 20;
+
+/// The byte at `at` of a sparse test WAV file (see [`FilesEnv::put_sparse_wav`]): the header of a WAV file, then zeros, except
+/// for the first and the last 32 bytes of each mebibyte, which hold bytes that depend on their place. A range that is read
+/// from a wrong offset, or across a piece boundary wrongly, shows up in those bytes.
+pub fn sparse_byte(at: u64) -> u8 {
+    const HEAD: &[u8; 12] = b"RIFF\x00\x00\x00\x00WAVE";
+    match usize::try_from(at) {
+        Ok(at) if at < HEAD.len() => HEAD[at],
+        _ if at % MIB < 32 || at % MIB >= MIB - 32 => u8::try_from((at.wrapping_mul(31).wrapping_add(7)) % 253).expect("a byte") | 1,
+        _ => 0,
+    }
+}
+
+/// The bytes `start..start + len` of a sparse test WAV file.
+pub fn sparse_bytes(start: u64, len: u64) -> Vec<u8> {
+    (start..start + len).map(sparse_byte).collect()
 }
 
 /// The bytes `start..start + len` of a test WAV file.
