@@ -517,6 +517,16 @@ impl Client {
         reply
     }
 
+    /// As [`Client::send_without_jar`], for a request the server may refuse to answer at all: `None` when the connection ends
+    /// without an answer. The jar's cookies are added, the answer is recorded.
+    pub async fn try_send(&mut self, request: Request) -> Option<Reply> {
+        let mut conn = Conn::new(tls_to(self.addr, &self.der).await);
+        conn.send(&request.bytes()).await;
+        let reply = conn.reply(request.method == "HEAD").await?;
+        self.recorder.note(&request.method, &request.target.chars().take(80).collect::<String>(), &reply);
+        Some(reply)
+    }
+
     /// A call the page would make.
     pub async fn call(&mut self, method: &str, target: &str, body: Option<&Value>) -> Reply {
         let request = self.page_request(method, target, body);
