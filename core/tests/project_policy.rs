@@ -3013,6 +3013,49 @@ fn the_web_result_check_flags_a_filled_cell_and_accepts_an_empty_one() {
     assert!(web_result_problems(other).is_empty(), "only the rows of the web build are looked at");
 }
 
+// ---- the operator guide ------------------------------------------------------------------------------------------
+
+/// The sentences that `docs/server.md` must hold word for word, because the design decisions of the web build rest on them: what
+/// a restart does, that there is one server on one volume, that one container is one trust domain, who makes the key, and what an
+/// administrator can do with a person's secrets.
+const GUIDE_SENTENCES: [&str; 5] = [
+    "A server restart ends every pane.",
+    "One server container or pod on one volume: the store is SQLite, never run a second one.",
+    "One container serves one trust domain",
+    "The server never makes a key; you make it with keygen and back it up apart from the data volume.",
+    "An administrator can reset a person's secrets and can never read them.",
+];
+
+/// The text with every run of white space (a line break included) reduced to one space, so that a sentence wrapped over two
+/// lines of the Markdown source still matches.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The required sentences that `doc` does not hold.
+fn missing_guide_sentences(doc: &str) -> Vec<&'static str> {
+    let flat = one_line(doc);
+    GUIDE_SENTENCES.iter().copied().filter(|sentence| !flat.contains(sentence)).collect()
+}
+
+#[test]
+fn the_operator_guide_holds_the_sentences_the_decisions_require() {
+    let missing = missing_guide_sentences(&read("docs/server.md"));
+    assert!(missing.is_empty(), "docs/server.md does not hold: {missing:?}");
+}
+
+#[test]
+fn the_guide_check_sees_a_missing_sentence_and_reads_across_a_line_break() {
+    let whole = GUIDE_SENTENCES.join("\n");
+    assert!(missing_guide_sentences(&whole).is_empty());
+    let wrapped = GUIDE_SENTENCES.join(" ").replace("never makes", "never\nmakes");
+    assert!(missing_guide_sentences(&wrapped).is_empty(), "a sentence wrapped in the source still counts");
+    let without = GUIDE_SENTENCES[1..].join("\n");
+    assert_eq!(missing_guide_sentences(&without), [GUIDE_SENTENCES[0]]);
+    let changed = whole.replace("never run a second one", "run a second one");
+    assert_eq!(missing_guide_sentences(&changed), [GUIDE_SENTENCES[1]]);
+}
+
 // ---- no plan label in the public tree -----------------------------------------------------------------------
 
 /// The first-party directories whose text files are public: the labels of the private planning tree stay out of them.

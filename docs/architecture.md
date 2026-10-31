@@ -68,6 +68,9 @@ authoritative layout, session or setting, and can be reloaded at any time.
 | `spike/` | `holzwave-spike` | measurement tool, not shipped | ✅ |
 | `wsh/` | `wsh` | CLI (`view`, `edit`, `setmeta`, `ping`, `hist`, `init`, `ai`); depends on the small `holzwave-ipc` crate (`ipc/`: protocol, socket server and client, streamed replies) | ✅ |
 | `plugins/apple-ai/` | `holzwave-apple-ai` | Foundation Models bridge: a Rust crate with a Swift package behind a C interface, macOS only, linked weakly, not a Tauri plugin; the whole AI feature then runs offline on the Mac | ✅ |
+| `host/` | `holzwave-host` | the commands, the state and the host modules of the shell with no Tauri in its tree: the one command table, the registry that answers a command by name, the AI host, the integration host, the windows, the sync runtime. The desktop and the server both use it | ✅ built, tested on the Mac and in a Linux container |
+| `server/` | `holzwave-server` | the browser build: the supervisor, the HTTP and WebSocket edge, TLS and ACME, sign-in, the store, the audit log and the worker that runs one person's terminals. One binary with the commands `serve`, `keygen`, `check-config`, `healthcheck` and `worker` (section 16) | ✅ built, tested in a Linux container; not run on a real cluster |
+| `spawn-helper/` | `holzwave-spawn-helper` | the small privileged helper that starts a worker as a person's own user id, with four file capabilities (section 16) | ✅ built, tested in a Linux container |
 | `docs/` | | roadmap, architecture, design, sync, config, test plan | ✅ |
 
 `holzwave-core` stays free of Tauri and of any UI type. It must build and test on its own, and it is the crate the
@@ -336,6 +339,20 @@ applied step by step by the TypeScript patcher, so both languages are proven aga
   4096 bytes. A link is opened only for `http`, `https` and `mailto`, through the platform opener started with
   an argument list (never a shell), and a path is revealed in the file manager and never run.
 
+**The web wire.** The browser build carries the same commands and events over one WebSocket, `GET /ws` of the page's own host.
+A frame is a JSON text message: a command is `{"id", "cmd", "args"}` with no other member, an answer carries the same `id`, and
+an event is `{"event", "payload"}`, the payload being the text the desktop emits. The server looks the name up in the command
+table of section 3 and checks the size of the frame against the cap of that command before it asks the person's worker; it never
+parses a result. The server adds one event of its own, `hw-session`, with the states `ok`, `expiring`, `locked`, `unlocked` and
+`ended` and the seconds that remain, and it closes a socket with a code the page understands: `4401` (no live session, or the
+session ended or the account was disabled), `4403` (the Origin or Host is not the public one), `1001` (the server is
+stopping, or 50 seconds of silence), `1002` (a protocol error), `1008` (too many violations), `1009` (a message over the cap),
+`1012` (the worker ended) and `1013` (too many sockets, or a peer that does not read). The page treats `4401` and `4403` as
+final and every other close as a reason to reconnect. The socket sits behind a `Transport` trait in one file, so the framing
+library can change without touching the route; compression is not adopted (section 16). The proof is in
+`server/tests/ws.rs`, `server/tests/wire.rs` and `server/tests/parity.rs`; the last sends the whole command table over a real
+socket and compares it with the desktop's golden.
+
 ## 7. Data and persistence
 
 | Data | Store | Synced | Notes |
@@ -573,6 +590,15 @@ hosts are covered; another system is shown as not supported.
 | Integration tools | a tool is started with more than the person decided: a name from a cluster, an account or a synced file becomes an option, a shell string or an environment variable of a loader | every child is an argument list started by the one runner, never a shell; every name is a validated type and a flag that carries one uses the equals form; a synced profile cannot set a loader, interpreter, program or app variable, and a file that breaks a rule is set aside whole; a verb that changes something is a card with a hash that only the window answers, once; the AI chat, `wsh` and the socket reach no integration. Tested by generated corpora against fakes (section 12), not against real tools |
 | Integration output | text from a cluster or an account spoofs the window, the card or a terminal (escape sequences, right-to-left marks, markup, huge cells) | cleaned once in the core, capped, cleaned again by the page and drawn as text only; the card spells control characters as escapes; a row whose name fails validation has no action |
 | Integration secrets | a secret variable of a profile reaches a file, a log, a card, a `Debug` text or another run | in the keychain as `int:<profile>:<NAME>` (at most 1 KiB), write-only, read for one spawn and wiped, never in `integrations.json`; a canary sweep over every output of the service finds the secret only in the environment of the runs that were given it |
+| The browser sign-in | a guessed password, a stolen cookie, a forged request from another site, a session that never ends | Argon2id behind a gate of two running derivations; a password needs a six-digit code of an authenticator app; five wrong attempts per name and twenty per address lock the password path for 15 minutes; passkeys and single sign-on are not throttled; the session is 43 base64url characters whose hash alone is stored, idle 30 minutes, absolute 24 hours, with a recent sign-in required to change a credential; every route checks Host, Origin, content type, a 64 KiB body, the session and a derived CSRF token before it runs (`server/tests/auth.rs`, `server/tests/edge.rs`, `server/tests/origin.rs`) |
+| The browser cookies | script reads a session, another site sends it, a sub-domain replaces it | `__Host-hw_session` is `Secure; HttpOnly; SameSite=Strict; Path=/` with no `Domain`; the single sign-on hop uses `__Host-hw_oidc` with `SameSite=Lax` and ten minutes, because the identity provider's redirect is a cross-site navigation, and that cookie is single use and bound to the browser; the half-finished enrolment uses `__Host-hw_pending` (`server/tests/edge.rs`) |
+| The browser page | an injected script, a framed page, a leaked address | a fixed header set on every response (a strict content security policy with `connect-src 'self'` and the page's own WebSocket, HSTS for a year, `no-referrer`, `nosniff`, `same-origin` opener and resource policies, a permissions policy, `no-store`), and no `access-control-*` header ever; the setup token and an invitation travel in the address fragment, which a browser never sends to a server (`server/tests/prohibitions.rs`) |
+| One container, many people | a person reads, signals or inspects another person or the server | no process has user id 0; the supervisor and the helper run as 10001 and the helper alone carries `cap_setuid,cap_setgid,cap_chown,cap_kill=p`; a worker, its shells and their children run as a user id of the range 20000 to 29999 with no capability, `no_new_privs`, four descriptors and a fixed environment; homes are mode 0700 under a 0711 base; the server directory, the database and the audit files are readable by the server user only (`server/tests/isolation.rs` in the container, forty tests) |
+| The server key | a key in a log, an image or the data volume, or a server that makes one silently | the server never makes a key: `holzwave-server keygen` writes a file with mode 0600 that is never overwritten, the reader refuses a link, a loose mode and a wrong shape, and the purpose keys (sealed values, CSRF, ACME account) come from it by HKDF (`server/tests/config.rs`) |
+| Saved passwords on the server | the operator or another person reads a person's secrets | one file per person, XChaCha20-Poly1305 under a random data key that is wrapped by up to four kinds of key slot (password, passphrase, passkey PRF, recovery code); the key is in the worker's memory only while a session of the person is open and leaves it when the last one ends, with one audit line; an administrator can reset a person's secrets and can never read them (`server/tests/secretstore.rs`, `server/tests/unlock.rs`, `server/tests/canary.rs`) |
+| The audit log | a secret or a typed name in a log, a log that can be rewritten | one JSON line per security event in a daily file with mode 0600, opened append-only; the action is a closed list and no member holds text a person typed; the server does not rotate or delete the files (`server/tests/audit.rs`, `server/tests/audit_once.rs`) |
+| Uploads and downloads | a file written outside the home, over another file, or a download of an unlisted file | the person's own worker writes into `<home>/uploads` through a directory descriptor, never overwriting and never following a link; a download is a 32-character token granted by the core for an image, video, audio or PDF file, served with a `sandbox` content security policy (`server/tests/files.rs`) |
+| Sealed deployment | an operator weakens the pod and the server then runs without isolation | the server refuses to start when the helper lacks its capabilities, and never runs with a reduced set; `allowPrivilegeEscalation: false` and `no-new-privileges` are absent on purpose because they stop file capabilities; the checker `scripts/web-deploy-check.mjs` judges Compose and the chart (`sh scripts/web-container-test.sh image`) |
 
 ### AI chat
 
@@ -792,6 +818,15 @@ All of it runs locally; GitHub builds only on request.
 - Windows builds an unsigned per-user NSIS installer, Linux a deb, an rpm and an AppImage, each on the owner's own machine
   ([build-windows.md](build-windows.md), [build-linux.md](build-linux.md)); Zig is exactly 0.16.0 and `scripts/env.sh` and
   `scripts/env.ps1` find it. No guide builds on GitHub, and no tag or release is made by them.
+- The server is one image built from `packaging/docker/Dockerfile` in three stages (the page with Node, the binaries with
+  Zig and Rust, a slim runtime with `tini`), pinned by tag and digest. It runs as 10001 with a read-only root file system,
+  drops every capability and adds CHOWN, KILL, SETGID and SETUID. `packaging/compose/` and `packaging/helm/holzwave/` are the
+  two supported ways to run it ([server.md](server.md)). No registry image is published: you build it. The image is built and
+  tested on a Docker host; nothing about it was run on a cluster.
+- `scripts/web-container-test.sh` (modes `caps`, `isolation`, `image`, `multiarch`, `acme`, `all`) proves the image in
+  containers, and `scripts/web-deploy-check.mjs` judges the Compose file and the chart against the rules with a self-test that
+  breaks one rule at a time. `scripts/test-names.sh` proves that the desktop's test list only grew while the host crate was
+  cut out of the app ([test-plan.md](test-plan.md) Part 1).
 
 ## 14. Decisions
 
@@ -822,6 +857,16 @@ All of it runs locally; GitHub builds only on request.
 | A23 | The integrations run on this computer only | the tools hold your credentials on this computer; a remote run would need a second trust decision and is not planned |
 | A24 | GAM7 output is read by the `csv` crate, pinned to one version, with caps around it | the text is written by other people into a domain's directory; a hand-written splitter would be a parser of hostile input, and the crate is the established reader |
 | A25 | Text from a tool is cleaned in the core and again in the page | the view model is a published contract that a model need not have passed through the core's cleaning; the second pass is defence in depth, and both use the same list of hidden characters |
+| A26 | The commands and the state of the shell live in `holzwave-host`, which has no Tauri in its tree | the server must run the same commands as the desktop without a window system; a test name list proves no test was lost in the move |
+| A27 | One macro table lists every command once and writes both the desktop's wrappers and the server's registry | a command cannot exist for one way only; a recorded surface of all commands and the protocol golden catch drift |
+| A28 | One worker process per person, started by the supervisor through the spawn helper | a worker holds a person's panes, files and secrets; the operating system, not a check in our code, keeps two people apart |
+| A29 | File capabilities on one small helper and user ids from a range, not user namespaces; no process runs as user id 0 | user namespaces are off or restricted on many clusters and kernels; four capabilities on one audited file are smaller than a root process, and the namespace needs only the baseline Pod Security level |
+| A30 | The key of a person's saved passwords comes from the sign-in and lives in the worker's memory while a session is open | the server then holds no key at rest for it; an administrator can reset a person's secrets and can never read them |
+| A31 | One replica on a local volume with SQLite, `synchronous=FULL` | the data is small and the credentials matter more than speed; a second writer would corrupt the store, so the chart has no replica value |
+| A32 | The WebSocket sits behind a `Transport` trait; compression is off | the measured library saved 79 to 94 percent of the bytes and refused bombs but left 18 Autobahn cases unimplemented, which the adoption rule does not allow; one file changes if that changes |
+| A33 | The single sign-on cookie is `SameSite=Lax`, single use and bound to the browser; every other cookie is `Strict` | the identity provider's redirect back is a cross-site navigation that a `Strict` cookie would not survive |
+| A34 | The server never makes its own key: `keygen` writes it and the operator keeps a copy apart from the volume | a key made at first start would sit in the volume it protects, in an image layer or in a log |
+| A35 | The image is built by the operator from the Dockerfile; no registry image is published | the project runs no registry, and the same Dockerfile builds for amd64 and arm64 |
 
 ## 15. Open questions
 
@@ -853,8 +898,125 @@ All of it runs locally; GitHub builds only on request.
     (Python, `socketserver`) lets the real `kubectl` 1.36.1 produce the recorded pods and namespaces; the Kubernetes parsers
     are tested against that recorded output and against a fake program. A real cluster is **open, see rows INT-K1 to
     INT-K4**.
+11. Whether the chart runs on a real cluster at the baseline Pod Security level, with the init container, the single-file
+    secret mounts and the group-readable key that kubelet makes. **Open, see rows SRV-K1 and SRV-K2.** The chart is linted,
+    rendered and judged by the checker, and its configuration is judged by the server's own `check-config`; it was never
+    applied.
+12. Whether passkeys and the PRF extension behave on real platform authenticators and hardware keys in the four big browsers.
+    **Open, see rows SRV-P1, SRV-P2 and SRV-B1.** The tests use virtual authenticators, and the passkey browser tests run in
+    Chromium only.
+13. Whether a real identity provider (Keycloak, Entra ID, Google and the like) behaves as the test provider does. **Open, see
+    row SRV-I1.**
+14. Whether a binary wire format would pay for itself. **Open.** JSON text frames are used because the page and the desktop
+    already speak them; compression is off (section 16). A change needs a measurement on a real network first.
+15. Workers that survive a server restart, so that a restart does not end the panes. **Open, not planned.** A restart ends
+    every pane, and the guide says so.
+16. User namespaces as a stronger boundary than user ids and file capabilities. **Open.** They are off or restricted on many
+    clusters, so the design uses the four capabilities (A29).
 
 The rows of Part 9 of [test-plan.md](test-plan.md) close the open parts of questions 7 to 10; an answer becomes a fixture and
 a rule.
+
+The rows of Part 10 of [test-plan.md](test-plan.md) close the open parts of questions 11 to 13; an answer becomes a test or a
+sentence of the guide.
+
+## 16. The web build
+
+The same core, behind a browser. People sign in to one server, and each person's terminals run in a worker that is a user of
+their own inside one container. Built and tested against a test identity provider, virtual authenticators, the container tests
+and a Pebble certificate authority on the author's machines; not yet run against a real cluster, a real identity provider,
+hardware authenticators or real networks. The rows that close those gaps are Part 10 of [test-plan.md](test-plan.md); the guide
+for an operator is [server.md](server.md).
+
+### The crates
+
+`holzwave-core` stays free of Tauri and of any server type. `holzwave-host` sits on it and holds the commands, the state and the
+host modules of the shell with no Tauri in its tree. The desktop shell (`holzwave-app`) and `holzwave-server` both sit on the
+host crate, so the two ways to run holzWave answer the same commands from one table. `holzwave-spawn-helper` has no
+holzWave dependency; the server takes only its request and answer types, so the client of the supervisor and the helper cannot
+drift apart. The direction is core, then host, then the app or the server. The proof is the closure guard in
+`core/tests/project_policy.rs` (the desktop app's closure holds no server-only library and the host crate's none of Tauri) and
+the name list of `sh scripts/test-names.sh`, which showed that the move lost no test.
+
+### The processes and the users
+
+The container's first process is `tini`. Under it the supervisor (`holzwave-server serve`) runs as user 10001 with no
+capability. It starts the spawn helper at assembly time. The helper is one file, owned by root with the group 10001 and mode
+0750, with the file capabilities `cap_setuid,cap_setgid,cap_chown,cap_kill=p`; it keeps them permitted, raises them only
+while it acts, and refuses to run at all with a reduced set. For each person the supervisor asks the helper for a worker: the
+helper makes the person's home through a directory descriptor, and starts the worker as a user id from the range
+(`workers.uid_min` to `workers.uid_max`, 20000 to 29999 by default, never below 1000), with no capability, `no_new_privs`,
+four descriptors, seven environment variables and the limits `workers.nproc` and `workers.nofile`. The worker runs the core
+from the command table; its panes are shells in process groups under the person's user id. A worker ends when no socket of
+the person has been attached for `workers.idle_timeout` (a day by default), and every pane ends with it. No process of the
+container has user id 0. The proof is `server/tests/isolation.rs`, forty tests in a container with exactly the four
+capabilities (`sh scripts/web-container-test.sh isolation`), the process-table audit in `server/tests/support/proc.rs`, and
+the image checks of `sh scripts/web-container-test.sh image`.
+
+### The web wire
+
+Section 6 describes the frames, the session event and the close codes. One socket carries a person's commands and events for
+every tab of the page; the sockets of one person are at most eight, they share a worker, and the socket that last sent input
+to a pane owns its size. A frame event that does not fit a slow socket's queue is dropped and the page asks for a full frame; any
+other message that does not fit closes the socket with `1013`. The transport is a trait in one file. The measurement of
+`permessage-deflate` saved 79 to 94 percent of the bytes and refused decompression bombs within the memory bound, but left
+18 cases of the Autobahn suite unimplemented, which the rule for adoption does not allow, so the WebSocket never offers
+the extension and `transport.compression` accepts only `off`. The proof is `server/tests/ws.rs`, `server/tests/wire.rs`,
+`server/tests/parity.rs`, `server/tests/order.rs` and `server/tests/deflate.rs`.
+
+### Sign-in and the session
+
+Three methods can be switched on: passkeys (user verification required, discoverable credentials preferred, the PRF extension
+passed through when the browser returns it), a password with a six-digit code of an authenticator app, and any number of
+OpenID Connect providers (authorization code with PKCE, `state` and `nonce`, a strict check of the ID token, an account matched
+by issuer and subject and never by e-mail, `allowed_domains` and `allowed_groups` as the only gate). A server with no account
+prints a one-time `hwb_` token on standard output at every start; it makes exactly one first administrator and expires after
+an hour. Administrators invite people with `hwi_` links that live seven days. A session is a 43-character token whose hash
+alone is stored; it ends after `sessions.idle` without input or `sessions.absolute` in total, and a change of a credential
+asks for a sign-in within `sessions.step_up`. Throttling, cookies, headers and the origin rules are in section 10. The proof is
+`server/tests/auth.rs`, `server/tests/password_totp.rs`, `server/tests/passkey.rs`, `server/tests/webauthn_flow.rs`,
+`server/tests/oidc.rs`, `server/tests/enrol.rs`, `server/tests/sessions.rs`, `server/tests/throttle_audit.rs` and, in WebKit
+and Chromium against the real server, `npm --prefix app run test:web`.
+
+### The secret store and its key
+
+A person's saved passwords and tokens (the AI keys, the integration secrets, the sync secrets) live in `<home>/.holzwave/` in
+one file, `secrets.store`, that only the person's worker opens. The file is sealed with XChaCha20-Poly1305 under a random
+256-bit data key; the data key is wrapped once for each way to unlock (the password, a passphrase, the PRF output of a
+passkey, a recovery code), so a way can be added or removed without touching the entries. A wrong key, a locked store and a
+damaged byte all end in the same text, `secrets are locked`. The wrapping key reaches the worker when the person signs in and
+leaves its memory when the last session of the person ends, by sign-out, idle time, absolute time, disabling or deleting, with
+one audit line. A sign-in finds or makes the store. An administrator can reset a person's secrets, which removes the file, and
+can never read them. The proof is `server/tests/secretstore.rs`, `server/tests/unlock.rs`, `server/tests/sealed.rs` and
+`server/tests/canary.rs`, which follows canary secrets of two people through every file, log line, `Debug` text, shell
+environment and process argument.
+
+### The data volume
+
+One volume, `/data` in the image. `server/server.sqlite3` is the store (accounts, credentials, sessions, invitations,
+throttle counters; mode 0600, write-ahead log, `synchronous=FULL`). `server/audit/` holds one file a day. `homes/<user id>/`
+is a person's home (mode 0700 under a 0711 base) with `.holzwave/` for the secret store, `uploads/` and a private `.tmp`. The
+ACME account and the issued certificate are sealed under the server key. The server key file is not on this volume, and is
+backed up apart. The proof is `server/tests/store.rs`, `server/tests/audit.rs` and the persistence checks of
+`sh scripts/web-container-test.sh image` (a restart keeps the volume).
+
+### The image and the two deployment examples
+
+The image is one binary pair on a slim base, run as 10001 with a read-only root file system and `tini`; its health check is the
+binary's own `healthcheck`, which asks a private Unix socket and opens no port. `packaging/compose/` has a Compose file with a
+one-shot `keygen` service, and `packaging/helm/holzwave/` a chart with one Deployment (strategy `Recreate`, no replica value,
+a `ReadWriteOnce` claim), an init container that prepares the homes base and a private run directory, and an Ingress for the
+proxy mode only. The security context is fixed, not a value. The proof is the `image` and `multiarch` modes of
+`scripts/web-container-test.sh`, `helm lint --strict` and `helm template` for the three value sets, and the checker
+`scripts/web-deploy-check.mjs` with its self-test. The chart was never applied to a cluster.
+
+### The tests that prove the build
+
+Server tests run on the Mac and in a Linux container; the isolation, capability and image tests need Linux and run in a
+container only. The suites that cross the whole server are `server/tests/prohibitions.rs` (every route, header and
+served file against an independent list), `server/tests/canary_sweep.rs` and `server/tests/audit_once.rs`. The page is tested
+against the product's own server in WebKit and Chromium by `npm --prefix app run test:web`. The commands are listed in
+[test-plan.md](test-plan.md) Part 1; the rows that need a real cluster, provider, authenticator, certificate authority, proxy,
+browser or person are Part 10.
 
 See also: [design.md](design.md) for colour, type, components and the window direction.

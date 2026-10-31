@@ -16,6 +16,7 @@ change that forgets the document fails a test.
 - [Privacy](#privacy)
 - [`ai.json`](#aijson)
 - [`integrations.json` and `integration_local.json`](#integrationsjson-and-integration_localjson)
+- [The server configuration](#the-server-configuration)
 
 ## Where the files live
 
@@ -1069,3 +1070,226 @@ What a schema cannot say, and the loader still checks:
 - an id taken from the file name (a file without an `id`) must follow the id rule too;
 - the limits that lie outside one document: at most 24 widgets are shown (the two built-in ones count) and a file is at most
   64 KiB.
+
+## The server configuration
+
+The server of the web build ([server.md](server.md)) reads one JSON file, by default `/etc/holzwave/server.json`; the
+variable `HOLZWAVE_SERVER_CONFIG` names another. The file is not synced and not written by the server: you write it, and
+`holzwave-server check-config` reads it the way `serve` does and prints `configuration ok` or the one sentence that says why the
+server would not start. The examples below are read from this document by a test of the server crate
+(`server/tests/docs.rs`) and run through the same validator, with a stand-in for the file system so that no certificate is
+needed, and the same test fails when a key the server reads is missing from the tables or a key named here is refused.
+Built and tested against a test identity provider, virtual authenticators, the container tests and a Pebble
+certificate authority on the author's machines; not yet run against a real cluster, a real identity provider, hardware
+authenticators or real networks.
+
+Rules for the whole file:
+
+- The file is JSON, at most 1 MiB, and an unknown key is refused with the keys the section does accept. Nothing has a default
+  that opens the server: there is no key that switches the sign-in or the TLS off, and `public_url`, the `tls` section and at
+  least one sign-in method must be given.
+- A time is a string with one unit: `90s`, `30m`, `24h` or `7d` (no sign, no fraction, at most ten years). A size is a whole
+  number of bytes. A value outside its bound is refused with the key and both bounds.
+- A secret never stands in this file: a client secret is a file that the file names, and the server key is a file that
+  `HOLZWAVE_SERVER_KEY_FILE` names.
+- The environment: `HOLZWAVE_SERVER_KEY_FILE` (required: the path of the key made by `holzwave-server keygen`, a regular file with
+  mode 0600, 0400, 0440 or 0640 that is not a link), `HOLZWAVE_SERVER_CONFIG` (the path of this file) and `HOLZWAVE_DATA_DIR`
+  (replaces `data_dir`). Nothing else in the environment is read, and a worker does not inherit these.
+
+### The keys
+
+| Key | Default | Bound | Effect |
+|---|---|---|---|
+| `public_url` | none, required | an `https://` address with a host and an optional port, no path, query, fragment or user information | The address people type. Host, Origin, the cookies and the passkey relying party come from it. An IP address as the host is refused while `auth.passkey` is on. |
+| `listen` | `0.0.0.0:8443` | an address and a port | Where the server listens. In the `proxy` mode the address is the one the proxy connects to. |
+| `data_dir` | `/data` | an absolute path | The volume: the store, the audit files and the homes. |
+| `runtime_dir` | `/run/holzwave` | an absolute path, private to the server user | The health socket and other files that live as long as the process. The server refuses a directory that others can write. |
+| `tls.mode` | none, required | `files`, `acme` or `proxy` | How the connection is secured. There is no plain-HTTP mode. |
+| `tls.cert_file` | none, required in `files` | a readable file | The certificate chain in PEM. |
+| `tls.key_file` | none, required in `files` | a readable file | The private key in PEM. |
+| `tls.directory_url` | Let's Encrypt production | an `https://` address | The ACME directory in the `acme` mode. |
+| `tls.contact` | none, required in `acme` | an address such as `mailto:admin@example.net` | The contact of the ACME account. |
+| `tls.domains` | none, required in `acme` | 1 to 10 lower-case host names, no wildcard, no IP address, including the host of `public_url` | The names of the certificate. The server answers the TLS-ALPN-01 challenge on its own TLS port. |
+| `tls.ca_file` | none | a readable file | An extra trusted root for a private ACME directory. |
+| `tls.terms_agreed` | none, required `true` in `acme` | `true` | Your agreement to the terms of service of the certificate authority. The server never agrees for you. |
+| `tls.trusted_proxies` | none, required in `proxy` | 1 to 256 addresses or networks, not `0.0.0.0/0` or `::/0` | The only addresses that may connect in the `proxy` mode; their `X-Forwarded-For` and `X-Forwarded-Proto` are believed. |
+| `auth.passkey` | `false` | `true` or `false` | Sign in with a passkey. |
+| `auth.password_totp` | `false` | `true` or `false` | Sign in with a password and a code of an authenticator app. |
+| `auth.oidc` | none | up to 32 provider entries | Sign in through an OpenID Connect provider. See the entry keys below. |
+| `sessions.idle` | 30m | 1m to 30d | A session that is not used for this long ends. |
+| `sessions.absolute` | 1d | 5m to 90d | A session ends this long after it began, however busy; `idle` may not be longer. |
+| `sessions.step_up` | 5m | 30s to 1h | How long a fresh sign-in counts for a change of a credential. |
+| `workers.uid_min` | 20000 | 1000 or more, below `uid_max` | The first user id of the range a person's worker runs as. The range may not contain the user id of the server. |
+| `workers.uid_max` | 29999 | below the largest user id | The last user id of the range. The range is the most people the server can hold. |
+| `workers.idle_timeout` | 1d | 1m to 90d | A worker, and with it every pane of the person, ends this long after the person's last socket closed. |
+| `workers.max_panes` | 64 | 1 to 1024 | The most panes one person holds. |
+| `workers.max_scrollback_lines` | 10000 | 100 to 1000000 | The scrollback lines of a pane. |
+| `workers.nproc` | 1024 | 8 to 4194304 | The process limit of a person's user id. |
+| `workers.nofile` | 4096 | 16 to 1048576 | The open-file limit of a worker. |
+| `workers.helper_path` | `/usr/local/bin/holzwave-spawn-helper` | an absolute path | The spawn helper. |
+| `workers.worker_path` | `/usr/local/bin/holzwave-server` | an absolute path | The program a worker runs (the server binary with the `worker` subcommand). |
+| `upload.dir` | `uploads` | a relative path inside the home, without `..` | The folder of a person's home that receives uploads. |
+| `upload.max_bytes` | 268435456 | 1024 to 17179869184 | The largest upload. |
+| `transport.compression` | `off` | `off` | Compression of the WebSocket. This build accepts only `off`: it never offers `permessage-deflate`, and the value `deflate` is refused. |
+
+The `limits` section overrides any of these; every key is optional and has a default and a bound, and a pair that
+contradicts itself is refused (`max_connections_per_address` above `max_connections`, `ws_small_command_bytes` above
+`ws_command_bytes` above `ws_message_bytes`, `commands_per_second` above `command_burst`):
+
+| Key | Default | Bound | Effect |
+|---|---|---|---|
+| `limits.handshake_timeout` | 10s | 1s to 1m | How long a connection may take to finish its TLS handshake. |
+| `limits.header_timeout` | 10s | 1s to 1m | How long a client may take to send the header of a request. |
+| `limits.max_connections` | 1024 | 1 to 65536 | The most connections open at once, from everywhere. |
+| `limits.max_connections_per_address` | 64 | 1 to 65536 | The most connections open at once from one address. |
+| `limits.api_body_bytes` | 65536 | 1024 to 1048576 | The largest JSON body of an API route, in bytes. |
+| `limits.ws_message_bytes` | 8388608 | 65536 to 67108864 | The largest message the socket accepts from the page, in bytes: the largest command cap. |
+| `limits.ws_command_bytes` | 65536 | 4096 to 8388608 | The largest message of every command except the paste family, in bytes. |
+| `limits.ws_small_command_bytes` | 4096 | 256 to 65536 | The largest message of the small commands (key, mouse, wheel, resize), in bytes. |
+| `limits.ws_queue_bytes` | 4194304 | 65536 to 268435456 | The bytes waiting to be sent to one socket before the socket is closed. |
+| `limits.sockets_per_person` | 8 | 1 to 64 | The most sockets one person may have open at once. |
+| `limits.commands_per_second` | 400 | 1 to 100000 | The commands per second one socket may send over a longer time. |
+| `limits.command_burst` | 800 | 1 to 1000000 | The commands one socket may send in a burst before the rate applies. |
+| `limits.ping_interval` | 25s | 1s to 10m | How often the server pings an open socket. |
+| `limits.session_recheck` | 30s | 1s to 10m | How often the server checks that the session behind an open socket is still valid. |
+| `limits.ws_violations` | 8 | 1 to 10000 | The violations (a malformed message, an unknown command, a message over the cap of its command) one socket may commit within the violation window; the next one closes the socket. |
+| `limits.ws_violation_window` | 1m | 1s to 1h | The span the violations of one socket are counted in. |
+| `limits.ws_refusals_in_a_row` | 200 | 1 to 1000000 | The commands refused for the rate in a row before the socket is closed. |
+| `limits.ws_write_stall` | 10s | 1s to 10m | How long a write to a socket may make no progress before the socket is closed. |
+| `limits.ws_silence` | 50s | 2s to 30m | How long a socket may be silent (no message of any kind, a pong included) before it is closed. |
+| `limits.session_expiring` | 1m | 1s to 1h | The idle time left at which the socket tells the page that the session is about to expire. |
+| `limits.gate_wait` | 8s | 1s to 2m | The longest the supervisor side of the secret store waits for a worker to answer one control. |
+| `limits.argon2_concurrency` | 2 | 1 to 64 | The most Argon2 verifications that run at once, which bounds the memory a flood of sign-ins can take. |
+| `limits.password_attempts_per_account` | 5 | 1 to 1000 | The wrong passwords per account within the window before the account is locked. |
+| `limits.password_attempts_per_address` | 20 | 1 to 10000 | The wrong passwords per address within the window before the address is locked. |
+| `limits.attempt_window` | 15m | 1m to 1d | The window in which wrong passwords are counted. |
+| `limits.lock_duration` | 15m | 1m to 1d | How long an account or an address stays locked. |
+| `limits.pending_signin` | 5m | 30s to 1h | How long a half-finished sign-in (the password was right, the second step is still to come) stays valid. |
+| `limits.downloads_per_person` | 8 | 1 to 64 | The most files one person downloads at once; the next request is answered busy. |
+| `limits.downloads_total` | 64 | 1 to 4096 | The most files all people download at once. |
+| `limits.uploads_per_person` | 2 | 1 to 16 | The most uploads one person makes at once; the next request is answered busy. |
+| `limits.uploads_total` | 16 | 1 to 1024 | The most uploads all people make at once. |
+| `limits.upload_stall` | 30s | 1s to 10m | How long an upload may go without a piece of its body before it is stopped and removed. |
+
+Each entry of `auth.oidc` has these keys:
+
+| Key | Default | Bound | Effect |
+|---|---|---|---|
+| `auth.oidc[].id` | none, required | 1 to 32 lower-case letters, digits, `-` and `_`, unique | The short name in the sign-in route. |
+| `auth.oidc[].name` | none, required | 1 to 64 characters | The name on the sign-in button. |
+| `auth.oidc[].issuer` | none, required | an `https://` address | The issuer. The server fetches the provider's discovery document from it. |
+| `auth.oidc[].client_id` | none, required | not empty | The client id the provider gave the server. |
+| `auth.oidc[].client_secret_file` | none, required | a readable file | The file that holds the client secret. The secret is never a value in this file. |
+| `auth.oidc[].allowed_domains` | none | a list of domains | If not empty, only a verified e-mail address in one of these domains may sign in. |
+| `auth.oidc[].allowed_groups` | none | a list of groups | If not empty, only members of one of these groups may sign in. |
+| `auth.oidc[].groups_claim` | `groups` | a claim name | The claim of the ID token that holds the groups. |
+
+A person who signs in through a provider gets a member account the first time, and is matched by the issuer and the
+subject of the ID token, never by the e-mail address.
+
+### Examples
+
+A server with its own certificate. This is the file of the Compose quick start with the optional sections written out;
+every value shown for `sessions`, `limits`, `workers`, `upload` and `transport` is the default, so you can delete the lines
+you do not want to change. The key is not here: it is the file that `HOLZWAVE_SERVER_KEY_FILE` names.
+
+<!-- example: server/files.json -->
+```json
+{
+  "public_url": "https://holzwave.example.net",
+  "listen": "0.0.0.0:8443",
+  "data_dir": "/data",
+  "runtime_dir": "/run/holzwave",
+  "tls": {
+    "mode": "files",
+    "cert_file": "/etc/holzwave/tls/tls.crt",
+    "key_file": "/etc/holzwave/tls/tls.key"
+  },
+  "auth": {
+    "passkey": true,
+    "password_totp": true
+  },
+  "sessions": {
+    "idle": "30m",
+    "absolute": "1d",
+    "step_up": "5m"
+  },
+  "limits": {
+    "sockets_per_person": 8,
+    "password_attempts_per_account": 5,
+    "lock_duration": "15m"
+  },
+  "workers": {
+    "uid_min": 20000,
+    "uid_max": 29999,
+    "idle_timeout": "1d",
+    "max_panes": 64,
+    "max_scrollback_lines": 10000
+  },
+  "upload": {
+    "dir": "uploads",
+    "max_bytes": 268435456
+  },
+  "transport": {
+    "compression": "off"
+  }
+}
+```
+
+A server that gets its certificate itself. `terms_agreed` is `false` here on purpose: the server refuses to start until you
+read the terms of the certificate authority and set it to `true` yourself. The port of the server must be reachable from
+the Internet as port 443, because the authority checks the name on the server's own TLS port.
+
+<!-- example: server/acme.json -->
+```json
+{
+  "public_url": "https://holzwave.example.net",
+  "tls": {
+    "mode": "acme",
+    "contact": "mailto:admin@example.net",
+    "domains": ["holzwave.example.net"],
+    "terms_agreed": false
+  },
+  "auth": {
+    "passkey": true,
+    "password_totp": true
+  }
+}
+```
+
+A server behind a reverse proxy or an ingress controller that ends TLS. Only the listed addresses may connect, and the
+server believes their forwarded address and scheme.
+
+<!-- example: server/proxy.json -->
+```json
+{
+  "public_url": "https://holzwave.example.net",
+  "listen": "0.0.0.0:8080",
+  "tls": {
+    "mode": "proxy",
+    "trusted_proxies": ["10.0.0.0/8", "fd00::/8"]
+  },
+  "auth": {
+    "passkey": true
+  }
+}
+```
+
+One provider entry for the `auth.oidc` list of any of the files above. The client secret is in a file, and only people at
+the listed domain who belong to the listed group may sign in.
+
+<!-- example: server/oidc.json -->
+```json
+{
+  "id": "corp",
+  "name": "Example Corp",
+  "issuer": "https://login.example.net/realms/main",
+  "client_id": "holzwave",
+  "client_secret_file": "/etc/holzwave/oidc/corp/secret",
+  "allowed_domains": ["example.net"],
+  "allowed_groups": ["terminal-users"],
+  "groups_claim": "groups"
+}
+```
+
+The redirect address to register with the provider is `<public_url>/auth/oidc/callback`.
