@@ -60,6 +60,8 @@ pub mod reason {
     pub const SIZE: &str = "size";
     /// A binary message.
     pub const TYPE: &str = "type";
+    /// The peer broke the WebSocket protocol.
+    pub const PROTOCOL: &str = "protocol";
     /// Text that is not UTF-8.
     pub const ENCODING: &str = "encoding";
     /// A violation budget or a refusal ceiling was passed.
@@ -602,8 +604,9 @@ impl<P: SessionPort> Machine<'_, P> {
     }
 
     async fn ended_event<T: Transport>(&mut self, transport: &mut T) -> Exit {
-        // The page is told before the close; if the write fails the close still goes out.
-        let _ = self.text(transport, session_event("ended", 0)).await;
+        // The page is told before the close; if the write fails or stalls the close still goes out. The announcement of the end
+        // reaches this very socket, so the write is not interrupted by it.
+        let _ = timeout(self.settings.stall, transport.send(Outgoing::Text(session_event("ended", 0)))).await;
         Exit::Close(CLOSE_SESSION, reason::SESSION)
     }
 
@@ -759,7 +762,7 @@ async fn drive<T: Transport, P: SessionPort>(
                     Ok(Inbound::Pong) => Ok(()),
                     Err(TransportError::TooLarge) => Err(Exit::Close(1009, reason::SIZE)),
                     Err(TransportError::Encoding) => Err(Exit::Close(1007, reason::ENCODING)),
-                    Err(TransportError::Protocol) => Err(Exit::Close(1002, reason::TYPE)),
+                    Err(TransportError::Protocol) => Err(Exit::Close(1002, reason::PROTOCOL)),
                     Err(TransportError::Closed) => Err(Exit::Gone),
                 }
             },
