@@ -38,6 +38,8 @@ test("a path on the page's origin is sent there with the fixed request options",
   assert.equal(log[0].init.redirect, "error");
   assert.equal(log[0].init.cache, "no-store");
   assert.equal(log[0].init.referrerPolicy, "no-referrer");
+  // With `no-referrer`, a mode other than `cors` makes WebKit send `Origin: null` on a POST, which the server refuses.
+  assert.equal(log[0].init.mode, "cors");
   assert.equal(log[0].init.headers["X-CSRF-Token"], undefined, "a GET sends no token");
 });
 

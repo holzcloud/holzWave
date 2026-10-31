@@ -3,7 +3,11 @@
 // handed in, so the unit tests need no network, and `bridge.ts` is the only file that names the real request function.
 //
 // A path must start with a single slash and stay on the page's origin; anything else is a `TypeError` before anything is
-// sent. Every request is same-origin, uncached, without redirects and without a referrer. The CSRF token comes from
+// sent. Every request is same-origin, uncached, without redirects and without a referrer. The request mode is `cors`, not
+// `same-origin`: for a request that changes state the Fetch standard serializes the `Origin` header as `null` when the mode
+// is not `cors` and the referrer policy is `no-referrer`, and WebKit does so, which the server rightly refuses; with `cors`
+// every engine sends the real origin. The address is still checked to be on the page's origin before anything is sent, so
+// the mode opens no other door. The CSRF token comes from
 // `GET /api/session`, is kept in this closure only, is sent on every request that is not a GET and is dropped after a 403.
 // Nothing is ever retried: a request that changes state must not run twice.
 
@@ -29,7 +33,7 @@ export interface RequestInitLike {
   redirect: "error";
   cache: "no-store";
   referrerPolicy: "no-referrer";
-  mode: "same-origin";
+  mode: "cors";
 }
 
 /** What `createHttp` needs from its surroundings. */
@@ -115,7 +119,7 @@ export function createHttp(deps: HttpDeps): Http {
       redirect: "error",
       cache: "no-store",
       referrerPolicy: "no-referrer",
-      mode: "same-origin",
+      mode: "cors",
     };
     if (body !== undefined) out.body = body;
     return out;
