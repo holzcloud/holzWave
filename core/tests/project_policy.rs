@@ -2960,6 +2960,56 @@ fn the_result_check_flags_a_filled_cell_and_accepts_an_empty_one() {
     assert!(integration_result_problems(other).is_empty(), "only the rows of the integrations are looked at");
 }
 
+// ---- the web part of the test plan -------------------------------------------------------------------------
+
+/// The rows of the part of `docs/test-plan.md` on the web build (the server, its image and the browser page): the human
+/// checks that need a cluster, an identity provider, hardware authenticators, a certificate authority, real browsers or
+/// real people, which no suite here can run. Every id is in the document exactly once, with an area, an instruction and an
+/// expected result; the Result cell is the owner's and stays empty until the owner has run the row. A slice, so that a row
+/// added later changes the list and not its type.
+const WEB_TEST_PLAN_ROWS: &[&str] = &["SRV-K1"];
+
+fn web_test_plan_row_ids() -> Vec<String> {
+    WEB_TEST_PLAN_ROWS.iter().map(|id| (*id).to_owned()).collect()
+}
+
+#[test]
+fn test_plan_has_every_web_row_exactly_once() {
+    let problems = test_plan_row_problems(&read("docs/test-plan.md"), &web_test_plan_row_ids());
+    assert!(problems.is_empty(), "docs/test-plan.md, the part on the web build: {problems:?}");
+}
+
+/// The rows of the web part whose Result cell (the fifth, and anything after it) holds text, one sentence each: nothing
+/// may be written there before the owner has run the row, so a document can never claim a row verified.
+fn web_result_problems(doc: &str) -> Vec<String> {
+    doc.lines()
+        .filter_map(table_cells)
+        .filter(|cells| cells.first().is_some_and(|id| id.starts_with("SRV-")))
+        .filter(|cells| cells.iter().skip(4).any(|cell| !cell.is_empty()))
+        .map(|cells| format!("row {} has a Result that is not empty", cells[0]))
+        .collect()
+}
+
+#[test]
+fn web_rows_have_empty_results() {
+    let problems = web_result_problems(&read("docs/test-plan.md"));
+    assert!(problems.is_empty(), "docs/test-plan.md, the part on the web build: {problems:?}");
+}
+
+#[test]
+fn the_web_result_check_flags_a_filled_cell_and_accepts_an_empty_one() {
+    let empty = "| SRV-K1 | Area | do it | it works | |\n| SRV-K2 | Area | do it | it works |  |\n";
+    assert!(web_result_problems(empty).is_empty(), "empty cells");
+    let filled = "| SRV-K1 | Area | do it | it works | pass |\n| SRV-K2 | Area | do it | it works | |\n";
+    assert_eq!(web_result_problems(filled), ["row SRV-K1 has a Result that is not empty"]);
+    let escaped = "| SRV-K1 | Area | do it \\| twice | it works | |\n";
+    assert!(web_result_problems(escaped).is_empty(), "an escaped bar is part of its cell");
+    let extra = "| SRV-K1 | Area | do it | it works | | fail |\n";
+    assert_eq!(web_result_problems(extra).len(), 1, "text after the Result cell counts");
+    let other = "| INT-K1 | Area | do it | it works | pass |\n| SRV-K1 | Area | do it | it works | |\n";
+    assert!(web_result_problems(other).is_empty(), "only the rows of the web build are looked at");
+}
+
 // ---- no plan label in the public tree -----------------------------------------------------------------------
 
 /// The first-party directories whose text files are public: the labels of the private planning tree stay out of them.
