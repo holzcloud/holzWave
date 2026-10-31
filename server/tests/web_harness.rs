@@ -10,11 +10,17 @@
 //!
 //! - `{"op":"start", ...}` once, first. Options: `upload_max_bytes`. The answer is the event `ready` (origin, port, the one-time
 //!   setup token, the certificate) after the health socket says that the server is ready.
+//! - `{"op":"idp","id":N,"sub":"..","email":"..","name":"..","groups":[..],"email_verified":true,"deny":false}` sets the identity the
+//!   single sign-on provider approves next (start option `oidc: true` starts the provider on `https://127.0.0.1:<port>`; its
+//!   one entry allows the domain `example.org` and the group `staff`). `deny: true` makes it answer `error=access_denied`.
 //! - `{"op":"account","id":N, ...}` makes a person through the enrolment routes of the running server, exactly as a browser
 //!   would, and answers `{"reply":N, ...}`. Options: `role` (`member` or `admin`), `name`, `passphrase` (true: a separate
 //!   passphrase is set), `locked` (true: the password no longer opens the secret store), `state` (`disabled`). The answer holds
 //!   the user name, the password, the authenticator secret, the recovery code and, if asked for, the passphrase. It is the only
 //!   place where a secret is printed.
+//! - `{"op":"backdate","id":N,"name":"anna"}` makes the sign-ins of the person's sessions older than the step-up time, so that
+//!   the next change of an administrator asks for the password. It writes `last_auth` through a second connection to the
+//!   database file, because the store's own call never moves the time back.
 //! - `{"op":"stop"}` or the end of the input: the server stops, the scratch directory is removed, the test ends.
 //!
 //! Workers run in the server's own process here (`in-process-workers`): the isolation of the image is the subject of the tests
@@ -26,6 +32,8 @@
 mod edge;
 #[path = "support/edge_tls.rs"]
 mod edge_tls;
+#[path = "support/web_idp.rs"]
+mod web_idp;
 #[path = "support/ws_env.rs"]
 mod ws_env;
 
@@ -46,6 +54,8 @@ use holzwave_server::http::routes_me::SecretsAdmin;
 use holzwave_server::keyfile;
 use holzwave_server::store::{AccountId, AccountState, Role, UnlockKind};
 use holzwave_server::supervisor::serve::{Overrides, Running, assemble};
+use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+use web_idp::Idp;
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
 use serde_json::{Value, json};
@@ -119,6 +129,8 @@ struct Harness {
     host_header: String,
     der: CertificateDer<'static>,
     tokens: Capture,
+    idp: Option<Arc<Idp>>,
+    idp_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Harness {
@@ -154,6 +166,18 @@ impl Harness {
             "auth": {"passkey": true, "password_totp": true},
             "workers": {"mode": "in_process", "uid_min": 20000, "uid_max": 29999}
         });
+        let idp = match options.get("oidc") {
+            Some(Value::Null) | Some(Value::Bool(false)) | None => None,
+            Some(_) => {
+                let idp = Idp::new(free_port(), &origin);
+                let secret = scratch.write_file("oidc-secret", format!("{}\n", idp.secret()).as_bytes(), 0o600);
+                config["auth"]["oidc"] = json!([{
+                    "id": "corp", "name": "Company", "issuer": idp.issuer(), "client_id": idp.client_id(),
+                    "client_secret_file": secret, "allowed_domains": ["example.org"], "allowed_groups": ["staff"]
+                }]);
+                Some(idp)
+            }
+        };
         if let Some(bytes) = options.get("upload_max_bytes").and_then(Value::as_u64) {
             config["upload"] = json!({"max_bytes": bytes});
         }
@@ -164,11 +188,23 @@ impl Harness {
         let prepared: Prepared = config::prepare(&env, &RealProbe).map_err(|e| format!("the configuration is refused: {e}"))?;
 
         let tokens = Capture::default();
-        let overrides = Overrides { token_writer: Some(Box::new(tokens.clone())), ..Overrides::default() };
+        let overrides = Overrides {
+            token_writer: Some(Box::new(tokens.clone())),
+            oidc_client: idp.as_ref().map(|idp| idp.client()),
+            ..Overrides::default()
+        };
         let running = tokio::runtime::Handle::current()
             .block_on(assemble(prepared, overrides))
             .map_err(|e| format!("the server does not start: {e}"))?;
         let addr = running.addr;
+        let handle = tokio::runtime::Handle::current();
+        let idp_task = match &idp {
+            Some(idp) => {
+                let key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(made.signing_key.serialize_der()));
+                Some(handle.block_on(idp.serve(made.cert.der().clone(), key)).map_err(|e| format!("the provider's socket: {e}"))?)
+            }
+            None => None,
+        };
         Ok(Harness {
             scratch,
             run,
@@ -178,6 +214,8 @@ impl Harness {
             host_header: format!("{HOST}:{port}"),
             der: made.cert.der().clone(),
             tokens,
+            idp,
+            idp_task,
         })
     }
 
@@ -401,7 +439,26 @@ impl Harness {
         Ok(EnrolPerson { id: account.id, name: name.to_owned(), password, secret: secret_text, recovery, passphrase: None, session_cookie })
     }
 
+    /// Makes every session of the person look like a sign-in from an hour ago.
+    fn backdate(&self, name: &str) -> Result<usize, String> {
+        let running = self.running();
+        let account = running
+            .services
+            .store
+            .read(|tx| tx.account_by_username(name))
+            .map_err(|e| format!("the account: {e:?}"))?
+            .ok_or("no such person")?;
+        let conn = rusqlite::Connection::open(running.services.store.path()).map_err(|e| format!("the database: {e}"))?;
+        conn.busy_timeout(Duration::from_secs(5)).map_err(|e| format!("the database: {e}"))?;
+        let then = running.services.clock.unix() - 3600;
+        conn.execute("UPDATE sessions SET last_auth = ?1 WHERE account_id = ?2", rusqlite::params![then, account.id.get()])
+            .map_err(|e| format!("the update: {e}"))
+    }
+
     async fn stop(mut self) {
+        if let Some(task) = self.idp_task.take() {
+            task.abort();
+        }
         if let Some(running) = self.running.take() {
             running.trigger();
             let _ = tokio::time::timeout(Duration::from_secs(15), running.join()).await;
@@ -490,6 +547,7 @@ fn serve() {
         "origin": harness.origin,
         "port": harness.addr.port(),
         "bootstrap": harness.tokens.token(),
+        "idp_origin": harness.idp.as_ref().map(|idp| idp.issuer()),
         "cert_der_b64": STANDARD.encode(harness.der.as_ref()),
     }));
 
@@ -499,6 +557,28 @@ fn serve() {
             match command["op"].as_str().unwrap_or_default() {
                 "account" => match harness.make_person(&command).await {
                     Ok(person) => say(person.reply(&id)),
+                    Err(text) => say(json!({"reply": id, "ok": false, "error": text})),
+                },
+                "idp" => match &harness.idp {
+                    Some(idp) => {
+                        let groups: Vec<String> = command["groups"]
+                            .as_array()
+                            .map(|list| list.iter().filter_map(|g| g.as_str().map(str::to_owned)).collect())
+                            .unwrap_or_default();
+                        idp.set_identity(
+                            command["sub"].as_str().unwrap_or("sub-1"),
+                            command["email"].as_str(),
+                            command["name"].as_str(),
+                            &groups,
+                            command["email_verified"].as_bool().unwrap_or(true),
+                            command["deny"].as_bool().unwrap_or(false),
+                        );
+                        say(json!({"reply": id, "ok": true}));
+                    }
+                    None => say(json!({"reply": id, "ok": false, "error": "the harness was started without a provider"})),
+                },
+                "backdate" => match harness.backdate(command["name"].as_str().unwrap_or_default()) {
+                    Ok(changed) => say(json!({"reply": id, "ok": true, "sessions": changed})),
                     Err(text) => say(json!({"reply": id, "ok": false, "error": text})),
                 },
                 "stop" => break,

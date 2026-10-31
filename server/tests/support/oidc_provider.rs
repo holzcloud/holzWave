@@ -242,7 +242,13 @@ impl TestProvider {
     pub fn authorize(&self, address: &str) -> Callback {
         let url = Url::parse(address).expect("the authorization address parses");
         assert_eq!(url.scheme(), "https", "the authorization endpoint is https");
-        assert_eq!(url.host_str(), Some(self.host.as_str()), "the address points at this provider");
+        // A provider on a loopback port is named `host:port`; the address then has to carry that port.
+        let (bare, port) = match self.host.split_once(':') {
+            Some((bare, port)) => (bare, port.parse::<u16>().ok()),
+            None => (self.host.as_str(), None),
+        };
+        assert_eq!(url.host_str(), Some(bare), "the address points at this provider");
+        assert_eq!(url.port(), port, "the address carries the port of this provider");
         assert_eq!(url.path(), "/authorize");
         let params: HashMap<String, String> = url.query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
         let request = AuthRequest {
@@ -470,6 +476,11 @@ async fn handle(State(provider): State<Arc<TestProvider>>, request: Request) -> 
     }
 }
 
+/// The routes of the provider (discovery, key set, token endpoint), for a caller that serves them on a socket of its own.
+pub fn router(provider: Arc<TestProvider>) -> Router {
+    Router::new().fallback(handle).with_state(provider)
+}
+
 /// The in-memory client: it calls the router of the provider that owns the host of the address.
 pub struct MemoryHttp {
     providers: Vec<Arc<TestProvider>>,
@@ -492,11 +503,12 @@ impl<'c> AsyncHttpClient<'c> for MemoryHttp {
                 return Err(HttpError::NotHttps);
             }
             let host = parts.uri.host().unwrap_or_default().to_owned();
-            let provider = self.providers.iter().find(|p| p.host == host).ok_or(HttpError::Failed)?.clone();
+            let authority = parts.uri.authority().map(|a| a.as_str().to_owned()).unwrap_or_default();
+            let provider = self.providers.iter().find(|p| p.host == host || p.host == authority).ok_or(HttpError::Failed)?.clone();
             if provider.lock().behaviour.unreachable {
                 return Err(HttpError::Failed);
             }
-            let router = Router::new().fallback(handle).with_state(provider);
+            let router = router(provider);
             let answer = router
                 .oneshot(axum::http::Request::from_parts(parts, Body::from(body)))
                 .await
