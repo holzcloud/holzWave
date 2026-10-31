@@ -249,7 +249,7 @@ pub struct Person {
     pub uid: u32,
     pub home: PathBuf,
     recorder: Recorder,
-    sock: tokio::sync::Mutex<Sock>,
+    sock: tokio::sync::Mutex<Option<Sock>>,
     shell_lock: tokio::sync::Mutex<()>,
     panes: Mutex<Vec<u64>>,
     seq: AtomicU64,
@@ -258,7 +258,13 @@ pub struct Person {
 impl Person {
     /// Asks the person's worker through the person's first socket.
     pub async fn ask(&self, command: &str, args: Value) -> Reply {
-        self.sock.lock().await.call(command, &args).await
+        let mut sock = self.sock.lock().await;
+        sock.as_mut().unwrap_or_else(|| panic!("{}'s socket is closed", self.name)).call(command, &args).await
+    }
+
+    /// Lets go of the person's first socket. A socket keeps the supervisor, and so the helper's control socket, alive.
+    pub async fn hang_up(&self) {
+        *self.sock.lock().await = None;
     }
 
     /// `file_open` as this person: the text of the file, or the error text.
@@ -423,7 +429,7 @@ impl World {
             account,
             key,
             recorder: recorder.clone(),
-            sock: tokio::sync::Mutex::new(Sock::new(handle, rx, recorder)),
+            sock: tokio::sync::Mutex::new(Some(Sock::new(handle, rx, recorder))),
             shell_lock: tokio::sync::Mutex::new(()),
             panes: Mutex::new(Vec::new()),
             seq: AtomicU64::new(0),
@@ -550,10 +556,13 @@ impl World {
         proc::process_table()
     }
 
-    /// The process of the spawn helper: the child of the test process called `holzwave-spawn-`.
+    /// The process of the spawn helper: the child of the test process that is named like the helper's file (the kernel keeps
+    /// the first 15 bytes of the file name).
     pub fn helper_pid(&self) -> Option<i32> {
         let me = std::process::id() as i32;
-        self.table().into_iter().find(|row| row.ppid == me && row.name.starts_with("holzwave-spawn") && !row.is_dead()).map(|row| row.pid)
+        let file = var("HW_HELPER");
+        let name: String = Path::new(&file).file_name()?.to_string_lossy().chars().take(15).collect();
+        self.table().into_iter().find(|row| row.ppid == me && row.name == name && !row.is_dead()).map(|row| row.pid)
     }
 
     /// What the audit expects of this container right now.
@@ -624,6 +633,10 @@ impl World {
         let started = Instant::now();
         let World { supervisor, accounts, store, sweeper, people, .. } = self;
         sweeper.abort();
+        let people = std::mem::take(&mut *people.lock().unwrap_or_else(PoisonError::into_inner));
+        for person in &people {
+            person.hang_up().await;
+        }
         drop(people);
         drop((supervisor, accounts, store));
         if let Some(pid) = helper {
