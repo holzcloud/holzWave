@@ -21,7 +21,7 @@ use holzwave_host::commands::registry::{COMMANDS, NOT_IN_BROWSER, lookup};
 use holzwave_server::http::ws::{ANSWER_TOO_LARGE, ANSWER_UNKNOWN};
 use holzwave_host::commands::registry::{Command, Web};
 use parity_env::{
-    Failure, Line, Probed, args_for, args_text_with, golden, golden_at, golden_command_args, golden_command_names, golden_event_names,
+    Failure, Line, Probed, fresh, start_focused_pane, args_for, args_text_with, golden, golden_at, golden_command_args, golden_command_names, golden_event_names,
     groups, hostile_texts, hostile_whole_args, row_for_group, same_shape, shape_matches_any, table_names, unavailable_rows,
 };
 use serde_json::{Value, json};
@@ -133,14 +133,6 @@ async fn tracer_an_upgrade_without_a_cookie_is_closed_4401_and_a_person_who_neve
 }
 
 // ---- helpers of the walks -----------------------------------------------------------------------------------------------
-
-/// A new sign-in of `person` with a new socket whose first message has been read.
-async fn fresh(probed: &Probed, person: &Person) -> Line {
-    let signed = probed.env.sign_in_again(person);
-    let mut line = Line::new(probed.env.connect_as(&signed).await);
-    assert!(line.until(PATIENCE, |events| events.iter().any(|e| e["event"] == "hw-session")).await, "the session message");
-    line
-}
 
 /// Fails with every problem at once, one per line.
 fn nothing_wrong(what: &str, problems: &[String]) {
@@ -483,14 +475,6 @@ async fn shapes_an_error_is_a_string_except_the_faults_of_the_assistant_and_the_
     }
     nothing_wrong("errors", &problems);
     println!("shapes: the error types that are not strings: {fault_types:?}");
-}
-
-/// Starts a pane in the focused place of `line` and returns its id.
-async fn start_focused_pane(line: &mut Line) -> u64 {
-    let view = line.ok("get_layout", &json!({})).await;
-    let pane = ws_env::focus(&view);
-    line.ok("start_pane", &json!({"pane": pane, "cols": 80, "rows": 24, "cell_w": 8, "cell_h": 16})).await;
-    pane
 }
 
 #[tokio::test(flavor = "multi_thread")]

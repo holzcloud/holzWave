@@ -515,6 +515,35 @@ impl Line {
         }
     }
 
+    /// Reads until `count` answers that nobody waited for have come in (or `within` has passed) and returns them in the order
+    /// they arrived; the events read meanwhile are kept.
+    pub async fn answers(&mut self, count: usize, within: Duration) -> Vec<Value> {
+        let deadline = Instant::now() + within;
+        while self.strays.len() < count {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match self.client.read(left).await {
+                Got::Message(Incoming::Text(text)) => {
+                    let value: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("not JSON ({e}): {text}"));
+                    self.keep(value);
+                }
+                Got::Message(Incoming::Close(code, _)) => {
+                    self.closed = Some(code);
+                    break;
+                }
+                Got::Message(_) => {}
+                Got::Ended => {
+                    self.closed = Some(None);
+                    break;
+                }
+                Got::Quiet => break,
+            }
+        }
+        std::mem::take(&mut self.strays)
+    }
+
     /// The events with the given name, in order.
     pub fn events_named(&self, name: &str) -> Vec<&Value> {
         self.events.iter().filter(|e| e["event"] == name).collect()
@@ -597,6 +626,94 @@ impl Probed {
     pub fn log_lines(&self) -> Vec<String> {
         self.log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// People, sockets and panes
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// A new sign-in of `person` with a new socket whose first message (`hw-session`) has been read.
+pub async fn fresh(probed: &Probed, person: &crate::ws_env::Person) -> Line {
+    let signed = probed.env.sign_in_again(person);
+    let mut line = Line::new(probed.env.connect_as(&signed).await);
+    let first = line.until(crate::ws_env::PATIENCE, |events| events.iter().any(|e| e["event"] == "hw-session")).await;
+    assert!(first, "the session message");
+    line
+}
+
+/// The size of the panes the suites start.
+pub fn pane_size() -> Value {
+    json!({"cols": 80, "rows": 24, "cell_w": 8, "cell_h": 16})
+}
+
+/// Starts a shell in the pane that has the focus and returns its id.
+pub async fn start_focused_pane(line: &mut Line) -> u64 {
+    let view = line.ok("get_layout", &json!({})).await;
+    let pane = crate::ws_env::focus(&view);
+    start_pane_with_size(line, pane).await;
+    pane
+}
+
+/// Starts a shell in the layout pane `pane`.
+pub async fn start_pane_with_size(line: &mut Line, pane: u64) {
+    let mut args = pane_size();
+    args["pane"] = json!(pane);
+    line.ok("start_pane", &args).await;
+}
+
+/// Splits the focused pane, starts a shell in the new one and returns its id.
+pub async fn split_and_start(line: &mut Line) -> u64 {
+    let view = line.ok("split", &json!({"column": false})).await;
+    let pane = crate::ws_env::focus(&view);
+    start_pane_with_size(line, pane).await;
+    pane
+}
+
+/// Types `text` into a pane.
+pub async fn type_into(line: &mut Line, pane: u64, text: &str) {
+    line.ok("text", &json!({"pane": pane, "text": text})).await;
+}
+
+/// The screen of a pane as the frames this socket has read so far rebuild it.
+pub fn screen_of(line: &Line, pane: u64) -> Screen {
+    Screen::rebuilt(&line.frames_of(pane))
+}
+
+/// Reads until the rebuilt screen of `pane` holds `needle`; true when it did within `within`.
+pub async fn until_screen_has(line: &mut Line, pane: u64, needle: &str, within: Duration) -> bool {
+    let needle = needle.to_owned();
+    line.until(within, move |events| {
+        let frames: Vec<Value> =
+            events.iter().filter(|e| e["event"] == "frame" && e["payload"]["pane"].as_u64() == Some(pane)).map(|e| e["payload"].clone()).collect();
+        Screen::rebuilt(&frames).rows.iter().any(|row| row.contains(&needle))
+    })
+    .await
+}
+
+/// Reads until the rebuilt screen of `pane` satisfies `wanted`; true when it did within `within`.
+pub async fn until_screen(line: &mut Line, pane: u64, within: Duration, wanted: impl Fn(&[String]) -> bool) -> bool {
+    line.until(within, move |events| {
+        let frames: Vec<Value> =
+            events.iter().filter(|e| e["event"] == "frame" && e["payload"]["pane"].as_u64() == Some(pane)).map(|e| e["payload"].clone()).collect();
+        wanted(&Screen::rebuilt(&frames).rows)
+    })
+    .await
+}
+
+/// Whether a process with this id exists (`ps` answers for any process of the machine).
+pub fn process_exists(pid: u32) -> bool {
+    std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "pid="])
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim() == pid.to_string())
+        .unwrap_or(false)
+}
+
+/// The whole text of a pane (the screen and the scrollback) as the core reports it for a selection of everything.
+pub async fn whole_text(line: &mut Line, pane: u64) -> String {
+    line.ok("select", &json!({"pane": pane, "op": {"kind": "all"}})).await;
+    let text = line.ok("selection_text", &json!({"pane": pane})).await;
+    text.as_str().unwrap_or_default().to_owned()
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
