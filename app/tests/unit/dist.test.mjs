@@ -48,7 +48,7 @@ function withScratch(files, body) {
   }
 }
 
-const ALLOWED = (f) => f === "index.html" || f === "login.html" || /^[^/]+\.js$/.test(f) || /^[^/]+\.css$/.test(f) || f.startsWith("fonts/") || /^vendor\/[a-z0-9-]+\//.test(f);
+const ALLOWED = (f) => f === "index.html" || f === "login.html" || /^[^/]+\.js$/.test(f) || /^[^/]+\.css$/.test(f) || /^[^/]+\.svg$/.test(f) || f.startsWith("fonts/") || /^vendor\/[a-z0-9-]+\//.test(f);
 
 test("dist holds only index.html, login.html, js, css and fonts, and no benchmark, test or map file", () => {
   assert.ok(existsSync(DIST), "app/dist is missing: run `npm run build` first");
@@ -124,4 +124,30 @@ test("copy-static still succeeds when src has no stylesheet and no fonts directo
     assert.deepEqual(listFiles(join(root, "dist")), ["index.html", "login.html"]);
     assert.ok(!existsSync(join(root, "dist", "fonts")), "an empty fonts directory must not be created");
   });
+});
+
+test("every top-level svg in src is present in dist", () => {
+  const files = new Set(listFiles(DIST));
+  const icons = readdirSync(SRC).filter((f) => f.endsWith(".svg"));
+  assert.ok(icons.includes("favicon.svg") && icons.includes("favicon-attention.svg"), "the two tab icons are in src");
+  for (const svg of icons) assert.ok(files.has(svg), `${svg} is missing from dist`);
+});
+
+test("copy-static copies every top-level svg of src and nothing else new", () => {
+  withScratch(
+    {
+      "src/index.html": "<!doctype html>",
+      "src/login.html": "<!doctype html>",
+      "src/app.css": "body{}",
+      "src/favicon.svg": "<svg/>",
+      "src/favicon-attention.svg": "<svg/>",
+      "src/deep/inner.svg": "<svg/>",
+      "src/notes.png": "not shipped",
+      "src/icon.svg.bak": "not shipped",
+    },
+    (root) => {
+      runCopyStatic(root);
+      assert.deepEqual(listFiles(join(root, "dist")), ["app.css", "favicon-attention.svg", "favicon.svg", "index.html", "login.html"]);
+    },
+  );
 });

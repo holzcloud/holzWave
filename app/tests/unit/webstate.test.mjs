@@ -4,10 +4,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { actionIdFor, chordFor, setBindingTable, setOs } from "../../dist/chords.js";
 import {
-  CLIPBOARD_REFUSED, DESKTOP_ONLY_ACTIONS, FULLSCREEN_NOTICE, LOCK_KEYS, NOT_AVAILABLE, canLockKeys,
+  CLIPBOARD_REFUSED, DESKTOP_ONLY_ACTIONS, FULLSCREEN_NOTICE, ICON_ATTENTION, ICON_PLAIN, LOCK_KEYS, NOT_AVAILABLE, Notices, canLockKeys,
+  commandKind, noticeIcon, noticeTitle,
 } from "../../dist/webstate.js";
 import { findTargets, isLinkModifier, linkAction } from "../../dist/links.js";
 import { isAvailable, listActions, listAvailableActions, registerAction, runAction, setAvailability } from "../../dist/actions.js";
+import { Attention } from "../../dist/attentionstate.js";
 import { readdirSync, readFileSync } from "node:fs";
 
 const CLIPBOARD = [
@@ -159,4 +161,124 @@ test("only the browser build's entry file sets an availability test", () => {
     .filter((f) => /\bsetAvailability\(/.test(readFileSync(new URL(f, dist), "utf8")))
     .sort();
   assert.deepEqual(users, ["actions.js", "web.js"]);
+});
+
+// ---- tab marks ------------------------------------------------------------------------------------------------------
+
+test("the notice state records a kind only while the page is hidden, once, and clear empties it", () => {
+  const n = new Notices();
+  assert.deepEqual(n.list(), []);
+  assert.equal(n.note("bell", false), false, "a visible page records nothing");
+  assert.deepEqual(n.list(), []);
+  assert.equal(n.note("bell", true), true, "hidden: recorded");
+  assert.equal(n.note("bell", true), false, "a repeat of a kind changes nothing");
+  assert.equal(n.note("done", true), true);
+  assert.deepEqual(n.list(), ["bell", "done"]);
+  assert.equal(n.clear(), true);
+  assert.deepEqual(n.list(), []);
+  assert.equal(n.clear(), false, "clearing nothing changes nothing");
+});
+
+test("the notice list is in the fixed order of the bar whatever order the kinds came in", () => {
+  const n = new Notices();
+  for (const kind of ["done", "failed", "bell", "ask"]) n.note(kind, true);
+  assert.deepEqual(n.list(), ["ask", "bell", "failed", "done"]);
+  assert.equal(n.drop("ask"), true, "a question that was answered goes");
+  assert.equal(n.drop("ask"), false);
+  assert.deepEqual(n.list(), ["bell", "failed", "done"]);
+});
+
+test("a kind the bar does not know is not recorded", () => {
+  const n = new Notices();
+  assert.equal(n.note("sound", true), false);
+  assert.equal(n.note("__proto__", true), false);
+  assert.deepEqual(n.list(), []);
+});
+
+test("the title is the glyphs of the bar in the fixed order, a space, and the base title; the base alone for none", () => {
+  assert.equal(noticeTitle("holzWave", []), "holzWave");
+  assert.equal(noticeTitle("holzWave", ["bell"]), "\u25B2 holzWave");
+  assert.equal(noticeTitle("holzWave", ["ask", "bell"]), "? \u25B2 holzWave");
+  assert.equal(noticeTitle("holzWave", ["ask", "bell", "failed", "done"]), "? \u25B2 ! \u2713 holzWave");
+  assert.equal(noticeTitle("holzWave", ["done", "ask"]), "? \u2713 holzWave", "the order is the bar's, not the caller's");
+});
+
+test("the icon is the attention file for a non-empty set and the plain file otherwise", () => {
+  assert.equal(ICON_PLAIN, "favicon.svg");
+  assert.equal(ICON_ATTENTION, "favicon-attention.svg");
+  assert.equal(noticeIcon([]), ICON_PLAIN);
+  assert.equal(noticeIcon(["done"]), ICON_ATTENTION);
+  assert.equal(noticeIcon(["ask", "bell", "failed", "done"]), ICON_ATTENTION);
+});
+
+test("a command that ended is finished for status 0 or none and failed for any other whole number", () => {
+  assert.equal(commandKind(0), "done");
+  assert.equal(commandKind(null), "done");
+  assert.equal(commandKind(undefined), "done");
+  assert.equal(commandKind(1), "failed");
+  assert.equal(commandKind(130), "failed");
+  assert.equal(commandKind(-1), "done", "a negative status counts as none, as on the bar");
+  assert.equal(commandKind(1.5), "done");
+  assert.equal(commandKind("1"), "done");
+  assert.equal(commandKind(Number.NaN), "done");
+});
+
+const SRC = new URL("../../src/", import.meta.url);
+const text = (name) => readFileSync(new URL(name, SRC), "utf8");
+
+test("the two icon files are SVG with a viewBox, and the attention file is the plain file plus one dot in the rose of the page", () => {
+  const plain = text("favicon.svg");
+  const attention = text("favicon-attention.svg");
+  for (const [name, svg] of [["favicon.svg", plain], ["favicon-attention.svg", attention]]) {
+    assert.match(svg, /^<svg\b[^>]*\sxmlns="http:\/\/www\.w3\.org\/2000\/svg"/, `${name} is an SVG document`);
+    assert.match(svg, /<svg\b[^>]*\sviewBox="[^"]+"/, `${name} has a viewBox`);
+    assert.ok(svg.trimEnd().endsWith("</svg>"), name);
+    assert.ok(!/<script|onload=|href=/i.test(svg), `${name} carries no script and no link`);
+  }
+  const head = plain.trimEnd().slice(0, -"</svg>".length);
+  assert.ok(attention.startsWith(head), "the attention file starts with the whole plain file");
+  const extra = attention.slice(head.length).trim();
+  const elements = extra.match(/<[a-zA-Z][^>]*>/g) ?? [];
+  assert.equal(elements.length, 1, `one more element: ${extra}`);
+  assert.match(elements[0], /^<circle\b/, "the dot is a circle");
+  const fill = /\sfill="(#[0-9a-fA-F]{6})"/.exec(elements[0]);
+  assert.ok(fill, "the dot has a literal fill");
+  const rose = /--hw-rose:\s*(#[0-9a-fA-F]{6})\b/.exec(text("app.css"));
+  assert.ok(rose, "app.css defines --hw-rose");
+  assert.equal(fill[1].toLowerCase(), rose[1].toLowerCase(), "the dot is the rose of the page");
+  assert.ok(!/<circle\b/.test(plain), "the plain file has no dot");
+});
+
+test("the icon link and the title marks come from the browser-only module, which only web.js loads", () => {
+  const dist = new URL("../../dist/", import.meta.url);
+  const files = readdirSync(dist).filter((f) => f.endsWith(".js"));
+  const users = files.filter((f) => /["']\.\/webnotice\.js["']/.test(readFileSync(new URL(f, dist), "utf8"))).sort();
+  assert.deepEqual(users, ["web.js"]);
+  for (const page of ["index.html", "login.html"]) assert.ok(!/rel="[^"]*icon/.test(readFileSync(new URL(page, dist), "utf8")), `${page} has no icon link`);
+});
+
+test("the attention store names the panes whose question waits, sorted, and tells when that changes", () => {
+  const store = new Attention();
+  let told = 0;
+  store.subscribe(() => told++);
+  assert.deepEqual(store.waiting(), []);
+  let panes = [3, 1];
+  const off = store.provide("t", () => panes);
+  assert.deepEqual(store.waiting(), [1, 3], "sorted");
+  store.changed();
+  assert.equal(told, 1);
+  store.changed();
+  assert.equal(told, 1, "no change, no telling");
+  panes = [];
+  store.changed();
+  assert.equal(told, 2);
+  assert.deepEqual(store.waiting(), []);
+  store.provide("bad", () => {
+    throw new Error("boom");
+  });
+  assert.deepEqual(store.waiting(), [], "a provider that throws names none");
+  panes = [2, 2, 5];
+  store.provide("u", () => [5]);
+  assert.deepEqual(store.waiting(), [2, 5], "unique across providers");
+  off();
 });
