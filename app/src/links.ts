@@ -8,6 +8,7 @@
 import { rowCells } from "./frames.js";
 import { gridRect } from "./geometry.js";
 import { state } from "./state.js";
+import { LINK_FEATURES, LINK_TARGET, webLinkModifier } from "./webstate.js";
 
 export type TargetKind = "url" | "path" | "hash";
 
@@ -194,22 +195,56 @@ export function targetAt(targets: readonly Target[], col: number): Target | null
 /**
  * What a click on `target` asks of the core: a URL is opened, a path is revealed with the pane's working directory
  * as the base (relative paths are resolved by the core), a hash is not a link. A URL that is not http, https or
- * mailto is refused here as well, whatever made the target.
+ * mailto is refused here as well, whatever made the target. Where nothing can be revealed (`canReveal` false: the
+ * browser build cannot show a folder) a path is no link either.
  */
-export function linkAction(target: Target, base: string | null): LinkAction | null {
+export function linkAction(target: Target, base: string | null, canReveal = true): LinkAction | null {
   if (target.kind === "url") {
     return isOpenableUrl(target.text) ? { command: "open_url", args: { url: target.text } } : null;
   }
   if (target.kind === "path") {
-    if (target.text === "" || /\p{C}/u.test(target.text)) return null;
+    if (!canReveal || target.text === "" || /\p{C}/u.test(target.text)) return null;
     return { command: "reveal_path", args: { path: target.text, base } };
   }
   return null;
 }
 
-/** Whether the modifier of a link click is held: Cmd on macOS, Ctrl elsewhere (Ctrl+click is the menu on macOS). */
+/**
+ * Whether the modifier of a link click is held: Cmd on macOS, Ctrl elsewhere (Ctrl+click is the menu on macOS). In the
+ * browser build (`web`) either of the two.
+ */
 export function isLinkModifier(e: { metaKey?: boolean; ctrlKey?: boolean }, os: string): boolean {
+  if (os === "web") return webLinkModifier(e);
   return os === "macos" ? e.metaKey === true : e.ctrlKey === true;
+}
+
+/** Whether this page can show a folder: not the browser build. */
+export const canRevealPaths = (): boolean => state.os !== "web";
+
+/**
+ * Open `url` the way the platform opens a link. On the desktop `desktop` is called, as before: the caller keeps its own
+ * `open_url` call. In the browser build the address is checked again (http, https or mailto, no blank or control
+ * character) and opened in a new tab that cannot reach this page; a mail address goes through an anchor without a target
+ * so that the page keeps its tab. It must be called from the gesture that is the person's act, and never waits for
+ * anything first: a browser lets a tab open only from the gesture itself.
+ */
+export function openUrl(url: string, desktop: () => void): void {
+  if (state.os !== "web") {
+    desktop();
+    return;
+  }
+  if (!isOpenableUrl(url)) return;
+  if (url.startsWith("mailto:")) {
+    const a = document.createElement("a");
+    a.href = url;
+    a.rel = "noopener noreferrer";
+    a.hidden = true;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    return;
+  }
+  window.open(url, LINK_TARGET, LINK_FEATURES);
 }
 
 // ---- the page side ------------------------------------------------------------------------------------
@@ -242,12 +277,15 @@ export async function initLinks(): Promise<void> {
     const y = e.clientY - origin.top - g.y;
     if (x < 0 || y < 0 || x >= mirror.cols * m.cellW || y >= mirror.rows * m.cellH) return null;
     const target = targetAt(findTargets(rowCells(mirror, hit.cell[1])), hit.cell[0]);
-    return target && target.kind !== "hash" ? { hit, target } : null;
+    return target && target.kind !== "hash" && linkAction(target, null, canRevealPaths()) !== null ? { hit, target } : null;
   };
 
   const act = (pane: number, target: Target): void => {
-    const action = linkAction(target, state.cwds.get(pane) ?? null);
-    if (action) void call(action.command, action.args).catch(() => {});
+    const action = linkAction(target, state.cwds.get(pane) ?? null, canRevealPaths());
+    if (action?.command === "open_url") {
+      const { url } = action.args;
+      openUrl(url, () => void call("open_url", { url }).catch(() => {}));
+    } else if (action) void call(action.command, action.args).catch(() => {});
   };
 
   // What is drawn: an underline over the target and the pointer cursor.
@@ -280,7 +318,7 @@ export async function initLinks(): Promise<void> {
       armed = null;
       if (e.button !== 0 || !isLinkModifier(e, state.os)) return false;
       const found = under(e, hit);
-      if (!found || linkAction(found.target, null) === null) return false;
+      if (!found || linkAction(found.target, null, canRevealPaths()) === null) return false;
       armed = { pointer: e.pointerId, pane: found.hit.pane, row: found.hit.cell[1], target: found.target };
       return true; // the press is the link's: no selection and no report for the program
     }

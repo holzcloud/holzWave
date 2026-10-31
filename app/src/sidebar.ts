@@ -12,6 +12,7 @@ import { el, setText } from "./dom.js";
 import { mountContextSection } from "./integratecontext.js";
 import { readHits, meta } from "./historystate.js";
 import type { Hit } from "./historystate.js";
+import { openUrl } from "./links.js";
 import { fit } from "./scene.js";
 import { state } from "./state.js";
 import { IDLE, hostState, left, mmss, pause, phaseWord, progress, readWidgets, resume, start, tick } from "./sidebarstate.js";
@@ -220,7 +221,10 @@ function listWidget(box: HTMLElement, def: Extract<WidgetDef, { kind: "list" }>)
     b.title = item.command ?? item.url ?? "";
     b.addEventListener("click", () => {
       if (item.command !== undefined) toPrompt(item.command);
-      else if (item.url !== undefined) void call("open_url", { url: item.url }).catch(() => {});
+      else if (item.url !== undefined) {
+        const { url } = item;
+        openUrl(url, () => void call("open_url", { url }).catch(() => {}));
+      }
     });
   }
 }

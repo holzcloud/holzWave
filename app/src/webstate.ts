@@ -20,3 +20,17 @@ export function canLockKeys(navigator: unknown): boolean {
 
 /** The status line says this after the browser granted the keyboard lock. */
 export const FULLSCREEN_NOTICE = "Browser shortcuts are off in full screen. Hold Escape to leave.";
+
+// ---- links ----------------------------------------------------------------------------------------------------------
+
+/** A link in the browser build opens in a new tab: the target name and the feature string that cuts the tab off from the page. */
+export const LINK_TARGET = "_blank";
+export const LINK_FEATURES = "noopener,noreferrer";
+
+/**
+ * Whether the modifier of a link click is held in the browser: Ctrl or Cmd. A browser page cannot tell which of the two
+ * the person's system means by "open", and both are a deliberate act, so both count.
+ */
+export function webLinkModifier(e: { metaKey?: boolean; ctrlKey?: boolean }): boolean {
+  return e.ctrlKey === true || e.metaKey === true;
+}

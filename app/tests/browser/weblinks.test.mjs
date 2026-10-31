@@ -3,7 +3,7 @@
 // the shell's `open_url`; a file path is not offered because a folder cannot be shown from a browser. The chat's links and the
 // sidebar's items open the same way. The desktop's own click is covered by links.test.mjs, which runs unchanged.
 import assert from "node:assert/strict";
-import { OTHER_PROFILE, PROFILE, boot, openAi, sendText } from "./ai-lib.mjs";
+import { boot, openAi, sendText } from "./ai-lib.mjs";
 import { callsOf, emit } from "./lib.mjs";
 
 export const backends = ["ws"];
@@ -44,6 +44,17 @@ const spyOpen = (page) =>
       window.__opened.push(args);
       return null;
     };
+    // A plain click on the web build starts a copy-on-select write whose item fails when nothing is selected; the real
+    // clipboard of Chromium leaves that rejection unhandled, so the page gets a clipboard that waits for the item as a browser does.
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async () => {},
+        write: async (items) => {
+          for (const item of items) for (const type of item.types) await item.getType(type);
+        },
+      },
+    });
     document.addEventListener(
       "click",
       (e) => {
@@ -258,7 +269,7 @@ async function hintCase(page, url) {
 /** The link of a finished AI reply opens the same way, by a plain click. */
 async function chatCase(page, url) {
   await spyOpen(page);
-  await boot(page, url, { profiles: [PROFILE, OTHER_PROFILE] });
+  await boot(page, url);
   await page.evaluate(async () => {
     (await import(new URL("state.js", location.href).href)).state.os = "web";
   });

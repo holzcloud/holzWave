@@ -2484,8 +2484,16 @@ the tab gets a small dot in `--hw-warn` while any kind is present.
 **Controls the browser does not have.** Tear-off entries (`Move pane to new window`, `Move tab to new window`), the text size from the system,
 the group `Local network` and `Reveal in folder` are absent from menus, the palette and the Settings, not disabled. When a stored shortcut
 or a script calls one of them anyway, the answer is `Not available in the browser.`, said as the notice of the status line for as long as a
-notice lasts (rule 5 of section 6). Copying and pasting use the clipboard of the browser (section 7). A link in a pane opens in a new browser tab, only
-for `http`, `https` and `mailto` and after the confirmation of the desktop.
+notice lasts (rule 5 of section 6). Copying and pasting use the clipboard of the browser (section 7).
+
+**Links.** A link in the visible output of a pane opens by the person's deliberate act, the same act as on the desktop: a click with `Ctrl` or
+`Cmd` held, either of the two. While the modifier is held the link under the pointer gets the underline and the pointer cursor (section 2, rule 4:
+the link underline); without it nothing is underlined and a click selects as always. Only `http`, `https` and `mailto` addresses are links, after
+the same checks as on the desktop. A web address opens in a new browser tab that cannot reach the page (`noopener`, `noreferrer`) and never in the
+page's own tab; a mail address is handed to the browser. There is no confirmation dialog, because the desktop has none: the click with the modifier
+is the act, and a hyperlink sequence in terminal output is not clickable, as on the desktop. A file path is not offered at all (no underline, no
+click, and hint mode skips it), because a folder cannot be shown from a browser. The links in a reply of the AI chat and the items with an address in
+the sidebar open in a new tab by a plain click, as they open the system browser on the desktop.
 
 **Full screen and the key lock.** The palette has the entry `Toggle full screen` in the browser build only (it is not drawn on the desktop) and it has no
 shortcut. It enters full screen from the press that runs it and leaves again when it is run once more; the page never enters full screen by itself.

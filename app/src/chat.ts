@@ -42,6 +42,7 @@ import { el, loadStyles } from "./dom.js";
 import { IntentSlot } from "./inlinestate.js";
 import type { ChatIntent } from "./inlinestate.js";
 import { focusInput } from "./keyboard.js";
+import { openUrl } from "./links.js";
 import { onOverlayRender, renderOverlay } from "./overlay.js";
 import { DEVICE_OFF, readDevice, withDevice } from "./ondevice.js";
 import type { DeviceView } from "./ondevice.js";
@@ -681,14 +682,14 @@ class Mounted implements ChatView {
       if (this.session.feed.state.running) this.stop();
       else void this.submit();
     });
-    // The page never follows a link by itself: a click on a safe link is opened by the shell in the system browser, any
-    // other click or middle click on a link does nothing.
+    // The page never follows a link by itself: a click on a safe link is opened by the shell in the system browser (in the
+    // browser build, in a new tab), any other click or middle click on a link does nothing.
     this.log.addEventListener("click", (e) => {
       const link = e.target instanceof Element ? e.target.closest("a") : null;
       if (link === null) return;
       e.preventDefault();
       const url = link.classList.contains("chat-link") ? link.getAttribute("href") : null;
-      if (url !== null && linkKind(url) === "open") void call("open_url", { url }).catch(() => {});
+      if (url !== null && linkKind(url) === "open") openUrl(url, () => void call("open_url", { url }).catch(() => {}));
     });
     this.log.addEventListener("auxclick", (e) => {
       if (e.target instanceof Element && e.target.closest("a") !== null) e.preventDefault();

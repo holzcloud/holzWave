@@ -9,7 +9,7 @@ import { registerAction } from "./actions.js";
 import { rowCells } from "./frames.js";
 import { isModifierKey } from "./keymap.js";
 import { pushKeyHandler } from "./keystack.js";
-import { findTargets, linkAction } from "./links.js";
+import { canRevealPaths, findTargets, linkAction, openUrl } from "./links.js";
 import type { Target } from "./links.js";
 import { state } from "./state.js";
 
@@ -136,9 +136,12 @@ export async function initHints(): Promise<void> {
       const { pane, open } = m;
       end();
       if (item) {
-        const action = open && item.target.kind !== "hash" ? linkAction(item.target, state.cwds.get(pane) ?? null) : null;
-        if (action) void call(action.command, action.args).catch(() => {});
-        else writeClipboard(item.target.text);
+        const action = open && item.target.kind !== "hash" ? linkAction(item.target, state.cwds.get(pane) ?? null, canRevealPaths()) : null;
+        if (action?.command === "open_url") {
+          const { url } = action.args;
+          openUrl(url, () => void call("open_url", { url }).catch(() => {}));
+        } else if (action) void call(action.command, action.args).catch(() => {});
+        else if (!(open && item.target.kind === "path")) writeClipboard(item.target.text); // a path the browser cannot show is not copied by Shift
       }
     }
     return true;
