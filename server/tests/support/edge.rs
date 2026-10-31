@@ -154,8 +154,8 @@ impl TestApp {
         let store = Arc::new(Store::open(scratch.path()).expect("open the store"));
         let clock = Arc::new(ManualClock::new(NOW));
         let dyn_clock: Arc<dyn Clock> = clock.clone();
-        let sessions = Arc::new(SessionManager::new(store.clone(), dyn_clock.clone(), Sessions::default()));
         let audit = Arc::new(Audit::open(scratch.path(), dyn_clock.clone()).expect("open the audit log"));
+        let sessions = Arc::new(SessionManager::new(store.clone(), dyn_clock.clone(), Sessions::default()).with_audit(audit.clone()));
         let audit_dir = audit.dir().to_path_buf();
         let view = Arc::new(TestView::default());
         let proxies = if options.proxy {

@@ -570,3 +570,33 @@ fn a_session_that_runs_out_when_it_is_looked_up_is_announced() {
     assert_eq!(f.manager.lookup(&value, f.manager.now()).expect_err("idle"), SessionError::Expired);
     assert!(listener.try_recv().expect("announced").ends(&session));
 }
+
+#[test]
+fn a_session_that_ran_out_writes_one_audit_line_at_the_first_lookup_and_none_at_the_second() {
+    use holzwave_server::audit::Audit;
+    let (f, alice) = fixture("session-expired-audit");
+    let clock: Arc<dyn holzwave_server::clock::Clock> = f.clock.clone();
+    let audit = Arc::new(Audit::open(f._scratch.path(), clock).expect("the audit log"));
+    let manager = SessionManager::new(f.store.clone(), f.clock.clone(), Sessions::default()).with_audit(audit.clone());
+    let created = manager.create(alice, Method::PasswordTotp, NOW, "Firefox on Linux", Some(ADDR)).expect("create");
+    let value = created.value.expose().to_owned();
+    let lines = || -> Vec<serde_json::Value> {
+        let mut rows = Vec::new();
+        for entry in std::fs::read_dir(audit.dir()).expect("the audit directory").flatten() {
+            for line in std::fs::read_to_string(entry.path()).unwrap_or_default().lines() {
+                rows.push(serde_json::from_str(line).expect("JSON"));
+            }
+        }
+        rows
+    };
+    manager.lookup(&value, NOW + 60).expect("alive");
+    assert!(lines().is_empty(), "a live lookup writes nothing");
+    assert_eq!(manager.lookup(&value, NOW + IDLE + 1).expect_err("idle"), SessionError::Expired);
+    let after_first = lines();
+    assert_eq!(after_first.len(), 1, "the first lookup after the idle time writes one line: {after_first:?}");
+    assert_eq!((after_first[0]["action"].as_str(), after_first[0]["result"].as_str()), (Some("session.expired"), Some("ok")));
+    assert_eq!(after_first[0]["target"].as_str(), after_first[0]["actor"].as_str(), "the account is actor and target");
+    assert_eq!(manager.lookup(&value, NOW + IDLE + 2).expect_err("gone"), SessionError::Unknown);
+    assert_eq!(lines().len(), 1, "a second lookup of the same session writes nothing");
+    assert!(!serde_json::to_string(&after_first).expect("text").contains(&value), "the line holds no part of the cookie value");
+}

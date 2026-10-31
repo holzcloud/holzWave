@@ -389,7 +389,7 @@ pub async fn assemble(prepared: Prepared, overrides: Overrides) -> Result<Runnin
     // The store, the audit log and the sessions.
     let store = Arc::new(Store::open(&prepared.data_dir).map_err(sentence)?);
     let audit = Arc::new(Audit::open(&prepared.data_dir, clock.clone()).map_err(sentence)?);
-    let sessions = Arc::new(SessionManager::new(store.clone(), clock.clone(), prepared.sessions));
+    let sessions = Arc::new(SessionManager::new(store.clone(), clock.clone(), prepared.sessions).with_audit(audit.clone()));
 
     // The workers.
     let launcher = launcher(&prepared).await?;

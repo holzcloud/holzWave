@@ -18,8 +18,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use tokio::sync::broadcast;
 use zeroize::Zeroizing;
 
+use crate::audit::{Action, Actor, Audit, Event, Outcome};
 use crate::clock::Clock;
 use crate::config::Sessions;
+use crate::log::{self, Level};
 use crate::store::{AccountId, AccountState, NewSession, Session, Store, StoreError, TokenHash, hash_token};
 use crate::unlock::random;
 
@@ -145,6 +147,8 @@ pub struct SessionManager {
     clock: Arc<dyn Clock>,
     lifetimes: Sessions,
     ended: broadcast::Sender<Ended>,
+    /// Where a session that ran out is written down, when the manager has been given a log.
+    audit: Option<Arc<Audit>>,
 }
 
 impl fmt::Debug for SessionManager {
@@ -160,7 +164,14 @@ fn expiry(created: i64, lifetime: std::time::Duration) -> i64 {
 impl SessionManager {
     /// A manager over `store` with the lifetimes of the configuration.
     pub fn new(store: Arc<Store>, clock: Arc<dyn Clock>, lifetimes: Sessions) -> SessionManager {
-        SessionManager { store, clock, lifetimes, ended: broadcast::channel(ENDED_BACKLOG).0 }
+        SessionManager { store, clock, lifetimes, ended: broadcast::channel(ENDED_BACKLOG).0, audit: None }
+    }
+
+    /// The same manager, writing `session.expired` to `audit` at the first lookup of a session that ran out.
+    #[must_use]
+    pub fn with_audit(mut self, audit: Arc<Audit>) -> SessionManager {
+        self.audit = Some(audit);
+        self
     }
 
     /// A listener for the sessions that are ended on purpose, from now on. A listener that falls behind is told so by the
@@ -251,6 +262,13 @@ impl SessionManager {
         if now > idle_ends || now > session.absolute_expires {
             self.store.write(|tx| tx.session_delete(hash))?;
             self.announce(Ended::Session(*hash));
+            // The session was deleted just now, so a second lookup answers `Unknown` and writes nothing.
+            if let Some(audit) = &self.audit {
+                let event = Event::new(Action::SessionExpired, Outcome::Ok, Actor::Account(session.account_id), None).target(session.account_id);
+                if audit.record(&event).is_err() {
+                    log::event(Level::Error, "session.audit_failed", &[("action", Action::SessionExpired.as_str())]);
+                }
+            }
             return Err(SessionError::Expired);
         }
         if !matches!(account, Some(ref found) if found.state == AccountState::Active) {
