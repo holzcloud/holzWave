@@ -30,8 +30,11 @@ mod container {
     use serde_json::{Value, json};
 
     use crate::isolation_env::{
-        Attempt, How, Person, Reply, World, canary, is_missing, is_permission_error, mode_of, owner_of, var, write_secret_file,
+        Attempt, How, Options, Person, RANGE, Reply, World, canary, is_missing, is_permission_error, mode_of, owner_of, var,
+        write_secret_file,
     };
+    use crate::proc;
+    use std::time::{Duration, Instant};
 
     // ---- the tracer -----------------------------------------------------------------------------------------------------
 
@@ -832,5 +835,408 @@ mod container {
     #[ignore = "container test: sh scripts/web-container-test.sh isolation"]
     async fn procs_panes_close_pane_for_ids_one_to_sixty_four_reaches_only_the_own_worker() {
         pane_ids("close_pane", |pane| json!({"pane": pane})).await;
+    }
+
+    // ---- caps: the process tree and the capability sets ------------------------------------------------------------------
+
+    /// Two panes for the person: a shell with a child (`sleep 300 &`) in each. Waits until both children are in the table.
+    async fn busy(world: &World, person: &Person) {
+        world.open_panes(person, 2).await;
+        // Typed into the panes: a child of the pane's own shell, not of a subshell that ends and leaves it to init.
+        world.type_into(person, 0, "sleep 300 > /dev/null 2>&1 &\r").await;
+        world.type_into(person, 1, "sleep 301 > /dev/null 2>&1 &\r").await;
+        world
+            .wait_until(&format!("{} has two sleeping children", person.name), 15, || {
+                world.procs_of(person.uid).iter().filter(|row| row.name == "sleep").count() >= 2
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "container test: sh scripts/web-container-test.sh isolation"]
+    async fn caps_the_process_tree_and_every_capability_set_are_what_the_design_says() {
+        let world = World::start().await;
+        let alice = world.person("alice").await;
+        let bob = world.person("bob").await;
+        busy(&world, &alice).await;
+        busy(&world, &bob).await;
+
+        let table = world.table();
+        let expect = world.expect();
+        let helper = expect.helper.expect("the helper runs");
+        println!("tree: supervisor {} helper {helper}", expect.supervisor);
+        for row in &table {
+            println!("tree: {}", row.line());
+        }
+        assert_eq!(proc::audit(&table, &expect), vec![], "the audit of the whole container");
+
+        // The same facts, one by one, so that a change names itself.
+        assert!(table.iter().all(|row| !row.uid.contains(&0)), "no process of the container has user id 0");
+        let supervisor = table.iter().find(|row| row.pid == expect.supervisor).expect("the supervisor");
+        assert_eq!(supervisor.uid, [10_001; 4]);
+        assert_eq!((supervisor.cap_prm, supervisor.cap_eff, supervisor.cap_inh, supervisor.cap_amb), (0, 0, 0, 0), "the supervisor holds no capability");
+        assert!(!supervisor.no_new_privs, "NoNewPrivs on the supervisor would make the kernel ignore the helper's file capabilities");
+        let helper_row = table.iter().find(|row| row.pid == helper).expect("the helper");
+        assert_eq!(helper_row.uid, [10_001; 4]);
+        assert_eq!(helper_row.cap_prm, proc::FOUR, "the helper holds exactly the four capabilities: {:?}", proc::cap_names(helper_row.cap_prm));
+        assert!(helper_row.cap_eff == 0 || helper_row.cap_eff == proc::FOUR, "the effective set is empty at rest and the four while it acts");
+        assert_eq!((helper_row.cap_inh, helper_row.cap_amb), (0, 0));
+        assert!(!helper_row.no_new_privs, "the helper's file capabilities need NoNewPrivs to be off");
+        println!("tree: helper permitted {:?} effective {:?} (at rest)", proc::cap_names(helper_row.cap_prm), proc::cap_names(helper_row.cap_eff));
+
+        for person in [&alice, &bob] {
+            let worker = world.worker_pid(person).expect("the worker");
+            let below = proc::descendants(&table, worker);
+            assert!(below.len() >= 4, "{}: two shells and two children below the worker: {below:?}", person.name);
+            let mut family = vec![worker];
+            family.extend(below);
+            for pid in &family {
+                let row = table.iter().find(|row| row.pid == *pid).expect("a row");
+                assert_eq!(row.uid, [person.uid; 4], "{} {}: user ids", person.name, row.name);
+                assert_eq!(row.gid, [person.uid; 4], "{} {}: group ids", person.name, row.name);
+                assert!(row.groups.is_empty(), "{} {}: no supplementary group", person.name, row.name);
+                assert_eq!((row.cap_inh, row.cap_prm, row.cap_eff, row.cap_amb), (0, 0, 0, 0), "{} {}: empty capability sets", person.name, row.name);
+                assert!(row.no_new_privs, "{} {}: NoNewPrivs", person.name, row.name);
+            }
+            let row = table.iter().find(|row| row.pid == worker).expect("the worker row");
+            println!("tree: {}'s worker bounding set {:016x} {:?} (the container's, not asserted empty)", person.name, row.cap_bnd, proc::cap_names(row.cap_bnd));
+        }
+        // Nothing but the helper holds a capability bit.
+        for row in table.iter().filter(|row| row.pid != helper && !row.is_dead()) {
+            assert_eq!((row.cap_prm, row.cap_eff), (0, 0), "{} ({}) holds a capability", row.name, row.pid);
+        }
+
+        // The audit is not blind: the same table with one fact changed names exactly that fact.
+        let worker = world.worker_pid(&alice).expect("the worker");
+        let mut changed = table.clone();
+        changed.iter_mut().find(|row| row.pid == worker).expect("row").cap_eff = proc::FOUR;
+        assert_eq!(proc::audit(&changed, &expect), vec![proc::Violation::PersonCapability { pid: worker, set: "effective" }]);
+        let mut changed = table.clone();
+        changed.iter_mut().find(|row| row.pid == worker).expect("row").no_new_privs = false;
+        assert_eq!(proc::audit(&changed, &expect), vec![proc::Violation::PersonNoNewPrivs { pid: worker }]);
+        world.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "container test: sh scripts/web-container-test.sh isolation"]
+    async fn caps_seen_from_the_shell_itself_a_person_holds_nothing() {
+        let world = World::start().await;
+        for name in ["alice", "bob"] {
+            let person = world.person(name).await;
+            let status = world.shell(&person, "cat /proc/$$/status").await;
+            let row = proc::parse_status(&status.text).unwrap_or_else(|e| panic!("the shell's status text: {e}"));
+            assert_eq!(row.uid, [person.uid; 4]);
+            assert_eq!(row.gid, [person.uid; 4]);
+            assert!(row.groups.is_empty());
+            assert_eq!((row.cap_inh, row.cap_prm, row.cap_eff, row.cap_amb), (0, 0, 0, 0));
+            assert!(row.no_new_privs);
+            // A capability cannot be asked for either: the program that would raise one is refused by NoNewPrivs and by the sets.
+            let grep = world.shell(&person, "grep -E '^(Cap|NoNewPrivs|Seccomp)' /proc/$$/status").await;
+            println!("caps shell view of {name}: {}", grep.text.replace('\n', " | "));
+        }
+        world.finish().await;
+    }
+
+    // ---- descriptors --------------------------------------------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "container test: sh scripts/web-container-test.sh isolation"]
+    async fn descriptors_a_shell_holds_no_socket_and_nothing_outside_its_pane_and_home() {
+        let world = World::start().await;
+        for name in ["alice", "bob"] {
+            let person = world.person(name).await;
+            let listing = world.shell(&person, "ls -l /proc/$$/fd").await;
+            assert_eq!(listing.status, 0, "{}", listing.text);
+            println!("descriptors of {name}'s shell:\n{}", listing.text.trim());
+            assert!(listing.text.lines().filter(|line| line.contains(" -> ")).count() >= 3, "the shell has its three standard descriptors: {}", listing.text);
+            assert_eq!(proc::fd_listing_problems(&listing.text, &person.home.display().to_string()), Vec::<String>::new());
+            assert!(!listing.text.contains("socket:") && !listing.text.contains("anon_inode:"));
+        }
+        world.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "container test: sh scripts/web-container-test.sh isolation"]
+    async fn descriptors_a_child_of_a_shell_holds_no_socket_either() {
+        let world = World::start().await;
+        for name in ["alice", "bob"] {
+            let person = world.person(name).await;
+            let child = world
+                .shell(&person, "sleep 300 > /dev/null 2>&1 & p=$!; sleep 0.5; ls -l /proc/$p/fd; kill $p")
+                .await;
+            assert_eq!(child.status, 0, "{}", child.text);
+            println!("descriptors of a child of {name}'s shell:\n{}", child.text.trim());
+            assert!(child.text.lines().filter(|line| line.contains(" -> ")).count() >= 3, "the child has its standard descriptors: {}", child.text);
+            assert_eq!(proc::fd_listing_problems(&child.text, &person.home.display().to_string()), Vec::<String>::new());
+        }
+        world.finish().await;
+    }
+
+    // ---- caps: the helper is the only way to a person's user --------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "container test: sh scripts/web-container-test.sh isolation"]
+    async fn caps_only_the_helper_can_start_a_process_as_a_person_and_it_refuses_what_the_range_forbids() {
+        use holzwave_spawn_helper::protocol::{Mode, Signal};
+        use std::os::unix::process::CommandExt;
+
+        let world = World::start().await;
+        let alice = world.person("alice").await;
+        let bob = world.person("bob").await;
+
+        // The supervisor's user cannot do it itself: it holds no CAP_SETUID.
+        for uid in [alice.uid, 0, 20_500] {
+            let attempt = std::process::Command::new("/bin/true").uid(uid).gid(uid).spawn();
+            let error = attempt.err().unwrap_or_else(|| panic!("the supervisor started a process as {uid}"));
+            println!("caps: starting /bin/true as {uid} from the supervisor: {error}");
+            assert_eq!(error.raw_os_error(), Some(1), "EPERM: {error}");
+        }
+
+        // The helper refuses what its range forbids; the refusal reaches the supervisor as an error and starts nothing.
+        let own = rustix::process::getuid().as_raw();
+        let before = world.table().iter().filter(|row| !row.is_dead()).count();
+        for uid in [0, own, 1, 999, RANGE.0 - 1, RANGE.1 + 1, 65_534, u32::MAX] {
+            let spawn = world.helper.spawn(uid, Mode::Serve).await;
+            println!("caps: helper spawn for uid {uid}: {}", spawn.as_ref().err().map_or_else(|| "STARTED".to_owned(), ToString::to_string));
+            assert!(spawn.is_err(), "the helper must refuse a worker for user id {uid}");
+            let kill = world.helper.kill_uid(uid, Signal::Kill).await;
+            assert!(kill.is_err(), "the helper must refuse to signal user id {uid}: {kill:?}");
+            let remove = world.helper.remove_home(uid).await;
+            assert!(remove.is_err(), "the helper must refuse to remove the home of user id {uid}: {remove:?}");
+            assert!(world.procs_of(uid).iter().all(|row| row.pid == std::process::id() as i32 || uid == own), "nothing was started as {uid}");
+        }
+        assert_eq!(world.table().iter().filter(|row| !row.is_dead()).count(), before, "the refused requests started nothing");
+        assert!(world.supervisor.stats().helper_alive, "the helper survived the hostile requests");
+        let workers = world.helper.ping().await.expect("the helper still answers");
+        assert_eq!(workers, 2, "the helper still holds exactly the two workers");
+        assert_eq!(world.shell(&alice, "id -u").await.text.trim(), alice.uid.to_string());
+        assert_eq!(world.shell(&bob, "id -u").await.text.trim(), bob.uid.to_string());
+        world.finish().await;
+    }
+
+    // ---- limits -----------------------------------------------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "container test: sh scripts/web-container-test.sh isolation"]
+    async fn limits_a_fork_flood_in_one_shell_stops_at_the_limit_and_the_other_person_still_works() {
+        let world = World::start().await;
+        let alice = world.person("alice").await;
+        let bob = world.person("bob").await;
+        world.open_panes(&bob, 1).await;
+        let limit = world.options.nproc as usize;
+        let before = world.tasks_of(alice.uid);
+        println!("limits: process limit {limit}, tasks of alice before the flood {before}");
+        let flood = "n=0; while [ $n -lt 300 ]; do sleep 60 > /dev/null 2>&1 & if [ $? -ne 0 ]; then break; fi; n=$((n+1)); [ $SECONDS -gt 25 ] && break; done; echo asked=$n";
+        let (flooded, (ok_during, peak)) = tokio::join!(
+            world.shell_waiting(&alice, flood, Duration::from_secs(120)),
+            async {
+                // Bob works when alice's tasks are at the limit (or after a bound), while the flood goes on.
+                let mut peak = 0;
+                let started = Instant::now();
+                while started.elapsed() < Duration::from_secs(20) {
+                    peak = peak.max(world.tasks_of(alice.uid));
+                    if peak + 2 >= limit {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                (world.shell(&bob, "echo ok").await, peak)
+            }
+        );
+        println!("limits: alice's shell said {:?}", flooded.text.trim());
+        let sleeps = world.procs_of(alice.uid).iter().filter(|row| row.name == "sleep").count();
+        let tasks = world.tasks_of(alice.uid);
+        println!("limits: peak tasks {peak}, tasks after {tasks}, sleeping children {sleeps}");
+        assert!(tasks <= limit, "alice's tasks ({tasks}) stay at or below the limit ({limit})");
+        assert!(peak <= limit, "alice's peak ({peak}) stays at or below the limit ({limit})");
+        assert!(sleeps <= limit && sleeps >= limit / 2, "{sleeps} children started: at most the limit {limit}, at least half of it");
+        assert!(flooded.text.contains("Resource temporarily unavailable"), "the failure is the operating system's: {}", flooded.text);
+        assert_eq!(ok_during.text.trim(), "ok", "bob's command ran while alice was at her limit");
+        assert!(world.tasks_of(bob.uid) < limit / 2, "bob's own count is small");
+        world.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "container test: sh scripts/web-container-test.sh isolation"]
+    async fn limits_a_descriptor_flood_in_one_shell_stops_at_the_limit() {
+        let world = World::start().await;
+        let alice = world.person("alice").await;
+        let bob = world.person("bob").await;
+        let limit = world.options.nofile as usize;
+        let opened = world
+            .shell(&alice, "n=0; while eval \"exec $((10+n))</dev/null\" 2>/dev/null; do n=$((n+1)); [ $n -gt 2000 ] && break; done; echo opened=$n; ulimit -n")
+            .await;
+        println!("limits: descriptor flood said {:?}", opened.text.replace('\n', " | "));
+        let count: usize = opened.text.lines().find_map(|line| line.strip_prefix("opened=")).and_then(|n| n.parse().ok()).expect("a count");
+        let ulimit: usize = opened.text.lines().last().and_then(|n| n.trim().parse().ok()).expect("the limit");
+        assert_eq!(ulimit, limit, "the soft limit of the shell is the configured one");
+        assert!(count <= limit, "{count} descriptors opened: at most the limit {limit}");
+        assert!(count >= limit / 2, "{count} descriptors opened: at least half of the limit {limit}");
+        assert_eq!(world.shell(&bob, "echo ok").await.text.trim(), "ok", "bob works while alice is at her limit");
+        world.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "container test: sh scripts/web-container-test.sh isolation"]
+    async fn limits_a_recorded_limit_all_people_share_one_network_namespace_and_the_kernel() {
+        // A recorded limit, not a wish: isolation here is by user id, file modes, capabilities and process groups, not by
+        // user namespaces, control groups or a network namespace per person.
+        let world = World::start().await;
+        let alice = world.person("alice").await;
+        let bob = world.person("bob").await;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+        let port = listener.local_addr().expect("address").port();
+        let accepter = std::thread::spawn(move || listener.accept().map(|(stream, peer)| (stream.local_addr().ok(), peer.port())));
+        let connected = world.shell(&alice, &format!("exec 3<>/dev/tcp/127.0.0.1/{port} && echo connected")).await;
+        println!("limits: alice's shell to the supervisor's loopback listener on {port}: {:?}", connected.text.trim());
+        assert_eq!(connected.text.trim(), "connected", "a shell of alice connects to a listener the supervisor holds: the namespace is shared");
+        accepter.join().expect("the accepting thread").expect("the listener accepted alice's connection");
+
+        let spaces = "for n in net pid user mnt cgroup ipc uts; do printf '%s=%s ' $n $(readlink /proc/self/ns/$n); done";
+        let a = world.shell(&alice, spaces).await;
+        let b = world.shell(&bob, spaces).await;
+        let own: String = ["net", "pid", "user", "mnt", "cgroup", "ipc", "uts"]
+            .iter()
+            .map(|n| format!("{n}={} ", std::fs::read_link(format!("/proc/self/ns/{n}")).expect("a namespace").display()))
+            .collect();
+        println!("limits: namespaces of alice {}", a.text.trim());
+        assert_eq!(a.text.trim(), b.text.trim(), "alice and bob share every namespace");
+        assert_eq!(a.text.trim(), own.trim(), "and the supervisor shares them too");
+        let kernel = world.shell(&alice, "uname -r").await;
+        assert_eq!(kernel.text.trim(), world.shell(&bob, "uname -r").await.text.trim(), "one kernel");
+        world.finish().await;
+    }
+
+    // ---- teardown ---------------------------------------------------------------------------------------------------------
+
+    /// The living processes of a user that are not its worker (the child of the helper).
+    fn others_than_the_worker(world: &World, uid: u32) -> Vec<String> {
+        let helper = world.helper_pid();
+        world.procs_of(uid).into_iter().filter(|row| Some(row.ppid) != helper).map(|row| format!("{} {}", row.pid, row.name)).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "container test: sh scripts/web-container-test.sh isolation"]
+    async fn teardown_closing_the_panes_leaves_no_process_of_the_person_but_the_worker() {
+        let world = World::start().await;
+        let alice = world.person("alice").await;
+        let bob = world.person("bob").await;
+        busy(&world, &alice).await;
+        busy(&world, &bob).await;
+        let bob_before = others_than_the_worker(&world, bob.uid);
+        assert!(bob_before.len() >= 4, "bob has two shells and two children: {bob_before:?}");
+        let worker = world.worker_pid(&alice).expect("alice's worker");
+        let seen = others_than_the_worker(&world, alice.uid);
+        assert!(seen.len() >= 4, "alice has two shells and two children: {seen:?}");
+
+        world.close_panes(&alice).await;
+        let took = world.wait_until("alice has a process besides her worker", 5, || others_than_the_worker(&world, alice.uid).is_empty()).await;
+        println!("teardown: closing alice's two panes left only the worker after {took:?}");
+        assert_eq!(world.worker_pid(&alice), Some(worker), "the worker stays");
+        assert_eq!(others_than_the_worker(&world, bob.uid), bob_before, "bob's processes are untouched");
+        assert_eq!(world.shell(&bob, "echo alive").await.text.trim(), "alive");
+        world.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "container test: sh scripts/web-container-test.sh isolation"]
+    async fn teardown_the_idle_timeout_ends_a_worker_with_no_socket_and_every_process_of_the_person() {
+        let world = World::start_with(Options { idle: Duration::from_secs(2), ..Options::default() }).await;
+        let alice = world.person("alice").await;
+        let bob = world.person("bob").await;
+        busy(&world, &alice).await;
+        assert!(!world.procs_of(alice.uid).is_empty());
+        let bob_worker = world.worker_pid(&bob).expect("bob's worker");
+        // Bob keeps his socket; alice lets go of hers.
+        alice.hang_up().await;
+        let took = world.wait_until("a process of alice is left", 15, || world.procs_of(alice.uid).is_empty()).await;
+        println!("teardown: the idle timeout (2 s) with no socket ended alice's worker and every process of her uid after {took:?}");
+        assert!(!world.supervisor.account_stats(alice.key).worker_running, "the supervisor sees no worker of alice");
+        assert_eq!(mode_of(&alice.home), 0o700, "the idle end keeps the home");
+        assert_eq!(world.worker_pid(&bob), Some(bob_worker), "bob's worker is not touched by alice's idle end");
+        world.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "container test: sh scripts/web-container-test.sh isolation"]
+    async fn teardown_a_deleted_account_loses_its_processes_but_keeps_its_home_and_store_file() {
+        use holzwave_server::wire::{Ctl, Key, SlotKey};
+        use holzwave_server::worker::secretstore::SlotKind;
+
+        let world = World::start().await;
+        let alice = world.person("alice").await; // the administrator
+        let bob = world.person("bob").await;
+        let carol = world.person("carol").await;
+        busy(&world, &carol).await;
+        busy(&world, &bob).await;
+        let carol_text = canary("carol");
+        let carol_file = world.plant(&carol, "kept.txt", &carol_text).await;
+        // A store file: provisioned by carol's own worker, with a key that is only used here.
+        let provisioned = world
+            .supervisor
+            .ctl(carol.key, Ctl::Provision { ctl: 1, slots: vec![SlotKey { kind: SlotKind::Password, id: [0; 16], key: Key::from_bytes(&[7u8; 32]) }] })
+            .await;
+        println!("teardown: provisioning carol's store: {provisioned:?}");
+        let store_file = format!("{}/.holzwave/secrets.store", carol.home.display());
+        carol.stat(&store_file).await.unwrap_or_else(|e| panic!("carol's store file exists before the deletion: {e}"));
+        let bob_before = others_than_the_worker(&world, bob.uid);
+        let bob_worker = world.worker_pid(&bob).expect("bob's worker");
+        let alice_worker = world.worker_pid(&alice).expect("alice's worker");
+
+        world.delete_account(&carol);
+        let took = world.wait_until("a process of carol is left", 5, || world.procs_of(carol.uid).is_empty()).await;
+        println!("teardown: deleting carol's account ended her worker and every process of her uid after {took:?}");
+
+        // A delete is not a wipe. The test reads only the metadata of the directory, never its contents.
+        assert_eq!(mode_of(&carol.home), 0o700, "the home is still there with mode 0700");
+        assert_eq!(owner_of(&carol.home), (carol.uid, carol.uid), "and with the same owner");
+        // The only path into the home is still carol's own worker: a fresh one, attached straight to the supervisor (the
+        // HTTP layer would refuse a deleted account; the supervisor does not look at account state).
+        let mut fresh = world.socket(&carol).await;
+        let opened = fresh.call("file_open", &json!({"source": "local", "path": carol_file})).await;
+        match opened {
+            Reply::Ok(value) => assert_eq!(value["text"].as_str(), Some(carol_text.as_str()), "the file she wrote is still there"),
+            Reply::Err(why) => panic!("a fresh worker of carol reads her file: {why}"),
+        }
+        let kept = fresh.call("file_stat", &json!({"source": "local", "path": store_file})).await;
+        assert!(kept.is_ok(), "her store file is still there: {kept:?}");
+        drop(fresh);
+
+        // The others are untouched.
+        assert_eq!(world.worker_pid(&bob), Some(bob_worker), "bob's worker is the same process");
+        assert_eq!(world.worker_pid(&alice), Some(alice_worker), "alice's worker is the same process");
+        assert_eq!(others_than_the_worker(&world, bob.uid), bob_before, "bob's shells and children are the same processes");
+        assert_eq!(world.shell(&bob, "echo alive").await.text.trim(), "alive");
+        assert!(mode_of(&bob.home) == 0o700 && mode_of(&alice.home) == 0o700);
+
+        // Her user id is never handed to a second account.
+        let dave = world.person("dave").await;
+        assert_eq!(carol.uid, 20_002);
+        assert_eq!(dave.uid, 20_003, "the next account gets the next user id, not carol's");
+        world.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "container test: sh scripts/web-container-test.sh isolation"]
+    async fn teardown_the_end_of_the_supervisor_leaves_no_process_of_the_range_and_the_helper_exits() {
+        let world = World::start().await;
+        let alice = world.person("alice").await;
+        let bob = world.person("bob").await;
+        busy(&world, &alice).await;
+        busy(&world, &bob).await;
+        let helper = world.helper_pid().expect("the helper runs");
+        let in_range = |rows: &[proc::Status]| rows.iter().filter(|row| !row.is_dead() && row.in_range(RANGE.0, RANGE.1)).count();
+        assert!(in_range(&world.table()) >= 10, "two workers, four shells and four children are running");
+
+        let took = world.finish().await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while in_range(&proc::process_table()) != 0 {
+            assert!(Instant::now() < deadline, "a process of the range is left five seconds after the end of the supervisor");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let rows = proc::process_table();
+        assert!(!rows.iter().any(|row| row.pid == helper && !row.is_dead()), "the helper exited when its socket closed");
+        println!("teardown: the end of the supervisor took {took:?}; no process of the range and no helper is left");
+        assert!(took < Duration::from_secs(5), "the end took {took:?}");
     }
 }

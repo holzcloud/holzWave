@@ -139,10 +139,10 @@ impl Status {
 
 fn field<'a>(text: &'a str, name: &'static str) -> Result<&'a str, StatusError> {
     for line in text.lines() {
-        if let Some((key, value)) = line.split_once(':') {
-            if key == name {
-                return Ok(value.trim());
-            }
+        if let Some((key, value)) = line.split_once(':')
+            && key == name
+        {
+            return Ok(value.trim());
         }
     }
     Err(StatusError::Missing(name))
@@ -406,6 +406,7 @@ pub fn fd_listing_problems(listing: &str, home: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
+    #[allow(clippy::too_many_arguments)]
     fn sample(name: &str, pid: i32, ppid: i32, uid: u32, gid: u32, groups: &str, caps: [&str; 5], nnp: u8) -> String {
         let [inh, prm, eff, bnd, amb] = caps;
         format!(
@@ -603,7 +604,7 @@ mod tests {
 
     #[test]
     fn a_missing_supervisor_or_helper_is_named_and_a_zombie_is_not_a_process() {
-        let rows = table(&clean()[3..].to_vec());
+        let rows = table(&clean()[3..]);
         assert_eq!(audit(&rows, &expect()), vec![Violation::NoSupervisor, Violation::NoHelper]);
         let mut rows = table(&clean());
         rows[5].state = 'Z';

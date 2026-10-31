@@ -333,6 +333,8 @@ pub struct World {
     /// `<HW_DATA>/<run>`: mode 0711, so that a person's worker can reach its home below it.
     pub data: PathBuf,
     pub supervisor: Supervisor,
+    /// The supervisor's own handle on the helper's control socket, for the requests no person can make.
+    pub helper: HelperClient,
     pub accounts: Arc<Accounts>,
     pub store: Arc<Store>,
     pub options: Options,
@@ -375,7 +377,7 @@ impl World {
             ..HelperSettings::default()
         };
         let client = HelperClient::start(&settings).await.unwrap_or_else(|e| panic!("the spawn helper does not start: {e}"));
-        let launcher = Arc::new(HelperLauncher::new(client));
+        let launcher = Arc::new(HelperLauncher::new(client.clone()));
         let supervisor_settings = SupervisorSettings {
             idle_timeout: options.idle,
             sweep_interval: Duration::from_millis(500),
@@ -386,7 +388,7 @@ impl World {
             Accounts::new(store.clone(), clock, audit, RANGE.0..=RANGE.1).with_observer(Arc::new(supervisor.clone())),
         );
         let sweeper = supervisor.start_sweeper();
-        World { data, supervisor, accounts, store, options, admin: Mutex::new(None), sweeper, people: Mutex::new(Vec::new()) }
+        World { data, supervisor, helper: client, accounts, store, options, admin: Mutex::new(None), sweeper, people: Mutex::new(Vec::new()) }
     }
 
     /// The directory that holds the homes.
@@ -587,6 +589,18 @@ impl World {
         out.text.trim().parse().unwrap_or_else(|_| panic!("the shell's pid is a number, not {:?}", out.text))
     }
 
+    /// Types `text` into the person's pane number `index` (in the order the panes were started).
+    pub async fn type_into(&self, person: &Person, index: usize, text: &str) {
+        let pane = person.panes()[index];
+        let sent = person.ask("text", json!({"pane": pane, "text": text})).await;
+        assert!(sent.is_ok(), "text to pane {pane}: {sent:?}");
+    }
+
+    /// The number of tasks (threads and processes) of the living processes that have the user id: what `RLIMIT_NPROC` counts.
+    pub fn tasks_of(&self, uid: u32) -> usize {
+        self.procs_of(uid).iter().map(|row| std::fs::read_dir(format!("/proc/{}/task", row.pid)).map_or(0, Iterator::count)).sum()
+    }
+
     /// The living processes that have the user id.
     pub fn procs_of(&self, uid: u32) -> Vec<Status> {
         self.table().into_iter().filter(|row| !row.is_dead() && row.has_uid(uid)).collect()
@@ -626,19 +640,19 @@ impl World {
     }
 
     /// Stops the supervisor in order (every worker told, the stragglers killed), then lets go of everything so that the
-    /// helper's socket closes. Returns when the helper process is gone.
+    /// helper's socket closes. Returns how long it took, from the start of the shutdown to the end of the helper process.
     pub async fn finish(self) -> Duration {
         let helper = self.helper_pid();
-        self.supervisor.shutdown().await;
         let started = Instant::now();
-        let World { supervisor, accounts, store, sweeper, people, .. } = self;
+        self.supervisor.shutdown().await;
+        let World { supervisor, helper: client, accounts, store, sweeper, people, .. } = self;
         sweeper.abort();
         let people = std::mem::take(&mut *people.lock().unwrap_or_else(PoisonError::into_inner));
         for person in &people {
             person.hang_up().await;
         }
         drop(people);
-        drop((supervisor, accounts, store));
+        drop((supervisor, client, accounts, store));
         if let Some(pid) = helper {
             let deadline = Instant::now() + Duration::from_secs(10);
             while std::fs::read_to_string(format!("/proc/{pid}/status")).ok().and_then(|t| proc::parse_status(&t).ok()).is_some_and(|row| !row.is_dead()) {
