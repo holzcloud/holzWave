@@ -924,7 +924,7 @@ async fn nothing_changed(
     let after = held(probed, who);
     assert_eq!(after.0, before.0 + own_calls, "no command was forwarded to a worker but the {own_calls} the test made itself");
     assert_eq!(after.1, before.1, "no worker was started");
-    assert_eq!(after.3.audit_lines, before.3.audit_lines + own_audit_lines, "no audit line was written but the {own_audit_lines} of the sign-outs");
+    assert_eq!(after.3.audit_lines, before.3.audit_lines + own_audit_lines, "no audit line was written but the {own_audit_lines} of the sign-outs and expiries");
     assert_eq!(after.4.workers, 0, "the person who never signed in has no worker");
     assert!(
         probed.env.launcher.requests().iter().all(|(uid, _)| *uid != who.bob.key.uid),
@@ -983,7 +983,9 @@ async fn no_session_an_expired_cookie_runs_no_row_and_is_closed_4401() {
     let mut problems = refused_for_every_row(&probed, Some(&who.alice.signed.cookie), Some(edge::ORIGIN), 4401).await;
     problems.extend(refused_for_every_row(&probed, Some(&who.bob.signed.cookie), Some(edge::ORIGIN), 4401).await);
     nothing_wrong("expired session", &problems);
-    nothing_changed(&probed, &who, &before, 0, 0).await;
+    // The one thing an expired session leaves is its own `session.expired` line, once for each of the two people however many
+    // rows were tried with the cookie.
+    nothing_changed(&probed, &who, &before, 0, 2).await;
     println!("no session (c) expired: {} rows x 2; counts alice {:?} -> {:?}", COMMANDS.len(), before.3, probed.env.counts(&who.alice));
 }
 
