@@ -18,13 +18,20 @@ mod worker_env;
 #[path = "support/ws_env.rs"]
 mod ws_env;
 
-use std::time::Duration;
+use std::os::unix::fs::{PermissionsExt, symlink};
+use std::path::Path;
+use std::time::{Duration, Instant, SystemTime};
 
-use files_env::{FilesEnv, assert_file_headers, png};
+use files_env::{FilesEnv, Opts, assert_file_headers, encode, names, png, tree};
+use holzwave_server::config::Upload;
+use holzwave_server::http::routes_files::clean_name;
+use holzwave_server::limits::Limits;
 use holzwave_server::wire::{Ctl, ExitReason, FILE_SOCKET, FileWhat, Frame, Note, Res, ResBody};
+use holzwave_server::worker::files::{FileHooks, numbered, valid_dir, valid_name};
 use holzwave_server::worker::runtime::TestHooks;
-use serde_json::json;
+use serde_json::{Value, json};
 use worker_env::{PATIENCE, Rig, RigOptions};
+use scratch::Scratch;
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
@@ -229,4 +236,935 @@ async fn tracer_another_persons_session_cannot_use_a_token_and_the_owners_worker
     assert_eq!(env.probe.stats(), asked + 1, "only bob's worker was asked");
     assert_eq!(env.env.supervisor.stats().file_calls, calls + 1);
     assert_eq!(env.get(&alice.signed, &grant.url).await.status, 200);
+}
+
+// ==== the upload ================================================================================================================
+
+// ---- the names, pure ---------------------------------------------------------------------------------------------------------
+
+#[test]
+fn a_name_is_cleaned_as_the_table_says() {
+    let table: &[(&str, &str)] = &[
+        ("hello.txt", "hello.txt"),
+        ("../../etc/passwd", "passwd"),
+        ("C:\\Users\\x\\a.txt", "a.txt"),
+        ("a/b/", "upload"),
+        ("..", "upload"),
+        (".", "upload"),
+        ("...", "upload"),
+        ("", "upload"),
+        ("     ", "upload"),
+        ("a\0b", "a_b"),
+        ("a\nb", "a_b"),
+        ("a\tb", "a_b"),
+        ("a\u{7f}b", "a_b"),
+        ("a\u{202e}b.txt", "a_b.txt"),
+        ("a\u{200b}b", "a_b"),
+        ("a\u{2028}b", "a_b"),
+        ("  report.pdf. ", "report.pdf"),
+        (".bashrc", "bashrc"),
+        (".part-1-deadbeef", "part-1-deadbeef"),
+        ("\0", "_"),
+        ("a b.tar.gz", "a b.tar.gz"),
+        ("na\u{ef}ve caf\u{e9}.txt", "na\u{ef}ve caf\u{e9}.txt"),
+        ("\u{65e5}\u{672c}\u{8a9e}.txt", "\u{65e5}\u{672c}\u{8a9e}.txt"),
+        ("a/../b", "b"),
+        ("..\\..\\x", "x"),
+        ("/etc/", "upload"),
+        ("trailing dots...", "trailing dots"),
+        ("a\r\nb: c", "a__b: c"),
+    ];
+    for (raw, cleaned) in table {
+        assert_eq!(clean_name(raw), *cleaned, "{raw:?}");
+    }
+}
+
+#[test]
+fn a_long_name_is_cut_on_a_character_boundary_and_keeps_a_short_extension() {
+    let long = format!("{}.pdf", "\u{e9}".repeat(150));
+    let cleaned = clean_name(&long);
+    assert_eq!(cleaned.len(), 200, "{} bytes", cleaned.len());
+    assert!(cleaned.ends_with(".pdf") && cleaned.starts_with('\u{e9}'));
+    assert_eq!(clean_name(&"\u{e9}".repeat(150)).len(), 200);
+    assert_eq!(clean_name(&"\u{1f600}".repeat(100)), "\u{1f600}".repeat(50));
+    // An extension that is too long is not kept; a cut that ends on a space loses it.
+    let no_keep = format!("{}.{}", "a".repeat(250), "b".repeat(20));
+    assert_eq!(clean_name(&no_keep), "a".repeat(200));
+    assert_eq!(clean_name(&format!("{} b", "a".repeat(199))), "a".repeat(199));
+    // A name already within the limit is not touched.
+    let exact = format!("{}.txt", "a".repeat(196));
+    assert_eq!(clean_name(&exact), exact);
+    // Only an extension, however long the stem was before it, still leaves a name.
+    assert_eq!(clean_name(&format!("{}.b", "a".repeat(250))).len(), 200);
+}
+
+#[test]
+fn whatever_a_name_is_the_clean_one_is_valid_for_the_worker_and_cleaning_it_again_changes_nothing() {
+    let pool = [
+        "a", "\u{e9}", "\u{1f600}", ".", " ", "/", "\\", "\0", "\u{202e}", "..", "x.y", "\n", "report", ".pdf", "\u{200b}", "%", "~", "\u{fffd}",
+    ];
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move |n: usize| {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        usize::try_from(state.wrapping_mul(0x2545_F491_4F6C_DD1D) % n as u64).expect("small")
+    };
+    for _ in 0..4000 {
+        let parts = next(70);
+        let raw: String = (0..parts).map(|_| pool[next(pool.len())]).collect();
+        let cleaned = clean_name(&raw);
+        assert!(valid_name(&cleaned), "{raw:?} -> {cleaned:?}");
+        assert!(cleaned.len() <= 200, "{raw:?}");
+        assert!(!cleaned.chars().any(char::is_control), "{raw:?}");
+        assert!(!cleaned.starts_with('.') && !cleaned.ends_with('.') && !cleaned.starts_with(' ') && !cleaned.ends_with(' '), "{raw:?} -> {cleaned:?}");
+        assert_eq!(clean_name(&cleaned), cleaned, "{raw:?}");
+    }
+}
+
+#[test]
+fn the_worker_accepts_a_name_of_one_plain_component_and_nothing_else() {
+    let good = ["a", "a.txt", "name (1).txt", "\u{e9}", ".hidden", "no-extension"];
+    for name in good {
+        assert!(valid_name(name), "{name:?}");
+    }
+    assert!(valid_name(&"a".repeat(255)));
+    let bad = ["", ".", "..", "a/b", "/", "a/", "a\0b", ".part-1-deadbeef", ".part-"];
+    for name in bad {
+        assert!(!valid_name(name), "{name:?}");
+    }
+    assert!(!valid_name(&"a".repeat(256)));
+}
+
+#[test]
+fn the_worker_accepts_a_folder_of_plain_relative_components_and_nothing_else() {
+    for dir in ["uploads", "a/b", "uploads/2026", "a.b/c d"] {
+        assert!(valid_dir(dir), "{dir:?}");
+    }
+    assert!(valid_dir(&"a".repeat(64)));
+    assert!(valid_dir(&vec!["a"; 16].join("/")));
+    let bad = ["", "/", "/abs", "a/", "/a", "a//b", "a/../b", "..", ".", "a/./b", "a\0b", "../x"];
+    for dir in bad {
+        assert!(!valid_dir(dir), "{dir:?}");
+    }
+    assert!(!valid_dir(&"a".repeat(65)));
+    assert!(!valid_dir(&vec!["a"; 17].join("/")));
+    assert!(!valid_dir(&format!("{}/{}", "a".repeat(60), "b".repeat(1000))));
+}
+
+#[test]
+fn a_taken_name_gets_a_number_before_the_extension() {
+    assert_eq!(numbered("a.txt", 0), "a.txt");
+    assert_eq!(numbered("a.txt", 1), "a (1).txt");
+    assert_eq!(numbered("a.tar.gz", 2), "a.tar (2).gz");
+    assert_eq!(numbered("noext", 3), "noext (3)");
+    assert_eq!(numbered(".hidden", 1), ".hidden (1)");
+}
+
+#[test]
+fn the_default_upload_settings_are_a_folder_called_uploads_and_256_mib() {
+    let upload = Upload::default();
+    assert_eq!(upload.dir, Path::new("uploads"));
+    assert_eq!(upload.max_bytes, 256 * 1024 * 1024);
+}
+
+// ---- the worker's writer over a socket pair -----------------------------------------------------------------------------
+
+fn upload_rig() -> Rig {
+    rig_with(TestHooks::default())
+}
+
+fn rig_with(hooks: TestHooks) -> Rig {
+    let mut rig = Rig::start_with(RigOptions { hooks, shell: None });
+    rig.init();
+    rig
+}
+
+fn answer_since(rig: &mut Rig, mark: usize, id: u64) -> ResBody {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let found = rig.seen()[mark..].iter().find_map(|f| match f {
+            Frame::Res(r) if r.socket == FILE_SOCKET && r.request == id => Some(r.body.clone()),
+            _ => None,
+        });
+        if let Some(body) = found {
+            return body;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(rig.next(left).is_some(), "no answer to the upload step of {id}");
+    }
+}
+
+/// One upload step, answered; unlike `file_call` it finds only an answer that came after the step was sent.
+fn step(rig: &mut Rig, control: Ctl, id: u64) -> ResBody {
+    let mark = rig.seen().len();
+    rig.send(Frame::Ctl(control));
+    answer_since(rig, mark, id)
+}
+
+fn open(rig: &mut Rig, id: u64, size: u64, folder: &str, name: &str) -> ResBody {
+    step(rig, Ctl::UploadOpen { id, size, folder: folder.into(), name: name.into() }, id)
+}
+
+fn piece(rig: &mut Rig, id: u64, bytes: &[u8]) -> ResBody {
+    step(rig, Ctl::UploadPiece { id, bytes: bytes.to_vec() }, id)
+}
+
+fn close(rig: &mut Rig, id: u64, commit: bool) -> ResBody {
+    step(rig, Ctl::UploadClose { id, commit }, id)
+}
+
+fn is_ok(body: &ResBody) -> bool {
+    matches!(body, ResBody::Ok(_))
+}
+
+/// A whole upload: open, the bytes in pieces of `at_most`, close with commit. The answer to the close.
+fn whole(rig: &mut Rig, id: u64, folder: &str, name: &str, bytes: &[u8], at_most: usize) -> ResBody {
+    assert!(is_ok(&open(rig, id, bytes.len() as u64, folder, name)));
+    for chunk in bytes.chunks(at_most) {
+        assert!(is_ok(&piece(rig, id, chunk)));
+    }
+    close(rig, id, true)
+}
+
+fn mode_of(path: &Path) -> u32 {
+    std::fs::metadata(path).expect("metadata").permissions().mode() & 0o7777
+}
+
+fn stored(body: ResBody) -> Value {
+    match body {
+        ResBody::Ok(text) => serde_json::from_str(&text).expect("JSON"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A directory outside the home with a file in it that no upload may touch.
+struct Canary {
+    dir: Scratch,
+}
+
+impl Canary {
+    fn new() -> Canary {
+        let dir = Scratch::new("canary");
+        dir.write_file("canary.txt", b"do not touch", 0o600);
+        Canary { dir }
+    }
+
+    fn untouched(&self) {
+        assert_eq!(names(self.dir.path()), vec!["canary.txt".to_owned()], "nothing was made beside the canary");
+        assert_eq!(std::fs::read(self.dir.join("canary.txt")).expect("canary"), b"do not touch");
+    }
+}
+
+#[test]
+fn opening_an_upload_makes_the_folder_with_mode_0700_and_an_exclusive_part_file_with_mode_0600() {
+    let mut rig = upload_rig();
+    let uploads = rig.home.join("uploads");
+    assert!(is_ok(&open(&mut rig, 1, 10, "uploads", "a.txt")));
+    assert_eq!(mode_of(&uploads), 0o700);
+    let found = names(&uploads);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].starts_with(".part-1-") && found[0].len() == ".part-1-".len() + 8, "{found:?}");
+    assert_eq!(mode_of(&uploads.join(&found[0])), 0o600);
+    // A second open with the same id is refused and leaves the first alone.
+    assert!(!is_ok(&open(&mut rig, 1, 10, "uploads", "b.txt")));
+    assert_eq!(names(&uploads), found);
+    assert!(is_ok(&close(&mut rig, 1, false)));
+    assert!(names(&uploads).is_empty());
+    rig.finish();
+}
+
+#[test]
+fn nested_folders_are_made_one_component_at_a_time_each_with_mode_0700() {
+    let mut rig = upload_rig();
+    let result = stored(whole(&mut rig, 1, "up/2026/may", "a.txt", b"x", 10));
+    let path = result["path"].as_str().expect("path").to_owned();
+    assert_eq!(path, rig.home.join("up/2026/may/a.txt").to_str().expect("UTF-8"));
+    for dir in ["up", "up/2026", "up/2026/may"] {
+        assert_eq!(mode_of(&rig.home.join(dir)), 0o700, "{dir}");
+    }
+    rig.finish();
+}
+
+#[test]
+fn pieces_are_appended_and_each_one_is_answered_and_a_commit_publishes_the_file_with_mode_0600() {
+    let mut rig = upload_rig();
+    let uploads = rig.home.join("uploads");
+    let bytes: Vec<u8> = (0..2500u32).map(|i| u8::try_from(i % 251).expect("byte")).collect();
+    assert!(is_ok(&open(&mut rig, 1, 2500, "uploads", "data.bin")));
+    for chunk in bytes.chunks(1000) {
+        assert_eq!(piece(&mut rig, 1, chunk), ResBody::Ok("{}".into()));
+    }
+    let result = stored(close(&mut rig, 1, true));
+    assert_eq!(result, json!({ "path": uploads.join("data.bin").to_str().expect("UTF-8"), "size": 2500 }));
+    assert_eq!(std::fs::read(uploads.join("data.bin")).expect("the file"), bytes);
+    assert_eq!(mode_of(&uploads.join("data.bin")), 0o600);
+    assert_eq!(names(&uploads), vec!["data.bin".to_owned()], "the part file is gone and nothing else is there");
+    // The id is free again and the upload is over: a piece for it is refused.
+    assert!(!is_ok(&piece(&mut rig, 1, b"late")));
+    rig.finish();
+}
+
+#[test]
+fn an_empty_upload_is_a_file_of_no_bytes() {
+    let mut rig = upload_rig();
+    let result = stored(whole(&mut rig, 1, "uploads", "empty.txt", b"", 10));
+    assert_eq!(result["size"], 0);
+    assert_eq!(std::fs::read(rig.home.join("uploads/empty.txt")).expect("the file"), b"");
+    rig.finish();
+}
+
+#[test]
+fn an_existing_file_is_never_changed_the_new_one_gets_a_number() {
+    let mut rig = upload_rig();
+    let uploads = rig.home.join("uploads");
+    std::fs::create_dir(&uploads).expect("folder");
+    let old = uploads.join("a.txt");
+    std::fs::write(&old, b"original").expect("old");
+    let modified = std::fs::metadata(&old).expect("meta").modified().expect("mtime");
+    std::thread::sleep(Duration::from_millis(30));
+
+    let first = stored(whole(&mut rig, 1, "uploads", "a.txt", b"new one", 100));
+    assert_eq!(first["path"], uploads.join("a (1).txt").to_str().expect("UTF-8"));
+    let second = stored(whole(&mut rig, 2, "uploads", "a.txt", b"newer", 100));
+    assert_eq!(second["path"], uploads.join("a (2).txt").to_str().expect("UTF-8"));
+    assert_eq!(std::fs::read(&old).expect("old"), b"original");
+    assert_eq!(std::fs::metadata(&old).expect("meta").modified().expect("mtime"), modified);
+    assert_eq!(std::fs::read(uploads.join("a (1).txt")).expect("1"), b"new one");
+    assert_eq!(std::fs::read(uploads.join("a (2).txt")).expect("2"), b"newer");
+    assert_eq!(names(&uploads), vec!["a (1).txt", "a (2).txt", "a.txt"]);
+    rig.finish();
+}
+
+#[test]
+fn a_link_where_the_folder_should_be_is_refused_and_nothing_is_written_outside() {
+    let mut rig = upload_rig();
+    let canary = Canary::new();
+    symlink(canary.dir.path(), rig.home.join("uploads")).expect("link");
+    assert!(!is_ok(&open(&mut rig, 1, 4, "uploads", "x.txt")));
+    assert!(!is_ok(&piece(&mut rig, 1, b"data")));
+    canary.untouched();
+    rig.finish();
+}
+
+#[test]
+fn a_link_as_a_component_of_the_folder_is_refused_and_nothing_is_written_outside() {
+    let mut rig = upload_rig();
+    let canary = Canary::new();
+    std::fs::create_dir(rig.home.join("up")).expect("folder");
+    symlink(canary.dir.path(), rig.home.join("up/inner")).expect("link");
+    assert!(!is_ok(&open(&mut rig, 1, 4, "up/inner/deeper", "x.txt")));
+    assert!(!is_ok(&open(&mut rig, 2, 4, "up/inner", "x.txt")));
+    canary.untouched();
+    // A link to a file in place of a folder component is refused too.
+    symlink(canary.dir.join("canary.txt"), rig.home.join("up/file")).expect("link");
+    assert!(!is_ok(&open(&mut rig, 3, 4, "up/file", "x.txt")));
+    canary.untouched();
+    rig.finish();
+}
+
+#[test]
+fn a_link_with_the_name_of_the_upload_is_not_followed_and_the_file_it_points_to_is_not_changed() {
+    let mut rig = upload_rig();
+    let canary = Canary::new();
+    let uploads = rig.home.join("uploads");
+    std::fs::create_dir(&uploads).expect("folder");
+    symlink(canary.dir.join("canary.txt"), uploads.join("x.txt")).expect("link");
+    symlink(canary.dir.join("not-there"), uploads.join("y.txt")).expect("dangling link");
+    let first = stored(whole(&mut rig, 1, "uploads", "x.txt", b"data", 10));
+    assert_eq!(first["path"], uploads.join("x (1).txt").to_str().expect("UTF-8"));
+    let second = stored(whole(&mut rig, 2, "uploads", "y.txt", b"data", 10));
+    assert_eq!(second["path"], uploads.join("y (1).txt").to_str().expect("UTF-8"));
+    canary.untouched();
+    assert!(!canary.dir.join("not-there").exists());
+    rig.finish();
+}
+
+#[test]
+fn a_link_as_the_home_path_of_the_folder_is_not_followed_even_when_it_points_to_a_folder() {
+    let mut rig = upload_rig();
+    let canary = Canary::new();
+    std::fs::create_dir(rig.home.join("real")).expect("folder");
+    symlink(rig.home.join("real"), rig.home.join("alias")).expect("link inside the home");
+    assert!(!is_ok(&open(&mut rig, 1, 1, "alias", "x.txt")), "not even a link that stays inside the home");
+    assert!(names(&rig.home.join("real")).is_empty());
+    canary.untouched();
+    rig.finish();
+}
+
+#[test]
+fn a_piece_for_an_upload_that_was_never_opened_is_refused_and_so_is_a_close() {
+    let mut rig = upload_rig();
+    assert!(!is_ok(&piece(&mut rig, 77, b"data")));
+    assert!(!is_ok(&close(&mut rig, 77, true)));
+    assert!(!is_ok(&close(&mut rig, 78, false)));
+    assert!(!rig.home.join("uploads").exists());
+    rig.finish();
+}
+
+#[test]
+fn an_abort_removes_the_part_file_and_publishes_nothing() {
+    let mut rig = upload_rig();
+    let uploads = rig.home.join("uploads");
+    assert!(is_ok(&open(&mut rig, 1, 100, "uploads", "a.txt")));
+    assert!(is_ok(&piece(&mut rig, 1, b"half of it")));
+    assert_eq!(names(&uploads).len(), 1);
+    assert!(is_ok(&close(&mut rig, 1, false)));
+    assert!(names(&uploads).is_empty());
+    rig.finish();
+}
+
+#[test]
+fn a_close_with_fewer_bytes_than_declared_and_a_piece_over_the_declared_size_are_refused_and_leave_nothing() {
+    let mut rig = upload_rig();
+    let uploads = rig.home.join("uploads");
+    assert!(is_ok(&open(&mut rig, 1, 10, "uploads", "short.txt")));
+    assert!(is_ok(&piece(&mut rig, 1, b"1234")));
+    assert!(!is_ok(&close(&mut rig, 1, true)));
+    assert!(names(&uploads).is_empty());
+
+    assert!(is_ok(&open(&mut rig, 2, 3, "uploads", "long.txt")));
+    assert!(!is_ok(&piece(&mut rig, 2, b"1234")));
+    assert!(names(&uploads).is_empty(), "{:?}", names(&uploads));
+    rig.finish();
+}
+
+#[test]
+fn a_folder_or_a_name_that_is_not_plain_is_refused_before_anything_is_made() {
+    let mut rig = upload_rig();
+    let mut id = 0;
+    for (folder, name) in [
+        ("../x", "a"),
+        ("/abs", "a"),
+        ("a//b", "a"),
+        ("a/./b", "a"),
+        ("uploads", "../a"),
+        ("uploads", "a/b"),
+        ("uploads", ".."),
+        ("uploads", ".part-1-deadbeef"),
+        ("uploads", "a\0b"),
+    ] {
+        id += 1;
+        assert!(!is_ok(&open(&mut rig, id, 1, folder, name)), "{folder:?} {name:?}");
+    }
+    let made: Vec<String> = tree(rig.home.path())
+        .into_iter()
+        .map(|(path, _, _)| path)
+        .filter(|path| !path.starts_with(".holzwave") && !path.starts_with(".tmp") && path != "shell.pid")
+        .collect();
+    assert!(made.is_empty(), "{made:?}");
+    rig.finish();
+}
+
+#[test]
+fn a_part_file_older_than_an_hour_is_removed_at_the_next_open_and_a_younger_one_and_other_files_are_kept() {
+    let mut rig = upload_rig();
+    let uploads = rig.home.join("uploads");
+    std::fs::create_dir(&uploads).expect("folder");
+    let old_time = SystemTime::now() - Duration::from_secs(2 * 3600);
+    let write = |name: &str, time: Option<SystemTime>| {
+        let path = uploads.join(name);
+        std::fs::write(&path, b"x").expect("file");
+        if let Some(time) = time {
+            std::fs::File::options().write(true).open(&path).expect("open").set_modified(time).expect("mtime");
+        }
+    };
+    write(".part-9-deadbeef", Some(old_time));
+    write(".part-8-cafebabe", None);
+    write("old-but-not-a-part.txt", Some(old_time));
+    write(".part-not-ours", Some(old_time));
+    assert!(is_ok(&open(&mut rig, 1, 1, "uploads", "a.txt")));
+    let found = names(&uploads);
+    assert!(!found.contains(&".part-9-deadbeef".to_owned()), "{found:?}");
+    for kept in [".part-8-cafebabe", "old-but-not-a-part.txt", ".part-not-ours"] {
+        assert!(found.contains(&kept.to_owned()), "{kept} in {found:?}");
+    }
+    assert_eq!(found.len(), 4, "{found:?}");
+    rig.finish();
+}
+
+#[test]
+fn a_full_disk_aborts_the_upload_and_removes_the_part_file_before_the_refusal_is_answered() {
+    let hooks = TestHooks { files: FileHooks { fail_write_after: Some(100), ..FileHooks::default() }, ..TestHooks::default() };
+    let mut rig = rig_with(hooks);
+    let uploads = rig.home.join("uploads");
+    assert!(is_ok(&open(&mut rig, 1, 1000, "uploads", "big.bin")));
+    assert!(is_ok(&piece(&mut rig, 1, &[7; 50])));
+    assert!(!is_ok(&piece(&mut rig, 1, &[7; 100])));
+    assert!(names(&uploads).is_empty(), "{:?}", names(&uploads));
+    // The upload is over: another piece for it is refused as unknown.
+    assert!(!is_ok(&piece(&mut rig, 1, &[7; 1])));
+    rig.finish();
+}
+
+#[test]
+fn a_worker_holds_at_most_four_uploads_open() {
+    let mut rig = upload_rig();
+    let uploads = rig.home.join("uploads");
+    for id in 1..=4 {
+        assert!(is_ok(&open(&mut rig, id, 10, "uploads", &format!("f{id}.txt"))), "{id}");
+    }
+    assert!(!is_ok(&open(&mut rig, 5, 10, "uploads", "f5.txt")));
+    assert_eq!(names(&uploads).len(), 4);
+    for id in 1..=4 {
+        assert!(is_ok(&close(&mut rig, id, false)));
+    }
+    assert!(names(&uploads).is_empty());
+    assert!(is_ok(&open(&mut rig, 6, 10, "uploads", "f6.txt")), "a place is free again");
+    rig.finish();
+}
+
+#[test]
+fn a_command_is_answered_within_a_second_all_through_a_64_mib_upload() {
+    let hooks = TestHooks { files: FileHooks { write_delay: Some(Duration::from_millis(15)), ..FileHooks::default() }, ..TestHooks::default() };
+    let mut rig = rig_with(hooks);
+    let total: u64 = 64 * 1024 * 1024;
+    assert!(is_ok(&open(&mut rig, 1, total, "uploads", "big.bin")));
+    let chunk = vec![0xA5u8; 1024 * 1024];
+    let mut slowest = Duration::ZERO;
+    for _ in 0..64 {
+        let mark = rig.seen().len();
+        rig.send(Frame::Ctl(Ctl::UploadPiece { id: 1, bytes: chunk.clone() }));
+        let started = Instant::now();
+        let layout = rig.call(2, "get_layout", json!({}));
+        slowest = slowest.max(started.elapsed());
+        assert!(matches!(layout.body, ResBody::Ok(_)));
+        assert!(is_ok(&answer_since(&mut rig, mark, 1)));
+    }
+    assert!(slowest < Duration::from_secs(1), "the slowest answer of a command took {slowest:?}");
+    let result = stored(close(&mut rig, 1, true));
+    assert_eq!(result["size"], total);
+    assert_eq!(std::fs::metadata(rig.home.join("uploads/big.bin")).expect("meta").len(), total);
+    rig.finish();
+}
+
+// ---- the route ----------------------------------------------------------------------------------------------------------
+
+/// The state of the folder of `person` after an upload: the names in it.
+fn uploads_of(env: &FilesEnv, person: &ws_env::Person) -> Vec<String> {
+    names(&env.home(person).join("uploads"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upload_answers_200_with_the_path_and_the_size_and_the_file_is_there_with_mode_0600() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let body: Vec<u8> = (0..1024u32).map(|i| u8::try_from(i % 253).expect("byte")).collect();
+    let reply = env.upload(&alice.signed, "hello.txt", &body).await;
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    let home = env.home(&alice);
+    assert_eq!(reply.json(), json!({ "path": home.join("uploads/hello.txt").to_str().expect("UTF-8"), "size": 1024 }));
+    assert_eq!(reply.header("content-type"), Some("application/json"));
+    assert_eq!(reply.header("cache-control"), Some("no-store"));
+    assert!(reply.header("strict-transport-security").is_some());
+    assert_eq!(std::fs::read(home.join("uploads/hello.txt")).expect("file"), body);
+    assert_eq!(mode_of(&home.join("uploads/hello.txt")), 0o600);
+    assert_eq!(mode_of(&home.join("uploads")), 0o700);
+    assert_eq!(uploads_of(&env, &alice), vec!["hello.txt".to_owned()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_same_name_again_lands_as_a_numbered_file_and_the_first_is_unchanged() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    assert_eq!(env.upload(&alice.signed, "hello.txt", b"first").await.status, 200);
+    let second = env.upload(&alice.signed, "hello.txt", b"second").await;
+    assert_eq!(second.status, 200);
+    let home = env.home(&alice);
+    assert_eq!(second.json()["path"], home.join("uploads/hello (1).txt").to_str().expect("UTF-8"));
+    assert_eq!(std::fs::read(home.join("uploads/hello.txt")).expect("first"), b"first");
+    assert_eq!(std::fs::read(home.join("uploads/hello (1).txt")).expect("second"), b"second");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upload_in_several_pieces_arrives_byte_for_byte_and_the_file_is_the_size_of_the_limit_at_most() {
+    let max = 3 * 1024 * 1024;
+    let env = FilesEnv::start_with(Opts { upload: Some(Upload { dir: "uploads".into(), max_bytes: max }), ..Opts::default() }).await;
+    let alice = env.person("alice");
+    // Exactly the limit, in three pieces; and a size that leaves a part of a piece.
+    for (name, size) in [("exact.bin", max), ("odd.bin", 2 * 1024 * 1024 + 12_345)] {
+        let body: Vec<u8> = (0..size).map(|i| u8::try_from(i % 251).expect("byte")).collect();
+        let reply = env.upload(&alice.signed, name, &body).await;
+        assert_eq!(reply.status, 200, "{name}: {}", reply.text());
+        assert_eq!(reply.json()["size"], size);
+        assert_eq!(std::fs::read(env.home(&alice).join("uploads").join(name)).expect("file"), body, "{name}");
+    }
+    assert_eq!(uploads_of(&env, &alice), vec!["exact.bin".to_owned(), "odd.bin".to_owned()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_byte_over_the_limit_is_400_size_before_any_body_byte_is_read() {
+    let max = 3 * 1024 * 1024;
+    let env = FilesEnv::start_with(Opts { upload: Some(Upload { dir: "uploads".into(), max_bytes: max }), ..Opts::default() }).await;
+    let alice = env.person("alice");
+    // Only the head is sent: the answer comes without a body byte.
+    let mut conn = env.begin_upload(&alice.signed, "name=big.bin", max + 1).await;
+    let reply = conn.reply(false).await.expect("an answer to the head alone");
+    assert_eq!(reply.status, 400);
+    assert_eq!(reply.json(), json!({ "code": "bad_request", "field": "size" }));
+    assert!(uploads_of(&env, &alice).is_empty());
+    // And the same for a size that is not a number or is huge.
+    for declared in ["99999999999999999999", "-1", "1e3", ""] {
+        let mut head = env.upload_request(&alice.signed, "name=a", &[]);
+        head.headers.retain(|(n, _)| !n.eq_ignore_ascii_case("content-length"));
+        head = head.header("Content-Length", declared);
+        let reply = env.send(head).await;
+        assert!(reply.status == 400 || reply.status == 0, "{declared:?}: {}", reply.status);
+    }
+    assert!(uploads_of(&env, &alice).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_with_no_length_or_a_chunked_body_is_400_and_leaves_nothing() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    // No Content-Length and no body.
+    let mut request = env.upload_request(&alice.signed, "name=a.txt", &[]);
+    request.headers.retain(|(n, _)| !n.eq_ignore_ascii_case("content-length"));
+    let reply = env.send(request).await;
+    assert_eq!((reply.status, reply.json()), (400, json!({ "code": "bad_request", "field": "size" })));
+
+    // A chunked body.
+    let mut request = env.upload_request(&alice.signed, "name=a.txt", &[]);
+    request.headers.retain(|(n, _)| !n.eq_ignore_ascii_case("content-length"));
+    request = request.header("Transfer-Encoding", "chunked");
+    let mut bytes = request.bytes();
+    bytes.extend_from_slice(b"5\r\nhello\r\n0\r\n\r\n");
+    let mut conn = env.env.connection().await;
+    conn.send(&bytes).await;
+    let reply = conn.reply(false).await.expect("an answer");
+    assert_eq!((reply.status, reply.json()), (400, json!({ "code": "bad_request", "field": "size" })));
+    assert!(uploads_of(&env, &alice).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_body_that_ends_before_its_declared_length_leaves_no_file_and_no_part_file() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let mut conn = env.begin_upload(&alice.signed, "name=short.txt", 12).await;
+    conn.send(b"hello").await;
+    // The part file exists while the upload waits for the rest.
+    env.env.eventually("the part file", |_| uploads_of(&env, &alice).len() == 1).await;
+    drop(conn);
+    env.env.eventually("the part file is gone", |_| uploads_of(&env, &alice).is_empty()).await;
+    // The place of the upload is free again.
+    assert_eq!(env.upload(&alice.signed, "after.txt", b"ok").await.status, 200);
+    assert_eq!(uploads_of(&env, &alice), vec!["after.txt".to_owned()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_body_longer_than_declared_is_cut_at_the_declared_length_and_never_written_past_it() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let mut conn = env.begin_upload(&alice.signed, "name=cut.txt", 5).await;
+    conn.send(b"hello world!").await;
+    let reply = conn.reply(false).await.expect("an answer");
+    // The five declared bytes are the whole upload; what follows them is not part of it, and the server closes the connection.
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.json()["size"], 5);
+    assert_eq!(std::fs::read(env.home(&alice).join("uploads/cut.txt")).expect("file"), b"hello");
+    assert_eq!(uploads_of(&env, &alice), vec!["cut.txt".to_owned()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_two_or_extra_name_and_a_name_of_5000_characters_are_400_name() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let queries = [
+        String::new(),
+        "x=1".to_owned(),
+        "name=a&name=b".to_owned(),
+        "name=a&extra=1".to_owned(),
+        "extra=1&name=a".to_owned(),
+        format!("name={}", "a".repeat(5000)),
+        format!("name={}", "%C3%A9".repeat(600)),
+    ];
+    for query in &queries {
+        let target = if query.is_empty() { "/api/upload".to_owned() } else { format!("/api/upload?{query}") };
+        let mut request = env.upload_request(&alice.signed, "", b"data");
+        request.target = target;
+        let reply = env.send(request).await;
+        assert_eq!(reply.status, 400, "{query:.40}");
+        assert_eq!(reply.json(), json!({ "code": "bad_request", "field": "name" }), "{query:.40}");
+    }
+    assert!(uploads_of(&env, &alice).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn names_from_the_request_are_cleaned_and_the_file_stays_in_the_upload_folder() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let home = env.home(&alice);
+    let long = format!("{}.pdf", "\u{e9}".repeat(150));
+    let cases: [(&str, String); 7] = [
+        ("..%2f..%2fx", "x".to_owned()),
+        ("%00", "_".to_owned()),
+        ("%2e%2e", "upload".to_owned()),
+        ("", "upload (1)".to_owned()),
+        ("C%3A%5CUsers%5Cx%5Ca.txt", "a.txt".to_owned()),
+        ("a%0D%0Ab", "a__b".to_owned()),
+        (&encode(&long), clean_name(&long)),
+    ];
+    for (raw, expected) in &cases {
+        let reply = env.send(env.upload_request(&alice.signed, &format!("name={raw}"), b"data")).await;
+        assert_eq!(reply.status, 200, "{raw}: {}", reply.text());
+        assert_eq!(reply.json()["path"], home.join("uploads").join(expected).to_str().expect("UTF-8"), "{raw}");
+    }
+    let found = uploads_of(&env, &alice);
+    assert_eq!(found.len(), 7, "{found:?}");
+    // Nothing was made beside or above the folder.
+    let beside: Vec<String> = names(&home).into_iter().filter(|n| n != ".holzwave" && n != ".tmp").collect();
+    assert_eq!(beside, vec!["uploads".to_owned()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_percent_encoded_name_and_a_plus_are_read_as_text_and_a_name_in_the_body_is_never_used() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let home = env.home(&alice);
+    let reply = env.send(env.upload_request(&alice.signed, "name=my%20file%2B1.txt", b"a")).await;
+    assert_eq!(reply.json()["path"], home.join("uploads/my file+1.txt").to_str().expect("UTF-8"));
+    // A header that looks like a name is not one.
+    let request = env.upload_request(&alice.signed, "name=real.txt", b"b").header("Content-Disposition", "attachment; filename=\"evil.txt\"");
+    let reply = env.send(request).await;
+    assert_eq!(reply.json()["path"], home.join("uploads/real.txt").to_str().expect("UTF-8"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_cookie_the_upload_is_401_and_writes_nothing() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let mut request = env.upload_request(&alice.signed, "name=a.txt", b"data");
+    request.headers.retain(|(n, _)| !n.eq_ignore_ascii_case("cookie"));
+    let reply = env.send(request).await;
+    assert_eq!((reply.status, reply.json()), (401, json!({ "code": "invalid" })));
+    assert!(!env.home(&alice).join("uploads").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_or_foreign_origin_and_a_missing_or_wrong_token_are_403_and_write_nothing() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let base = env.upload_request(&alice.signed, "name=a.txt", b"data");
+    let without = |name: &str| {
+        let mut request = base.clone();
+        request.headers.retain(|(n, _)| !n.eq_ignore_ascii_case(name));
+        request
+    };
+    let with = |name: &str, value: &str| without(name).header(name, value);
+    let attempts = [
+        ("no origin", without("origin")),
+        ("foreign origin", with("origin", "https://evil.example")),
+        ("null origin", with("origin", "null")),
+        ("http origin", with("origin", "http://hw.example.test")),
+        ("no token", without("x-csrf-token")),
+        ("wrong token", with("x-csrf-token", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")),
+    ];
+    for (what, request) in attempts {
+        let reply = env.send(request).await;
+        assert_eq!((reply.status, reply.json()), (403, json!({ "code": "forbidden" })), "{what}");
+    }
+    assert!(!env.home(&alice).join("uploads").exists(), "nothing was written");
+    // The same request with everything right works.
+    assert_eq!(env.send(base).await.status, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn another_content_type_than_octet_stream_is_400_and_writes_nothing() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    for content_type in ["text/plain", "multipart/form-data; boundary=x", "application/json", "image/png", ""] {
+        let mut request = env.upload_request(&alice.signed, "name=a.txt", b"data");
+        request.headers.retain(|(n, _)| !n.eq_ignore_ascii_case("content-type"));
+        if !content_type.is_empty() {
+            request = request.header("Content-Type", content_type);
+        }
+        let reply = env.send(request).await;
+        assert_eq!(reply.status, 400, "{content_type:?}");
+    }
+    assert!(!env.home(&alice).join("uploads").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_post_and_delete_on_the_upload_path_are_405() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    for method in ["GET", "POST", "DELETE", "PATCH"] {
+        let mut request = env.upload_request(&alice.signed, "name=a.txt", b"data");
+        request.method = method.to_owned();
+        let reply = env.send(request).await;
+        assert_eq!(reply.status, 405, "{method}");
+        assert_eq!(reply.json(), json!({ "code": "bad_request" }), "{method}");
+        assert!(reply.header("allow").is_none(), "{method}");
+    }
+    assert!(!env.home(&alice).join("uploads").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_third_parallel_upload_of_a_person_is_503_busy_and_the_first_two_still_finish() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let mut first = env.begin_upload(&alice.signed, "name=one.txt", 10).await;
+    let mut second = env.begin_upload(&alice.signed, "name=two.txt", 10).await;
+    env.env.eventually("two part files", |_| uploads_of(&env, &alice).len() == 2).await;
+
+    let started = Instant::now();
+    let third = env.upload(&alice.signed, "three.txt", b"x").await;
+    assert_eq!((third.status, third.json()), (503, json!({ "code": "busy" })));
+    assert!(started.elapsed() < Duration::from_secs(2), "refused at once, not after a wait");
+    assert_eq!(uploads_of(&env, &alice).len(), 2, "the refused one left nothing");
+
+    first.send(b"0123456789").await;
+    second.send(b"abcdefghij").await;
+    assert_eq!(first.reply(false).await.expect("first").status, 200);
+    assert_eq!(second.reply(false).await.expect("second").status, 200);
+    // The places are free again.
+    assert_eq!(env.upload(&alice.signed, "three.txt", b"x").await.status, 200);
+    assert_eq!(std::fs::read(env.home(&alice).join("uploads/one.txt")).expect("one"), b"0123456789");
+    assert_eq!(std::fs::read(env.home(&alice).join("uploads/two.txt")).expect("two"), b"abcdefghij");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_server_wide_limit_of_uploads_refuses_a_person_who_has_none_running() {
+    let limits = Limits { uploads_per_person: 1, uploads_total: 2, ..Limits::DEFAULT };
+    let env = FilesEnv::start_with(Opts { limits: Some(limits), ..Opts::default() }).await;
+    let (alice, bob, carol) = (env.person("alice"), env.person("bob"), env.person("carol"));
+    let mut a = env.begin_upload(&alice.signed, "name=a.txt", 3).await;
+    assert_eq!(env.upload(&alice.signed, "again.txt", b"x").await.status, 503, "one per person");
+    let mut b = env.begin_upload(&bob.signed, "name=b.txt", 3).await;
+    env.env.eventually("two part files", |_| uploads_of(&env, &alice).len() == 1 && uploads_of(&env, &bob).len() == 1).await;
+    let refused = env.upload(&carol.signed, "c.txt", b"x").await;
+    assert_eq!((refused.status, refused.json()), (503, json!({ "code": "busy" })), "the whole server is full");
+    assert!(uploads_of(&env, &carol).is_empty());
+    a.send(b"abc").await;
+    assert_eq!(a.reply(false).await.expect("a").status, 200);
+    assert_eq!(env.upload(&carol.signed, "c.txt", b"x").await.status, 200, "a place came free");
+    b.send(b"abc").await;
+    assert_eq!(b.reply(false).await.expect("b").status, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upload_that_stops_sending_is_ended_after_the_stall_time_and_its_part_file_is_removed() {
+    let limits = Limits { upload_stall: Duration::from_secs(1), ..Limits::DEFAULT };
+    let env = FilesEnv::start_with(Opts { limits: Some(limits), ..Opts::default() }).await;
+    let alice = env.person("alice");
+    let mut conn = env.begin_upload(&alice.signed, "name=slow.txt", 100).await;
+    conn.send(b"0123456789").await;
+    env.env.eventually("the part file", |_| uploads_of(&env, &alice).len() == 1).await;
+    let started = Instant::now();
+    let reply = conn.reply(false).await;
+    let waited = started.elapsed();
+    assert!(reply.as_ref().is_none_or(|r| r.status != 200), "{reply:?}");
+    assert!(waited >= Duration::from_millis(800) && waited < Duration::from_secs(8), "ended after {waited:?}");
+    env.env.eventually("the part file is gone", |_| uploads_of(&env, &alice).is_empty()).await;
+    assert_eq!(env.upload(&alice.signed, "after.txt", b"ok").await.status, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn signing_out_in_the_middle_of_an_upload_aborts_it_and_removes_the_part_file() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let mut conn = env.begin_upload(&alice.signed, "name=cut.txt", 100).await;
+    conn.send(b"0123456789").await;
+    env.env.eventually("the part file", |_| uploads_of(&env, &alice).len() == 1).await;
+    env.env.test.sessions.end(&alice.signed.session).expect("end");
+    let reply = conn.reply(false).await;
+    assert!(reply.as_ref().is_none_or(|r| r.status == 401), "no success status: {reply:?}");
+    env.env.eventually("the part file is gone", |_| uploads_of(&env, &alice).is_empty()).await;
+    assert_eq!(uploads_of(&env, &alice), Vec::<String>::new());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_that_goes_away_in_the_middle_leaves_nothing_and_frees_its_places() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    let mut one = env.begin_upload(&alice.signed, "name=one.txt", 5000).await;
+    let mut two = env.begin_upload(&alice.signed, "name=two.txt", 5000).await;
+    one.send(&[1u8; 1000]).await;
+    two.send(&[2u8; 1000]).await;
+    env.env.eventually("two part files", |_| uploads_of(&env, &alice).len() == 2).await;
+    drop(one);
+    drop(two);
+    env.env.eventually("nothing is left", |_| uploads_of(&env, &alice).is_empty()).await;
+    // Both places are free: two new uploads are accepted.
+    let mut again = env.begin_upload(&alice.signed, "name=three.txt", 3).await;
+    let mut more = env.begin_upload(&alice.signed, "name=four.txt", 3).await;
+    again.send(b"abc").await;
+    more.send(b"def").await;
+    assert_eq!(again.reply(false).await.expect("again").status, 200);
+    assert_eq!(more.reply(false).await.expect("more").status, 200);
+    assert_eq!(uploads_of(&env, &alice), vec!["four.txt".to_owned(), "three.txt".to_owned()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_disk_in_the_worker_ends_the_upload_503_and_leaves_nothing() {
+    let env = FilesEnv::start_with(Opts { fail_write_after: Some(1000), ..Opts::default() }).await;
+    let alice = env.person("alice");
+    let reply = env.upload(&alice.signed, "big.bin", &[3u8; 4000]).await;
+    assert_eq!((reply.status, reply.json()), (503, json!({ "code": "busy" })));
+    assert!(uploads_of(&env, &alice).is_empty());
+    // A small file still goes through: the failure was the disk's, not the person's account.
+    assert_eq!(env.upload(&alice.signed, "small.bin", &[3u8; 500]).await.status, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upload_lands_in_the_home_of_the_person_who_made_it_and_in_no_other() {
+    let env = FilesEnv::start().await;
+    let (alice, bob) = (env.person("alice"), env.person("bob"));
+    let reply = env.upload(&bob.signed, "mine.txt", b"bob's").await;
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.json()["path"], env.home(&bob).join("uploads/mine.txt").to_str().expect("UTF-8"));
+    assert!(!env.home(&alice).join("uploads").exists());
+    assert_eq!(env.upload(&alice.signed, "mine.txt", b"alice's").await.json()["path"], env.home(&alice).join("uploads/mine.txt").to_str().expect("UTF-8"));
+    assert_eq!(std::fs::read(env.home(&bob).join("uploads/mine.txt")).expect("bob"), b"bob's");
+    assert_eq!(std::fs::read(env.home(&alice).join("uploads/mine.txt")).expect("alice"), b"alice's");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_configured_folder_of_two_levels_is_used_and_made() {
+    let upload = Upload { dir: "drop/in".into(), max_bytes: 1024 * 1024 };
+    let env = FilesEnv::start_with(Opts { upload: Some(upload), ..Opts::default() }).await;
+    let alice = env.person("alice");
+    let reply = env.upload(&alice.signed, "a.txt", b"data").await;
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.json()["path"], env.home(&alice).join("drop/in/a.txt").to_str().expect("UTF-8"));
+    assert_eq!(mode_of(&env.home(&alice).join("drop")), 0o700);
+    assert_eq!(mode_of(&env.home(&alice).join("drop/in")), 0o700);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upload_does_not_hold_up_the_socket_of_the_same_person() {
+    let env = FilesEnv::start_with(Opts { write_delay: Some(Duration::from_millis(5)), ..Opts::default() }).await;
+    let alice = env.person("alice");
+    let mut ws = env.worker(&alice).await;
+    let body = vec![9u8; 6 * 1024 * 1024];
+    let upload = env.upload(&alice.signed, "six.bin", &body);
+    let layout = async {
+        let mut slowest = Duration::ZERO;
+        for _ in 0..20 {
+            let started = Instant::now();
+            ws.ok("get_layout", "{}").await;
+            slowest = slowest.max(started.elapsed());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        slowest
+    };
+    let (reply, slowest) = tokio::join!(upload, layout);
+    assert_eq!(reply.status, 200);
+    assert!(slowest < Duration::from_secs(1), "a command took {slowest:?} during the upload");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nothing_but_the_file_is_in_the_folder_after_any_mix_of_good_and_refused_uploads() {
+    let env = FilesEnv::start().await;
+    let alice = env.person("alice");
+    assert_eq!(env.upload(&alice.signed, "a.txt", b"one").await.status, 200);
+    let mut cut = env.begin_upload(&alice.signed, "name=b.txt", 50).await;
+    cut.send(b"half").await;
+    drop(cut);
+    assert_eq!(env.send(env.upload_request(&alice.signed, "name=a&name=b", b"x")).await.status, 400);
+    assert_eq!(env.upload(&alice.signed, "c.txt", b"three").await.status, 200);
+    env.env.eventually("only complete files", |_| uploads_of(&env, &alice) == vec!["a.txt".to_owned(), "c.txt".to_owned()]).await;
+    let kinds: Vec<(String, u64, u32)> = tree(&env.home(&alice).join("uploads"));
+    assert_eq!(kinds, vec![("a.txt".to_owned(), 3, 0o600), ("c.txt".to_owned(), 5, 0o600)]);
 }

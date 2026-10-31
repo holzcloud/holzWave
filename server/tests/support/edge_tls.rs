@@ -314,9 +314,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
         Conn { stream, buffer: Vec::new() }
     }
 
-    /// Writes bytes.
+    /// Writes bytes and flushes them. The flush matters on a TLS stream: after a large write the last records can still sit in
+    /// the stream's buffer, and the server never sees the end of a body that was "sent".
     pub async fn send(&mut self, bytes: &[u8]) {
-        tokio::time::timeout(PATIENCE, self.stream.write_all(bytes)).await.expect("write in time").expect("write");
+        let write = async {
+            self.stream.write_all(bytes).await?;
+            self.stream.flush().await
+        };
+        tokio::time::timeout(PATIENCE, write).await.expect("write in time").expect("write");
     }
 
     /// Reads one answer. `head_only` is true for the answer to a `HEAD` request. `None` when the connection ends before a

@@ -303,12 +303,11 @@ pub fn files_holding(root: &Path, needle: &[u8]) -> Vec<PathBuf> {
             let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
             if meta.is_dir() {
                 walk(&path, needle, out);
-            } else if meta.is_file() {
-                if let Ok(bytes) = std::fs::read(&path) {
-                    if bytes.windows(needle.len()).any(|w| w == needle) {
-                        out.push(path);
-                    }
-                }
+            } else if meta.is_file()
+                && let Ok(bytes) = std::fs::read(&path)
+                && bytes.windows(needle.len()).any(|w| w == needle)
+            {
+                out.push(path);
             }
         }
     }
