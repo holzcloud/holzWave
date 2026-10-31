@@ -531,18 +531,21 @@ pub enum Region {
     Header,
     /// A byte inside the first slot's wrapped key.
     Slot,
+    /// A byte inside the second slot's wrapped key.
+    SecondSlot,
     /// The last byte of the body.
     Body,
 }
 
 impl Region {
-    pub const ALL: [Region; 3] = [Region::Header, Region::Slot, Region::Body];
+    pub const ALL: [Region; 4] = [Region::Header, Region::Slot, Region::SecondSlot, Region::Body];
 
     /// The offset of the byte to change in a file of `len` bytes (format version 1: a seven byte header, then 89 bytes a slot).
     pub fn offset(self, len: usize) -> usize {
         match self {
             Region::Header => 0,
             Region::Slot => 7 + 1 + 16 + 24 + 5,
+            Region::SecondSlot => 7 + 89 + 1 + 16 + 24 + 5,
             Region::Body => len - 1,
         }
     }
