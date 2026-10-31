@@ -6,6 +6,8 @@
 // `npm run build`, a generated certificate, workers in the server's own process. Exit status of a file: 0 is `ok`, 77 is
 // `SKIP` (the reason is the last line it printed after `SKIP:`), anything else is `FAIL`. Nothing is retried.
 //
+// `--verbose` also prints what each file reported about what it saw (its lines before the final `ok`).
+//
 // `--self-check` runs the files that carry deliberately wrong expectations (they print `selfcheck.fail` lines) and requires
 // that exactly those expectations fail in each engine: a suite that cannot fail proves nothing.
 import { spawn } from "node:child_process";
@@ -16,7 +18,7 @@ import { DIST_DIR, ENGINES, loadPlaywright } from "../browser/lib.mjs";
 import { buildHarness } from "./harness.mjs";
 
 const { values } = parseArgs({
-  options: { only: { type: "string" }, engine: { type: "string" }, "self-check": { type: "boolean", default: false } },
+  options: { only: { type: "string" }, engine: { type: "string" }, "self-check": { type: "boolean", default: false }, verbose: { type: "boolean", default: false } },
   strict: true,
 });
 if (values.engine !== undefined && !ENGINES.includes(values.engine)) {
@@ -100,10 +102,18 @@ for (const file of files) {
       const reason = output.split("\n").filter((l) => l.startsWith("SKIP:")).pop() ?? "SKIP: no reason given";
       note = reason.slice("SKIP:".length).trim();
       if (note === "no reason given") verdict = "FAIL";
+      // Only WebKit has a reason to skip (no virtual authenticator); a skip in Chromium would hide a missing check.
+      if (engine === "chromium") {
+        verdict = "FAIL";
+        note = `a skip in Chromium is a failure (${note})`;
+      }
     } else verdict = "FAIL";
     counts[verdict]++;
     perEngine[engine][verdict]++;
     console.log(`web: ${name} ${engine} ${selfCheck ? "self-check " : ""}${verdict}${note ? ` (${note})` : ""} ${ms} ms`);
+    if (values.verbose && verdict === "ok") {
+      for (const line of output.trim().split("\n").filter((l) => !l.startsWith("ok "))) console.log(`    ${line}`);
+    }
     if (verdict === "FAIL") {
       for (const line of output.trim().split("\n").slice(-25)) console.log(`    ${line}`);
     }
