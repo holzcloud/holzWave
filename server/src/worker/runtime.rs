@@ -18,6 +18,7 @@ use holzwave_host::state::{AppCore, ShellSpec};
 
 use crate::log::Level;
 use crate::wire::{Ctl, ExitReason, Frame, Note, PROTOCOL_VERSION, StoreState, read_frame};
+use crate::worker::files::{FileHooks, Files};
 pub use crate::worker::dispatch::{Gate, HookRow, Probe, QueueLimits};
 use crate::worker::dispatch::{self, Dispatcher, Outbound, Pin, ServerSink, WorkerLog};
 pub use crate::worker::secretstore::DATA_DIR;
@@ -52,6 +53,8 @@ pub struct TestHooks {
     pub queue: Option<QueueLimits>,
     /// Receives every log line the worker writes, as text.
     pub log: Option<Arc<Mutex<Vec<String>>>>,
+    /// The switches of the file routes: the idle time of a grant, a full disk, counters.
+    pub files: FileHooks,
 }
 
 impl fmt::Debug for TestHooks {
@@ -132,6 +135,8 @@ struct Running {
     sink: Arc<ServerSink>,
     secrets: Arc<SecretsHandle>,
     dispatcher: Dispatcher,
+    /// The grants and the uploads.
+    files: Files,
     /// The store state the supervisor was told last.
     told: StoreState,
 }
@@ -191,6 +196,14 @@ fn serve(
                 let _ = running.core.window_ready_in(dispatch::WINDOW);
             }
             (Frame::Ctl(Ctl::Detach { .. }), Some(_)) => {}
+            (Frame::Ctl(Ctl::FileServe { request, what, token, offset, length }), Some(running)) => {
+                running.files.serve(request, what, &token, offset, length);
+            }
+            (Frame::Ctl(Ctl::UploadOpen { id, size, folder, name }), Some(running)) => {
+                running.files.upload_open(id, size, folder, name);
+            }
+            (Frame::Ctl(Ctl::UploadPiece { id, bytes }), Some(running)) => running.files.upload_piece(id, bytes),
+            (Frame::Ctl(Ctl::UploadClose { id, commit }), Some(running)) => running.files.upload_close(id, commit),
             (Frame::Ctl(Ctl::Init { .. }), Some(_)) => break fail(queue, log, "second init"),
             (Frame::Ctl(control), Some(running)) => control_store(running, queue, control),
             // A second Init, a frame before Init, or a frame that only the worker writes.
@@ -225,7 +238,14 @@ fn control_store(running: &mut Running, queue: &Outbound, control: Ctl) {
         }
         Ctl::RemoveSlot { ctl, kind, id } => (ctl, running.secrets.remove_slot(kind, id)),
         // The other controls are handled by the loop.
-        Ctl::Init { .. } | Ctl::Attach { .. } | Ctl::Detach { .. } | Ctl::Shutdown => return,
+        Ctl::Init { .. }
+        | Ctl::Attach { .. }
+        | Ctl::Detach { .. }
+        | Ctl::Shutdown
+        | Ctl::FileServe { .. }
+        | Ctl::UploadOpen { .. }
+        | Ctl::UploadPiece { .. }
+        | Ctl::UploadClose { .. } => return,
     };
     let state = running.secrets.state();
     if state != running.told {
@@ -268,7 +288,9 @@ fn start(
     });
     let dispatcher =
         Dispatcher::start(&core, &sink, queue, hooks.rows.clone(), hooks.probe.clone(), log.clone(), REPLAY_COMMAND);
-    Some(Running { core, sink, secrets, dispatcher, told: StoreState::Absent })
+    let files = Files::new(&core, queue, &env.home, hooks.files.clone(), log.clone());
+    sink.set_observer(files.observer());
+    Some(Running { core, sink, secrets, dispatcher, files, told: StoreState::Absent })
 }
 
 // ---- the self-check, the modes and the wipes ----------------------------------------------------------------------------

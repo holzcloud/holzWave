@@ -133,6 +133,55 @@ pub const SWEEP_INTERVAL: Duration = secs(10);
 /// numbers stay below it, and a command that carries a number at or above it is refused.
 pub const SYNTHETIC_REQUEST_BASE: u64 = 1 << 60;
 
+/// The most bytes of a file that travel in one frame between the supervisor and a worker: a download is read in pieces of this
+/// size as the connection takes them, and an upload is written in pieces of this size, one at a time.
+pub const FILE_PIECE_BYTES: usize = 1024 * 1024;
+
+/// The most file frames that wait for the answer of one worker at once.
+pub const FILE_WAITERS: usize = 64;
+
+/// How long the answer to one file frame may take before the file call counts as failed.
+pub const FILE_CALL_TIMEOUT: Duration = secs(10);
+
+/// How long a file grant of a worker may stay unused before it is refused as unknown and dropped. Each use renews it.
+pub const GRANT_IDLE: Duration = minutes(15);
+
+/// The most grants a worker keeps a record of; the oldest unused one is forgotten first.
+pub const GRANT_RECORDS: usize = 256;
+
+/// The longest file name a request may carry before the server cleans it, in bytes after decoding.
+pub const UPLOAD_NAME_INPUT_BYTES: usize = 1024;
+
+/// The longest cleaned file name of an upload, in bytes.
+pub const UPLOAD_NAME_BYTES: usize = 200;
+
+/// The longest extension, dot included, that is kept when a long name is cut.
+pub const UPLOAD_EXTENSION_KEEP: usize = 16;
+
+/// The longest raw query of an upload request, in bytes.
+pub const UPLOAD_QUERY_BYTES: usize = 4096;
+
+/// The age after which a part file of an upload that never finished is removed by the next upload in its folder.
+pub const UPLOAD_PART_MAX_AGE: Duration = hours(1);
+
+/// How many names (`name`, `name (1)`, ...) an upload tries before it gives up.
+pub const UPLOAD_NAME_TRIES: u32 = 1000;
+
+/// The most uploads one worker has open at once, whatever the supervisor sends.
+pub const WORKER_OPEN_UPLOADS: usize = 4;
+
+/// The most file reads one worker has waiting for its pool before the next one is refused.
+pub const WORKER_FILE_QUEUE: usize = 64;
+
+/// The threads of a worker that read granted files.
+pub const WORKER_FILE_THREADS: usize = 4;
+
+/// The longest media type a worker may name for a granted file, in bytes.
+pub const MEDIA_TYPE_BYTES: usize = 127;
+
+/// The longest path a worker may answer for a saved upload, in bytes.
+pub const UPLOAD_PATH_BYTES: usize = 4096;
+
 /// The longest event name a worker may send, in bytes.
 pub const EVENT_NAME_BYTES: usize = 32;
 
@@ -372,6 +421,16 @@ limits! {
     lock_duration, LOCK_DURATION: Duration = minutes(15), minutes(1), hours(24);
     /// How long a half-finished sign-in (the password was right, the second step is still to come) stays valid.
     pending_signin, PENDING_SIGNIN: Duration = minutes(5), secs(30), hours(1);
+    /// The most files one person downloads at once; the next request is answered busy.
+    downloads_per_person, DOWNLOADS_PER_PERSON: u32 = 8, 1, 64;
+    /// The most files all people download at once.
+    downloads_total, DOWNLOADS_TOTAL: u32 = 64, 1, 4096;
+    /// The most uploads one person makes at once; the next request is answered busy.
+    uploads_per_person, UPLOADS_PER_PERSON: u32 = 2, 1, 16;
+    /// The most uploads all people make at once.
+    uploads_total, UPLOADS_TOTAL: u32 = 16, 1, 1024;
+    /// How long an upload may go without a piece of its body before it is stopped and removed.
+    upload_stall, UPLOAD_STALL: Duration = secs(30), secs(1), minutes(10);
 }
 
 impl Limits {

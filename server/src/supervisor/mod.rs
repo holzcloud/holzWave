@@ -18,5 +18,5 @@ pub use helper_client::{HelperClient, HelperError, HelperSettings, HelperTimeout
 pub use launcher::{HelperLauncher, Launch, LaunchError, LaunchRequest, LaunchedWorker, WorkerLauncher};
 #[cfg(feature = "in-process-workers")]
 pub use launcher::InProcessLauncher;
-pub use registry::{AccountKey, AccountStats, AttachError, CtlError, Stats, Supervisor, SupervisorSettings, WipeError};
+pub use registry::{AccountKey, AccountStats, AttachError, CtlError, FileError, Stats, Supervisor, SupervisorSettings, WipeError};
 pub use socket::{Outbound, SocketHandle, SocketRx, SubmitError};

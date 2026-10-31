@@ -172,12 +172,27 @@ mod in_process {
         shell: ShellSpec,
         launches: AtomicUsize,
         book: Mutex<Book>,
+        /// The switches of the integration tests that every worker of this launcher is started with; the default changes
+        /// nothing.
+        hooks: runtime::TestHooks,
     }
 
     impl InProcessLauncher {
         /// A launcher whose homes are `root/homes/<uid>` and whose panes run `shell`.
         pub fn new(root: impl Into<PathBuf>, shell: ShellSpec) -> InProcessLauncher {
-            InProcessLauncher { root: root.into(), shell, launches: AtomicUsize::new(0), book: Mutex::new(Book::default()) }
+            InProcessLauncher {
+                root: root.into(),
+                shell,
+                launches: AtomicUsize::new(0),
+                book: Mutex::new(Book::default()),
+                hooks: runtime::TestHooks::default(),
+            }
+        }
+
+        /// The same launcher, with every worker it starts run with `hooks` (the switches of a test).
+        pub fn with_hooks(mut self, hooks: runtime::TestHooks) -> InProcessLauncher {
+            self.hooks = hooks;
+            self
         }
 
         /// How many workers were started, of any mode.
@@ -236,11 +251,12 @@ mod in_process {
             let env = WorkerEnv { home: home.clone(), tmp, shell: self.shell.clone(), user: format!("u{uid}") };
             let mode = request.mode;
             let own_uid = rustix::process::getuid().as_raw();
+            let hooks = self.hooks.clone();
             std::thread::Builder::new()
                 .name(format!("worker-{uid}"))
                 .spawn(move || {
                     let status = match mode {
-                        WorkerMode::Serve => match runtime::run(theirs, env) {
+                        WorkerMode::Serve => match runtime::run_with(theirs, env, hooks) {
                             runtime::RunEnd::Failed => 1,
                             runtime::RunEnd::LinkClosed | runtime::RunEnd::Shutdown => 0,
                         },

@@ -30,7 +30,7 @@ use crate::supervisor::idle;
 use crate::supervisor::launcher::{LaunchRequest, LaunchedWorker, WorkerLauncher};
 use crate::accounts::{AccountObserver, Ending};
 use crate::supervisor::socket::{self, Attached, SocketCore, SocketHandle, SocketRx, SubmitError};
-use crate::wire::{self, CmdFrame, Ctl, CtlOutcome, Frame, Note, PROTOCOL_VERSION, StoreState};
+use crate::wire::{self, CmdFrame, Ctl, CtlOutcome, Frame, Note, PROTOCOL_VERSION, ResBody, StoreState};
 use crate::worker::runtime::WorkerMode;
 
 /// The close code for a socket whose worker ended.
@@ -148,6 +148,41 @@ impl fmt::Display for CtlError {
 
 impl std::error::Error for CtlError {}
 
+/// Why a file control did not get an answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileError {
+    /// The frame is not one of the four file controls, or its id is used already.
+    Refused,
+    /// The person has no worker and none was to be started.
+    NoWorker,
+    /// The worker did not answer in time.
+    Timeout,
+    /// The worker ended before it answered.
+    WorkerGone,
+    /// Too many file frames wait for an answer, or the worker's queue is full.
+    Busy,
+    /// No worker could be started.
+    Launch,
+    /// The server is stopping.
+    ShuttingDown,
+}
+
+impl fmt::Display for FileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            FileError::Refused => "this is not a file control",
+            FileError::NoWorker => "the person has no worker",
+            FileError::Timeout => "the worker did not answer in time",
+            FileError::WorkerGone => "the worker ended before it answered",
+            FileError::Busy => "too many file frames are waiting",
+            FileError::Launch => "no worker could be started",
+            FileError::ShuttingDown => "the server is stopping",
+        })
+    }
+}
+
+impl std::error::Error for FileError {}
+
 /// Why a wipe did not happen. One sentence, no byte of any request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WipeError(pub String);
@@ -179,6 +214,10 @@ pub struct Stats {
     pub worker_deaths: u64,
     /// Answers to controls that nobody waited for.
     pub dropped_ctl_done: u64,
+    /// File controls sent to workers.
+    pub file_calls: u64,
+    /// Answers to file controls that nobody waited for.
+    pub dropped_file_answers: u64,
     /// Whether the spawn helper (or whatever starts the workers) can be reached.
     pub helper_alive: bool,
 }
@@ -323,7 +362,14 @@ fn with_number(control: Ctl, number: u64) -> Option<Ctl> {
         Ctl::Provision { slots, .. } => Ctl::Provision { ctl: number, slots },
         Ctl::SetSlot { slot, opening, .. } => Ctl::SetSlot { ctl: number, slot, opening },
         Ctl::RemoveSlot { kind, id, .. } => Ctl::RemoveSlot { ctl: number, kind, id },
-        Ctl::Init { .. } | Ctl::Attach { .. } | Ctl::Detach { .. } | Ctl::Shutdown => return None,
+        Ctl::Init { .. }
+        | Ctl::Attach { .. }
+        | Ctl::Detach { .. }
+        | Ctl::Shutdown
+        | Ctl::FileServe { .. }
+        | Ctl::UploadOpen { .. }
+        | Ctl::UploadPiece { .. }
+        | Ctl::UploadClose { .. } => return None,
     })
 }
 
@@ -354,6 +400,8 @@ struct Worker {
     /// The controls that wait for their answer, by the number the supervisor gave them.
     waiters: Mutex<HashMap<u64, oneshot::Sender<CtlOutcome>>>,
     next_ctl: AtomicU64,
+    /// The file controls that wait for their answer, by the id the control carries.
+    file_waiters: Mutex<HashMap<u64, oneshot::Sender<ResBody>>>,
 }
 
 /// The first number the supervisor gives a control: high, so that a number a caller wrote never looks like it.
@@ -374,6 +422,54 @@ impl Worker {
 
     fn waiters(&self) -> MutexGuard<'_, HashMap<u64, oneshot::Sender<CtlOutcome>>> {
         self.waiters.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn file_waiters(&self) -> MutexGuard<'_, HashMap<u64, oneshot::Sender<ResBody>>> {
+        self.file_waiters.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Sends one file control and waits for the worker's answer. The frame carries the id the answer is matched by.
+    async fn file(self: &Arc<Self>, control: Ctl) -> Result<ResBody, FileError> {
+        let id = match &control {
+            Ctl::FileServe { request, .. } => *request,
+            Ctl::UploadOpen { id, .. } | Ctl::UploadPiece { id, .. } | Ctl::UploadClose { id, .. } => *id,
+            _ => return Err(FileError::Refused),
+        };
+        let frame = encode(&Frame::Ctl(control)).map_err(|_| FileError::Refused)?;
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut waiters = self.file_waiters();
+            if waiters.len() >= limits::FILE_WAITERS {
+                return Err(FileError::Busy);
+            }
+            if waiters.contains_key(&id) {
+                return Err(FileError::Refused);
+            }
+            waiters.insert(id, tx);
+        }
+        if self.is_dead() {
+            self.file_waiters().remove(&id);
+            return Err(FileError::WorkerGone);
+        }
+        match self.out.push_control(frame) {
+            Ok(()) => Counters::bump(&self.shared.counters.file_calls),
+            Err(SubmitError::Busy) => {
+                self.file_waiters().remove(&id);
+                return Err(FileError::Busy);
+            }
+            Err(_) => {
+                self.file_waiters().remove(&id);
+                return Err(FileError::WorkerGone);
+            }
+        }
+        match tokio::time::timeout(limits::FILE_CALL_TIMEOUT, rx).await {
+            Ok(Ok(body)) => Ok(body),
+            Ok(Err(_)) => Err(FileError::WorkerGone),
+            Err(_) => {
+                self.file_waiters().remove(&id);
+                Err(FileError::Timeout)
+            }
+        }
     }
 
     /// Starts the end of this worker: no socket may join it, the sockets it has close with `close` if given, and it is asked
@@ -446,6 +542,7 @@ impl Worker {
         self.cancel.cancel();
         self.out.close();
         self.waiters().clear();
+        self.file_waiters().clear();
         let sockets: Vec<Arc<SocketCore>> = self.lock().sockets.drain().map(|(_, s)| s).collect();
         for socket in sockets {
             socket.queue.close(CLOSE_WORKER_ENDED, "the worker ended");
@@ -511,6 +608,10 @@ impl Worker {
         }
         match frame {
             Frame::Cmd(_) | Frame::Ctl(_) => return Err(Fault::WrongDirection),
+            Frame::Res(res) if fanout::is_file_answer(&res) => {
+                let waiter = self.file_waiters().remove(&res.request);
+                fanout::deliver_file_res(res, waiter, &self.shared.counters);
+            }
             Frame::Res(res) => {
                 let mut state = self.lock();
                 let overflowed = fanout::deliver_res(res, &state.sockets, &self.shared.counters);
@@ -699,6 +800,8 @@ struct Shared {
     slots: Mutex<HashMap<AccountId, Arc<Slot>>>,
     counters: Counters,
     shutting_down: AtomicBool,
+    /// The last id given to a file control; ids are never 0 and never repeat while the server runs.
+    file_ids: AtomicU64,
     /// Cancelled at shutdown: stops the sweeper.
     stop: CancellationToken,
     runtime: Handle,
@@ -727,6 +830,7 @@ impl Supervisor {
                 slots: Mutex::new(HashMap::new()),
                 counters: Counters::default(),
                 shutting_down: AtomicBool::new(false),
+                file_ids: AtomicU64::new(0),
                 stop: CancellationToken::new(),
                 runtime: Handle::current(),
             }),
@@ -795,6 +899,7 @@ impl Supervisor {
             done: watch::channel(false).0,
             waiters: Mutex::new(HashMap::new()),
             next_ctl: AtomicU64::new(FIRST_CTL_NUMBER),
+            file_waiters: Mutex::new(HashMap::new()),
         });
         let init = Ctl::Init {
             version: PROTOCOL_VERSION,
@@ -862,6 +967,8 @@ impl Supervisor {
             overflow_closes: Counters::get(&counters.overflow_closes),
             worker_deaths: Counters::get(&counters.worker_deaths),
             dropped_ctl_done: Counters::get(&counters.dropped_ctl_done),
+            file_calls: Counters::get(&counters.file_calls),
+            dropped_file_answers: Counters::get(&counters.dropped_file_answers),
             helper_alive: self.shared.launcher.helper_alive(),
             ..Stats::default()
         };
@@ -881,7 +988,17 @@ impl Supervisor {
     /// answered, starting the worker if there is none. `Init`, `Attach`, `Detach` and `Shutdown` belong to the supervisor and
     /// are refused. A `Lock` for a person without a worker is done: there is no key to wipe.
     pub async fn ctl(&self, account: AccountKey, control: Ctl) -> Result<CtlOutcome, CtlError> {
-        if matches!(control, Ctl::Init { .. } | Ctl::Attach { .. } | Ctl::Detach { .. } | Ctl::Shutdown) {
+        if matches!(
+            control,
+            Ctl::Init { .. }
+                | Ctl::Attach { .. }
+                | Ctl::Detach { .. }
+                | Ctl::Shutdown
+                | Ctl::FileServe { .. }
+                | Ctl::UploadOpen { .. }
+                | Ctl::UploadPiece { .. }
+                | Ctl::UploadClose { .. }
+        ) {
             return Err(CtlError::Refused("this control belongs to the supervisor"));
         }
         let existing = self.shared.slots().get(&account.id).and_then(|slot| slot.usable());
@@ -894,6 +1011,38 @@ impl Supervisor {
             })?,
         };
         worker.control(control).await
+    }
+
+    /// A new id for a file control: not 0, and never given twice while the server runs.
+    pub fn file_id(&self) -> u64 {
+        self.shared.file_ids.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Sends one of the four file controls (`FileServe`, `UploadOpen`, `UploadPiece`, `UploadClose`) to the worker of
+    /// `account` and returns the answer the worker gave: its status and body, which the caller treats as untrusted. The
+    /// control carries the id the answer is matched by (see [`Supervisor::file_id`]); an upload uses one id for all its frames
+    /// and has one frame in flight at a time. With `start` false a person with no worker gets [`FileError::NoWorker`] and no
+    /// worker is started; the download route has no business starting one, because a person with no worker has no grants.
+    pub async fn file_call(&self, account: AccountKey, control: Ctl, start: bool) -> Result<ResBody, FileError> {
+        if !matches!(
+            control,
+            Ctl::FileServe { .. } | Ctl::UploadOpen { .. } | Ctl::UploadPiece { .. } | Ctl::UploadClose { .. }
+        ) {
+            return Err(FileError::Refused);
+        }
+        if self.shared.shutting_down.load(Ordering::SeqCst) {
+            return Err(FileError::ShuttingDown);
+        }
+        let existing = self.shared.slots().get(&account.id).and_then(|slot| slot.usable());
+        let worker = match existing {
+            Some(worker) => worker,
+            None if !start => return Err(FileError::NoWorker),
+            None => self.ensure_worker(account).await.map_err(|e| match e {
+                AttachError::ShuttingDown => FileError::ShuttingDown,
+                _ => FileError::Launch,
+            })?,
+        };
+        worker.file(control).await
     }
 
     /// What the worker last said about the store of `account`; `None` while no worker runs.

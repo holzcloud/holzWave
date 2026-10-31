@@ -54,19 +54,26 @@ impl SecurityHeaders {
     }
 
     /// Puts the fixed headers on `headers`, replacing any value a route set, removes every cross-origin sharing header, and
-    /// adds `Cache-Control: no-store` unless a route chose its own.
+    /// adds `Cache-Control: no-store` unless a route chose its own. The two headers that say what a response may do in the
+    /// page's origin, the content security policy and the cross-origin resource policy, are kept when the route set them: a
+    /// route that serves a file from its own sandbox policy must not have it replaced by the page's policy. A route that
+    /// sets one of them takes the responsibility for it, and the tests of the file routes hold the values.
     pub fn apply(&self, headers: &mut HeaderMap) {
         let doomed: Vec<HeaderName> =
             headers.keys().filter(|name| name.as_str().starts_with("access-control-")).cloned().collect();
         for name in doomed {
             headers.remove(name);
         }
-        headers.insert(CSP, self.csp.clone());
+        if !headers.contains_key(CSP) {
+            headers.insert(CSP, self.csp.clone());
+        }
         headers.insert(HSTS_NAME, HeaderValue::from_static(HSTS));
         headers.insert(REFERRER, HeaderValue::from_static("no-referrer"));
         headers.insert(SNIFF, HeaderValue::from_static("nosniff"));
         headers.insert(COOP, HeaderValue::from_static("same-origin"));
-        headers.insert(CORP, HeaderValue::from_static("same-origin"));
+        if !headers.contains_key(CORP) {
+            headers.insert(CORP, HeaderValue::from_static("same-origin"));
+        }
         headers.insert(PERMISSIONS, HeaderValue::from_static(PERMISSIONS_POLICY));
         if !headers.contains_key(header::CACHE_CONTROL) {
             headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));

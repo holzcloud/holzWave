@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use crate::limits;
 use crate::supervisor::socket::{Outbound, Push, SocketCore};
-use crate::wire::{Evt, Res, ResBody};
+use crate::wire::{Evt, FILE_SOCKET, Res, ResBody};
 
 /// The event whose loss the page repairs by asking for a full frame.
 pub const FRAME_EVENT: &str = "frame";
@@ -29,6 +29,8 @@ pub(super) struct Counters {
     pub(super) overflow_closes: AtomicU64,
     pub(super) worker_deaths: AtomicU64,
     pub(super) dropped_ctl_done: AtomicU64,
+    pub(super) file_calls: AtomicU64,
+    pub(super) dropped_file_answers: AtomicU64,
 }
 
 impl Counters {
@@ -183,6 +185,21 @@ pub(super) fn deliver_res(res: Res, sockets: &HashMap<u32, Arc<SocketCore>>, cou
             Counters::bump(&counters.dropped_unknown_socket);
             Vec::new()
         }
+    }
+}
+
+/// Whether an answer is the answer to a file control rather than to a command of a browser socket.
+pub(super) fn is_file_answer(res: &Res) -> bool {
+    res.socket == FILE_SOCKET
+}
+
+/// Gives the answer to a file control to the call that waits for it; an answer nobody waits for is counted and dropped.
+pub(super) fn deliver_file_res(res: Res, waiter: Option<tokio::sync::oneshot::Sender<ResBody>>, counters: &Counters) {
+    match waiter {
+        Some(waiter) => {
+            let _ = waiter.send(res.body);
+        }
+        None => Counters::bump(&counters.dropped_file_answers),
     }
 }
 

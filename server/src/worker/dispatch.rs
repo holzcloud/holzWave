@@ -16,7 +16,7 @@ use std::os::unix::net::UnixStream;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
@@ -459,7 +459,12 @@ pub struct ServerSink {
     queue: Arc<Outbound>,
     panes: AtomicU64,
     log: WorkerLog,
+    /// Told the name, the arguments and the outcome of every command that ran, once it has run.
+    observer: OnceLock<Observer>,
 }
+
+/// What watches the commands that ran: their name, their arguments as text and what they came to.
+pub type Observer = Arc<dyn Fn(&str, &str, &Outcome) + Send + Sync>;
 
 impl ServerSink {
     pub fn new(queue: Arc<Outbound>) -> ServerSink {
@@ -467,7 +472,18 @@ impl ServerSink {
     }
 
     pub fn with_log(queue: Arc<Outbound>, log: WorkerLog) -> ServerSink {
-        ServerSink { queue, panes: AtomicU64::new(UNKNOWN), log }
+        ServerSink { queue, panes: AtomicU64::new(UNKNOWN), log, observer: OnceLock::new() }
+    }
+
+    /// Lets `observer` see every command that ran. It can be set once; a second call changes nothing.
+    pub fn set_observer(&self, observer: Observer) {
+        let _ = self.observer.set(observer);
+    }
+
+    fn observe(&self, name: &str, args: &str, outcome: &Outcome) {
+        if let Some(observer) = self.observer.get() {
+            observer(name, args, outcome);
+        }
     }
 
     /// Tells the supervisor how many panes there are, when that is not what it was told last.
@@ -598,7 +614,12 @@ fn run_job(job: Job, core: &AppCore, sink: &ServerSink, queue: &Outbound, probe:
         sink.announce_panes(view.workspaces.iter().map(|w| w.panes).sum());
     }
     let frame = match run {
-        Ok(outcome) => outcome_frame(job.socket, job.request, outcome),
+        Ok(outcome) => {
+            if let Work::Row(_, args) = &job.work {
+                sink.observe(&job.name, args, &outcome);
+            }
+            outcome_frame(job.socket, job.request, outcome)
+        }
         Err(_) => {
             log.event(Level::Error, "worker_command_panicked", &[("command", &job.name)]);
             refusal(job.socket, job.request, "internal error")

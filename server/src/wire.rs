@@ -26,6 +26,8 @@
 //!   5..13  u64   request id of the Cmd
 //!   13     u8    status: 0 the result, 1 the error value, 2 a binary result
 //!   14..   body  status 0 and 1: the JSON text of the value the page gets, UTF-8; status 2: the bytes
+//!   The socket id [`FILE_SOCKET`] (`u32::MAX`, never given to a browser connection) marks the answer to a file control
+//!   (operations 8 to 11 below): its request id is the id the control carried, and the body is the answer of that control.
 //!
 //! 0x03 Evt   worker -> supervisor
 //!   0      u8    kind = 3
@@ -45,7 +47,23 @@
 //!   5 Lock          2..10 u64 control id                                                               (10 bytes)
 //!   6 Shutdown      nothing                                                                            (2 bytes)
 //!   7 ResetSecrets  2..10 u64 control id                                                               (10 bytes)
-//!   8 to 11         reserved for the file routes (upload and file serving); a decoder refuses them
+//!   8 FileServe     2..10 u64 request id (not 0) | 10 u8 what: 0 stat, 1 read | 11..43 the token: 32 bytes of 0-9a-f |
+//!                   43..51 u64 offset | 51..55 u32 length; a stat has offset 0 and length 0, a read has a length of
+//!                   1 to [`FILE_PIECE`] (1 MiB)                                                       (55 bytes)
+//!                   The answer is a `Res` on [`FILE_SOCKET`]: a stat is status 0 with the JSON `{"mime","size"}`, a read is
+//!                   status 2 with the bytes (fewer than asked at the end of the file), a refusal is status 1 with a short
+//!                   fixed text.
+//!   9 UploadOpen    2..10 u64 upload id (not 0) | 10..18 u64 declared size | 18..20 u16 folder length n, 1 to 1024 |
+//!                   20..20+n the folder, UTF-8 | 20+n.. the file name, UTF-8, 1 to 255 bytes, to the end of the frame
+//!                   The answer is a `Res` on [`FILE_SOCKET`] with the upload id as request id: status 0 with `{}` once the
+//!                   folder is open and the part file is made, or status 1 with a short fixed text.
+//!   10 UploadPiece  2..10 u64 upload id | 10.. the bytes of the body, 1 to [`FILE_PIECE`] (1 MiB), to the end of the frame
+//!                   The answer is a `Res` with the upload id as request id: status 0 with `{}` once the bytes are written,
+//!                   or status 1.
+//!   11 UploadClose  2..10 u64 upload id | 10 u8 commit: 0 abort, 1 publish                              (11 bytes)
+//!                   Commit answers status 0 with `{"path","size"}` once the file is complete, synced and published under a
+//!                   name that did not exist; abort removes the part file and answers status 0 with `{}`. After either the
+//!                   upload id is free.
 //!   12 Provision    2..10 u64 control id | 10 u8 count 0 to 4 | 11.. count slot keys of 49 bytes       (11 + 49 n bytes)
 //!   13 SetSlot      2..10 u64 control id | 10..59 slot key | 59 u8 opening key 0 or 1 | 60 u8 kind | 61..93 key
 //!                   (the last two only when the opening key is 1)                                      (60 or 93 bytes)
@@ -105,10 +123,14 @@ pub const OP_LOCK: u8 = 5;
 pub const OP_SHUTDOWN: u8 = 6;
 /// The operation number of `ResetSecrets`.
 pub const OP_RESET_SECRETS: u8 = 7;
-/// The first operation number reserved for the file routes.
-pub const OP_RESERVED_FIRST: u8 = 8;
-/// The last operation number reserved for the file routes.
-pub const OP_RESERVED_LAST: u8 = 11;
+/// The operation number of `FileServe`.
+pub const OP_FILE_SERVE: u8 = 8;
+/// The operation number of `UploadOpen`.
+pub const OP_UPLOAD_OPEN: u8 = 9;
+/// The operation number of `UploadPiece`.
+pub const OP_UPLOAD_PIECE: u8 = 10;
+/// The operation number of `UploadClose`.
+pub const OP_UPLOAD_CLOSE: u8 = 11;
 /// The operation number of `Provision`.
 pub const OP_PROVISION: u8 = 12;
 /// The operation number of `SetSlot`.
@@ -130,6 +152,21 @@ pub const NOTE_CTL_DONE: u8 = 5;
 /// The protocol version of the `Init` control.
 pub const PROTOCOL_VERSION: u16 = 1;
 
+/// The socket id on which a worker answers a file control. A browser connection never has this id.
+pub const FILE_SOCKET: u32 = u32::MAX;
+
+/// The most bytes of a file in one `FileServe` read or one `UploadPiece`.
+pub const FILE_PIECE: usize = crate::limits::FILE_PIECE_BYTES;
+
+/// The length of a token in a `FileServe`, in bytes.
+pub const TOKEN_BYTES: usize = 32;
+
+/// The longest folder of an `UploadOpen`, in bytes.
+pub const FOLDER_BYTES: usize = 1024;
+
+/// The longest file name of an `UploadOpen`, in bytes.
+pub const NAME_BYTES: usize = 255;
+
 /// How much of a payload is allocated before any of it has arrived.
 const FIRST_CHUNK: usize = 64 * 1024;
 
@@ -150,7 +187,7 @@ pub enum WireError {
     UnknownKind(u8),
     /// The operation byte of a control or note is not one the decoder knows.
     UnknownOp { kind: u8, op: u8 },
-    /// The operation number is reserved for the file routes.
+    /// The operation number is reserved.
     ReservedOp(u8),
     /// Text that is not UTF-8.
     BadUtf8,
@@ -303,6 +340,20 @@ pub struct OpeningKey {
     pub key: Key,
 }
 
+/// What a `FileServe` asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileWhat {
+    /// The media type and size of the grant.
+    Stat = 0,
+    /// A range of the bytes of the file.
+    Read = 1,
+}
+
+/// Whether `token` is exactly 32 characters of `0-9a-f`.
+pub fn valid_token(token: &str) -> bool {
+    token.len() == TOKEN_BYTES && token.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// A control from the supervisor.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Ctl {
@@ -327,6 +378,15 @@ pub enum Ctl {
     SetSlot { ctl: u64, slot: SlotKey, opening: Option<OpeningKey> },
     /// Remove one slot.
     RemoveSlot { ctl: u64, kind: SlotKind, id: [u8; SLOT_ID_BYTES] },
+    /// Ask for the media type and size of a granted file, or for a range of its bytes. The answer is a `Res` on
+    /// [`FILE_SOCKET`] with `request` as its request id.
+    FileServe { request: u64, what: FileWhat, token: String, offset: u64, length: u32 },
+    /// Open an upload of `size` bytes into `folder` (relative to the person's home) under `name`.
+    UploadOpen { id: u64, size: u64, folder: String, name: String },
+    /// The next bytes of an upload.
+    UploadPiece { id: u64, bytes: Vec<u8> },
+    /// Publish (`commit`) or remove an upload.
+    UploadClose { id: u64, commit: bool },
 }
 
 /// What a frame that holds a key prints: its name and nothing of its content.
@@ -350,6 +410,17 @@ impl fmt::Debug for Ctl {
                 f.debug_struct("Provision").field("ctl", ctl).field("slots", &slots.len()).finish_non_exhaustive()
             }
             Ctl::SetSlot { ctl, .. } => f.debug_struct("SetSlot").field("ctl", ctl).finish_non_exhaustive(),
+            // A token, a folder, a name and the bytes of a file are never printed.
+            Ctl::FileServe { request, what, .. } => {
+                f.debug_struct("FileServe").field("request", request).field("what", what).finish_non_exhaustive()
+            }
+            Ctl::UploadOpen { id, size, .. } => {
+                f.debug_struct("UploadOpen").field("id", id).field("size", size).finish_non_exhaustive()
+            }
+            Ctl::UploadPiece { id, bytes } => {
+                f.debug_struct("UploadPiece").field("id", id).field("bytes", &bytes.len()).finish()
+            }
+            Ctl::UploadClose { id, commit } => f.debug_struct("UploadClose").field("id", id).field("commit", commit).finish(),
         }
     }
 }
@@ -454,6 +525,14 @@ impl<'a> Fields<'a> {
     fn u64(&mut self) -> Result<u64, WireError> {
         let bytes: [u8; 8] = self.take(8)?.try_into().map_err(|_| WireError::Truncated)?;
         Ok(u64::from_be_bytes(bytes))
+    }
+
+    /// A request or upload id that is not 0.
+    fn id(&mut self) -> Result<u64, WireError> {
+        match self.u64()? {
+            0 => Err(WireError::BadValue("an id is not 0")),
+            id => Ok(id),
+        }
     }
 
     /// A socket id that is not 0.
@@ -606,6 +685,62 @@ impl Frame {
                 out.push(kind.byte());
                 out.extend_from_slice(id);
             }
+            Frame::Ctl(Ctl::FileServe { request, what, token, offset, length }) => {
+                if *request == 0 || !valid_token(token) {
+                    return Err(WireError::BadValue("a file request needs an id and a token of 32 lower-case hex digits"));
+                }
+                match what {
+                    FileWhat::Stat if *offset != 0 || *length != 0 => {
+                        return Err(WireError::BadValue("a stat has no offset and no length"));
+                    }
+                    FileWhat::Read if *length == 0 || usize::try_from(*length).is_ok_and(|l| l > FILE_PIECE) => {
+                        return Err(WireError::BadValue("a read has a length of 1 to 1 MiB"));
+                    }
+                    _ => {}
+                }
+                out.extend_from_slice(&[KIND_CTL, OP_FILE_SERVE]);
+                out.extend_from_slice(&request.to_be_bytes());
+                out.push(*what as u8);
+                out.extend_from_slice(token.as_bytes());
+                out.extend_from_slice(&offset.to_be_bytes());
+                out.extend_from_slice(&length.to_be_bytes());
+            }
+            Frame::Ctl(Ctl::UploadOpen { id, size, folder, name }) => {
+                if *id == 0 {
+                    return Err(WireError::BadValue("an upload id is not 0"));
+                }
+                if folder.is_empty() || folder.len() > FOLDER_BYTES {
+                    return Err(WireError::BadValue("a folder is 1 to 1024 bytes"));
+                }
+                if name.is_empty() || name.len() > NAME_BYTES {
+                    return Err(WireError::BadValue("a file name is 1 to 255 bytes"));
+                }
+                out.extend_from_slice(&[KIND_CTL, OP_UPLOAD_OPEN]);
+                out.extend_from_slice(&id.to_be_bytes());
+                out.extend_from_slice(&size.to_be_bytes());
+                out.extend_from_slice(&u16::try_from(folder.len()).map_err(|_| WireError::TooLarge(folder.len()))?.to_be_bytes());
+                out.extend_from_slice(folder.as_bytes());
+                out.extend_from_slice(name.as_bytes());
+            }
+            Frame::Ctl(Ctl::UploadPiece { id, bytes }) => {
+                if *id == 0 {
+                    return Err(WireError::BadValue("an upload id is not 0"));
+                }
+                if bytes.is_empty() || bytes.len() > FILE_PIECE {
+                    return Err(WireError::BadValue("a piece is 1 byte to 1 MiB"));
+                }
+                out.extend_from_slice(&[KIND_CTL, OP_UPLOAD_PIECE]);
+                out.extend_from_slice(&id.to_be_bytes());
+                out.extend_from_slice(bytes);
+            }
+            Frame::Ctl(Ctl::UploadClose { id, commit }) => {
+                if *id == 0 {
+                    return Err(WireError::BadValue("an upload id is not 0"));
+                }
+                out.extend_from_slice(&[KIND_CTL, OP_UPLOAD_CLOSE]);
+                out.extend_from_slice(&id.to_be_bytes());
+                out.push(u8::from(*commit));
+            }
             Frame::Note(Note::Ready) => out.extend_from_slice(&[KIND_NOTE, NOTE_READY]),
             Frame::Note(Note::StoreState(state)) => out.extend_from_slice(&[KIND_NOTE, NOTE_STORE_STATE, *state as u8]),
             Frame::Note(Note::PaneCount(count)) => {
@@ -684,7 +819,63 @@ impl Frame {
                     OP_LOCK => Frame::Ctl(Ctl::Lock { ctl: fields.u64()? }),
                     OP_SHUTDOWN => Frame::Ctl(Ctl::Shutdown),
                     OP_RESET_SECRETS => Frame::Ctl(Ctl::ResetSecrets { ctl: fields.u64()? }),
-                    OP_RESERVED_FIRST..=OP_RESERVED_LAST => return Err(WireError::ReservedOp(op)),
+                    OP_FILE_SERVE => {
+                        let request = fields.id()?;
+                        let what = match fields.u8()? {
+                            0 => FileWhat::Stat,
+                            1 => FileWhat::Read,
+                            _ => return Err(WireError::BadValue("a file request asks for 0 (stat) or 1 (read)")),
+                        };
+                        let token = std::str::from_utf8(fields.take(TOKEN_BYTES)?)
+                            .map_err(|_| WireError::BadValue("a token is 32 lower-case hex digits"))?;
+                        if !valid_token(token) {
+                            return Err(WireError::BadValue("a token is 32 lower-case hex digits"));
+                        }
+                        let token = token.to_owned();
+                        let offset = fields.u64()?;
+                        let length = fields.u32()?;
+                        match what {
+                            FileWhat::Stat if offset != 0 || length != 0 => {
+                                return Err(WireError::BadValue("a stat has no offset and no length"));
+                            }
+                            FileWhat::Read if length == 0 || usize::try_from(length).is_ok_and(|l| l > FILE_PIECE) => {
+                                return Err(WireError::BadValue("a read has a length of 1 to 1 MiB"));
+                            }
+                            _ => {}
+                        }
+                        Frame::Ctl(Ctl::FileServe { request, what, token, offset, length })
+                    }
+                    OP_UPLOAD_OPEN => {
+                        let id = fields.id()?;
+                        let size = fields.u64()?;
+                        let folder_len = usize::from(fields.u16()?);
+                        if folder_len == 0 || folder_len > FOLDER_BYTES {
+                            return Err(WireError::BadValue("a folder is 1 to 1024 bytes"));
+                        }
+                        let folder = text(fields.take(folder_len)?)?;
+                        let name = text(fields.rest())?;
+                        if name.is_empty() || name.len() > NAME_BYTES {
+                            return Err(WireError::BadValue("a file name is 1 to 255 bytes"));
+                        }
+                        Frame::Ctl(Ctl::UploadOpen { id, size, folder, name })
+                    }
+                    OP_UPLOAD_PIECE => {
+                        let id = fields.id()?;
+                        let bytes = fields.rest();
+                        if bytes.is_empty() || bytes.len() > FILE_PIECE {
+                            return Err(WireError::BadValue("a piece is 1 byte to 1 MiB"));
+                        }
+                        Frame::Ctl(Ctl::UploadPiece { id, bytes: bytes.to_vec() })
+                    }
+                    OP_UPLOAD_CLOSE => {
+                        let id = fields.id()?;
+                        let commit = match fields.u8()? {
+                            0 => false,
+                            1 => true,
+                            _ => return Err(WireError::BadValue("the commit flag is not 0 or 1")),
+                        };
+                        Frame::Ctl(Ctl::UploadClose { id, commit })
+                    }
                     OP_PROVISION => {
                         let ctl = fields.u64()?;
                         let count = usize::from(fields.u8()?);
