@@ -8,7 +8,7 @@
 #![cfg(feature = "in-process-workers")]
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -20,13 +20,19 @@ use holzwave_server::supervisor::AccountKey;
 use holzwave_server::supervisor::gate::SupervisorGate;
 use holzwave_server::supervisor::registry::AttachError;
 use holzwave_server::supervisor::socket::Outbound;
-use holzwave_server::worker::secretstore::store_path;
+use holzwave_server::http::ws::SocketSettings;
+use holzwave_server::wire::Ctl;
+use holzwave_server::worker::secretstore::{EncryptedFileStore, SlotKind, store_path};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::edge::{ORIGIN, Signed, UID_RANGE};
 use crate::edge_tls::{Reply, Request};
-use crate::ws_env::{PATIENCE, WsClient, WsEnv, WsOptions};
+use crate::ws_env::{PATIENCE, SUPERVISOR_START, WsClient, WsEnv, WsOptions};
+
+#[path = "webauthn_client.rs"]
+pub mod webauthn_client;
+use webauthn_client::SoftPasskey;
 
 /// The seconds between two sign-ins of the same person: more than the 30 seconds of one authenticator code.
 pub const CODE_STEP: i64 = 31;
@@ -45,6 +51,8 @@ pub struct User {
     pub key: AccountKey,
     /// The recovery code the enrolment answer showed.
     pub recovery: String,
+    /// The authenticator of a person who enrolled with a passkey.
+    pub passkey: Option<Arc<Mutex<SoftPasskey>>>,
 }
 
 /// One row of the audit log.
@@ -88,7 +96,12 @@ pub struct UnlockEnv {
 impl UnlockEnv {
     /// The default environment: the real gate, the real worker, 30 minutes idle and 24 hours absolute.
     pub async fn start() -> UnlockEnv {
-        let ws = WsEnv::start_with(WsOptions { real_gate: true, ..WsOptions::default() }).await;
+        UnlockEnv::start_tuned(None).await
+    }
+
+    /// The same with other settings for every socket (a short re-check, for the tests that wait for `locked`).
+    pub async fn start_tuned(tune: Option<fn(&mut SocketSettings)>) -> UnlockEnv {
+        let ws = WsEnv::start_with(WsOptions { real_gate: true, tune, ..WsOptions::default() }).await;
         let clock: Arc<dyn holzwave_server::clock::Clock> = ws.test.clock.clone();
         let accounts = Accounts::new(ws.test.store.clone(), clock, ws.test.app.audit.clone(), UID_RANGE);
         let gate = ws.gate.clone().expect("the real gate");
@@ -188,6 +201,7 @@ impl UnlockEnv {
             id: account.id,
             key: AccountKey { id: account.id, uid: account.uid },
             recovery,
+            passkey: None,
         };
         let signed = self.signed_from(&cookie);
         (user, signed, finish)
@@ -506,4 +520,154 @@ pub fn scan_text_for(text: &str, needles: &[(&str, &str)]) -> Vec<String> {
         }
     }
     found
+}
+
+// ---- more of the environment: workers, files, passkeys, the unlock route ---------------------------------------------------
+
+/// A part of a store file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Region {
+    /// The first byte of the magic.
+    Header,
+    /// A byte inside the first slot's wrapped key.
+    Slot,
+    /// The last byte of the body.
+    Body,
+}
+
+impl Region {
+    pub const ALL: [Region; 3] = [Region::Header, Region::Slot, Region::Body];
+
+    /// The offset of the byte to change in a file of `len` bytes (format version 1: a seven byte header, then 89 bytes a slot).
+    pub fn offset(self, len: usize) -> usize {
+        match self {
+            Region::Header => 0,
+            Region::Slot => 7 + 1 + 16 + 24 + 5,
+            Region::Body => len - 1,
+        }
+    }
+}
+
+impl UnlockEnv {
+    /// Waits until the person has no socket, then lets the idle rule of the supervisor end the worker. The next control or
+    /// attach starts a new one, which finds the store file locked (or damaged) and nothing else.
+    pub async fn restart_worker(&self, user: &User) {
+        self.eventually("the sockets of the person to leave", || self.ws.supervisor.account_stats(user.key).sockets == 0).await;
+        if !self.ws.supervisor.account_stats(user.key).worker_running {
+            return;
+        }
+        self.ws.supervisor_clock.advance(25 * 3600);
+        assert!(self.ws.supervisor.sweep().await >= 1, "the idle worker is ended");
+        self.eventually("the worker to end", || !self.ws.supervisor.account_stats(user.key).worker_running).await;
+        // Later sweeps must not look at a worker that is started again as if it had been idle for a day.
+        self.ws.supervisor_clock.set(SUPERVISOR_START + 25 * 3600);
+    }
+
+    /// Changes one byte of the store file (every bit of it).
+    pub fn flip_byte(&self, user: &User, region: Region) {
+        let path = self.store_file(user);
+        let mut bytes = std::fs::read(&path).expect("the store file");
+        let at = region.offset(bytes.len());
+        bytes[at] ^= 0xff;
+        std::fs::write(&path, bytes).expect("write the damaged file");
+    }
+
+    /// The slots in the store file: kind and id.
+    pub fn slots_of(&self, user: &User) -> Vec<(SlotKind, [u8; 16])> {
+        EncryptedFileStore::open(&self.store_file(user)).expect("the store opens").slots().expect("the slots")
+    }
+
+    /// Locks the store of the person at the worker, the way a restart does: sessions are untouched.
+    pub async fn lock_at_the_worker(&self, user: &User) {
+        let done = self.ws.supervisor.ctl(user.key, Ctl::Lock { ctl: 0 }).await.expect("the lock frame");
+        assert_eq!(done, holzwave_server::wire::CtlOutcome::Done);
+    }
+
+    /// `POST /auth/unlock` with a passphrase.
+    pub async fn unlock_passphrase(&self, who: &Signed, text: &str) -> Reply {
+        self.api(who, "POST", "/auth/unlock", Some(&json!({"passphrase": text}))).await
+    }
+
+    /// `POST /auth/unlock` with a recovery code.
+    pub async fn unlock_recovery(&self, who: &Signed, code: &str) -> Reply {
+        self.api(who, "POST", "/auth/unlock", Some(&json!({"recovery_code": code}))).await
+    }
+
+    /// The administrator's reset of the secrets of `target`.
+    pub async fn reset_secrets(&self, admin: &Signed, target: &User) -> Reply {
+        self.act(admin, "POST", &format!("/api/admin/accounts/{}/reset-secrets", target.id.get())).await
+    }
+
+    /// The live sessions of the person at the time of the clock.
+    pub fn live_sessions(&self, user: &User) -> usize {
+        self.ws.test.sessions.list_live(user.id, self.now()).expect("the sessions").len()
+    }
+
+    /// The number of `secrets.lock` lines.
+    pub fn lock_lines(&self) -> usize {
+        self.audit_of("secrets.lock").len()
+    }
+
+    /// A passkey member invited by `admin`: the enrolment, with the PRF output `prf` beside the credential when given.
+    pub async fn invite_with_passkey(&self, admin: &User, name: &str, prf: Option<&str>) -> (User, Signed, Reply) {
+        let token = self.accounts.invite_create(admin.id, None, None, Role::Member).expect("an invitation").token.expose().to_owned();
+        let route = "/auth/invite/redeem";
+        let begin = self
+            .post(route, &json!({"step": "begin", "token": token, "username": name, "display_name": name, "method": "passkey"}), None)
+            .await;
+        assert_eq!(begin.status, 200, "begin: {}", begin.text());
+        let pending = UnlockEnv::cookie_of(&begin, "__Host-hw_pending").expect("a pending cookie");
+        let origin = webauthn_rs::prelude::Url::parse(ORIGIN).expect("the origin");
+        let mut authenticator = SoftPasskey::new();
+        let credential = authenticator.register(&begin.json()["options"], &origin).expect("the authenticator answers");
+        let mut body = json!({"step": "finish", "credential": credential});
+        if let Some(prf) = prf {
+            body["prf"] = json!(prf);
+        }
+        let finish = self.post(route, &body, Some(("__Host-hw_pending", &pending))).await;
+        assert_eq!(finish.status, 200, "finish: {}", finish.text());
+        let cookie = UnlockEnv::cookie_of(&finish, "__Host-hw_session").expect("a session cookie");
+        let recovery = finish.json()["recovery_code"].as_str().expect("a recovery code").to_owned();
+        let account = self.ws.test.store.account_by_username(name).expect("read").expect("the account");
+        let user = User {
+            name: name.to_owned(),
+            password: String::new(),
+            secret: Vec::new(),
+            id: account.id,
+            key: AccountKey { id: account.id, uid: account.uid },
+            recovery,
+            passkey: Some(Arc::new(Mutex::new(authenticator))),
+        };
+        (user, self.signed_from(&cookie), finish)
+    }
+
+    /// A passkey sign-in with the authenticator of the person; `prf` is what the page sends beside the assertion.
+    pub async fn sign_in_with_passkey(&self, user: &User, prf: Option<&str>) -> Signed {
+        self.advance(CODE_STEP);
+        let begin = self.post("/auth/passkey/begin", &json!({}), None).await;
+        assert_eq!(begin.status, 200, "{}", begin.text());
+        let pending = UnlockEnv::cookie_of(&begin, "__Host-hw_pending").expect("a pending cookie");
+        let origin = webauthn_rs::prelude::Url::parse(ORIGIN).expect("the origin");
+        let credential = user
+            .passkey
+            .as_ref()
+            .expect("a person with a passkey")
+            .lock()
+            .expect("lock")
+            .authenticate(&begin.json()["options"], &origin)
+            .expect("the authenticator answers");
+        let mut body = json!({"credential": credential});
+        if let Some(prf) = prf {
+            body["prf"] = json!(prf);
+        }
+        let finish = self.post("/auth/passkey/finish", &body, Some(("__Host-hw_pending", &pending))).await;
+        assert_eq!(finish.status, 200, "the passkey sign-in: {}", finish.text());
+        let cookie = UnlockEnv::cookie_of(&finish, "__Host-hw_session").expect("a session cookie");
+        self.signed_from(&cookie)
+    }
+}
+
+/// A 43-character base64url text of 32 bytes: the form of a PRF output.
+pub fn prf_text(byte: u8) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([byte; 32])
 }
