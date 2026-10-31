@@ -2477,9 +2477,14 @@ They are off until the person turns them on, and the browser is asked only when 
 | `on` | on | ok; the word | A browser notification appears when a pane out of view rings the bell or needs you. It never contains terminal text. | `Turn off` |
 | `blocked` | blocked by the browser | warn; the word, an underline and `!` | The browser blocks notifications for this site. Allow them in the site settings of the browser, then choose Check again. | `Check again` |
 
-Besides the notification, the title of the browser tab shows the kinds of 6.23 that are present, as their glyphs in the fixed order
-followed by `holzWave` (`? ▲ holzWave`); with none, the title is `holzWave`. The title never holds anything a pane wrote. The icon of
-the tab gets a small dot in `--hw-warn` while any kind is present.
+**Tab marks.** While the page is hidden (the tab is in the background or the window is minimised) the title of the browser tab starts with the
+glyphs of the kinds of 6.23 that happened or wait, in the fixed order `?`, `▲`, `!`, `✓`, each followed by a space, then `holzWave` (`? ▲ holzWave`);
+with none, the title is `holzWave`. The icon of the tab changes to the holzWave mark with a small dot in `--hw-rose` at its top right corner: rose
+is the colour of the thing that asks for the person's action, and the dot is the one place where it marks attention outside the page. Both are put back
+the moment the tab is visible again and are never touched while it is visible. The question mark shows while a card waits; the other three begin
+again each time the tab is hidden. The title never holds anything a pane wrote: no pane title, directory, command or output. The two icon files
+(`favicon.svg` and `favicon-attention.svg`, the second the first plus the dot) are served from the same origin, and the page adds the icon link
+itself in the browser build only.
 
 **Controls the browser does not have.** Tear-off entries (`Move pane to new window`, `Move tab to new window`), the text size from the system,
 the group `Local network` and `Reveal in folder` are absent from menus, the palette and the Settings, not disabled. When a stored shortcut

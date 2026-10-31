@@ -11,6 +11,7 @@
 import { registerAction, setAvailability } from "./actions.js";
 import { state } from "./state.js";
 import { showNotice } from "./status.js";
+import { initNotice } from "./webnotice.js";
 import { DESKTOP_ONLY_ACTIONS, FULLSCREEN_NOTICE, LOCK_KEYS, canLockKeys } from "./webstate.js";
 
 /** The part of `navigator.keyboard` the page uses (Chromium only). */
@@ -109,5 +110,7 @@ export function initWeb(): void {
   // The controls that need a window of the desktop shell are not offered by the palette; run by a stored shortcut or a script
   // they answer in words (dragdrop.ts) and call nothing. The test asks the platform each time, like every web branch of the page.
   for (const id of DESKTOP_ONLY_ACTIONS) setAvailability(id, () => state.os !== "web");
+  // The tab marks: the title and the icon while the page is hidden.
+  void initNotice().catch(() => {});
   // The later browser-only modules are started here.
 }

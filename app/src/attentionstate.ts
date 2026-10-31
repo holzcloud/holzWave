@@ -122,6 +122,11 @@ export class Attention {
     return out;
   }
 
+  /** The panes that wait for an answer now, sorted and unique: what the providers name at this moment. */
+  waiting(): number[] {
+    return [...this.askingPanes()].sort((a, b) => a - b);
+  }
+
   /** Tell the subscribers once if who waits for an answer is not what it was when they were last told. */
   changed(): void {
     const now = [...this.askingPanes()].sort((a, b) => a - b).join(",");
