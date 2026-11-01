@@ -2,7 +2,7 @@
 // answers, the fragment of a link, the grouping of a secret, and the list of modules the page loads before sign-in.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -234,4 +234,19 @@ test("the_entry_document_has_no_inline_script_or_style", () => {
   assert.match(html, /href="\/app\.css"/);
   assert.match(html, /href="\/login\.css"/);
   assert.doesNotMatch(html, /(?:href|src)="\./);
+});
+
+test("the_application_document_names_its_files_from_the_root_like_the_login_document", () => {
+  const html = readFileSync(join(DIST, "index.html"), "utf8");
+  assert.deepEqual([...html.matchAll(/<script\b[^>]*>/g)].map((m) => m[0]), ['<script type="module" src="/main.js">']);
+  assert.doesNotMatch(html, /<style\b|\sstyle=|\son[a-z]+=|javascript:/i);
+  // The server answers this document at `/` and at `/index.html`; a name relative to the document would be wrong for the next route
+  // that serves it deeper, the blank page that the login document had under `/auth/oidc/callback`.
+  assert.match(html, /href="\/app\.css"/);
+  assert.doesNotMatch(html, /(?:href|src)="\./);
+  // No file of the document is named by a path relative to it, and every name that starts at the root is a file of the build.
+  for (const [, name] of html.matchAll(/(?:href|src)="([^"]+)"/g)) {
+    assert.ok(name.startsWith("/") && !name.startsWith("//"), `${name} starts at the root`);
+    assert.ok(existsSync(join(DIST, name.slice(1))), `${name} is a file of the build`);
+  }
 });
