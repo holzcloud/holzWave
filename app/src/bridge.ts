@@ -48,7 +48,8 @@ const web = createTransport({
 });
 
 const webHttp = createHttp({
-  // The one request function of the page: same-origin paths only (see webhttp.ts), and the desktop build never calls it.
+  // The one request function of the page: paths on the page's origin only. The mode is `cors`, so the browser does not enforce that;
+  // `resolve()` in webhttp.ts does. The desktop build never calls it.
   send: (url, init) => fetch(url, init as RequestInit),
   origin: location.origin,
 });

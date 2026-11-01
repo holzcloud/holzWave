@@ -2,14 +2,19 @@
 // itself talks over the socket). This file is pure: the request function, the origin and the reading of the token are
 // handed in, so the unit tests need no network, and `bridge.ts` is the only file that names the real request function.
 //
-// A path must start with a single slash and stay on the page's origin; anything else is a `TypeError` before anything is
-// sent. Every request is same-origin, uncached, without redirects and without a referrer. The request mode is `cors`, not
-// `same-origin`: for a request that changes state the Fetch standard serializes the `Origin` header as `null` when the mode
-// is not `cors` and the referrer policy is `no-referrer`, and WebKit does so, which the server rightly refuses; with `cors`
-// every engine sends the real origin. The address is still checked to be on the page's origin before anything is sent, so
-// the mode opens no other door. The CSRF token comes from
-// `GET /api/session`, is kept in this closure only, is sent on every request that is not a GET and is dropped after a 403.
-// Nothing is ever retried: a request that changes state must not run twice.
+// Where a request may go: the path is the only way in, and `resolve()` is the single place that keeps a request on the page's
+// origin. A path must start with a single slash and have no backslash and no control character; anything else (`//host`,
+// `\\host`, a full URL) is a `TypeError` before anything is sent. The request is uncached, goes without redirects and without a
+// referrer, and sends credentials to the page's origin only.
+//
+// The request mode is `cors`, not `same-origin`, so the browser no longer enforces the origin: that is why that check is
+// the guard, and the unit test that refuses `//host`, `\\host` and control characters must stay. The reason for `cors`: for a
+// request that changes state the Fetch standard serializes the `Origin` header as `null` when the mode is not `cors` and the
+// referrer policy is `no-referrer`, and WebKit does so, which the server rightly refuses; with `cors` every engine sends the real
+// origin.
+//
+// The CSRF token comes from `GET /api/session`, is kept in this closure only, is sent on every request that is not a GET and is
+// dropped after a 403. Nothing is ever retried: a request that changes state must not run twice.
 
 /** The longest message of an `HttpError`, in characters. */
 export const MAX_ERROR_MESSAGE = 200;
