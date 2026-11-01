@@ -60,6 +60,11 @@ pub const EXTENSIONS: &[(&str, &str)] = &[
     ("ico", "image/x-icon"),
     ("json", "application/json"),
     ("txt", "text/plain; charset=utf-8"),
+    // The PDF.js bundle: its two modules, the packed CMaps and the standard fonts. Without them the page cannot show a PDF.
+    ("mjs", "text/javascript; charset=utf-8"),
+    ("bcmap", "application/octet-stream"),
+    ("pfb", "application/octet-stream"),
+    ("ttf", "font/ttf"),
 ];
 
 /// Whether a file may be served without a session.

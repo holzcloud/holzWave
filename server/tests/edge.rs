@@ -318,7 +318,7 @@ fn list_the_prefix_rule_covers_the_fonts_and_nothing_next_to_them() {
 // ---- types -----------------------------------------------------------------------------------------------------------
 
 #[test]
-fn types_the_table_maps_the_nine_extensions_to_their_content_types() {
+fn types_the_table_maps_the_thirteen_extensions_to_their_content_types() {
     let expected = [
         ("html", "text/html; charset=utf-8"),
         ("js", "text/javascript; charset=utf-8"),
@@ -329,6 +329,10 @@ fn types_the_table_maps_the_nine_extensions_to_their_content_types() {
         ("ico", "image/x-icon"),
         ("json", "application/json"),
         ("txt", "text/plain; charset=utf-8"),
+        ("mjs", "text/javascript; charset=utf-8"),
+        ("bcmap", "application/octet-stream"),
+        ("pfb", "application/octet-stream"),
+        ("ttf", "font/ttf"),
     ];
     assert_eq!(embed::EXTENSIONS, expected.as_slice());
 }
@@ -341,11 +345,16 @@ fn types_a_file_with_another_extension_is_neither_served_nor_listed() {
         ("main.js.map".to_owned(), body.clone()),
         ("vendor/pdf.min.mjs".to_owned(), body.clone()),
         ("vendor/cmaps/H.bcmap".to_owned(), body.clone()),
+        ("vendor/cmaps/H.cmap".to_owned(), body.clone()),
         ("LICENSE".to_owned(), body.clone()),
         ("MAIN.JS".to_owned(), body.clone()),
     ]);
-    assert_eq!(table.paths().collect::<Vec<_>>(), ["/main.js"], "only the file with an allowed extension is in the table");
-    assert_eq!(table.skipped(), 5, "the others are counted");
+    assert_eq!(
+        table.paths().collect::<Vec<_>>(),
+        ["/main.js", "/vendor/cmaps/H.bcmap", "/vendor/pdf.min.mjs"],
+        "only files with an allowed extension are in the table"
+    );
+    assert_eq!(table.skipped(), 4, "the others are counted");
     assert!(table.get("/main.js.map").is_none());
 }
 
@@ -388,7 +397,7 @@ async fn types_a_built_file_with_another_extension_answers_404_even_with_a_sessi
     let server = start().await;
     let cookie = alice(&server);
     let others: Vec<String> = built_files().into_iter().filter(|p| !embed::EXTENSIONS.iter().any(|(e, _)| *e == extension(p))).collect();
-    assert!(!others.is_empty(), "the build holds files the closed list leaves out (PDF.js data, licences)");
+    assert!(!others.is_empty(), "the build holds files the closed list leaves out (the licences)");
     let mut conn = server.h1().await;
     for path in others.iter().take(12) {
         conn.send(&Request::get(path).cookie(&cookie).bytes()).await;
