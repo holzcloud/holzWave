@@ -8,6 +8,7 @@ import {
   NOTIFY_FLAG_KEY, NOTIFY_GAP_MS, NOTIFY_GROUP, NOTIFY_TEXT, NotifyGate, commandKind, noticeIcon, noticeTitle, permissionState,
   DROP_LABEL, FOLDERS_SKIPPED, MAX_DROP_FILES, batchText, ONLY_SIXTEEN, hasNewline, notUploaded, readUploaded, refusalText, shellQuote, takeFiles,
   uploadFolder, uploadUrl, uploadedText, uploadingText, DOWNLOAD_ONLY_SENTENCE, GrantList, MAX_GRANTS, baseName, readGrant,
+  dropTarget, sameFolder, shownFolder, readGrantWhy, downloadRefusal, DOWNLOAD_FAILED,
 } from "../../dist/webstate.js";
 import { findTargets, isLinkModifier, linkAction } from "../../dist/links.js";
 import { isAvailable, listActions, listAvailableActions, registerAction, runAction, setAvailability } from "../../dist/actions.js";
@@ -467,7 +468,61 @@ test("the end of a run of uploads says how many arrived, the last refusal, and w
   assert.equal(batchText(none), "");
 });
 
+test("a pane takes an upload when it runs a shell, is a chat or is a file browser, and no other pane does", () => {
+  assert.equal(dropTarget(undefined), "shell", "a pane that is no block runs a shell");
+  assert.equal(dropTarget("chat"), "chat");
+  assert.equal(dropTarget("files"), "files");
+  for (const kind of ["preview", "monitor", "integration", "terminal", "", "FILES", "unknown"]) assert.equal(dropTarget(kind), null, kind);
+});
+
+test("the end of a run says the folder when the file browser that took the files showed another one", () => {
+  const none = { ok: 0, failed: [], over: 0, folders: 0 };
+  assert.equal(batchText({ ...none, ok: 1, elsewhere: "/home/p/uploads" }), "Uploaded to /home/p/uploads");
+  assert.equal(batchText({ ...none, ok: 3, elsewhere: "/home/p/uploads" }), "Uploaded 3 files to /home/p/uploads");
+  assert.equal(batchText({ ...none, ok: 2, elsewhere: "/up", failed: ["too large"] }), "Uploaded 2 files to /up. Not uploaded: too large.");
+  assert.equal(batchText({ ...none, ok: 1, elsewhere: "" }), "Uploaded", "no folder named: the plain sentence");
+  assert.equal(batchText({ ...none, failed: ["too large"], elsewhere: "/up" }), "Not uploaded: too large.", "nothing arrived: no folder");
+});
+
+test("two folder paths are the same folder when only a trailing slash differs, and a long folder is cut at its start", () => {
+  assert.equal(sameFolder("/home/p/uploads", "/home/p/uploads"), true);
+  assert.equal(sameFolder("/home/p/uploads/", "/home/p/uploads"), true);
+  assert.equal(sameFolder("/", "/"), true);
+  assert.equal(sameFolder("/home/p", "/home/p/uploads"), false);
+  assert.equal(sameFolder("/home/p/Uploads", "/home/p/uploads"), false, "paths are case sensitive");
+  assert.equal(sameFolder("", ""), false, "no folder is no folder");
+  assert.equal(shownFolder("/home/p/uploads"), "/home/p/uploads");
+  const long = `/${"d".repeat(100)}/uploads`;
+  assert.equal(shownFolder(long), `…${long.slice(-63)}`);
+  assert.equal(Array.from(shownFolder(long)).length, 64);
+  assert.equal(shownFolder("/a\u0007b"), "/a�b", "a control character is shown as a replacement mark");
+});
+
 // ---- download ---------------------------------------------------------------------------------------------------------
+
+test("the reason a grant was refused is read from its stable code and nothing else", () => {
+  assert.equal(readGrantWhy({ code: "locked" }), "locked");
+  assert.equal(readGrantWhy({ code: "not_found" }), "not_found");
+  assert.equal(readGrantWhy({ code: "denied" }), "denied");
+  assert.equal(readGrantWhy({ code: "kind" }), "kind");
+  assert.equal(readGrantWhy({ code: "other" }), "other");
+  assert.equal(readGrantWhy({ code: "other", text: "no such file: /secret" }), "other", "only the code is read");
+  for (const bad of [null, undefined, "locked", 3, [], ["locked"], {}, { code: 1 }, { code: "" }, { code: "LOCKED" }, { code: "too_large" }, { code: "no such file" }]) {
+    assert.equal(readGrantWhy(bad), "other", JSON.stringify(bad));
+  }
+});
+
+test("a refused download says why in the words the design gives, and the old sentence stays for a kind", () => {
+  assert.equal(downloadRefusal("kind"), "Download works for images, video, audio and PDF files.");
+  assert.equal(downloadRefusal("kind"), DOWNLOAD_ONLY_SENTENCE);
+  assert.equal(downloadRefusal("locked"), "Not downloaded: secrets are locked.");
+  assert.equal(downloadRefusal("not_found"), "Not downloaded: file not found.");
+  assert.equal(downloadRefusal("denied"), "Not downloaded: not allowed to read it.");
+  assert.equal(downloadRefusal("other"), "Not downloaded: download failed.");
+  assert.equal(DOWNLOAD_FAILED, "Not downloaded: download failed.");
+  const all = new Set(["kind", "locked", "not_found", "denied", "other"].map(downloadRefusal));
+  assert.equal(all.size, 5, "five reasons, five different sentences");
+});
 
 test("the sentence for a file kind that is not granted is the one the design gives", () => {
   assert.equal(DOWNLOAD_ONLY_SENTENCE, "Download works for images, video, audio and PDF files.");

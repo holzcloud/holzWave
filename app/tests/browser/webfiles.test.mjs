@@ -48,7 +48,8 @@ async function open(page, url, { answer = () => stored("x", 0), os = "web", bloc
     ([o, b, f, entries, view]) => {
       window.__MOCK__.on("app_info", () => ({ os: o, version: "t", hostname: "h" }));
       window.__MOCK__.on("pane_blocks", () => structuredClone(b));
-      window.__MOCK__.on("files_list", ({ path }) => ({ path, parent: "/home", entries, truncated: false }));
+      // `window.__EXTRA[path]` are the files that "arrived" in a folder since the page first listed it.
+      window.__MOCK__.on("files_list", ({ path }) => ({ path, parent: "/home", entries: [...entries, ...(window.__EXTRA?.[path] ?? [])], truncated: false }));
       window.__MOCK__.on("file_open", ({ path }) => ({
         content: "binary", name: path.split("/").pop(), mime: "application/octet-stream", size: 3, text: null, html: null, language: null, modified: 1, digest: null,
       }));
@@ -60,6 +61,12 @@ async function open(page, url, { answer = () => stored("x", 0), os = "web", bloc
         return { url: `/files/tok-${granted}`, token: `tok-${granted}`, mime: "image/png", size: 1 };
       });
       window.__MOCK__.on("file_revoke", () => null);
+      // Why the core refused: `window.__WHY` is the stable code (a kind it does not grant by default), `window.__WHY_RAW` an answer of any
+      // shape, `window.__WHY_FAIL` makes the question itself fail.
+      window.__MOCK__.on("file_grant_why", () => {
+        if (window.__WHY_FAIL) throw window.__WHY_FAIL;
+        return window.__WHY_RAW !== undefined ? window.__WHY_RAW : { code: window.__WHY ?? "kind" };
+      });
       if (b.length > 0) window.__MOCK__.setView({ ...view, focus: f });
       // The entries API of a real drop says which item is a folder; a made-up drop has none, so a file named `dir-...` plays one.
       DataTransferItem.prototype.webkitGetAsEntry = function () {
@@ -226,6 +233,9 @@ export default async function ({ page, url, errors }) {
     await refusalCase(page, url);
     await quoteCase(page, url);
     await outsideCase(page, url);
+    await takesNothingCase(page, url);
+    await chatDropCase(page, url);
+    await browserDropCase(page, url);
     await endedCase(page, url);
     await menuCase(page, url);
     await keyboardMenuCase(page, url);
@@ -485,10 +495,10 @@ async function quoteCase(page, url) {
   await page.waitForFunction(() => document.activeElement?.id === "ime");
 }
 
-/** A drop outside every pane, of text, or on a pane that runs no shell uploads nothing, and the browser never navigates. */
+/** A drop outside every pane, of text, or on a pane that takes nothing (a preview, the monitor, a tool view) uploads nothing, and the browser never navigates. */
 async function outsideCase(page, url) {
   const { log } = await open(page, url, {
-    blocks: [{ pane: 1, kind: "files", source: "local", path: "/home/p", source_label: "This computer" }],
+    blocks: [{ pane: 1, kind: "preview", source: "local", path: "/home/p/mockup.png", source_label: "This computer" }],
   });
   const before = await page.evaluate(() => location.href);
   const f = [file("a.txt")];
@@ -500,13 +510,13 @@ async function outsideCase(page, url) {
   const status = await dropAt(page, { x: 40, y: 640 - 8 }, f, { key: "dt4" });
   assert.equal(status.prevented, true, "and on the status line");
 
-  // A pane that is a file browser takes no upload: no edge, no copy cursor, nothing sent. The browser still does not navigate.
+  // A pane that is a preview takes no upload: no edge, no copy cursor, nothing sent. The browser still does not navigate.
   const block = await paneBox(page, 1);
   await drag(page, "dragenter", block, { files: f, key: "dt5" });
   const over = await drag(page, "dragover", block, { files: f, key: "dt5" });
   assert.equal(over.prevented, true);
   assert.equal(over.effect, "none");
-  assert.deepEqual(await targetOf(page), [], "no edge on a pane that runs no shell");
+  assert.deepEqual(await targetOf(page), [], "no edge on a pane that takes nothing");
   const drop = await drag(page, "drop", block, { files: f, key: "dt5" });
   assert.equal(drop.prevented, true);
   assert.equal(await page.evaluate(() => location.href), before);
@@ -522,6 +532,178 @@ async function outsideCase(page, url) {
   assert.deepEqual(log, [], "nothing was uploaded");
   assert.deepEqual(await pastes(page), []);
   assert.deepEqual(await page.evaluate(() => window.__sent), []);
+}
+
+const CHAT = { pane: 1, kind: "chat", source: "local", path: "chat-mock-1", source_label: "This computer" };
+
+/** A monitor and a tool view take nothing either: no edge, no copy cursor, nothing sent, and the drop is still the page's. */
+async function takesNothingCase(page, url) {
+  const blocks = [
+    { pane: 1, kind: "monitor", source: "local", path: "", source_label: "This computer" },
+    { pane: 1, kind: "integration", source: "kube", path: "get_pods", source_label: "kube" },
+  ];
+  for (const block of blocks) {
+    const { log } = await open(page, url, { blocks: [block] });
+    const before = await page.evaluate(() => location.href);
+    const at = await paneBox(page, 1);
+    const f = [file("a.txt")];
+    await drag(page, "dragenter", at, { files: f, key: "dtn" });
+    const over = await drag(page, "dragover", at, { files: f, key: "dtn" });
+    assert.equal(over.prevented, true, block.kind);
+    assert.equal(over.effect, "none", `${block.kind}: the cursor says nothing is taken`);
+    assert.deepEqual(await targetOf(page), [], `${block.kind}: no edge`);
+    const drop = await drag(page, "drop", at, { files: f, key: "dtn" });
+    assert.equal(drop.prevented, true, `${block.kind}: the drop is the page's, so the browser cannot open the file`);
+    assert.equal(drop.moved, false);
+    assert.equal(await page.evaluate(() => location.href), before);
+    await settle(page);
+    assert.deepEqual(log, [], `${block.kind}: nothing was uploaded`);
+    assert.deepEqual(await pastes(page), []);
+  }
+}
+
+/** The composer of the chat pane. */
+const composer = (page) => page.locator("textarea.chat-input");
+
+/**
+ * A file dropped on a chat pane is uploaded and its quoted path is added to the message being written, at the caret, with a space
+ * between it and the words before it; nothing is pasted to a shell and nothing is sent.
+ */
+async function chatDropCase(page, url) {
+  // The server stores a file under the name it was sent, except that `big.bin` is too large.
+  const named = (entry) => new URL(entry.path, "http://x").searchParams.get("name");
+  const { log } = await open(page, url, { blocks: [CHAT], focus: 1, answer: (entry) => (named(entry) === "big.bin" ? { status: 413, body: {} } : stored(named(entry), 3)) });
+  await composer(page).waitFor();
+  const at = await paneBox(page, 1);
+  const f = [file("a.txt")];
+
+  // Over the chat: the edge, the label and the copy cursor.
+  await drag(page, "dragenter", at, { files: f, key: "dtc" });
+  const over = await drag(page, "dragover", at, { files: f, key: "dtc" });
+  assert.equal(over.effect, "copy", "a chat takes files");
+  const shown = await targetOf(page);
+  assert.equal(shown.length, 1);
+  assert.equal(shown[0].label, "Drop to upload");
+  assert.equal(shown[0].style, "dashed");
+  assert.equal(shown[0].pointer, "none");
+  await drag(page, "drop", at, { files: f, key: "dtc" });
+
+  await page.waitForFunction(() => document.querySelector("textarea.chat-input")?.value.includes("a.txt"));
+  assert.equal(await composer(page).inputValue(), "'/home/p/uploads/a.txt'", "the quoted path, alone in an empty composer");
+  assert.equal(await noticeNow(page), "Uploaded");
+  assert.deepEqual(await pastes(page), [], "a chat is no shell: nothing is pasted");
+  assert.deepEqual(await page.evaluate(() => window.__MOCK__.callsOf("ai_send")), [], "it is never sent");
+  assert.equal(await page.evaluate(() => document.activeElement?.className), "chat-input", "the keyboard is in the composer");
+  assert.deepEqual(await targetOf(page), [], "the edge is gone after the drop");
+
+  // Words before the caret get one space; a path with a quote and a space is quoted as for the shell; the draft counts it.
+  await composer(page).fill("look at");
+  await dropAt(page, at, [file("b c.txt")], { key: "dtc2" });
+  await page.waitForFunction(() => document.querySelector("textarea.chat-input").value.includes("b c.txt"));
+  assert.equal(await composer(page).inputValue(), "look at '/home/p/uploads/b c.txt'");
+  await composer(page).fill("look at ");
+  await dropAt(page, at, [file("it's.txt")], { key: "dtc3" });
+  await page.waitForFunction(() => document.querySelector("textarea.chat-input").value.includes("it"));
+  assert.equal(await composer(page).inputValue(), "look at '/home/p/uploads/it'\\''s.txt'", "after a space there is no second one");
+
+  // Several files of one drop are separated by a space; the caret in the middle of the text splits it.
+  await composer(page).fill("");
+  const second = await dropAt(page, at, [file("p.txt"), file("q.txt")], { key: "dtc4" });
+  assert.equal(second.prevented, true);
+  await page.waitForFunction(() => (document.querySelector("textarea.chat-input").value.match(/'\/home/g) ?? []).length === 2);
+  assert.equal(await composer(page).inputValue(), "'/home/p/uploads/p.txt' '/home/p/uploads/q.txt'");
+  assert.equal(await noticeNow(page), "Uploaded 2 files");
+  assert.deepEqual(await pastes(page), []);
+  assert.equal(log.length, 5);
+  assert.deepEqual(await page.evaluate(() => window.__MOCK__.callsOf("ai_send")), []);
+
+  // A refusal adds nothing to the message.
+  await composer(page).fill("keep this");
+  await dropAt(page, at, [file("big.bin")], { key: "dtc5" });
+  await page.waitForFunction(() => document.querySelector("#status .notice")?.textContent.startsWith("Not uploaded"));
+  assert.equal(await noticeNow(page), "Not uploaded: too large.");
+  assert.equal(await composer(page).inputValue(), "keep this");
+}
+
+/** `FILES` shows /home/holz, so a file stored in `FOLDER` is elsewhere unless the browser is pointed at that folder. */
+/**
+ * A file dropped on a file browser is uploaded and then shown there. When the browser lists the folder the file went to, the list is
+ * read again and the new row is the selected one; when it lists another folder (or the files of a saved connection) it does not move,
+ * and the status line says where the file went. Nothing is typed anywhere.
+ */
+async function browserDropCase(page, url) {
+  // 1. The browser shows the upload folder.
+  let { log } = await open(page, url, { blocks: [{ ...FILES, path: FOLDER }], answer: () => stored("new.txt", 3) });
+  await page.locator(".block-files .bk-row").first().waitFor();
+  assert.equal(await selectedName(page), "docs");
+  const at = await paneBox(page, 1);
+  const f = [file("new.txt")];
+  await drag(page, "dragenter", at, { files: f, key: "dtf" });
+  const over = await drag(page, "dragover", at, { files: f, key: "dtf" });
+  assert.equal(over.effect, "copy", "a file browser takes files");
+  const shown = await targetOf(page);
+  assert.equal(shown.length, 1, "the edge is drawn on a file browser");
+  assert.equal(shown[0].label, "Drop to upload");
+  assert.equal(shown[0].style, "dashed");
+  assert.ok(Math.abs(shown[0].x - (at.left + 2)) <= 1 && Math.abs(shown[0].w - (at.w - 4)) <= 1, "the edge is the pane's box, 2 px inside");
+  await page.evaluate(() => (window.__EXTRA = { "/home/p/uploads": [{ name: "new.txt", kind: "file", link: false, size: 3, modified: 1760000100, hidden: false }] }));
+  const listed = () => page.evaluate(() => window.__MOCK__.callsOf("files_list").length);
+  const before = await listed();
+  await drag(page, "drop", at, { files: f, key: "dtf" });
+  await page.waitForFunction(() => [...document.querySelectorAll(".block-files .bk-row")].some((r) => r.textContent.includes("new.txt")));
+  assert.equal(await selectedName(page), "new.txt", "the new file is the selected row");
+  assert.equal(await listed(), before + 1, "the list was read again, once");
+  assert.equal(await noticeNow(page), "Uploaded");
+  assert.deepEqual(await pastes(page), [], "a file browser types nothing");
+  assert.equal(log.length, 1);
+  assert.deepEqual(await targetOf(page), []);
+  assert.equal(await page.evaluate(() => document.activeElement?.id), "ime", "the keyboard stays in the page's input");
+  // The row is in view and has the selection cue (the attribute) in a scroll box that holds it.
+  assert.ok(await page.locator('.block-files .bk-row[aria-selected="true"]').evaluate((row) => {
+    const box = row.parentElement.getBoundingClientRect();
+    const r = row.getBoundingClientRect();
+    return r.top >= box.top - 1 && r.bottom <= box.bottom + 1;
+  }), "the selected row is visible");
+
+  // 2. The browser shows another folder: it does not move, and the status line names the folder.
+  ({ log } = await open(page, url, { blocks: [FILES], answer: () => stored("new.txt", 3) }));
+  await page.locator(".block-files .bk-row").first().waitFor();
+  const first = await listed();
+  const there = await paneBox(page, 1);
+  await dropAt(page, there, [file("new.txt")], { key: "dtf2" });
+  await page.waitForFunction(() => document.querySelector("#status .notice")?.textContent.startsWith("Uploaded"));
+  assert.equal(await noticeNow(page), "Uploaded to /home/p/uploads");
+  assert.equal(await selectedName(page), "docs", "the selection did not move");
+  assert.equal(await listed(), first, "the list was not read again");
+  assert.equal(await page.locator(".block-files .bk-path").textContent(), "/home/holz", "the browser still shows its own folder");
+  assert.deepEqual(await pastes(page), []);
+  assert.equal(log.length, 1);
+
+  // Two files: the sentence counts them and names the folder once.
+  ({ log } = await open(page, url, { blocks: [FILES], answer: (_, n) => stored(`n${n}.txt`, 3) }));
+  await page.locator(".block-files .bk-row").first().waitFor();
+  await dropAt(page, await paneBox(page, 1), [file("n0.txt"), file("n1.txt")], { key: "dtf3" });
+  await page.waitForFunction(() => document.querySelector("#status .notice")?.textContent.startsWith("Uploaded 2"));
+  assert.equal(await noticeNow(page), "Uploaded 2 files to /home/p/uploads");
+
+  // 3. A browser of a saved connection never shows the folder of this server.
+  ({ log } = await open(page, url, { blocks: [{ ...FILES, source: "talos-1", path: FOLDER, source_label: "talos-1" }], answer: () => stored("new.txt", 3) }));
+  await page.locator(".block-files .bk-row").first().waitFor();
+  const remoteLists = await listed();
+  await dropAt(page, await paneBox(page, 1), [file("new.txt")], { key: "dtf4" });
+  await page.waitForFunction(() => document.querySelector("#status .notice")?.textContent.startsWith("Uploaded"));
+  assert.equal(await noticeNow(page), "Uploaded to /home/p/uploads", "the same folder name on another computer is not this folder");
+  assert.equal(await listed(), remoteLists);
+
+  // 4. A refusal types and shows nothing; the browser stays as it was.
+  ({ log } = await open(page, url, { blocks: [{ ...FILES, path: FOLDER }], answer: () => ({ status: 413, body: {} }) }));
+  await page.locator(".block-files .bk-row").first().waitFor();
+  const kept = await listed();
+  await dropAt(page, await paneBox(page, 1), [file("big.bin")], { key: "dtf5" });
+  await page.waitForFunction(() => document.querySelector("#status .notice")?.textContent.startsWith("Not uploaded"));
+  assert.equal(await noticeNow(page), "Not uploaded: too large.");
+  assert.equal(await listed(), kept);
+  assert.equal(await selectedName(page), "docs");
 }
 
 /** When the session is over the page uploads nothing, and still does not let the browser leave. */
@@ -709,17 +891,64 @@ async function closeCase(page, url) {
   assert.equal(await menus(page).count(), 0);
 }
 
-/** A kind the core does not grant says so in the status line; the page makes no download. */
+/** The words of every reason a grant is refused, said in the status line; the page makes no download and the question is asked after a refusal only. */
 async function refusedGrantCase(page, url) {
   await openBrowser(page, url);
-  await page.evaluate(() => (window.__REFUSE = "no preview or download for this kind of file"));
-  await rowOf(page, "notes.md").click({ button: "right" });
+  const asked = () => page.evaluate(() => window.__MOCK__.callsOf("file_grant_why"));
+  /** Make the core refuse with `refusal` and the question answer `why` (`raw` replaces the whole answer), press Download on notes.md and return what the status line then says. */
+  const refuse = async ({ code = "kind", raw, fail = null }) => {
+    await page.evaluate(
+      ([c, r, f]) => {
+        window.__REFUSE = "zq-secret core text of the refusal";
+        window.__WHY = c;
+        window.__WHY_RAW = r;
+        window.__WHY_FAIL = f;
+        document.querySelector("#status .notice").textContent = "";
+      },
+      [code, raw, fail],
+    );
+    await rowOf(page, "notes.md").click({ button: "right" });
+    await menus(page).getByRole("menuitem", { name: "Download" }).click();
+    await page.waitForFunction(() => document.querySelector("#status .notice")?.textContent !== "");
+    await page.waitForFunction(() => document.activeElement?.id === "ime");
+    return noticeNow(page);
+  };
+
+  // A download that works never asks why.
+  await rowOf(page, "mockup.png").click({ button: "right" });
   await menus(page).getByRole("menuitem", { name: "Download" }).click();
-  await page.waitForFunction((t) => document.querySelector("#status .notice")?.textContent === t, SENTENCE);
-  assert.deepEqual(await links(page), [], "nothing was downloaded");
-  assert.equal((await grants(page)).length, 1);
+  await page.waitForFunction(() => window.__links.length === 1);
+  assert.deepEqual(await asked(), [], "no refusal, no question");
+
+  // Each stable code has its sentence; the kind keeps the sentence it always had.
+  const reasons = [
+    ["kind", SENTENCE],
+    ["locked", "Not downloaded: secrets are locked."],
+    ["not_found", "Not downloaded: file not found."],
+    ["denied", "Not downloaded: not allowed to read it."],
+    ["other", "Not downloaded: download failed."],
+  ];
+  for (const [code, sentence] of reasons) assert.equal(await refuse({ code }), sentence, code);
+  assert.equal((await asked()).length, reasons.length, "one question for each refusal");
+  assert.deepEqual((await asked()).at(-1), { source: "local", path: "/home/holz/notes.md" }, "the question names the same file and nothing else");
+
+  // The question can fail, or be answered with something that is not a code: the plain sentence, never a guess and never the core's text.
+  const plain = "Not downloaded: download failed.";
+  assert.equal(await refuse({ fail: "zq-secret no such file" }), plain, "a failing question");
+  assert.equal(await refuse({ raw: "locked" }), plain, "an answer that is a string");
+  assert.equal(await refuse({ raw: { code: "too_large", text: "zq-secret" } }), plain, "a code the page does not know");
+  assert.equal(await refuse({ raw: null }), plain, "no answer");
+  assert.ok(!(await noticeNow(page)).includes("zq-secret"), "the core's text never reaches the status line");
+
+  assert.equal((await links(page)).length, 1, "only the first download made a link; a refusal makes none");
+  assert.equal((await grants(page)).length, 1 + reasons.length + 4, "every press asked for a grant once");
   assert.deepEqual(await revokes(page), [], "there was no grant to end");
-  await page.waitForFunction(() => document.activeElement?.id === "ime");
+  await page.evaluate(() => {
+    window.__REFUSE = undefined;
+    window.__WHY_FAIL = null;
+    window.__WHY_RAW = undefined;
+    window.__WHY = undefined;
+  });
 }
 
 /** The palette lists `Download` only while the focused pane is a file browser with a file selected, or a preview. */
