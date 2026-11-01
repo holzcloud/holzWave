@@ -241,7 +241,7 @@ export default async function ({ engine, page, url, errors }) {
   };
   const passkeyRoutes = [
     { path: "/api/session", body: anonymous({ methods: { passkey: true, password: false } }) },
-    { method: "POST", path: "/auth/passkey/begin", body: { options } },
+    { method: "POST", path: "/auth/passkey/begin", body: { options: { publicKey: options } } },
     { method: "POST", path: "/auth/passkey/finish", body: { next: "done" } },
     homeStub,
   ];
@@ -277,7 +277,7 @@ export default async function ({ engine, page, url, errors }) {
     const server = await open(
       [
         { path: "/api/session", body: anonymous({ methods: { passkey: true } }) },
-        { method: "POST", path: "/auth/passkey/begin", body: { options } },
+        { method: "POST", path: "/auth/passkey/begin", body: { options: { publicKey: options } } },
         { method: "POST", path: "/auth/passkey/finish", body: { next: "done" }, delay: 600 },
         homeStub,
       ],

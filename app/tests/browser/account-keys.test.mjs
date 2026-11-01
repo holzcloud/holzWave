@@ -8,14 +8,17 @@ import { STEP, clean, confirmWith, dialog, fixture, holdsSecret, installAuthenti
 export const backends = ["ws"];
 export const backendNote = "the dialog exists on the web backend only: http() throws on the Tauri backend";
 
+// The shape of the server: the library's own text, `{"publicKey": {...}}`, inside `options`.
 const CREATION = {
   options: {
-    challenge: "AQID",
-    rp: { id: "holz.example.net", name: "holzWave" },
-    user: { id: "BAUG", name: "holz", displayName: "Holz" },
-    pubKeyCredParams: [{ type: "public-key", alg: -7 }],
-    timeout: 60000,
-    extensions: { prf: { eval: { first: "BwgJ" } } },
+    publicKey: {
+      challenge: "AQID",
+      rp: { id: "holz.example.net", name: "holzWave" },
+      user: { id: "BAUG", name: "holz", displayName: "Holz" },
+      pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+      timeout: 60000,
+      extensions: { prf: { eval: { first: "BwgJ" } } },
+    },
   },
 };
 const RULE = "Use at least 12 characters. Not your username, not one repeated character.";

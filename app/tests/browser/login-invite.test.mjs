@@ -58,7 +58,7 @@ const enrolment = (path, handlers = {}) => ({
     if (step === "peek") return ok({ role: "member", existing: false });
     if (step === "begin") {
       return req.json.method === "passkey"
-        ? ok({ next: "passkey_register", options: creation })
+        ? ok({ next: "passkey_register", options: { publicKey: creation } })
         : ok({ next: "totp_setup", secret: SECRET, otpauth: OTPAUTH });
     }
     if (step === "finish") {

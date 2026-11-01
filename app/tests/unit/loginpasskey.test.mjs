@@ -2,14 +2,12 @@
 // the browser returns. Node has ArrayBuffer, btoa and atob, which is all these functions use.
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
-  b64urlDecode,
-  b64urlEncode,
-  decodeCreationOptions,
-  decodeRequestOptions,
-  encodeAssertion,
-  encodeAttestation,
-} from "../../dist/loginpasskey.js";
+import * as passkey from "../../dist/loginpasskey.js";
+
+const { b64urlDecode, b64urlEncode, encodeAssertion, encodeAttestation } = passkey;
+// The server answers `{"options": {"publicKey": {...}}}` (the library's own text), and the page decodes what is in `options`.
+const decodeRequestOptions = (publicKey) => passkey.decodeRequestOptions({ publicKey });
+const decodeCreationOptions = (publicKey) => passkey.decodeCreationOptions({ publicKey });
 
 const buffer = (...bytes) => new Uint8Array(bytes).buffer;
 const text = (s) => Buffer.from(s).toString("base64url");
@@ -114,16 +112,19 @@ test("decodeCreationOptions_converts_challenge_user_and_excluded_credentials", (
   assert.throws(() => decodeCreationOptions({ challenge: text("c"), user: { id: text("u") }, excludeCredentials: [{}] }), TypeError);
 });
 
-test("the options are taken from the publicKey member the server's library wraps them in", () => {
-  const request = decodeRequestOptions({ publicKey: { challenge: text("challenge"), rpId: "holz.example.net", allowCredentials: [{ id: text("c1"), type: "public-key" }] } });
+test("the options are taken from the publicKey member the server's library wraps them in, and from nothing else", () => {
+  const request = passkey.decodeRequestOptions({ publicKey: { challenge: text("challenge"), rpId: "holz.example.net", allowCredentials: [{ id: text("c1"), type: "public-key" }] } });
   assert.equal(Buffer.from(request.challenge).toString(), "challenge");
   assert.equal(request.rpId, "holz.example.net");
   assert.equal(Buffer.from(request.allowCredentials[0].id).toString(), "c1");
-  const creation = decodeCreationOptions({ publicKey: { challenge: text("c"), user: { id: text("u"), name: "anna", displayName: "Anna" }, rp: { name: "holzWave" } } });
+  const creation = passkey.decodeCreationOptions({ publicKey: { challenge: text("c"), user: { id: text("u"), name: "anna", displayName: "Anna" }, rp: { name: "holzWave" } } });
   assert.equal(Buffer.from(creation.user.id).toString(), "u");
   assert.equal(creation.rp.name, "holzWave");
-  assert.throws(() => decodeRequestOptions({ publicKey: "no" }), TypeError);
-  assert.throws(() => decodeCreationOptions({ publicKey: { challenge: text("c") } }), TypeError, "no user inside publicKey");
+  assert.throws(() => passkey.decodeRequestOptions({ publicKey: "no" }), TypeError);
+  assert.throws(() => passkey.decodeCreationOptions({ publicKey: { challenge: text("c") } }), TypeError, "no user inside publicKey");
+  // A bare options object is not what the server sends: it is refused, not guessed at.
+  assert.throws(() => passkey.decodeRequestOptions({ challenge: text("c") }), TypeError, "a bare request object");
+  assert.throws(() => passkey.decodeCreationOptions({ challenge: text("c"), user: { id: text("u"), name: "anna", displayName: "Anna" } }), TypeError, "a bare creation object");
 });
 
 const assertion = (over = {}, extensionResults = {}) => ({

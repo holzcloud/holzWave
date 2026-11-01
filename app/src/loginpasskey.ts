@@ -52,11 +52,10 @@ function list(value: unknown, what: string): unknown[] {
 
 /**
  * The options of a ceremony as the server answers them: the library's own text is `{"publicKey": {...}}`, and the page takes
- * the members of `publicKey` (a bare object, as the scripted servers of the page tests answer, is taken as it is).
+ * the members of `publicKey`. Nothing else is accepted: an object of another shape is not what the server sends.
  */
 function publicKeyOf(raw: unknown): Json {
-  const o = obj(raw, "options");
-  return isObject(o.publicKey) && o.challenge === undefined ? o.publicKey : o;
+  return obj(obj(raw, "options").publicKey, "options.publicKey");
 }
 
 /** A base64url member as an `ArrayBuffer`. */

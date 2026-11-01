@@ -18,7 +18,8 @@ const ME = {
   sessions: [],
 };
 const STEP = { status: 403, body: { code: "forbidden", step_up: true } };
-const OPTIONS = { options: { challenge: "AQID", rpId: "holz.example.net", allowCredentials: [{ id: "Y3JlZA", type: "public-key" }], userVerification: "preferred", timeout: 60000 } };
+// The shape of the server: the library's own text, `{"publicKey": {...}}`, inside `options`.
+const OPTIONS = { options: { publicKey: { challenge: "AQID", rpId: "holz.example.net", allowCredentials: [{ id: "Y3JlZA", type: "public-key" }], userVerification: "preferred", timeout: 60000 } } };
 
 export default async function ({ page, url, errors }) {
   await installAuthenticator(page);
