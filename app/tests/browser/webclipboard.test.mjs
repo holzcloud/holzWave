@@ -124,6 +124,7 @@ export default async function ({ page, url, errors }) {
   await copyKeyCase(page, url);
   await copyOnSelectCase(page, url);
   await copyOnSelectFallbackCase(page, url);
+  await copyOnSelectRefusedCase(page, url);
   await terminalClipboardCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
@@ -334,6 +335,35 @@ async function copyOnSelectFallbackCase(page, url) {
     assert.equal((await callsOf(page, "copy_selection")).length, 0);
     assert.equal((await callsOf(page, "clipboard_text")).length, 0);
   }
+}
+
+/**
+ * An empty selection, and the browser refuses the clipboard write before it looks at the item (the document has no focus). Nobody
+ * reads the item's text promise then, and its rejection ("no selection") must not be reported as an uncaught error of the page for a
+ * plain click. The page's own listener sees unhandled rejections in every engine; the runner's `errors` list sees them again.
+ */
+async function copyOnSelectRefusedCase(page, url) {
+  const g = await openGrid(page, url);
+  await recordClipboard(page, "unused");
+  await page.evaluate(() => {
+    window.__rejected = [];
+    window.addEventListener("unhandledrejection", (e) => window.__rejected.push(String(e.reason && e.reason.message)));
+    window.__MOCK__.on("selection_text", () => null);
+    // The refusal comes at once and the item is never read, as a browser does when the document is not focused.
+    navigator.clipboard.write = (items) => {
+      window.__log.push(["write", items.length, items.map((i) => [...i.types])]);
+      return Promise.reject(new DOMException("Document is not focused.", "NotAllowedError"));
+    };
+  });
+  await page.mouse.move(...g.pt(2, 1, 1));
+  await page.mouse.down();
+  await page.mouse.move(...g.pt(2, 8, 3), { steps: 6 });
+  await frames(page);
+  await page.mouse.up();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("selection_text").length >= 1);
+  await wait(page, 250);
+  assert.deepEqual(await kinds(page), ["write"], "the write was tried once, and with no text there was no second try");
+  assert.deepEqual(await page.evaluate(() => window.__rejected), [], "the item's rejected text was not left unhandled");
 }
 
 /** Nothing the terminal prints can write or read the clipboard: events of that kind reach no clipboard call. */
