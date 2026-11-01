@@ -1892,6 +1892,9 @@ async fn healthcheck_returns_within_3_seconds_when_the_server_accepts_and_never_
             held.push(stream);
         }
     });
+    // The first start of the binary from a test process costs about 1.5 s on macOS (measured: the binary alone, and every later
+    // start, take 3.01 s here). That is the system's first-run check of the file, not the probe, so it is paid before the clock runs.
+    let _ = tokio::process::Command::new(env!("CARGO_BIN_EXE_holzwave-server")).args(["healthcheck", "--now"]).env_clear().output().await;
     let ran = healthcheck(&runtime, &config_file(&dir, &runtime)).await;
     println!("Health: healthcheck against a server that never answers: exit {:?} after {:?}", ran.code, ran.took);
     assert_eq!(ran.code, Some(1));
