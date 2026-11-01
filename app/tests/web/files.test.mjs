@@ -179,6 +179,12 @@ await runTest("files", { upload_max_bytes: LIMIT }, async ({ harness, open }) =>
   // A path outside the home cannot be granted.
   const outside = await socket.call("file_grant", { source: "local", path: "/etc/hosts" });
   check(outside.err !== undefined, "a path outside the home is not granted");
+  // Why it was refused is a stable code and nothing else: a file that is no media kind, and a path that is not there.
+  const whyKind = await socket.call("file_grant_why", { source: "local", path: "/etc/hosts" });
+  equal(JSON.stringify(whyKind.ok), JSON.stringify({ code: "kind" }), "a text file is refused for its kind, with the code only");
+  const whyGone = await socket.call("file_grant_why", { source: "local", path: "/home/zq-no-such-folder/none.png" });
+  check(whyGone.ok?.code === "not_found" || whyGone.ok?.code === "other", "a path that is not there has a code and no text");
+  check(Object.keys(whyGone.ok ?? {}).join() === "code", "the answer has the one member");
 
   ownerContext.expectClean("the owner's context");
   stranger.expectClean("the context with no session");
