@@ -191,7 +191,7 @@ thread and is driven over a channel (section 5). This shapes the whole concurren
 
 ## 6. The app protocol
 
-The webview talks to the core through a deny-by-default set of 119 commands and 17 events. The tables below list the
+The webview talks to the core through a deny-by-default set of 120 commands and 17 events. The tables below list the
 commands of the terminal core, of the AI chat and of the integrations; the golden lists every command. The Rust types are the
 source of truth; `app/tests/fixtures/protocol.json` is the golden written from them (`UPDATE_FIXTURES=1`) and read by
 the TypeScript tests too, so a renamed argument or a changed payload fails on both sides at once. Arguments are
