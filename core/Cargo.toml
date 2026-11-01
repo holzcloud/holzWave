@@ -8,8 +8,8 @@ repository.workspace = true
 
 [features]
 default = ["ghostty"]
-# Terminal engine backed by libghostty-vt. Needs Zig 0.16.0 at build time: the pinned
-# Ghostty commit requires exactly 0.16, and Zig 0.17 breaks its build.zig.
+# Terminal engine backed by libghostty-vt. Needs Zig 0.17 at build time: the pinned
+# Ghostty commit (1.4.0) requires Zig 0.17.
 ghostty = ["dep:libghostty-vt"]
 keyring = ["dep:keyring"]
 
@@ -22,8 +22,8 @@ zeroize = "1"
 getrandom = "0.4"
 infer = "0.22"
 keyring = { version = "4", optional = true }
-# libghostty-rs master (2026-10-09), pinned; the 0.2.2 on crates.io is older and needs Zig 0.15.2.
-libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "d2036baeb605d31d09a9e2ba6d0c923e04c34d54", optional = true }
+# libghostty-rs master (2026-10-30, Ghostty 1.4.0), pinned; the 0.2.2 on crates.io is older. Needs Zig 0.17.
+libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "575ed6b8ceb79ffaf247ecf7e34333876b0d5be4", optional = true }
 portable-pty = "0.9"
 nucleo-matcher = "0.3"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }

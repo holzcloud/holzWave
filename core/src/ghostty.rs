@@ -21,7 +21,7 @@ use crate::engine::{
     Cell, Color, CopyMotion, CopyOp, CopyState, Cursor, CursorStyle, EngineEvent, EngineTheme, KeyAction, KeyEvent,
     MAX_SEARCH_BYTES, MatchSpan, Modes, Mods, MouseAction, MouseButton, MouseEvent, PasteOutcome, RowUpdate, Screen,
     Scrollbar, SearchOp, SearchState, SelectMode, SelectOp, Span, TerminalEngine, Update, WheelEvent, WheelOutcome,
-    Width, sanitize_program_text,
+    Width, sanitize_program_bytes,
 };
 use crate::textread::{
     Cut, MAX_READ_BYTES, MAX_READ_ROWS, TextBuilder, TextRead, TextRegion, cell_is_hidden, rows_within_budget,
@@ -688,7 +688,7 @@ impl GhosttyEngine {
             terminal
                 .on_title_changed(move |t| {
                     if let Ok(title) = t.title() {
-                        push_event(&queue, EngineEvent::Title(sanitize_program_text(title)));
+                        push_event(&queue, EngineEvent::Title(sanitize_program_bytes(title)));
                     }
                 })
                 .map_err(eng)?;
@@ -696,7 +696,7 @@ impl GhosttyEngine {
             terminal
                 .on_pwd_changed(move |t| {
                     if let Ok(pwd) = t.pwd() {
-                        push_event(&queue, EngineEvent::Pwd(sanitize_program_text(pwd)));
+                        push_event(&queue, EngineEvent::Pwd(sanitize_program_bytes(pwd)));
                     }
                 })
                 .map_err(eng)?;

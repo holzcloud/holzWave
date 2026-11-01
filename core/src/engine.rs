@@ -511,6 +511,14 @@ pub fn sanitize_program_text(text: &str) -> String {
     out
 }
 
+/// [`sanitize_program_text`] for bytes that a program controls and that need not be UTF-8 (the title and the working
+/// directory arrive as bytes from libghostty-vt). The input is cut to [`MAX_EVENT_BYTES`] before the conversion so a
+/// huge payload is never copied, bytes that are not UTF-8 become U+FFFD, and the result keeps the same rules.
+pub fn sanitize_program_bytes(bytes: &[u8]) -> String {
+    let bounded = &bytes[..bytes.len().min(MAX_EVENT_BYTES)];
+    sanitize_program_text(&String::from_utf8_lossy(bounded))
+}
+
 /// The value of one hex digit.
 fn hex_value(b: u8) -> Option<u8> {
     match b {

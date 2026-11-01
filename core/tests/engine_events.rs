@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use common::{ascii, engine};
 use holzwave_core::TerminalEngine;
-use holzwave_core::engine::{EngineEvent, MAX_EVENT_BYTES, parse_osc7, sanitize_program_text};
+use holzwave_core::engine::{EngineEvent, MAX_EVENT_BYTES, parse_osc7, sanitize_program_bytes, sanitize_program_text};
 
 fn title(s: &str) -> EngineEvent {
     EngineEvent::Title(s.to_owned())
@@ -46,6 +46,21 @@ fn an_oversized_title_is_cut_to_4096_bytes_on_a_character_boundary() {
     assert_eq!(cut.len(), 4095);
     let ascii_cut = sanitize_program_text(&"a".repeat(10_000));
     assert_eq!(ascii_cut.len(), MAX_EVENT_BYTES);
+}
+
+#[test]
+fn program_bytes_that_are_not_utf8_are_replaced_and_bounded() {
+    // libghostty-vt hands the title and the working directory over as bytes: they need not be UTF-8.
+    assert_eq!(sanitize_program_bytes(b"ok \xff\xfe done"), "ok \u{FFFD}\u{FFFD} done");
+    assert_eq!(sanitize_program_bytes(b"a\x1bb\x00c"), "abc");
+    assert_eq!(sanitize_program_bytes(b""), "");
+    assert_eq!(sanitize_program_bytes("\u{65E5}".as_bytes()), "\u{65E5}");
+
+    // Huge input is cut before it is converted, and the result keeps the cap.
+    let huge = vec![0xffu8; 1_000_000];
+    let cut = sanitize_program_bytes(&huge);
+    assert!(cut.len() <= MAX_EVENT_BYTES, "{} bytes", cut.len());
+    assert!(!cut.is_empty());
 }
 
 #[test]
