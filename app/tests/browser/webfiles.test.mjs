@@ -105,6 +105,7 @@ async function open(page, url, { answer = () => stored("x", 0), os = "web", bloc
             bytes: Array.from(new Uint8Array(await init.body.arrayBuffer())),
             credentials: init.credentials,
             redirect: init.redirect,
+            mode: init.mode,
             at: performance.now(),
           };
           window.__sent.push(entry);
@@ -370,7 +371,11 @@ async function uploadCase(page, url) {
   assert.equal(sent[0].token, "csrf-token-1");
   assert.equal(sent[0].credentials, "same-origin");
   assert.equal(sent[0].redirect, "error");
+  assert.equal(sent[0].mode, "cors", "the mode that reaches fetch: every engine then sends the real Origin header");
   assert.equal(log[0].headers["x-csrf-token"], "csrf-token-1");
+  // What the page puts in the options is not what the server sees: the engine decides. The route has the headers the browser really
+  // sent, and an explicit type must beat the Blob's own `text/plain` there too, or the server answers 400 to the upload.
+  assert.equal(log[0].headers["content-type"], "application/octet-stream", "the browser sent a byte stream, not the file's type");
 
   assert.deepEqual(await pastes(page), [{ pane: 2, text: `'${FOLDER}/a b.txt'`, allow_unsafe: false }], "the quoted path, typed through the paste path of the pane under the drop");
   await page.waitForFunction(() => window.__notices.includes("Uploaded"));
@@ -408,6 +413,8 @@ async function queueCase(page, url) {
   const sent = await page.evaluate(() => window.__sent.map((s) => [s.method, s.headers.slice().sort(), s.bytes.length]));
   const headers = ["Accept", "Content-Type", "X-CSRF-Token"];
   assert.deepEqual(sent, [["PUT", headers, 10], ["PUT", headers, 10], ["PUT", headers, 12]]);
+  assert.deepEqual(log.map((e) => e.headers["content-type"]), ["application/octet-stream", "application/octet-stream", "application/octet-stream"], "the browser sent a byte stream for each file");
+  assert.deepEqual(await page.evaluate(() => window.__sent.map((s) => s.mode)), ["cors", "cors", "cors"]);
   assert.deepEqual(
     (await pastes(page)).map((p) => [p.pane, p.text]),
     [[1, `'${FOLDER}/a.txt'`], [1, ` '${FOLDER}/b.txt'`], [1, ` '${FOLDER}/c d.txt'`]],
