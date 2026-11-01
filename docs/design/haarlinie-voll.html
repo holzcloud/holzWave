@@ -680,7 +680,7 @@ const P=(dot,ico,t,ctx,body,o={})=>`<div class="pane ${o.f?'f':''}" style="${o.s
 
 const shell=(mode)=>{
   let t=`<span class="ro">❯</span> cargo test -p holzwave-core
-<span class="dim">   Compiling holzwave-core v0.0.1-beta1</span>
+<span class="dim">   Compiling holzwave-core v0.0.1-beta2</span>
 test layout::focus_cycles_and_wraps ... <span class="ok">ok</span>
 test layout::json_roundtrip ... <span class="ok">ok</span>
 test unicode_and_wide_characters ... <span class="ok">ok</span>
@@ -689,8 +689,8 @@ test result: <span class="ok">ok</span>. 14 passed; 0 failed
 
 <span class="ro">❯</span> git log --oneline | head -3
 <span class="wa">e883222</span> fix(release): Windows cross script
-<span class="wa">7af9cc8</span> Casks: holzwave@preview 0.0.1-beta1
-<span class="wa">6815139</span> release: version 0.0.1-beta1
+<span class="wa">7af9cc8</span> Casks: holzwave@preview 0.0.1-beta2
+<span class="wa">6815139</span> release: version 0.0.1-beta2
 <span class="ro">❯</span> <span class="cur"></span>`;
   if(mode==='search') t=t.replace(/layout::focus_cycles_and_wraps/,'<span class="hl cur2">layout</span>::focus_cycles_and_wraps').replace('layout::json_roundtrip','<span class="hl">layout</span>::json_roundtrip').replace('release: version','<span class="hl">release</span>: version').replace('fix(release)','fix(<span class="hl">release</span>)');
   if(mode==='copy') t=t.replace('<span class="wa">e883222</span> fix(release): Windows cross script','<span class="sel"><span class="hint">a</span>e883222 fix(release): Windows cross script</span>').replace('<span class="wa">7af9cc8</span>','<span class="hint">s</span><span class="wa">7af9cc8</span>').replace('<span class="wa">6815139</span>','<span class="hint">d</span><span class="wa">6815139</span>').replace('<span class="ro">❯</span> <span class="cur"></span>','<span class="ro">❯</span> ');
@@ -736,7 +736,7 @@ const side=`<div class="side">
  <div class="sec" style="border:0"><div class="h lbl"><span>Widgets</span><span>＋</span></div><div class="i"><span class="ro">◧</span>Notes</div><div class="i"><span class="ro">◧</span>Pomodoro</div></div></div>`;
 /* A status segment of the context (docs/design.md 6.11): a button in the app, the text, then the words PRODUCTION and stale when they apply. */
 const cseg=(text,o={})=>`<span class="cseg${o.stale?' stale':''}"><span class="ct">${text}</span>${o.prod?'<span class="pw">production</span>':''}${o.stale?'<span class="stl">stale</span>':''}</span>`;
-const status=(extra='',k8s=cseg('⎈ talos-prod/kube-system'))=>`<div class="status row"><span>5 tabs · 5 panes</span>${k8s}${cseg('az holz-prod')}<span>⎇ main</span><span class="wa">⌁ ssh 2</span><span class="ok">☁ synced 14:31</span>${extra}<span style="margin-left:auto">webgl2</span><span>utf-8</span><span>0.0.1-beta1</span></div>`;
+const status=(extra='',k8s=cseg('⎈ talos-prod/kube-system'))=>`<div class="status row"><span>5 tabs · 5 panes</span>${k8s}${cseg('az holz-prod')}<span>⎇ main</span><span class="wa">⌁ ssh 2</span><span class="ok">☁ synced 14:31</span>${extra}<span style="margin-left:auto">webgl2</span><span>utf-8</span><span>0.0.1-beta2</span></div>`;
 
 
 const OSK={mac:{n:'⌘',s:'⇧',a:'⌥'},win:{n:'Ctrl',s:'Shift',a:'Alt'},lin:{n:'Ctrl',s:'Shift',a:'Alt'}};
@@ -1129,7 +1129,7 @@ const wbPeople=()=>`<div class="ov float wb-box sheet" role="dialog" aria-modal=
 const wbDrop='<div class="wb-drop" role="status"><div class="lb"><b>Drop to upload</b><span class="dim">to <span style="color:var(--ink)">~/uploads</span></span></div></div>';
 const wbRowMenu='<div class="ov float wb-menu" role="menu" aria-label="sync.pdf" style="left:11rem;top:5.6rem;width:10rem"><div class="it on" role="menuitem"><span>Download</span></div></div>';
 const wbArea=()=>`<div class="area">${P('','❯','shell','pane 1 · ~/holzWave',shell('')+wbDrop,{f:1,chip:phChip('⎈ talos-prod')})}${P('in','▦','files','sftp · talos-1',tree+wbRowMenu)}${P('','⌁','holzkube','ssh · talos-2',ssh(0))}${P('in','◧','notes.md','preview',md)}</div>`;
-const wbStatus=()=>`<div class="status row"><span>5 tabs · 5 panes</span><span class="wa">◌ reconnecting</span><span class="wa">◔ session ends in 4 min</span><span><i class="wb-lock"></i>secrets locked <span class="wb-un">Unlock</span></span><span>Not available in the browser.</span><span style="margin-left:auto">webgl2</span><span>utf-8</span><span>0.0.1-beta1</span></div>`;
+const wbStatus=()=>`<div class="status row"><span>5 tabs · 5 panes</span><span class="wa">◌ reconnecting</span><span class="wa">◔ session ends in 4 min</span><span><i class="wb-lock"></i>secrets locked <span class="wb-un">Unlock</span></span><span>Not available in the browser.</span><span style="margin-left:auto">webgl2</span><span>utf-8</span><span>0.0.1-beta2</span></div>`;
 const wbNRow=(state,tone,word,line,btns)=>`<div class="ln-row" data-state="${state}" data-tone="${tone}"><span class="ln-name">Notify me</span><span class="ln-meta">bell and attention</span><span class="ln-state">${word}</span><p class="ln-adv">${line}</p><div class="ln-btns">${btns.map(b=>`<span class="ln-btn">${b}</span>`).join('')}</div></div>`;
 const wbNState=(cap,group)=>`<div class="wb-nstate"><div class="cap" style="margin:0">${cap}</div>${group}</div>`;
 const wbNotif=()=>`<div class="float wb-notif" role="group" aria-label="Settings: Notifications"><div class="cap wb-nhead" style="margin:0">Settings</div>${wbNState('Off, the default',apG('Notifications',wbNRow('off','plain','off','Bell and attention marks also show in the tab title. Turn this on to get a browser notification as well.',['Turn on'])))}${wbNState('On, after Turn on',apG('Notifications',wbNRow('on','ok','on','A browser notification appears when a pane out of view rings the bell or needs you. It never contains terminal text.',['Turn off'])))}${wbNState('Blocked in the browser',apG('Notifications',wbNRow('blocked','warn','blocked by the browser','The browser blocks notifications for this site. Allow them in the site settings of the browser, then choose Check again.',['Check again'])))}</div>`;
