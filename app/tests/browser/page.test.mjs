@@ -43,14 +43,14 @@ async function stylesheetCase(page, url) {
   }, html);
   assert.equal(source.styleElements, 0, "index.html still has a <style> element");
   assert.equal(source.styleAttributes, 0, "index.html still has a style attribute");
-  assert.deepEqual(source.links, ["./app.css"], "index.html links exactly the app stylesheet");
+  assert.deepEqual(source.links, ["/app.css"], "index.html links exactly the app stylesheet");
 
   // The live document at the moment parsing ended.
   const atLoad = await page.evaluate(() => window.__atLoad);
   assert.ok(atLoad, "the document never reached readyState interactive");
   assert.equal(atLoad.styleElements, 0, "a <style> element exists at load");
   assert.equal(atLoad.styleAttributes, 0, "an element has a style attribute at load");
-  assert.deepEqual(atLoad.stylesheetLinks, ["./app.css"]);
+  assert.deepEqual(atLoad.stylesheetLinks, ["/app.css"]);
 
   assert.equal(await page.locator("style").count(), 0, "a <style> element exists");
 
