@@ -13,6 +13,8 @@ export default async function ({ page, url, errors }) {
   await editFlagCase(page, url);
   await pdfCase(page, url);
   await pdfCloseCase(page, url);
+  await pdfRangeCase(page, url);
+  await pdfDamagedCase(page, url);
   await safeHtmlCase(page, url);
   // That case feeds the allow-list hostile markup: the policy reports the style and the handlers it parses, nothing else.
   await dropInertReports(page, errors);
@@ -488,4 +490,105 @@ async function pdfCloseCase(page, url) {
     return reasons;
   }, 853);
   assert.deepEqual(rejected, [], "closing the viewer must not leave a rejection behind");
+}
+
+// A range that the core refuses. Closing the viewer revokes the grant, so a range still on its way is answered with an error then,
+// and nobody waits for it: the page must not report it. A range refused while the viewer is open ends the document, and the area
+// says so (the page does not stay blank, and nothing is thrown out of the transport).
+async function pdfRangeCase(page, url) {
+  await stubRange(page);
+  await open(page, url, []);
+  const result = await page.evaluate(async ([size, b64]) => {
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const serve = () => window.__MOCK__.on("file_range", ({ offset, len }) => bytes.slice(offset, offset + len));
+    window.__rejections = [];
+    window.addEventListener("unhandledrejection", (e) => window.__rejections.push(String(e.reason?.message ?? e.reason)));
+    // The viewer assigns `requestDataRange` on its transport; an accessor on the prototype collects what it assigns, so the case can
+    // make the request PDF.js would make at the moment it chooses (the order is not left to the speed of the machine).
+    window.__requests = [];
+    const lib = await import(new URL("vendor/pdfjs/pdf.min.mjs", location.href).href);
+    Object.defineProperty(lib.PDFDataRangeTransport.prototype, "requestDataRange", {
+      configurable: true,
+      set(fn) {
+        Object.defineProperty(this, "requestDataRange", { value: fn, writable: true, configurable: true });
+        window.__requests.push((begin, end) => fn.call(this, begin, end));
+      },
+      get() {
+        return () => {};
+      },
+    });
+    const { showPdf } = await import(new URL("pdfview.js", location.href).href);
+    const open = async () => {
+      const host = document.body.appendChild(document.createElement("div"));
+      const said = [];
+      const view = await showPdf(host, "fedcba9876543210fedcba9876543210", size, (t) => said.push(t));
+      return { host, view, said, request: window.__requests.at(-1) };
+    };
+    const settle = () => new Promise((r) => setTimeout(r, 80)); // the report of an unhandled rejection is an event of its own
+    const out = {};
+
+    // In flight at the close: the read is answered with an error after `dispose`.
+    {
+      const { host, view, request } = await open();
+      let refuse = () => {};
+      window.__MOCK__.on("file_range", () => new Promise((_, no) => (refuse = () => no(new Error("the grant ended")))));
+      request(0, 100);
+      view.dispose();
+      refuse();
+      await settle();
+      host.remove();
+      out.afterClose = window.__rejections.splice(0);
+    }
+    // Refused while the viewer is open.
+    serve();
+    {
+      const { host, view, said, request } = await open();
+      window.__MOCK__.on("file_range", () => Promise.reject(new Error("the grant ended")));
+      request(0, 100);
+      await settle();
+      out.refusedText = host.querySelector(".pdf-area .bk-message")?.textContent ?? null;
+      out.refusedDisabled = [...host.querySelectorAll(".pdf-bar button")].map((b) => b.disabled);
+      out.refusedSaid = said.at(-1);
+      out.refusedRejections = window.__rejections.splice(0);
+      view.dispose();
+      host.remove();
+    }
+    return out;
+  }, [853, TINY_PDF]);
+  assert.deepEqual(result.afterClose, [], "a range that is refused after the viewer was closed leaves no rejection behind");
+  assert.deepEqual(result.refusedRejections, [], "a range that is refused leaves no rejection behind");
+  assert.equal(result.refusedText, "The PDF could not be shown.", "a range that is refused while the viewer is open is said in its area");
+  assert.equal(result.refusedSaid, "The PDF could not be shown.");
+  assert.ok(result.refusedDisabled.length > 0 && result.refusedDisabled.every(Boolean), "the buttons of a document that cannot be shown are off");
+}
+
+// A damaged PDF: the document opens (its page tree counts two pages) but the first page is a reference to nothing. The page request
+// fails inside a draw that nobody awaits; the viewer says so in its area and the page reports no uncaught error.
+async function pdfDamagedCase(page, url) {
+  await page.addInitScript((b64) => {
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const text = new TextDecoder("latin1").decode(bytes);
+    const damaged = text.replace("[3 0 R 5 0 R]", "[9 0 R 5 0 R]");
+    if (damaged === text || damaged.length !== text.length) throw new Error("the test PDF has no page list to damage");
+    const broken = Uint8Array.from(damaged, (c) => c.charCodeAt(0));
+    window.__MOCK__.on("file_range", ({ offset, len }) => broken.slice(offset, offset + len));
+  }, TINY_PDF);
+  await open(page, url, []);
+  const result = await page.evaluate(async (size) => {
+    window.__rejections = [];
+    window.addEventListener("unhandledrejection", (e) => window.__rejections.push(String(e.reason?.message ?? e.reason)));
+    const { showPdf } = await import(new URL("pdfview.js", location.href).href);
+    const host = document.body.appendChild(document.createElement("div"));
+    const said = [];
+    const view = await showPdf(host, "fedcba9876543210fedcba9876543210", size, (t) => said.push(t));
+    for (let i = 0; i < 100 && !host.querySelector(".pdf-area .bk-message"); i++) await new Promise((r) => setTimeout(r, 20));
+    await new Promise((r) => setTimeout(r, 80));
+    const out = { text: host.querySelector(".pdf-area .bk-message")?.textContent ?? null, said: said.at(-1), rejections: window.__rejections.splice(0) };
+    view.dispose();
+    host.remove();
+    return out;
+  }, 853);
+  assert.equal(result.text, "The PDF could not be shown.", "a page that cannot be read is said in the area of the viewer");
+  assert.equal(result.said, "The PDF could not be shown.");
+  assert.deepEqual(result.rejections, [], "and it is not an unhandled rejection");
 }

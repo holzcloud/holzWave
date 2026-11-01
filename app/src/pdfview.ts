@@ -43,6 +43,8 @@ function pdfjs(): Promise<PdfJs> {
 
 /** The first piece a document is started with; PDF.js asks for the rest as it needs it. */
 const FIRST = 256 * 1024;
+/** What the area of the viewer says when the document cannot be shown. */
+const FAILED = "The PDF could not be shown.";
 const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 5;
 
@@ -97,8 +99,20 @@ export async function showPdf(host: HTMLElement, token: string, size: number, st
   };
   const first = await read(0, Math.min(size, FIRST));
   const transport = new lib.PDFDataRangeTransport(size, first);
+  let gone = false;
   transport.requestDataRange = (begin, end) => {
-    void read(begin, Math.min(end, size)).then((chunk) => transport.onDataRange(begin, chunk));
+    read(begin, Math.min(end, size))
+      .then((chunk) => {
+        if (!gone) transport.onDataRange(begin, chunk);
+      })
+      .catch(() => {
+        // Closing the viewer ends the grant, so a range still on its way is refused then and nobody waits for it. While the viewer
+        // is open a refused range means the document cannot be read on: ending the loading task makes a document that is still
+        // opening fail with its own error (the caller says it), and one that is open says so in its area.
+        if (gone) return;
+        void task.destroy().catch(() => {});
+        fail();
+      });
   };
   const task = lib.getDocument({
     range: transport,
@@ -116,9 +130,32 @@ export async function showPdf(host: HTMLElement, token: string, size: number, st
   let zoom = 0; // 0 is "fit the width"
   let fitted = -1; // the width of the area the page was last fitted to
   let rendering: { cancel(): void } | null = null;
-  let gone = false;
+  let failed = false;
 
+  /** The document cannot be shown (a range that was refused, a page that is damaged): the area says so, once, and nothing is drawn. */
+  const fail = (): void => {
+    if (gone || failed) return;
+    failed = true;
+    rendering?.cancel();
+    rendering = null;
+    for (const b of [prev, next, out, into, fit]) b.disabled = true;
+    const note = el("p", "bk-message");
+    note.textContent = FAILED;
+    area.replaceChildren(note);
+    status(FAILED);
+  };
+
+  /** Draw the page, and report a failure of it here: a draw is started from keys and resizes, where nobody can catch it. */
   const draw = async (): Promise<void> => {
+    try {
+      await render();
+    } catch {
+      fail();
+    }
+  };
+
+  const render = async (): Promise<void> => {
+    if (failed) return;
     rendering?.cancel();
     rendering = null;
     const mine = ++drawn;
@@ -128,7 +165,7 @@ export async function showPdf(host: HTMLElement, token: string, size: number, st
     } catch (e) {
       // A page PDF.js has not fetched yet is a request to the worker. `dispose` destroys the loading task, and PDF.js
       // rejects what is still pending then (`Error("Transport destroyed")`, a plain Error with no class of its own). Nothing
-      // waits for this draw any more, so that one case ends here; any other failure is still reported.
+      // waits for this draw any more, so that one case ends here; any other failure goes to `draw`, which says it.
       if (gone) return;
       throw e;
     }
