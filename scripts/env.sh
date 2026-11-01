@@ -2,15 +2,16 @@
 #
 #   . scripts/env.sh
 #
-# What it does: puts the stable Rust toolchain and Zig 0.16 on PATH, so that `cargo build`, `cargo test` and the
+# What it does: puts the stable Rust toolchain and Zig 0.17 on PATH, so that `cargo build`, `cargo test` and the
 # libghostty-vt build step work from a fresh shell. Each directory is added only when it exists and is not on PATH
 # yet, so sourcing the file twice changes nothing.
 #
-# Zig must be exactly 0.16.0. The pinned Ghostty commit needs it, and Zig 0.17 breaks Ghostty's build.zig
-# (Phase 2 decision D-02 documents this blocker). Homebrew keeps 0.16 in a keg-only formula for that reason.
-# Where Zig 0.16.0 is looked for, the first one winning: $HOLZWAVE_ZIG_DIR, $HOME/.holzwave/zig-0.16.0 (where
+# Zig must be exactly 0.17.0. The pinned Ghostty commit requires it (its build.zig.zon says minimum_zig_version 0.17.0 and
+# the previous pin needed 0.16.0, so a different Zig than the one named here does not build the terminal engine).
+# Homebrew's versioned formula `zig@0.17` is the one to install: it keeps 0.17 when the plain `zig` moves on.
+# Where Zig 0.17.0 is looked for, the first one winning: $HOLZWAVE_ZIG_DIR, $HOME/.holzwave/zig-0.17.0 (where
 # scripts/env.ps1 -InstallZig puts it on Windows and where docs/build-linux.md unpacks it on Linux), then Homebrew's
-# keg. A directory that does not exist is skipped. Whatever is found, `zig version` must print exactly 0.16.0: a
+# keg. A directory that does not exist is skipped. Whatever is found, `zig version` must print exactly 0.17.0: a
 # distribution's Zig is usually the newest and is wrong for this project.
 #
 # This file is sourced into the interactive shell: it never calls `exit` and never sets `set -e`. It is plain POSIX
@@ -26,8 +27,8 @@ _hw_prepend() {
 
 # Order matters: the last directory prepended wins, so the rustup toolchain comes first on PATH.
 _hw_prepend "$HOME/.cargo/bin"
-_hw_prepend "/opt/homebrew/opt/zig@0.16/bin"
-_hw_prepend "$HOME/.holzwave/zig-0.16.0"
+_hw_prepend "/opt/homebrew/opt/zig@0.17/bin"
+_hw_prepend "$HOME/.holzwave/zig-0.17.0"
 if [ -n "${HOLZWAVE_ZIG_DIR:-}" ]; then
     _hw_prepend "$HOLZWAVE_ZIG_DIR"
 fi

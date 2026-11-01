@@ -12,7 +12,7 @@
 #
 # The container is `ubuntu:26.04`, which is arm64 on an Apple Silicon Mac: a proxy for x86_64 (the same kernel API
 # and the same code paths, not the same CPU). The first run builds the image `holzwave-linux-test` (build tools,
-# GTK and WebKitGTK headers, rustup stable and Zig 0.16.0); remove it with `docker rmi holzwave-linux-test` to get
+# GTK and WebKitGTK headers, rustup stable and Zig 0.17.0); remove it with `docker rmi holzwave-linux-test` to get
 # a newer Rust. `image` only makes sure the image exists and runs no test: scripts/linux-container-bundle.sh builds on it. Named volumes keep the cargo registry, the git checkouts and the target directory between runs, so
 # a second run does not start from nothing: `docker volume rm holzwave-linux-target` forgets the build cache.
 #
@@ -22,7 +22,7 @@
 # Exit status: 0 when the tests ran and passed, 1 when a test failed or no test ran, 2 when a tool is missing
 # (Docker, or npm for the app modes). A missing tool is a failed gate, never a skip.
 
-ZIG_VERSION=0.16.0
+ZIG_VERSION=0.17.0
 BASE_IMAGE=ubuntu:26.04
 
 # HOLZWAVE_LINUX_ARCH=amd64 runs everything as linux/amd64 (on an Apple Silicon Mac Docker Desktop emulates it, with
@@ -107,6 +107,7 @@ RUN set -eu; \
     test "$(zig version)" = "$ZIG_VERSION"
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
 ENV PATH=/root/.cargo/bin:${PATH}
+LABEL ch.holzcloud.holzwave.zig="${ZIG_VERSION}"
 WORKDIR /work
 DOCKERFILE
 }
@@ -158,7 +159,11 @@ run_tests() {
     echo "linux-container-test: ok ($results test binaries)"
 }
 
-if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+# An image that holds another Zig than ZIG_VERSION (or was built before the label existed) is built again: the terminal
+# engine does not build with the wrong Zig, and a cached image would hide that behind a failure deep in the build.
+image_zig=$(docker image inspect -f '{{index .Config.Labels "ch.holzcloud.holzwave.zig"}}' "$IMAGE" 2>/dev/null)
+if [ "$image_zig" != "$ZIG_VERSION" ]; then
+    [ -z "$image_zig" ] || echo "linux-container-test: the image $IMAGE holds Zig $image_zig, not $ZIG_VERSION: building it again"
     build_image || {
         echo "linux-container-test: the image build failed" >&2
         exit 1

@@ -9,7 +9,7 @@ build with its server, image and browser page (Part 10). All of it runs locally;
 ## Part 1: run everything locally
 
 ```sh
-. scripts/env.sh                      # Rust stable and Zig 0.16 on PATH (the pinned engine needs exactly 0.16)
+. scripts/env.sh                      # Rust stable and Zig 0.17 on PATH (the pinned engine needs exactly 0.17.0)
 npm --prefix app ci                   # once: typescript, the Tauri CLI and playwright-core, nothing else
 (cd app && npx playwright-core install webkit chromium)   # once: the two browsers of the browser tests, cached
 
@@ -173,7 +173,7 @@ Notes:
   line that your shell history keeps (put a space before the line, or read the key from the keychain into the variable).
 - The live tests spend tokens: use throwaway keys with a small spending limit, and revoke them afterwards. They are
   `#[ignore]`d and do nothing without their variables.
-- The engine, the shell crate and the goldens need Zig 0.16; the real Apple model needs a Mac with macOS 26 or later,
+- The engine, the shell crate and the goldens need Zig 0.17; the real Apple model needs a Mac with macOS 26 or later,
   Apple Intelligence switched on, and the Xcode 26 SDK to build it. Without Zig or Xcode the quick set above still runs.
 
 ## Part 2: per-platform manual list

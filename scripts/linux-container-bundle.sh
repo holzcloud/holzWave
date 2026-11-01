@@ -135,6 +135,13 @@ RUN set -eu; \
 DOCKERFILE
 }
 
+# An image built on the base keeps the Zig label of the base it was built on. When the base was built again for another Zig,
+# the image on top of it is removed here so that it is built again too and does not carry the old Zig.
+zig_label() { docker image inspect -f '{{index .Config.Labels "ch.holzcloud.holzwave.zig"}}' "$1" 2>/dev/null; }
+if docker image inspect "$IMAGE" >/dev/null 2>&1 && [ "$(zig_label "$IMAGE")" != "$(zig_label "$BASE_IMAGE")" ]; then
+    echo "bundle-check: $IMAGE was built on an older base image: building it again"
+    docker rmi -f "$IMAGE" >/dev/null 2>&1 || true
+fi
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
     build_image || {
         echo "bundle-check: the image build failed" >&2

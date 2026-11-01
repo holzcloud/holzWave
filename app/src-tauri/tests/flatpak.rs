@@ -224,14 +224,14 @@ fn the_runtime_the_extensions_and_the_zig_archive_are_pinned() {
         ["org.freedesktop.Sdk.Extension.rust-stable", "org.freedesktop.Sdk.Extension.node26"]
     );
     assert_eq!(manifest_scalar("command").as_deref(), Some("holzwave-app"), "the binary Tauri builds");
-    // Every archive is Zig 0.16.0 (Phase 2 D-02), from ziglang.org, with its sha256 in the next line.
+    // Every archive is Zig 0.17.0 (the pinned Ghostty commit requires it), from ziglang.org, with its sha256 in the next line.
     let lines: Vec<&str> = MANIFEST.lines().collect();
     let urls: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].trim().starts_with("url:")).collect();
     assert_eq!(urls.len(), 2, "one archive per architecture, nothing else is fetched by the manifest");
     for i in urls {
         let url = lines[i].trim().trim_start_matches("url:").trim();
-        assert!(url.starts_with("https://ziglang.org/download/0.16.0/zig-"), "{url}");
-        assert!(url.ends_with("-linux-0.16.0.tar.xz"), "{url}");
+        assert!(url.starts_with("https://ziglang.org/download/0.17.0/zig-"), "{url}");
+        assert!(url.ends_with("-linux-0.17.0.tar.xz"), "{url}");
         let sha = lines[i + 1].trim().strip_prefix("sha256:").map(str::trim).expect("the sha256 follows the url");
         assert!(sha.len() == 64 && sha.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')), "{sha}");
     }

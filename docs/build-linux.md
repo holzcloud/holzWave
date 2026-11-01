@@ -13,10 +13,10 @@ The result is a `.deb`, an `.rpm` and an AppImage; the packages are not signed (
 
 ## Rules of this build
 
-- **Zig is exactly 0.16.0.** The pinned Ghostty commit builds the terminal engine with its own `build.zig`, which needs
-  Zig 0.16.0; Zig 0.17 removed an API it uses and fails (Phase 2 decision D-02). A distribution's `zig` package, Snap,
-  Homebrew on Linux and `zigup` hand out the newest Zig, so none of them is used: download the exact version from
-  ziglang.org as shown below.
+- **Zig is exactly 0.17.0.** The pinned Ghostty commit builds the terminal engine with its own `build.zig`, and its
+  `build.zig.zon` says `minimum_zig_version = "0.17.0"` (the commit before the pin needed 0.16.0, so the version moved
+  with the pin). A distribution's `zig` package, Snap, Homebrew on Linux and `zigup` hand out the newest Zig, which will
+  not stay 0.17.0, so none of them is used: download the exact version from ziglang.org as shown below.
 - **Everything else is the newest version**: Rust stable (from rustup, not the distribution's older `rustc`), Node,
   npm, git, the system libraries.
 - **Build only locally**, on your own machine.
@@ -78,24 +78,24 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh     # Rust stable
 Open a new terminal afterwards (or `. "$HOME/.cargo/env"`). Node 26 or newer with npm comes from
 <https://nodejs.org> (distribution packages are usually older). git comes from the package list above.
 
-### Zig 0.16.0 (exactly)
+### Zig 0.17.0 (exactly)
 
-`scripts/env.sh` looks for Zig in `$HOLZWAVE_ZIG_DIR`, then in `$HOME/.holzwave/zig-0.16.0` (the folder
-`scripts/env.ps1` uses on Windows), then in Homebrew's keg-only `zig@0.16`. Put the archive there:
+`scripts/env.sh` looks for Zig in `$HOLZWAVE_ZIG_DIR`, then in `$HOME/.holzwave/zig-0.17.0` (the folder
+`scripts/env.ps1` uses on Windows), then in Homebrew's `zig@0.17`. Put the archive there:
 
 ```sh
 cd "$(mktemp -d)"
 arch=$(uname -m)                         # x86_64 or aarch64
-curl --proto '=https' --tlsv1.2 -fLO "https://ziglang.org/download/0.16.0/zig-$arch-linux-0.16.0.tar.xz"
+curl --proto '=https' --tlsv1.2 -fLO "https://ziglang.org/download/0.17.0/zig-$arch-linux-0.17.0.tar.xz"
 # The checksum comes from ziglang.org's published index. With jq:
-curl --proto '=https' --tlsv1.2 -fsSL https://ziglang.org/download/index.json | jq -r ".[\"0.16.0\"][\"$arch-linux\"].shasum"
-sha256sum "zig-$arch-linux-0.16.0.tar.xz"      # the two lines must be equal; stop if they are not
-mkdir -p "$HOME/.holzwave/zig-0.16.0"
-tar -xJf "zig-$arch-linux-0.16.0.tar.xz" -C "$HOME/.holzwave/zig-0.16.0" --strip-components=1
+curl --proto '=https' --tlsv1.2 -fsSL https://ziglang.org/download/index.json | jq -r ".[\"0.17.0\"][\"$arch-linux\"].shasum"
+sha256sum "zig-$arch-linux-0.17.0.tar.xz"      # the two lines must be equal; stop if they are not
+mkdir -p "$HOME/.holzwave/zig-0.17.0"
+tar -xJf "zig-$arch-linux-0.17.0.tar.xz" -C "$HOME/.holzwave/zig-0.17.0" --strip-components=1
 ```
 
-For orientation, the index of 2026-10-12 gave `70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00` for
-`x86_64-linux` and `ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17` for `aarch64-linux`. The index
+For orientation, the index of 2026-11-01 gave `1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026` for
+`x86_64-linux` and `9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8` for `aarch64-linux`. The index
 is the authority; do not trust a copy of it, including this one, if they differ.
 
 ## Steps
@@ -106,7 +106,7 @@ From a normal (not root) terminal.
 git clone https://github.com/holzcloud/holzWave
 cd holzWave
 . scripts/env.sh                      # Rust and Zig on PATH; sourcing prints nothing
-zig version                           # must print exactly 0.16.0; if not, fix this before anything else
+zig version                           # must print exactly 0.17.0; if not, fix this before anything else
 npm --prefix app ci                   # the Tauri CLI, TypeScript and the browser-test driver; nothing else
 npm --prefix app run build            # compiles the page into app/dist (the app build needs it)
 cargo test --workspace                # the first run builds the terminal engine with Zig: minutes
@@ -293,12 +293,19 @@ the top). A failing row becomes a gap plan; DESK-31 is marked done only when the
 
 ## What was and was not verified
 
-Verified in a Linux container on a Mac (Ubuntu 26.04.1, arm64, rustc 1.99, Zig 0.16.0):
+Verified in a Linux container on a Mac (Ubuntu 26.04.1, arm64, rustc 1.99). The rows below were made with Zig 0.16.0 and have
+**not** been repeated with Zig 0.17.0 (the move of 2026-11-01), except where a row says so. Repeated with Zig 0.17.0 in that
+container: the image build (`scripts/linux-container-test.sh image`, which unpacks the 0.17.0 archive after the checksum
+check and now rebuilds an image that holds another Zig), the terminal engine builds there, and
+`CARGO_BUILD_JOBS=1 sh scripts/linux-container-test.sh server` passes (53 test binaries; without the job limit the linker
+of the 8 GiB Docker VM was killed once). The GNU-ABI and Linux cross builds of `scripts/cross-check.sh all` also pass with
+Zig 0.17.0.
+
 
 | What | How |
 |---|---|
 | The core tests and the app crate's tests pass on Linux | `sh scripts/linux-container-test.sh all` |
-| `scripts/env.sh` sourced by dash, bash and zsh finds `$HOME/.holzwave/zig-0.16.0` and `$HOLZWAVE_ZIG_DIR`, never exits, and leaves the macOS `PATH` exactly as it was | run in the container and on the Mac |
+| `scripts/env.sh` sourced by dash, bash and zsh finds `$HOME/.holzwave/zig-0.17.0` and `$HOLZWAVE_ZIG_DIR`, never exits, and leaves the macOS `PATH` exactly as it was | run in the container and on the Mac |
 | The release build, a deb, an rpm and an AppImage; the deb and rpm have the right dependencies, files, icons, categories, keywords and no install script | `sh scripts/linux-container-bundle.sh` |
 | The same for x86_64: the release build, deb, rpm and AppImage in an amd64 container (Ubuntu 24.04, emulated); each is read back as x86_64 and the AppImage is opened without being run | `sh scripts/release-linux-container.sh <version>` |
 | The Debian family package names exist on Ubuntu 26.04; the Fedora family names exist on Fedora 44 | `apt-cache policy`, `dnf repoquery` in containers |

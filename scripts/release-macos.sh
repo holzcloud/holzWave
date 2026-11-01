@@ -15,7 +15,7 @@
 # attribute after the install and says so in its caveats.
 #
 # Needs a clean checkout of main at the commit to release, the gh CLI logged in for --publish, and the build
-# environment of docs/building.md (scripts/env.sh puts Rust and Zig 0.16 on the PATH).
+# environment of docs/building.md (scripts/env.sh puts Rust and Zig 0.17 on the PATH).
 
 here=$(cd "$(dirname "$0")" && pwd)
 cd "$here/.." || exit 2

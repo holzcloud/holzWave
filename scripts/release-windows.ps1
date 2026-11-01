@@ -48,7 +48,7 @@ if (git status --porcelain) { Fail 'the working tree is not clean' }
 git fetch -q origin main
 if ((git rev-parse HEAD) -ne (git rev-parse origin/main)) { Fail 'main is not the same commit as origin/main: pull first' }
 
-. (Join-Path $PSScriptRoot 'env.ps1')   # puts Zig 0.16.0 on the PATH for this session, checks MSVC Rust and VS tools
+. (Join-Path $PSScriptRoot 'env.ps1')   # puts Zig 0.17.0 on the PATH for this session, checks MSVC Rust and VS tools
 
 npm --prefix app ci
 if ($LASTEXITCODE -ne 0) { Fail 'npm ci failed' }

@@ -3,8 +3,8 @@
 Preview installers exist for macOS, Windows and Linux (see Releases below); the author has run holzWave on all three. The steps below are for macOS on Apple Silicon.
 
 ```sh
-brew install rustup zig@0.16 node
-export PATH="/opt/homebrew/opt/zig@0.16/bin:$PATH"   # Zig 0.16.0 exactly; see below
+brew install rustup zig@0.17 node
+export PATH="/opt/homebrew/opt/zig@0.17/bin:$PATH"   # Zig 0.17.0 exactly; see below
 rustup default stable
 
 git clone https://github.com/holzcloud/holzwave
@@ -13,8 +13,10 @@ npm --prefix app ci && npm --prefix app run build    # the frontend, compiled by
 cargo run -p holzwave-app                            # builds libghostty-vt with Zig, then starts the app
 ```
 
-**Why Zig 0.16.0 and not the newest?** `libghostty-vt` is built by Ghostty's own `build.zig`, which needs exactly
-Zig 0.16. Zig 0.17 removed an API it uses and fails. The crate is pinned by git revision for the same reason.
+**Why Zig 0.17.0 exactly?** `libghostty-vt` is built by Ghostty's own `build.zig`; the pinned commit (521cf2c, through
+`libghostty-rs` 575ed6b) declares `minimum_zig_version = "0.17.0"` in its `build.zig.zon`, and the commit that was pinned
+before needed 0.16.0 (it fails on 0.17). A later Zig is not tried: every Zig release has so far changed the build API. The
+crate is pinned by git revision for the same reason, and the Zig version moves only together with that pin.
 
 Run the tests and the renderer benchmark locally:
 
@@ -33,7 +35,7 @@ Windows and Linux are built from source as described in [build-windows.md](build
 
 The web build ([server.md](server.md)) is one image built from `packaging/docker/Dockerfile` in three stages: the page with
 Node, the binaries with Zig and Rust, and a slim Debian runtime. Everything it fetches is pinned: the base images by tag and
-digest (Node 26.11.1 for the page, Debian trixie for the build and the runtime), Zig by the build argument `ZIG_VERSION` (0.16.0,
+digest (Node 26.11.1 for the page, Debian trixie for the build and the runtime), Zig by the build argument `ZIG_VERSION` (0.17.0,
 with the checksum from ziglang.org's index verified before unpacking), rustup 1.29.2 with Rust 1.99.1, and the page's
 packages with `npm ci --ignore-scripts`. From the repository root:
 
@@ -70,7 +72,7 @@ installs the sidecar beside the app executable, which is the folder that the app
 `usr/bin/wsh` in the AppImage. The Flatpak does not carry it, see [flatpak.md](flatpak.md). `sh scripts/wsh-sidecar.sh <rust target
 triple>` builds the sidecar for one target into `app/src-tauri/binaries/` (an ignored folder of build products, never committed).
 `sh scripts/wsh-linux.sh` builds the two static Linux binaries (`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`)
-on any host with no Linux cross compiler: `wsh` has no C dependency, so the linker is `zig cc` (Zig 0.16 is a build requirement
+on any host with no Linux cross compiler: `wsh` has no C dependency, so the linker is `zig cc` (Zig 0.17 is a build requirement
 already) or, where that does not link, Rust's own `rust-lld`; run `rustup target add x86_64-unknown-linux-musl
 aarch64-unknown-linux-musl` once. It checks with `file` that each is an ELF of the right machine and statically linked.
 Each release script then inspects the package it built: `scripts/bundle-check-macos.sh` (the file is beside the executable that

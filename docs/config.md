@@ -85,7 +85,7 @@ setting is changed from the dialog, the palette or a shortcut, and then in full.
 | `cursor_blink` | string | `"system"`, `"on"`, `"off"` | `"system"` | at once |
 | `motion` | string | `"system"`, `"reduce"`, `"full"` | `"system"` | at once |
 | `contrast` | string | `"system"`, `"normal"`, `"high"` | `"system"` | at once |
-| `scrollback_lines` | number | 100 to 100000 | 10000 | for panes started afterwards; a running pane keeps its own |
+| `scrollback_lines` | number | 100 to 100000 | 10000 | for panes started afterwards; a running pane keeps its own; it counts rows of the grid (a long line that wraps takes several), and the terminal engine drops whole pages of rows, so a pane keeps a few percent more or less than the number |
 | `confirm_multiline_paste` | boolean | | `true` | at once |
 | `copy_on_select` | boolean | | `true` | at once; copies the selection to the system clipboard when a mouse selection ends (below) |
 | `smooth_scroll` | boolean | | `false` | at once; eases a scrollback jump over at most 120 ms (below) |

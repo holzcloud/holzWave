@@ -116,7 +116,7 @@ await runTest("transport", {}, async ({ harness, open }) => {
   equal(gotSmall.slice(0, 64), small.slice(0, 64), "the first 64 characters of the 40,000-character line");
 
   // 200,000 characters: the end of the line is compared with the end of the line that was printed, and the line was complete up to
-  // its last character because the marker follows it. Since plan 11-49 the pane keeps the 10,000 lines it is set to (before, a
+  // its last character because the marker follows it. Now the pane keeps the 10,000 lines it is set to (before, a
   // hidden byte limit of the engine cut it to about 1,000 rows and only a tail of 57,608 characters arrived), so more of the line arrives; the
   // comparison stays "as far as the pane keeps it" and needs 40,000 characters at least.
   const big = lineOf(20_000);

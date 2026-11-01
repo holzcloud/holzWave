@@ -4,7 +4,7 @@
 //! Verdict: PASS
 //! Terminators: ST, BEL
 //! Unmarked text: None
-//! Revision: libghostty-vt d2036baeb605d31d09a9e2ba6d0c923e04c34d54, Zig 0.16.0
+//! Revision: libghostty-vt 575ed6b8ceb79ffaf247ecf7e34333876b0d5be4 (Ghostty 521cf2c), Zig 0.17.0
 //!
 //! This file is the guard for a libghostty bump: a newer revision that changes an answer fails or un-ignores a test
 //! here instead of silently changing what the AI chat reads.

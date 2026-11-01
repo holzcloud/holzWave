@@ -36,7 +36,7 @@
 # no binary) names them for the bundler.
 #
 # Needs: this Mac (Darwin), Docker running, `brew install mingw-w64`, `rustup target add x86_64-pc-windows-gnu`, npm,
-# a clean working tree, and the environment of docs/building.md (scripts/env.sh puts Rust and Zig 0.16 on the PATH).
+# a clean working tree, and the environment of docs/building.md (scripts/env.sh puts Rust and Zig 0.17 on the PATH).
 # It installs nothing; a missing tool is exit 2.
 #
 # Exit status: 0 when the installer was built and inspected (the last line is "release-windows-cross: ok"), 1 when a
@@ -84,7 +84,7 @@ if [ -n "$rustup_cmd" ]; then
     "$rustup_cmd" target list --installed 2>/dev/null | grep -qx "$TARGET" ||
         need "rustup target missing: rustup target add $TARGET (a toolchain change, not a dependency)"
 fi
-[ "$(zig version 2>/dev/null)" = 0.16.0 ] || need "Zig 0.16.0 is not on PATH (. scripts/env.sh; docs/building.md)"
+[ "$(zig version 2>/dev/null)" = 0.17.0 ] || need "Zig 0.17.0 is not on PATH (. scripts/env.sh; docs/building.md)"
 
 conf=$(sed -n 's/^ *"version": "\(.*\)",/\1/p' app/src-tauri/tauri.conf.json | head -1)
 [ "$conf" = "$version" ] || fail "version $version is not the version of tauri.conf.json ($conf)"

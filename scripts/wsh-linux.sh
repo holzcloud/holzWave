@@ -10,7 +10,7 @@
 # serde_json, getrandom). It has no C dependency and no `ring`, so the only foreign piece is the linker, and the
 # musl target needs nothing from the host's C library. The linker is, in this order, the first that yields a binary
 # that passes the checks below (the script prints which one):
-#   1. `zig cc -target <arch>-linux-musl` through a small wrapper (Zig 0.16 is already a build requirement);
+#   1. `zig cc -target <arch>-linux-musl` through a small wrapper (Zig 0.17 is already a build requirement);
 #   2. Rust's own `rust-lld` with self-contained linking.
 # If neither links, the script exits 1 and prints both linker outputs. It adds no C cross compiler, uses no Docker
 # and changes no manifest.

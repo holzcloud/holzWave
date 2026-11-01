@@ -85,7 +85,7 @@ trap cleanup EXIT
 
 check_core() {
     command -v zig >/dev/null 2>&1 || {
-        echo "cross-check: zig is missing: the Linux half compiles C with zig cc (brew install zig@0.16)" >&2
+        echo "cross-check: zig is missing: the Linux half compiles C with zig cc (brew install zig@0.17)" >&2
         exit 2
     }
     zshim=$(mktemp -d "${TMPDIR:-/tmp}/holzwave-zcc.XXXXXX") || exit 2

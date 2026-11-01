@@ -14,7 +14,7 @@ repository, never a Flathub package; there is no signing, no repository and no a
 
 | File | What |
 |---|---|
-| `packaging/flatpak/ch.holzcloud.holzwave.yml` | The manifest: GNOME 51 runtime and SDK (org.freedesktop 26.08), the Rust and Node 26 SDK extensions, Zig 0.16.0 as a build tool, and the build of this repository inside the SDK |
+| `packaging/flatpak/ch.holzcloud.holzwave.yml` | The manifest: GNOME 51 runtime and SDK (org.freedesktop 26.08), the Rust and Node 26 SDK extensions, Zig 0.17.0 as a build tool, and the build of this repository inside the SDK |
 | `packaging/flatpak/ch.holzcloud.holzwave.metainfo.xml` | AppStream: name, licence `GPL-3.0-only`, the release, and a description that says plainly that the app can run commands on the host and uses the network |
 | `packaging/flatpak/ch.holzcloud.holzwave.desktop` | The desktop file (`Categories=System;TerminalEmulator;`) |
 | `scripts/build-flatpak.sh` | `--check` (validate the three files), `--container-build` (build in Docker), no argument (build and install on a Linux machine) |
@@ -156,8 +156,10 @@ Checked (Docker Desktop, Ubuntu 26.04, arm64):
 
 - `sh scripts/build-flatpak.sh --check`: `flatpak-builder --show-manifest` reads the manifest without warning,
   `appstreamcli validate --no-net` and `desktop-file-validate` pass.
-- `sh scripts/build-flatpak.sh --container-build`: **the manifest builds** in a privileged Docker container (GNOME 51 and the
-  two SDK extensions installed from Flathub, Zig 0.16.0 and the Ghostty packages downloaded, the release build of the app,
+- `sh scripts/build-flatpak.sh --container-build`: **the manifest built** in a privileged Docker container with Zig 0.16.0; it
+  was **not repeated** after the manifest moved to Zig 0.17.0 (2026-11-01), when only the archive addresses and sha256 values were
+  changed and checked against ziglang.org's index and the downloaded files (GNOME 51 and the
+  two SDK extensions installed from Flathub, Zig and the Ghostty packages downloaded, the release build of the app,
   Zig removed from the result again, AppStream composed, files exported, `ldd` finds every library of the binary in the
   runtime). That build is for **aarch64** (the architecture of the Docker VM on an Apple Silicon Mac), so it used the
   aarch64 Zig archive: the x86_64 archive and checksum of the manifest were not exercised, and the app was not started

@@ -26,7 +26,7 @@
 # dropped and exactly CHOWN, KILL, SETGID and SETUID added. It makes a key with `keygen`, a throwaway certificate for the name
 # `holzwave.test`, starts the server on a private network and asks it for the sign-in state over TLS 1.3 from a second
 # container. HOLZWAVE_WEB_CONTEXT names another build context than the repository root (a clean checkout, for example), and
-# HOLZWAVE_ZIG_VERSION another Zig than the default of the Dockerfile (0.16.0) for a tree whose terminal engine needs it.
+# HOLZWAVE_ZIG_VERSION another Zig than the default of the Dockerfile (0.17.0) for a tree whose terminal engine needs it.
 # `multiarch` builds the image for linux/amd64 and linux/arm64, one platform at a time, and on each runs `uname -m`, `ldd`,
 # `keygen` and `check-config` on the example configuration with a generated certificate. A platform that cannot be built or
 # run on this machine is reported as `NOT RUN <platform>: <reason>` and the mode exits 1; it is never a pass.
@@ -110,11 +110,18 @@ tree_stream() {
 }
 
 # The base image of the Linux script, and the web test image on top of it (file capability tools).
+# An image built on the base keeps the Zig label of the base it was built on. When the base was built again for another Zig,
+# the image on top of it is removed here so that it is built again too and does not carry the old Zig.
+zig_label() { docker image inspect -f '{{index .Config.Labels "ch.holzcloud.holzwave.zig"}}' "$1" 2>/dev/null; }
 ensure_images() {
     sh "$here/linux-container-test.sh" image || {
         echo "web-container-test: the Linux test image $BASE_IMAGE could not be built" >&2
         exit 1
     }
+    if docker image inspect "$WEB_IMAGE" >/dev/null 2>&1 && [ "$(zig_label "$WEB_IMAGE")" != "$(zig_label "$BASE_IMAGE")" ]; then
+        echo "web-container-test: $WEB_IMAGE was built on an older base image: building it again"
+        docker rmi -f "$WEB_IMAGE" >/dev/null 2>&1 || true
+    fi
     if ! docker image inspect "$WEB_IMAGE" >/dev/null 2>&1; then
         echo "+ docker build -t $WEB_IMAGE (Dockerfile from stdin)"
         docker build ${PLATFORM:+--platform "$PLATFORM"} -t "$WEB_IMAGE" --build-arg "BASE_IMAGE=$BASE_IMAGE" - <<'DOCKERFILE' || {

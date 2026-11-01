@@ -3,7 +3,7 @@
 //!
 //! libghostty-vt has two scrollback limits that work together, a number of lines and a number of bytes, and the first
 //! one reached wins. A fresh terminal starts with a byte limit of only 10 000 bytes, so setting the line limit alone
-//! left about 1 000 rows at 80 columns whatever the setting said (found by the web transport test of plan 11-39, same
+//! left about 1 000 rows at 80 columns whatever the setting said (found by the web transport test of the page, same
 //! on the revisions before and after the Zig 0.17 bump). The engine now sets the line limit and removes the byte limit.
 //!
 //! libghostty-vt prunes whole pages, so the kept history is near the limit and not exactly on it (measured: 9 836 rows

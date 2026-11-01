@@ -5,7 +5,7 @@
 //! UI hint, never a decision about security or content: a bell that is held back is simply not shown again.
 //!
 //! [`CommandMarks`] reads the end of a command, the `D` mark of OSC 133, with its exit status from the PTY bytes. It
-//! exists because the pinned libghostty-vt (rev d2036ba) parses OSC 133 for its own rows but its OSC API (`osc.rs`)
+//! exists because the pinned libghostty-vt (rev 575ed6b) parses OSC 133 for its own rows but its OSC API (`osc.rs`)
 //! exposes only the command type `SemanticPrompt`, no status and no callback (checked in the vendored source). Only
 //! the 7-bit forms (`ESC ]`) are read, because those are the only ones the shell hooks (`wsh/hooks`) and the Windows
 //! wrapper (`core/src/winshell.rs`) write. What it finds feeds a UI hint (a mark on a tab) and never a decision about

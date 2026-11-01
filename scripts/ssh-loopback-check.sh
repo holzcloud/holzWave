@@ -24,7 +24,7 @@
 #
 # Needs: ssh-keygen, ssh-keyscan, ssh-agent, ssh-add, /usr/sbin/sshd, an sftp-server binary (/usr/libexec/sftp-server, /usr/lib/openssh/
 # sftp-server or /usr/lib/ssh/sftp-server) and the Rust toolchain. The tests of the SSH client build without the engine;
-# the test of the tunnel is a test of the app crate and needs Zig 0.16 (scripts/env.sh finds it).
+# the test of the tunnel is a test of the app crate and needs Zig 0.17 (scripts/env.sh finds it).
 # Present on macOS and on most Linux hosts. The passphrases of the generated keys are throwaway text and reach the test
 # only through its environment.
 #
