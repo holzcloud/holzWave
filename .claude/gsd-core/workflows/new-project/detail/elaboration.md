@@ -84,7 +84,7 @@ Your STACK.md feeds into roadmap creation. Be prescriptive:
 
 <output>
 Write to: {research_dir}/STACK.md
-Use template: .claude/gsd-core/templates/research-project/STACK.md
+Use template: /Users/holz/Projects/holzWave/.claude/gsd-core/templates/research-project/STACK.md
 </output>
 ", subagent_type="gsd-project-researcher", model="{researcher_model}", description="Stack research")
 
@@ -124,7 +124,7 @@ Your FEATURES.md feeds into requirements definition. Categorize clearly:
 
 <output>
 Write to: {research_dir}/FEATURES.md
-Use template: .claude/gsd-core/templates/research-project/FEATURES.md
+Use template: /Users/holz/Projects/holzWave/.claude/gsd-core/templates/research-project/FEATURES.md
 </output>
 ", subagent_type="gsd-project-researcher", model="{researcher_model}", description="Features research")
 
@@ -164,7 +164,7 @@ Your ARCHITECTURE.md informs phase structure in roadmap. Include:
 
 <output>
 Write to: {research_dir}/ARCHITECTURE.md
-Use template: .claude/gsd-core/templates/research-project/ARCHITECTURE.md
+Use template: /Users/holz/Projects/holzWave/.claude/gsd-core/templates/research-project/ARCHITECTURE.md
 </output>
 ", subagent_type="gsd-project-researcher", model="{researcher_model}", description="Architecture research")
 
@@ -204,7 +204,7 @@ Your PITFALLS.md prevents mistakes in roadmap/planning. For each pitfall:
 
 <output>
 Write to: {research_dir}/PITFALLS.md
-Use template: .claude/gsd-core/templates/research-project/PITFALLS.md
+Use template: /Users/holz/Projects/holzWave/.claude/gsd-core/templates/research-project/PITFALLS.md
 </output>
 ", subagent_type="gsd-project-researcher", model="{researcher_model}", description="Pitfalls research")
 ```

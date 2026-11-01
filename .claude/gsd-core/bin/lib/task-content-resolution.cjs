@@ -43,6 +43,8 @@ const node_child_process_1 = __importDefault(require("node:child_process"));
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const ioMod = require("./io.cjs");
 const { formatDiagnosticToken } = ioMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const capabilityLoaderMod = require("./capability-loader.cjs");
 // ─── Result taxonomy ──────────────────────────────────────────────────────────
 /**
  * The four non-throwing outcomes of `resolveTaskContent`. Frozen because the
@@ -100,6 +102,17 @@ class ResolverFailedError extends Error {
         this.name = 'ResolverFailedError';
         this.exitCode = exitCode;
         this.stderrTail = stderrTail;
+    }
+}
+/**
+ * The tracker-id's id segment cannot safely be one argv element: a leading `-`
+ * reads as an option to the resolver binary, and control characters are never
+ * legitimate. Thrown before any spawn.
+ */
+class ResolverUnsafeIdError extends Error {
+    constructor() {
+        super('tracker-id rejected: id must not start with "-" or contain control characters');
+        this.name = 'ResolverUnsafeIdError';
     }
 }
 /** The resolver subprocess exceeded its declared `invoke.timeoutMs` bound. */
@@ -312,6 +325,9 @@ function resolveTaskContent(input) {
     const split = splitTrackerId(input.trackerId);
     if (split === null)
         return { kind: TASK_CONTENT_RESULT.NOT_APPLICABLE };
+    if (split.id.trimStart().startsWith('-') || /[\u0000-\u001f\u007f]/.test(input.trackerId ?? '')) {
+        throw new ResolverUnsafeIdError();
+    }
     const resolver = findResolver(split.prefix, input.capabilities ?? []);
     if (resolver === null)
         return { kind: TASK_CONTENT_RESULT.NO_RESOLVER };
@@ -327,7 +343,7 @@ function resolveTaskContent(input) {
         throw new ResolverAmbiguousError(split.prefix, ids);
     }
     const invocation = buildInvocation(resolver, split.id);
-    const timeoutMs = input.timeoutOverrideMs ?? invocation.timeoutMs;
+    const timeoutMs = Math.floor(Math.min(input.timeoutOverrideMs ?? invocation.timeoutMs, invocation.timeoutMs));
     const execFn = input.execFn ?? realExec;
     const result = execFn(invocation.binary, invocation.args, { timeout: timeoutMs });
     if (isExecTimeout(result)) {
@@ -354,12 +370,41 @@ function resolveTaskContent(input) {
     }
     return { kind: TASK_CONTENT_RESULT.RESOLVED, content };
 }
+/**
+ * Production capability loader for tracker-id resolution: the merged
+ * first-party + validated-installed-overlay registry (ADR-1244 D2), the
+ * established runtime read path for "installed capabilities including
+ * third-party" — as opposed to `capability-loader.cts`'s heavier build-time
+ * validation entry points or the static `capability-registry.cjs` alone
+ * (first-party only, would miss a third-party capability's
+ * `taskContentResolver` declaration entirely).
+ */
+function loadResolverCapabilities(cwd) {
+    const registry = capabilityLoaderMod.loadRegistry({ includeInstalled: true, cwd });
+    return Object.values(registry.capabilities ?? {});
+}
+/** True for every error `resolveTaskContent` throws as a hard halt (the one classifier all consumers share). */
+function isResolverFailure(err) {
+    return (err instanceof ResolverAmbiguousError ||
+        err instanceof ResolverFailedError ||
+        err instanceof ResolverTimeoutError ||
+        err instanceof ResolverMalformedOutputError ||
+        err instanceof ResolverUnsafeIdError);
+}
+/** Every text field of resolved content, so a consumer scanning for text cannot miss one when the shape grows. */
+function contentTexts(c) {
+    return [c.action, c.verify, ...c.acceptanceCriteria, ...c.readFirst, c.done].filter((v) => v !== null);
+}
 const taskContentResolution = {
     TASK_CONTENT_RESULT,
     splitTrackerId,
     findResolver,
     buildInvocation,
     resolveTaskContent,
+    loadResolverCapabilities,
+    isResolverFailure,
+    contentTexts,
+    ResolverUnsafeIdError,
     ResolverAmbiguousError,
     ResolverFailedError,
     ResolverTimeoutError,

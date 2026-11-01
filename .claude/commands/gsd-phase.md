@@ -36,10 +36,10 @@ Mode routing:
 </routing>
 
 <execution_context>
-@.claude/gsd-core/workflows/add-phase.md
-@.claude/gsd-core/workflows/insert-phase.md
-@.claude/gsd-core/workflows/remove-phase.md
-@.claude/gsd-core/workflows/edit-phase.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/add-phase.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/insert-phase.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/remove-phase.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/edit-phase.md
 </execution_context>
 
 <context>

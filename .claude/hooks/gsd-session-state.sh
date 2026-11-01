@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# gsd-hook-version: 1.17.0
+# gsd-hook-version: 1.19.0
 # gsd-session-state.sh — SessionStart hook: inject project state reminder
 # Outputs STATE.md head on every session start for orientation.
 #

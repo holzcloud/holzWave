@@ -113,6 +113,22 @@ exports.KNOWN_REVIEWER_SLUGS = (() => {
         return [];
     }
 })();
+/**
+ * #5359: map a lane flag alias (`agy` for `--agy`) to its canonical slug via the
+ * descriptor roster's declared `flags` (same source as `review-lane explicit-from-argv`).
+ * Guarded like KNOWN_REVIEWER_SLUGS: a load failure degrades to the plain error.
+ */
+function laneSlugForAlias(name, lanes) {
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const roster = lanes ?? require('./review-lane-descriptor.cjs').REVIEWER_LANES;
+        // `l.slug !== name`: an undetected canonical slug (`--codex` flag) is not an alias.
+        return roster.find((l) => l.slug !== name && l.flags.includes(`--${name}`))?.slug;
+    }
+    catch {
+        return undefined;
+    }
+}
 /** Instance names are lowercase slugs that must not shadow a built-in slug. */
 exports.INSTANCE_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 function normalizeConfiguredDefaultReviewers(rawValue) {
@@ -239,7 +255,10 @@ function resolveReviewerSelection(input) {
         // Sorted so the error order does not depend on flag order on the command line.
         const missing = [...explicitFlags].filter((slug) => !detected.has(slug)).sort();
         for (const slug of missing) {
-            errors.push(`explicit reviewer '${slug}' is not available on this host`);
+            const canonical = laneSlugForAlias(slug, input.lanes);
+            errors.push(canonical
+                ? `explicit reviewer '${slug}' is a flag alias; pass its canonical slug '${canonical}'`
+                : `explicit reviewer '${slug}' is not available on this host`);
         }
         // Guarded on the error count as it stood BEFORE this branch, so the
         // aggregate message fires under exactly the conditions it did previously.

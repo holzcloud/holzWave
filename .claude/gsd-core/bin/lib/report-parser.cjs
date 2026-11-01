@@ -6,7 +6,7 @@ exports.parseTestReport = parseTestReport;
 const tap_parser_cjs_1 = require("./vendor/tap-parser.cjs");
 const saxes_cjs_1 = require("./vendor/saxes.cjs");
 exports.ReportFormat = {
-    Tap: 'tap', Junit: 'junit', SwiftTesting: 'swift-testing', Unittest: 'unittest', Unknown: 'unknown',
+    Tap: 'tap', Junit: 'junit', SwiftTesting: 'swift-testing', Unittest: 'unittest', GoTest: 'go-test', Unknown: 'unknown',
 };
 exports.TestStatus = { Passed: 'passed', Failed: 'failed', Skipped: 'skipped', Todo: 'todo' };
 function parseTap(output) {
@@ -247,7 +247,63 @@ function parseUnittest(output) {
     report.valid = report.issues.length === 0;
     return report;
 }
+/**
+ * `go test` text output (#5106). Plain console text, so the shape is matched by line:
+ *   --- FAIL: TestName (0.00s)          one per failed test (every test with -v; subtests indented)
+ *   FAIL\texample.com/pkg\t0.004s        one package summary per package, after that package's tests
+ *   FAIL\texample.com/pkg [build failed]   the package did not compile — nothing asserted anything
+ * A test's name carries no package, so each test is also known as `<package>.<name>`, attributed to
+ * the next package summary line. The same name failing in two packages is ambiguous until qualified.
+ * `go test -json` is not text and stays unsupported.
+ */
+const GO_TEST_RESULT = /^[ \t]*-{3} (PASS|FAIL|SKIP): (\S+) \(\d+(?:\.\d+)?s\)$/; // -{3}: not a literal fence, see frontmatter-fence-drift
+const GO_PACKAGE_LINE = /^(ok|FAIL|\?)[ \t]+(\S+)[ \t]+(?:\d+(?:\.\d+)?s\b|\(cached\)|\[([a-z ]+)\])/;
+function isGoTestOutput(output) {
+    if (/^TAP version \d+/.test(output.trimStart()))
+        return false;
+    return output.split(/\r?\n/).some((line) => GO_TEST_RESULT.test(line) || GO_PACKAGE_LINE.test(line));
+}
+function parseGoTest(output) {
+    const report = { format: exports.ReportFormat.GoTest, valid: true, tests: [], issues: [] };
+    let segment = [];
+    let packages = 0;
+    for (const line of output.split(/\r?\n/)) {
+        const result = GO_TEST_RESULT.exec(line);
+        if (result) {
+            const name = result[2];
+            const status = result[1] === 'FAIL' ? exports.TestStatus.Failed : result[1] === 'SKIP' ? exports.TestStatus.Skipped : exports.TestStatus.Passed;
+            if (!segment.some((test) => test.name === name && test.status === status)) {
+                segment.push({ name, identities: [name], group: null, groupIdentities: [], status });
+            }
+            continue;
+        }
+        const pkg = GO_PACKAGE_LINE.exec(line);
+        if (!pkg)
+            continue;
+        packages++;
+        const [, outcome, importPath, bracket] = pkg;
+        if (outcome === 'FAIL' && (bracket === 'build failed' || bracket === 'setup failed')) {
+            report.buildFailed = true;
+            report.issues.push(`go test package ${importPath} ${bracket}`);
+        }
+        else if (outcome === 'ok' && segment.some((test) => test.status === exports.TestStatus.Failed)) {
+            report.issues.push(`go test package ${importPath} is ok but its output reports a failed test`);
+        }
+        for (const test of segment)
+            test.identities.push(`${importPath}.${test.name}`);
+        report.tests.push(...segment);
+        segment = [];
+    }
+    if (packages === 0)
+        report.issues.push('Missing go test package summary');
+    if (segment.length > 0)
+        report.issues.push('go test results without a following package summary');
+    report.valid = report.issues.length === 0;
+    return report;
+}
 const adapters = [
+    // Before TAP: a run whose first package is fine begins `ok  <TAB>pkg`, which the TAP matcher reads as a point.
+    { matches: isGoTestOutput, parse: parseGoTest },
     { matches: (output) => /^(?:TAP version \d+|(?:not )?ok\b|1\.\.\d+|#)/.test(output.trimStart()), parse: parseTap },
     { matches: (output) => output.trimStart().startsWith('<'), parse: parseJunit },
     { matches: (output) => new RegExp(SWIFT_AGGREGATE.source, 'm').test(output), parse: parseSwiftTesting },

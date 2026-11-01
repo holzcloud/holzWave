@@ -118,6 +118,9 @@ const { getMilestoneInfo } = roadmapParserMod;
 const stateMod = require("./state.cjs");
 const { writeStateMd, assertVerificationReportsReadable } = stateMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
+const verificationMod = require("./verification.cjs");
+const { repairLegacyVerificationStatus } = verificationMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const frontmatter = require("./frontmatter.cjs");
 const { extractFrontmatter } = frontmatter;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -252,9 +255,27 @@ function computeMissingMilestoneVersions(milestonesArchiveDir, milestonesPath) {
  * shape, collapsed to one seam here since every case now shares one
  * caller).
  */
-function runRepairAction(cwd, action, paths) {
+function runRepairAction(cwd, action, paths, args = {}) {
     const { rootBase, configPath, statePath, milestonesPath, milestonesArchiveDir } = paths;
     switch (action) {
+        case REMEDY_ACTION.REPAIR_VERIFICATION_STATUS: {
+            // #5291: the report path comes from the finding's own remedy args, not
+            // from user input; `repairLegacyVerificationStatus` re-verifies that it is
+            // a report contained in its phase directory before it writes a byte.
+            const file = typeof args['file'] === 'string' ? args['file'] : '';
+            if (file === '')
+                return { success: false, error: 'no report path on the finding' };
+            const repaired = repairLegacyVerificationStatus(file);
+            if (!repaired.ok)
+                return { success: false, error: repaired.reason };
+            return {
+                success: true,
+                path: node_path_1.default.relative(cwd, file).split(node_path_1.default.sep).join('/'),
+                detail: repaired.legacyStatusKept
+                    ? `status ${repaired.from} -> ${repaired.to}; the report's existing legacy_status was left as it was`
+                    : `status ${repaired.from} -> ${repaired.to}; original kept as legacy_status`,
+            };
+        }
         case REMEDY_ACTION.CREATE_CONFIG:
         case REMEDY_ACTION.RESET_CONFIG: {
             (0, shell_command_projection_cjs_1.platformWriteSync)(configPath, JSON.stringify(defaultConfigPayload(), null, 2));
@@ -390,6 +411,34 @@ function applyRepairs(cwd, diagnostics, repair, backfill) {
     const refused = [];
     const details = [];
     const paths = repairPaths(cwd);
+    // #5291: a legacy-status repair is the CURE for the refusal the pre-check
+    // below enforces, so it runs first (a report edit is its only write and it
+    // validates its own target); the pre-check then sees the repaired reports.
+    const statusRepairs = new Set();
+    if (repair) {
+        for (const diagnostic of diagnostics) {
+            const { remedy, code } = diagnostic;
+            if (remedy.action !== REMEDY_ACTION.REPAIR_VERIFICATION_STATUS || remedy.risk === REMEDY_RISK.DESTRUCTIVE)
+                continue;
+            statusRepairs.add(diagnostic);
+            try {
+                const outcome = runRepairAction(cwd, remedy.action, paths, remedy.args);
+                details.push({
+                    code,
+                    action: remedy.action,
+                    success: outcome.success,
+                    ...(outcome.path ? { path: outcome.path } : {}),
+                    ...(outcome.detail ? { detail: outcome.detail } : {}),
+                    ...(outcome.error ? { error: outcome.error } : {}),
+                });
+                if (outcome.success)
+                    applied.push(code);
+            }
+            catch (err) {
+                details.push({ code, action: remedy.action, success: false, error: err instanceof Error ? err.message : String(err) });
+            }
+        }
+    }
     // #5118 (no write before the error): a requested REGENERATE_STATE rewrites
     // STATE.md from every phase's report and throws on one whose `status` is
     // outside the closed set — but other repairs in the SAME run (config,
@@ -410,6 +459,8 @@ function applyRepairs(cwd, diagnostics, repair, backfill) {
     for (const diagnostic of diagnostics) {
         const { remedy, code } = diagnostic;
         if (remedy.action === REMEDY_ACTION.ADVISE)
+            continue;
+        if (statusRepairs.has(diagnostic))
             continue;
         const requested = remedy.action === REMEDY_ACTION.BACKFILL_MILESTONES ? repair || backfill : repair;
         if (!requested)

@@ -233,7 +233,7 @@ the next spawn. `effort` (claude runtime) has its own cascade
 (`agent_overrides` → `routing_tier_defaults` → `default`; see
 `docs/CONFIGURATION.md` § "Where effort actually reaches") and is baked at
 install time into the `effort:` frontmatter key of
-`.claude/agents/gsd-*.md` — Claude Code's Agent tool has no per-spawn
+`/Users/holz/Projects/holzWave/.claude/agents/gsd-*.md` — Claude Code's Agent tool has no per-spawn
 effort parameter, so per-agent frontmatter is the only channel. An effort
 config change has no effect until `gsd_run effort sync --apply`
 re-syncs the agent files. Codex agents instead pin

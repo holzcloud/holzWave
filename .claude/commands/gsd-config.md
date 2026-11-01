@@ -37,9 +37,9 @@ Mode routing:
 </routing>
 
 <execution_context>
-@.claude/gsd-core/workflows/settings.md
-@.claude/gsd-core/workflows/settings-advanced.md
-@.claude/gsd-core/workflows/settings-integrations.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/settings.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/settings-advanced.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/settings-integrations.md
 </execution_context>
 
 <context>

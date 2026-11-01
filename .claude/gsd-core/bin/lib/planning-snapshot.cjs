@@ -129,7 +129,9 @@ function buildPhaseSnapshot(phasesDir, dir, convention) {
         dir,
         complete: completionResult.value.complete,
         verificationStatus: completionResult.value.verification.status,
-        verificationStatusError: statusError ? { file: statusError.file, message: statusError.message } : null,
+        verificationStatusError: statusError
+            ? { file: statusError.file, message: statusError.message, rawStatus: statusError.rawStatus }
+            : null,
         planCount: scanResult.planCount,
         summaryCount: scanResult.summaryCount,
         scope: worstScope(completionResult.scope, scanResult.scope),

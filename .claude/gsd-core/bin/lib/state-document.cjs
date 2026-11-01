@@ -14,6 +14,7 @@ exports.isUnfilledFieldValue = isUnfilledFieldValue;
 exports.leadingCalendarDate = leadingCalendarDate;
 exports.isRealCalendarDate = isRealCalendarDate;
 exports.stateFieldContinuation = stateFieldContinuation;
+exports.fieldContinuationEnd = fieldContinuationEnd;
 exports.stateExtractField = stateExtractField;
 exports.stateFieldValue = stateFieldValue;
 exports.stateCurrentPositionSlice = stateCurrentPositionSlice;
@@ -359,6 +360,8 @@ const STATE_SIBLING_FIELD_LINE_RE = /^\*{0,2}[A-Za-z][A-Za-z0-9 _-]*\*{0,2}:{1,2
  * cannot wrap), or is followed by end-of-file, a blank line, Markdown
  * structure, or a sibling field.
  */
+/** The line terminators the STATE.md readers (JS `m`-flag `^`/`$`) treat as a line boundary. */
+const LINE_SEPARATOR_RE = /[\n\u2028\u2029]/;
 function stateFieldContinuation(content, fieldName) {
     const escaped = (0, pattern_cjs_1.escapeRegex)(fieldName);
     // Same two single-line grammars stateExtractField uses, in the same order, so
@@ -375,10 +378,21 @@ function stateFieldContinuation(content, fieldName) {
     // before testing for the newline.
     const afterValue = match.index + match[0].length;
     const rest = content.slice(afterValue).replace(/^\r/, '');
-    if (!rest.startsWith('\n'))
+    // #5460: U+2028 / U+2029 are line starts to the `m`-flag readers (and stop `(.+)`), so they end
+    // the value's line exactly as `\n` does.
+    if (!/^[\n\u2028\u2029]/.test(rest))
         return null; // end of file: nothing follows
-    const lines = rest.slice(1).split('\n').map((line) => line.replace(/\r$/, ''));
-    const continuation = [];
+    const lines = rest.slice(1).split(LINE_SEPARATOR_RE).map((line) => line.replace(/\r$/, ''));
+    const continuation = lines.slice(0, continuationLineCount(lines)).map((line) => line.trim());
+    return continuation.length ? continuation.join(' ') : null;
+}
+/**
+ * How many of the lines directly below a single-line field belong to its value: the scan
+ * `stateFieldContinuation` reports on, shared so a writer that replaces the value removes exactly
+ * the lines a validator would call its continuation (#4945). `lines` are CR-free.
+ */
+function continuationLineCount(lines) {
+    let count = 0;
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
         if (!line.trim())
@@ -391,9 +405,37 @@ function stateFieldContinuation(content, fieldName) {
         // title, so stop before consuming it rather than after.
         if (i + 1 < lines.length && SETEXT_UNDERLINE_RE.test(lines[i + 1]))
             break;
-        continuation.push(line.trim());
+        count++;
     }
-    return continuation.length ? continuation.join(' ') : null;
+    return count;
+}
+/**
+ * The index just past a single-line field's value AND the continuation lines that wrap it
+ * (#4945). `valueEnd` is where the field's own line ends (before its line terminator). Replacing
+ * `content.slice(valueEnd, result)` with nothing removes every continuation line and the
+ * terminator in front of each, so the terminator after the last one stays. Returns `valueEnd`
+ * when nothing continues the value.
+ */
+function fieldContinuationEnd(content, valueEnd) {
+    const tail = content.slice(valueEnd);
+    // #5460: the readers' `m`-flag `^` also starts a line after U+2028 / U+2029, so a continuation
+    // scan that split on `\n` alone swallowed `...tail<U+2028>Stopped at: x` as ONE continuation line
+    // and deleted the sibling field with it. Each separator is one UTF-16 unit, like `\n`, so the
+    // removal arithmetic below is unchanged.
+    const first = /^(?:\r?\n|[\u2028\u2029])/.exec(tail);
+    if (!first)
+        return valueEnd;
+    const rawLines = tail.slice(first[0].length).split(LINE_SEPARATOR_RE);
+    const count = continuationLineCount(rawLines.map((line) => line.replace(/\r$/, '')));
+    if (count === 0)
+        return valueEnd;
+    let removed = first[0].length + (count - 1);
+    for (let i = 0; i < count; i++)
+        removed += rawLines[i].length;
+    // The terminator after the last continuation line stays; on a CRLF document that includes its CR.
+    if (rawLines[count - 1].endsWith('\r'))
+        removed -= 1;
+    return valueEnd + removed;
 }
 function stateExtractField(content, fieldName) {
     const escaped = (0, pattern_cjs_1.escapeRegex)(fieldName);

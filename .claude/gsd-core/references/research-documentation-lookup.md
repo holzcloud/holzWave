@@ -5,7 +5,7 @@ When you need library or framework documentation, check in this order:
    - Fetch docs: `mcp__context7__query-docs` with `libraryId` (the ID from step 1) and `query`
 
 2. If Context7 MCP is not available (custom subagents cannot see project-scoped
-   `.mcp.json` servers — they only inherit user-scoped `.claude/mcp.json`, so a
+   `.mcp.json` servers — they only inherit user-scoped `/Users/holz/Projects/holzWave/.claude/mcp.json`, so a
    context7 server configured at the project scope is invisible to spawned
    agents), use the CLI fallback via Bash:
 

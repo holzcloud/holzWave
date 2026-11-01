@@ -18,7 +18,7 @@ A completed phase has been submitted for verification. Verify that the phase goa
 
 Goal-backward verification. Start from what the phase SHOULD deliver, verify it actually exists and works in the codebase.
 
-@.claude/gsd-core/references/mandatory-initial-read.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/mandatory-initial-read.md
 
 **Critical mindset:** Do NOT trust SUMMARY.md claims. SUMMARYs document what Claude SAID it did. You verify what ACTUALLY exists in the code. These often differ.
 
@@ -41,10 +41,10 @@ Every truth must resolve to VERIFIED, FAILED (BLOCKER), or UNCERTAIN (WARNING wi
 </adversarial_stance>
 
 <required_reading>
-@.claude/gsd-core/references/verification-overrides.md
-@.claude/gsd-core/references/gates.md
-@.claude/gsd-core/references/verifier-phase-gates.md
-@.claude/gsd-core/references/verifier-evidence-gate.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/verification-overrides.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/gates.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/verifier-phase-gates.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/verifier-evidence-gate.md
 </required_reading>
 
 This agent implements the **Escalation Gate** pattern (surfaces unresolvable gaps to the developer for decision).
@@ -53,11 +53,11 @@ Before verifying, discover project context:
 
 **Project instructions:** Read `./CLAUDE.md` if it exists in the working directory. Follow all project-specific guidelines, security requirements, and coding conventions.
 
-**Project skills:** @.claude/gsd-core/references/project-skills-discovery.md
+**Project skills:** @/Users/holz/Projects/holzWave/.claude/gsd-core/references/project-skills-discovery.md
 - Load `rules/*.md` as needed during **verification**.
 - Apply skill rules when scanning for anti-patterns and verifying quality.
 
-**agent_skills:** self-load per @.claude/gsd-core/references/agent-skills-bootstrap.md
+**agent_skills:** self-load per @/Users/holz/Projects/holzWave/.claude/gsd-core/references/agent-skills-bootstrap.md (agent type: `gsd-verifier`)
 </project_context>
 
 <core_principle>
@@ -77,16 +77,16 @@ Then verify each level against the actual codebase.
 <verification_process>
 
 At verification decision points, apply structured reasoning:
-@.claude/gsd-core/references/thinking-models-verification.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/thinking-models-verification.md
 
 At verification decision points, reference calibration examples:
-@.claude/gsd-core/references/few-shot-examples/verifier.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/few-shot-examples/verifier.md
 
 ## Resolver Bootstrap (Every Mode)
 
-`gsd_run` is used in initial and re-verification mode alike, so it is defined here, before Step 0, not inside a mode-specific step. Each Bash call is a fresh shell, so a `gsd_run` function defined in one call does not exist in the next: every Bash snippet below that calls `gsd_run` (in any step, in any mode) must begin with this resolver block in the same call. If `gsd-tools.cjs` cannot be found, never search the filesystem (no `find /`, no `find "$HOME"`): use the runtime config directory's `gsd-core/bin/gsd-tools.cjs` (`${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/gsd-tools.cjs` on Claude Code) or stop and report.
+`gsd_run` is used in initial and re-verification mode alike, so it is defined here, before Step 0, not inside a mode-specific step. Each Bash call is a fresh shell, so a `gsd_run` function defined in one call does not exist in the next: every Bash snippet below that calls `gsd_run` (in any step, in any mode) must begin with this resolver block in the same call. If `gsd-tools.cjs` cannot be found, never search the filesystem (no `find /`, no `find "$HOME"`): use the runtime config directory's `gsd-core/bin/gsd-tools.cjs` (`${CLAUDE_CONFIG_DIR:-/Users/holz/Projects/holzWave/.claude}/gsd-core/bin/gsd-tools.cjs` on Claude Code) or stop and report.
 
-@.claude/gsd-core/references/gsd-run-resolver.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/gsd-run-resolver.md
 
 ## Step 0: Check for Previous Verification
 
@@ -299,7 +299,7 @@ grep -r "$artifact_name" "${search_path:-src/}" --include="*.ts" --include="*.ts
 ## Step 4b: Data-Flow Trace (Level 4)
 
 Trace each rendered value back to a real data source. Procedure and
-recipes: @.claude/gsd-core/references/verifier-wiring-patterns.md
+recipes: @/Users/holz/Projects/holzWave/.claude/gsd-core/references/verifier-wiring-patterns.md
 
 Flag any value whose chain ends in a static return, a hardcoded literal, or
 a mock rather than a real query.
@@ -347,7 +347,7 @@ For each link:
 ### Wiring patterns
 
 Verify each link below; per-pattern procedures and recipes:
-@.claude/gsd-core/references/verifier-wiring-patterns.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/verifier-wiring-patterns.md
 
 - **Component → API** — the component actually calls the endpoint it claims.
 - **API → Database** — the endpoint issues a real query, not a static return.
@@ -423,7 +423,7 @@ grep -n -B 2 -A 2 "console\.log" "$file" 2>/dev/null | grep -E "^\s*(const|funct
 
 **Debt marker gate:** Any `TBD`, `FIXME`, or `XXX` marker in a file modified by this phase is a 🛑 BLOCKER unless the same line references formal follow-up work (`issue #123`, `PR #123`, `#123`, or `DEF-*`). Unreferenced markers mean completion is not auditable; set `status: gaps_found` and list each marker under `gaps`.
 
-**Re-verification evidence gate (#3304):** in re-verification mode, a 🛑 Blocker other than an unresolved debt marker (always self-evidencing) blocks unconditionally only if it is a carried-forward gap (Step 0's `gaps:`) or the flagged file was git-modified since the prior `verified:` timestamp (fail closed: unresolvable history counts as modified). Otherwise it predates the gap-closure round unflagged and needs deterministic evidence — a named test run red, or another reproducible artifact — to stay blocking. Algorithm: @.claude/gsd-core/references/verifier-evidence-gate.md. Unevidenced → 📋 Advisory: record in `advisory:` frontmatter, exclude from Step 9 Rule 1, never revert a completed must-have.
+**Re-verification evidence gate (#3304):** in re-verification mode, a 🛑 Blocker other than an unresolved debt marker (always self-evidencing) blocks unconditionally only if it is a carried-forward gap (Step 0's `gaps:`) or the flagged file was git-modified since the prior `verified:` timestamp (fail closed: unresolvable history counts as modified). Otherwise it predates the gap-closure round unflagged and needs deterministic evidence — a named test run red, or another reproducible artifact — to stay blocking. Algorithm: @/Users/holz/Projects/holzWave/.claude/gsd-core/references/verifier-evidence-gate.md. Unevidenced → 📋 Advisory: record in `advisory:` frontmatter, exclude from Step 9 Rule 1, never revert a completed must-have.
 
 Categorize: 🛑 Blocker (prevents goal or unresolved debt marker) | ⚠️ Warning (incomplete) | ℹ️ Info (notable) | 📋 Advisory (re-verification only — new-scope, unevidenced; see above)
 
@@ -651,7 +651,7 @@ Deferred items are informational only — they do not require closure plans.
 
 ## MVP Mode Verification
 
-**When the phase under verification has `mode: mvp` in ROADMAP.md (resolved by the verify-work workflow):** Apply the goal-backward methodology, narrowed to the phase's user-story goal. Required reading: `@.claude/gsd-core/references/verify-mvp-mode.md`.
+**When the phase under verification has `mode: mvp` in ROADMAP.md (resolved by the verify-work workflow):** Apply the goal-backward methodology, narrowed to the phase's user-story goal. Required reading: `@/Users/holz/Projects/holzWave/.claude/gsd-core/references/verify-mvp-mode.md`.
 
 **Core narrowing rule:** Goal-backward verification normally checks that the phase goal is observably true in the codebase. Under MVP mode, the phase goal IS a user story ("As a [user role], I want to [capability], so that [outcome]."). Verify the `[outcome]` clause is observably true — that is the success condition.
 
@@ -691,7 +691,7 @@ verified: YYYY-MM-DDTHH:MM:SSZ
 status: passed | gaps_found | human_needed
 score: N/M must-haves verified
 covered_files: [...]
-covered_digest: "v3:sha256:..."
+covered_digest: "v4:sha256:..."
 behavior_unverified: 0 # Count of ⚠️ PRESENT_BEHAVIOR_UNVERIFIED truths (present + wired, behavior not exercised); each is detailed in behavior_unverified_items below (and in human_verification when status is human_needed)
 overrides_applied: 0 # Count of PASSED (override) items included in score
 overrides: # Only if overrides exist — carried forward or newly added

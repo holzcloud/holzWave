@@ -21,12 +21,12 @@ Routes to the pause-work workflow which handles:
 - Current phase detection from recent files
 - Complete state gathering (position, completed work, remaining work, decisions, blockers)
 - Handoff file creation with all context sections
-- Git commit as WIP
+- Git commit handoff
 - Resume instructions
 </objective>
 
 <execution_context>
-@.claude/gsd-core/workflows/pause-work.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/pause-work.md
 </execution_context>
 
 <context>
@@ -35,7 +35,7 @@ State and phase progress are gathered in-workflow with targeted reads.
 
 <process>
 If `--report` is in the `<arguments>` block:
-Read and execute `.claude/gsd-core/workflows/session-report.md` end-to-end.
+Read and execute `/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/session-report.md` end-to-end.
 
 **Follow the pause-work workflow**.
 

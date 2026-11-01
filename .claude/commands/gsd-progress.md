@@ -37,10 +37,10 @@ Three modes:
 </flags>
 
 <execution_context>
-@.claude/gsd-core/workflows/progress.md
-@.claude/gsd-core/workflows/next.md
-@.claude/gsd-core/workflows/do.md
-@.claude/gsd-core/references/ui-brand.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/progress.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/next.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/do.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/ui-brand.md
 </execution_context>
 
 <process>

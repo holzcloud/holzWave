@@ -47,6 +47,8 @@ const coreUtilsMod = require("./core-utils.cjs");
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- planning-scope.cjs is an export= CommonJS module
 const planningScopeMod = require("./planning-scope.cjs");
 const shell_command_projection_cjs_1 = require("./shell-command-projection.cjs");
+const text_lines_cjs_1 = require("./text-lines.cjs");
+const frontmatter_fence_cjs_1 = require("./frontmatter-fence.cjs");
 const runtime_slash_cjs_1 = require("./runtime-slash.cjs");
 const security_cjs_1 = require("./security.cjs");
 const pattern_cjs_1 = require("./pattern.cjs");
@@ -607,17 +609,19 @@ function phaseArtifactPaths(phaseDir, projectRoot) {
  *                `.planning/<project>/workstreams/<ws>`), covering a
  *                per-project/per-workstream store symlink (amendment 1,
  *                revised R7).
+ *   v4 (#5351) — v3 with each CRLF byte pair hashed as LF. Every other
+ *                byte, including a lone CR and non-UTF-8 input, is preserved.
  *
  * A stored digest names its own version (`v<N>:sha256:…`), and
  * `readVerificationStatus` recomputes under the STORED version rather than
  * this constant — so bumping it does not flip every already-verified phase
- * to `stale` on upgrade. A legacy v1/v2 report keeps its own semantics
- * (shared documents included for v1; no report filter or artifact union for
- * either) until it is re-fingerprinted; only a version outside
+ * to `stale` on upgrade. A legacy v1/v2/v3 report keeps its own raw-byte
+ * semantics (shared documents included for v1; no report filter or artifact
+ * union for v1/v2) until it is re-fingerprinted; only a version outside
  * `KNOWN_FINGERPRINT_VERSIONS` is unrecomputable and fails closed.
  */
-const FINGERPRINT_VERSION = 3;
-const KNOWN_FINGERPRINT_VERSIONS = new Set([1, 2, 3]);
+const FINGERPRINT_VERSION = 4;
+const KNOWN_FINGERPRINT_VERSIONS = new Set([1, 2, 3, 4]);
 /**
  * #4623: the planning roots whose DIRECT children are repo-wide planning
  * documents, as project-root-relative posix paths. Always `.planning`; plus
@@ -815,7 +819,22 @@ function deriveCoveredDigest(projectRoot, coveredFiles, version = FINGERPRINT_VE
         catch {
             return { ok: true, digest: null, files: declared, mappedPhaseDir: artifactMappedPhaseDir };
         }
-        const fileHash = node_crypto_1.default.createHash('sha256').update(bytes).digest('hex');
+        const hash = node_crypto_1.default.createHash('sha256');
+        if (version >= 4) {
+            // #5351: drop only the CR in each CRLF pair without decoding the
+            // covered input — binary files and lone CR bytes keep their meaning.
+            // Hash Buffer slices directly, retaining the LF at each new start.
+            let start = 0;
+            for (let crlf = bytes.indexOf('\r\n'); crlf !== -1; crlf = bytes.indexOf('\r\n', start)) {
+                hash.update(bytes.subarray(start, crlf));
+                start = crlf + 1;
+            }
+            hash.update(bytes.subarray(start));
+        }
+        else {
+            hash.update(bytes);
+        }
+        const fileHash = hash.digest('hex');
         parts.push(`${rel}\n${fileHash}\n`);
         hashed++;
     }
@@ -1176,6 +1195,72 @@ function findVerificationStatusError(phaseDirs, deps = {}) {
     return null;
 }
 /**
+ * #5291: legacy report statuses `validate health --repair` may rewrite, and the
+ * closed-set status each becomes. Deliberately minimal — only the value the
+ * maintainer ruled on (`pass_with_caveats` -> `passed`). Every other status
+ * outside the closed set (`pending`, `partial`, …) has NO mapping: it stays
+ * refused and its W030 stays advise-only (fail closed; only `passed` satisfies
+ * the gate). The original value is preserved in `legacy_status`.
+ */
+const LEGACY_STATUS_REPAIRS = Object.freeze({
+    pass_with_caveats: VERIFICATION_STATUS.PASSED,
+});
+/** The closed-set status a known legacy `raw` status repairs to, or `null` when it has no mapping. */
+function legacyStatusRepairTarget(raw) {
+    return typeof raw === 'string' && Object.prototype.hasOwnProperty.call(LEGACY_STATUS_REPAIRS, raw)
+        ? LEGACY_STATUS_REPAIRS[raw]
+        : null;
+}
+/**
+ * #5291: rewrite one report's frontmatter `status:` from a known legacy value
+ * to its closed-set equivalent and record the original as `legacy_status:`
+ * right after it. Touches only those lines — every other byte (body, other
+ * keys, line endings) is preserved — and never overwrites an existing
+ * `legacy_status`. Refuses (writes nothing) for a path that is not a report
+ * contained in its own phase directory, a report with no frontmatter `status`,
+ * and any status without a mapping.
+ */
+function repairLegacyVerificationStatus(filePath) {
+    if (!isReportContained(node_path_1.default.dirname(filePath), filePath)) {
+        return { ok: false, reason: 'the report is not contained in its phase directory' };
+    }
+    let content;
+    try {
+        content = node_fs_1.default.readFileSync(filePath, 'utf-8');
+    }
+    catch (err) {
+        return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    }
+    // The fence owner (`locateFrontmatterFence`) is the one place that knows where
+    // the frontmatter body starts and ends (BOM, CRLF, lenient closing fence).
+    const fence = (0, frontmatter_fence_cjs_1.locateFrontmatterFence)(content);
+    if (!fence || !fence.closed)
+        return { ok: false, reason: 'the report has no closed frontmatter' };
+    const lines = (0, text_lines_cjs_1.splitLines)(content.slice(fence.openEnd, fence.bodyEnd));
+    // The YAML reader keeps the LAST of duplicate keys, so the line the repair
+    // edits is the last `status:` line — the very value the refusal named. A
+    // trailing comment (`status: pass_with_caveats # x`) is not part of the value.
+    let statusAt = -1;
+    lines.forEach((l, i) => { if (/^status:/.test(l))
+        statusAt = i; });
+    if (statusAt === -1)
+        return { ok: false, reason: 'the report frontmatter has no status' };
+    const raw = lines[statusAt]
+        .replace(/^status:\s*/, '')
+        .replace(/\s+#.*$/, '')
+        .replace(/\s+$/, '')
+        .replace(/^(["'])(.*)\1$/, '$2');
+    const to = legacyStatusRepairTarget(raw);
+    if (to === null)
+        return { ok: false, reason: `${describeRawStatus(raw)} has no known repair` };
+    const legacyStatusKept = lines.some((l) => /^legacy_status:/.test(l));
+    lines[statusAt] = `status: ${to}`;
+    if (!legacyStatusKept)
+        lines.splice(statusAt + 1, 0, `legacy_status: ${raw}`);
+    (0, shell_command_projection_cjs_1.platformWriteSync)(filePath, content.slice(0, fence.openEnd) + (0, text_lines_cjs_1.joinLines)(lines, fence.eol) + content.slice(fence.bodyEnd), { verbatim: true });
+    return { ok: true, from: raw, to, legacyStatusKept };
+}
+/**
  * #3518: the shared phase-pinned artifact-selection core BOTH single-pick
  * resolvers (`resolveVerificationFile` for `*-VERIFICATION.md`,
  * `resolveUatFile` for `*-UAT.md`) delegate to — one rule, not two grammars
@@ -1499,11 +1584,11 @@ function readVerificationStatus(phaseDir, opts = {}) {
             isStale = true;
         }
         else if (storedVersion >= 3) {
-            // #5095 (R1): v3's digest is computed over the declared set UNIONED
+            // #5095 (R1): the v3+ digest is computed over the declared set UNIONED
             // with the phase's own live artifacts — a plan/summary added after
             // fingerprinting already moves the digest itself, so the separate
             // live-directory re-scan (`uncoveredCurrentArtifacts`) is redundant
-            // for v3 and is not run.
+            // for v3+ and is not run.
             isStale =
                 computeCoveredDigest(projectRoot, coveredFilesVal, storedVersion, { phaseDir }) !== coveredDigestVal;
             if (isStale) {
@@ -1784,7 +1869,7 @@ function parseFingerprintFileArgs(tokens) {
  *                       directly assignable. #5095 (ADR-5057 Phase 2): `raw`
  *                       returning only the digest is safe even though the
  *                       emitted `covered_files` is a SUPERSET of the caller's
- *                       declared list — the v3 digest is computed over
+ *                       declared list — the v3+ digest is computed over
  *                       `canonicalize(declared ∪ phaseArtifactPaths)` on BOTH
  *                       the emit side (here) and the check side
  *                       (`readVerificationStatus`), so a `--raw` caller that
@@ -2134,6 +2219,8 @@ const verificationModule = {
     isReportContained,
     routeResult,
     findVerificationStatusError,
+    legacyStatusRepairTarget,
+    repairLegacyVerificationStatus,
     defaultPhaseCleanCommitTimesMs,
     resolvePhaseArtifactFile,
     resolveVerificationFile,

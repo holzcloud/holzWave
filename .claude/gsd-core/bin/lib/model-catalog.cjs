@@ -245,6 +245,14 @@ exports.EFFORT_ARGV = {
         supported: new Set(['low', 'medium', 'high', 'xhigh', 'max']),
         clamp: (level) => (level === 'minimal' ? 'low' : level),
     },
+    // Verified against `pi --help` (pi 1.3.0, #5557): `--thinking <level>` — "Set
+    // thinking level: off, minimal, low, medium, high, xhigh, max". `off` is a
+    // pi-only level with no universal counterpart, so it is not in `supported`.
+    pi: {
+        render: (level) => ['--thinking', level],
+        supported: new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'max']),
+        clamp: (level) => level,
+    },
 };
 /**
  * Clamp a universal effort level to what a host actually accepts, or null.

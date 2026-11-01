@@ -80,31 +80,27 @@ function buildPredicateDeps() {
             if (phaseDirStat.kind === 'unreadable')
                 return unreadable(phaseDir, phaseDirStat.reason);
             if (phaseDirStat.kind === 'none')
-                return null;
+                return [];
             if (artifactSuffix === '.' ||
                 artifactSuffix === '..' ||
                 artifactSuffix.includes('\0') ||
                 node_path_1.default.basename(artifactSuffix) !== artifactSuffix ||
                 node_path_1.default.win32.basename(artifactSuffix) !== artifactSuffix) {
-                return null;
+                return [];
             }
-            const directContained = (0, security_cjs_1.tryWithinRoot)(artifactSuffix, phaseDir);
-            if (directContained !== null) {
-                const direct = regularFileOrNull(directContained);
-                if (direct !== null)
-                    return direct;
-            }
+            // #5313: collect EVERY distinct match; the evaluator fails closed on >1 instead of trusting listing order.
+            const found = [];
             const planningContained = (0, security_cjs_1.tryWithinRoot)(node_path_1.default.join('.planning', artifactSuffix), phaseDir);
             if (planningContained !== null) {
                 const planning = regularFileOrNull(planningContained);
                 if (planning !== null)
-                    return planning;
+                    found.push(planning);
             }
             const listing = (0, gate_evidence_cjs_1.readDirEvidence)(phaseDir);
             if (listing.kind === 'unreadable')
                 return unreadable(phaseDir, listing.reason);
             if (listing.kind === 'none')
-                return null;
+                return [];
             for (const f of listing.value) {
                 if (f.endsWith('-' + artifactSuffix) || f === artifactSuffix) {
                     const candidateContained = (0, security_cjs_1.tryWithinRoot)(f, phaseDir);
@@ -112,10 +108,10 @@ function buildPredicateDeps() {
                         continue;
                     const candidate = regularFileOrNull(candidateContained);
                     if (candidate !== null)
-                        return candidate;
+                        found.push(candidate);
                 }
             }
-            return null;
+            return found;
         },
         readFrontmatter(filePath) {
             const content = (0, shell_command_projection_cjs_1.platformReadSync)(filePath);

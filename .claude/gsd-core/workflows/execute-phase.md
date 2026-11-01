@@ -42,9 +42,9 @@ via filesystem and git state.
 
 <required_reading>
 Read STATE.md before any operation to load project context.
-@.claude/gsd-core/references/agent-contracts.md
-@.claude/gsd-core/references/context-budget.md
-@.claude/gsd-core/references/gates.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/agent-contracts.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/context-budget.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/gates.md
 </required_reading>
 
 <available_agent_types>
@@ -84,11 +84,15 @@ If `--wave` is absent, preserve the current behavior of executing all incomplete
 <step name="initialize" priority="first">
 Load all context in one call:
 
-@.claude/gsd-core/references/gsd-run-resolver.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/gsd-run-resolver.md
 
 ```bash
-WAVE_PARAM=""; if [[ "$ARGUMENTS" =~ (^|[[:space:]])--wave[[:space:]]+([^[:space:]-][^[:space:]]*) ]]; then WAVE_PARAM="--wave ${BASH_REMATCH[2]}"; fi
-GSD_WS=$(echo " $ARGUMENTS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
+IFS= read -rd '' GSD_ARGS <<'GSD_ARGS_END_413007cfc1c41f1241db55136b86a896' || true
+$ARGUMENTS
+GSD_ARGS_END_413007cfc1c41f1241db55136b86a896
+GSD_ARGS=${GSD_ARGS%$'\n'}
+WAVE_PARAM=""; if [[ "$GSD_ARGS" =~ (^|[[:space:]])--wave[[:space:]]+([^[:space:]-][^[:space:]]*) ]]; then WAVE_PARAM="--wave ${BASH_REMATCH[2]}"; fi
+GSD_WS=$(echo " $GSD_ARGS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
 INIT=$(gsd_run query init.execute-phase ${GSD_WS:+--ws=${GSD_WS##* }} "${PHASE_ARG}" $WAVE_PARAM)
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 AGENT_SKILLS=$(gsd_run query agent-skills gsd-executor ${GSD_WS:+--ws=${GSD_WS##* }})
@@ -102,7 +106,16 @@ Parse JSON for: `executor_model`, `verifier_model`, `commit_docs`, `parallelizat
 
 **Model resolution:** If `executor_model` is `"inherit"`, omit the `model=` parameter from all `Agent()` calls — do NOT pass `model="inherit"` to Agent. Omitting the `model=` parameter causes Claude Code to inherit the orchestrator model automatically. Only set `model=` when `executor_model` is an explicit model name (e.g., `"claude-sonnet-5"`, `"claude-opus-4-8"`).
 
-@.claude/gsd-core/references/execute-phase-response-language.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/execute-phase-response-language.md
+
+Reset the wave-failure tally (#4915). Fenced `bash` blocks are separate shells, so the post-merge gate's cumulative count reaches step 5.8 through a handoff file; a previous run's tally must not leak in:
+
+```bash
+# gsd-handoff:begin wave-failure-reset
+_GSD_HANDOFF="$( { git rev-parse --absolute-git-dir 2>/dev/null || echo "${TMPDIR:-/tmp}/gsd-$(pwd | cksum | cut -d' ' -f1)"; } )/gsd-handoff"; mkdir -p "$_GSD_HANDOFF"
+: > "$_GSD_HANDOFF/wave-failures"
+# gsd-handoff:end wave-failure-reset
+```
 
 Read runtime/worktree config and fail closed before any executor dispatch:
 
@@ -151,8 +164,8 @@ When `CONTEXT_WINDOW >= 500000` (1M-class models), subagent prompts include rich
 - This enables cross-phase awareness and history-aware verification
 
 When `CONTEXT_WINDOW < 200000` (sub-200K models), subagent prompts are thinned to reduce static overhead:
-- Executor agents omit extended deviation rule examples and checkpoint examples from inline prompt — load on-demand via @.claude/gsd-core/references/executor-examples.md
-- Planner agents omit extended anti-pattern lists and specificity examples from inline prompt — load on-demand via @.claude/gsd-core/references/planner-antipatterns.md
+- Executor agents omit extended deviation rule examples and checkpoint examples from inline prompt — load on-demand via @/Users/holz/Projects/holzWave/.claude/gsd-core/references/executor-examples.md
+- Planner agents omit extended anti-pattern lists and specificity examples from inline prompt — load on-demand via @/Users/holz/Projects/holzWave/.claude/gsd-core/references/planner-antipatterns.md
 - Core rules and decision logic remain inline; only verbose examples and edge-case lists are extracted
 - This reduces executor static overhead by ~40% while preserving behavioral correctness
 
@@ -172,16 +185,24 @@ inline path for each plan.
 
 **REQUIRED — Sync chain flag with intent.** If user invoked manually (no `--auto`), clear the ephemeral chain flag from any previous interrupted `--auto` chain. This prevents stale `_auto_chain_active: true` from causing unwanted auto-advance. This does NOT touch `workflow.auto_advance` (the user's persistent settings preference). You MUST execute this bash block before any config reads:
 ```bash
+IFS= read -rd '' GSD_ARGS <<'GSD_ARGS_END_413007cfc1c41f1241db55136b86a896' || true
+$ARGUMENTS
+GSD_ARGS_END_413007cfc1c41f1241db55136b86a896
+GSD_ARGS=${GSD_ARGS%$'\n'}
 # REQUIRED: prevents stale auto-chain from previous --auto runs
-if [[ ! "$ARGUMENTS" =~ --auto ]]; then
+if [[ ! "$GSD_ARGS" =~ --auto ]]; then
   gsd_run query config-set workflow._auto_chain_active false || true
 fi
 ```
 
 Resolve `MVP_MODE` once via the centralized `phase.mvp-mode` query verb (precedence chain: CLI flag → ROADMAP `**Mode:** mvp` → `workflow.mvp_mode` config → false):
 ```bash
+IFS= read -rd '' GSD_ARGS <<'GSD_ARGS_END_413007cfc1c41f1241db55136b86a896' || true
+$ARGUMENTS
+GSD_ARGS_END_413007cfc1c41f1241db55136b86a896
+GSD_ARGS=${GSD_ARGS%$'\n'}
 MVP_FLAG_ARG=""
-if [[ "$ARGUMENTS" =~ (^|[[:space:]])--mvp([[:space:]]|$) ]]; then MVP_FLAG_ARG="--cli-flag"; fi
+if [[ "$GSD_ARGS" =~ (^|[[:space:]])--mvp([[:space:]]|$) ]]; then MVP_FLAG_ARG="--cli-flag"; fi
 MVP_MODE=$(gsd_run query phase.mvp-mode "${PHASE_NUMBER}" $MVP_FLAG_ARG --pick active)
 EXECUTE_POST_HOOKS_JSON=$(gsd_run loop render-hooks execute:post --raw)
 TDD_MODE=$(gsd_run loop render-hooks execute:post --active-cap tdd)
@@ -239,7 +260,7 @@ if [ "$TDD_MODE" = "true" ]; then
   fi
 fi
 ```
-Pure doc-only / config-only / test-only tasks return `is_behavior_adding=false` and are exempt. When the gate trips, Read `.claude/gsd-core/references/execute-mvp-tdd.md` for the exact halt report format.
+Pure doc-only / config-only / test-only tasks return `is_behavior_adding=false` and are exempt. When the gate trips, Read `/Users/holz/Projects/holzWave/.claude/gsd-core/references/execute-mvp-tdd.md` for the exact halt report format.
 </step>
 
 <step name="check_blocking_antipatterns" priority="first">
@@ -482,7 +503,7 @@ if printf '%s' "$ORCH_BRANCH" | grep -Eq '^((worktree-)?agent-|worktree-wf_)'; t
   if [ "$_WT_HAS_COMMITS" -eq 1 ] || [ -n "$_WT_DIRTY_ALL" ]; then
     echo "" >&2
     echo "  To integrate before continuing:" >&2
-    [ -n "$_WT_DIRTY_ALL" ] && echo "    1. git add -A && git commit -m 'wip: recover worktree state'   # from THIS worktree" >&2
+    [ -n "$_WT_DIRTY_ALL" ] && echo "    1. git add -A && git commit -m 'chore(recover): recover worktree state'   # from THIS worktree" >&2
     echo "    2. cd <orchestrator worktree>   # a checkout whose branch is NOT agent-*/worktree-agent-*" >&2
     echo "    3. git merge --no-ff $ORCH_BRANCH        # or: git cherry-pick <sha>...  for selected commits" >&2
     echo "    4. re-run the phase from there" >&2
@@ -520,9 +541,9 @@ increases monotonically across waves. `{status}` is `complete` (success),
 
 **For each wave:**
 
-@.claude/gsd-core/references/execute-phase-wave-guard.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/execute-phase-wave-guard.md
 
-@.claude/gsd-core/references/execute-phase-context-guard.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/execute-phase-context-guard.md
 
 1. **Intra-wave files_modified overlap check (BEFORE spawning):**
 
@@ -584,11 +605,13 @@ increases monotonically across waves. `{status}` is `complete` (success),
    - Bad: "Executing terrain generation plan"
    - Good: "Procedural terrain generator using Perlin noise — creates height maps and biome zones. Required before vehicle physics."
 
-2.5. **Per-plan worktree decision (run for each plan in this wave BEFORE its dispatch):**
+2.5. **Per-plan worktree decision (run for each plan in this wave BEFORE any dispatch):**
 
-   Read and execute `gsd-core/workflows/execute-phase/steps/per-plan-worktree-gate.md` for each plan. It extracts `PLAN_FILES` from the plan's JSON, intersects against `SUBMODULE_PATHS` (with normalization, bidirectional matching, and glob-prefix handling), and sets `USE_WORKTREES_FOR_PLAN` to `false` when the plan touches a submodule path. Append `plan_id` to a `WAVE_WORKTREE_PLANS` accumulator when `USE_WORKTREES_FOR_PLAN != false`.
+   Read and execute **Part 1** of `gsd-core/workflows/execute-phase/steps/per-plan-worktree-gate.md` for each plan. It extracts `PLAN_FILES` from the plan's JSON, intersects against `SUBMODULE_PATHS` (with normalization, bidirectional matching, and glob-prefix handling), and sets `USE_WORKTREES_FOR_PLAN` to `false` when the plan touches a submodule path. Append `plan_id` to a `WAVE_WORKTREE_PLANS` accumulator when `USE_WORKTREES_FOR_PLAN != false`. **Store each plan's decision** (`plan_id → USE_WORKTREES_FOR_PLAN`): the shared `USE_WORKTREES_FOR_PLAN` value is overwritten by the next plan's decision.
 
-   The dispatch branches in step 3 gate on both `USE_WORKTREES` and `USE_WORKTREES_FOR_PLAN` (#2474).
+   The plan-scoped dispatch-isolation record is **not written here**. It is a single slot, so it is written in step 3, immediately before each plan's own dispatch (Part 2 of the gate, #5516).
+
+   The dispatch branches in step 3 gate on both `USE_WORKTREES` and the dispatched plan's own stored `USE_WORKTREES_FOR_PLAN` (#2474).
 
 2.75. **Execute:wave:pre capability dispatch:**
 
@@ -610,6 +633,8 @@ increases monotonically across waves. `{status}` is `complete` (success),
    Pass paths only — executors read files themselves.
 
    **Substitute `{plan_id}` in the prompt below with this plan's `id` field** from the `phase-plan-index` JSON loaded in step 1 (the same field referred to elsewhere in this workflow as `plan.id`) — unmodified and un-truncated, never a paraphrase. The guard hooks compare this value verbatim against the sentinel the per-plan gate wrote (`per-plan-worktree-gate.md`'s `plan_id`); a paraphrase or an omission costs the dispatch its recorded isolation decision.
+
+   **Record this plan's isolation immediately before its dispatch (#5516).** Restore the dispatched plan's **stored decision** from step 2.5 (`plan_id` := this plan's `id`, `USE_WORKTREES_FOR_PLAN` := the value stored for that plan, and `PLAN_FILES` / `PLAN_DELETIONS` re-extracted from this plan's JSON, since the later plans' decisions overwrote them) and run **Part 2** of `gsd-core/workflows/execute-phase/steps/per-plan-worktree-gate.md`, so the single-slot sentinel names the plan being dispatched. Do not run it for any other plan, and do not batch it ahead of the dispatches.
 
    **Executor routing (#1689/#3370).** Per plan, run `gsd-core/workflows/execute-phase/steps/per-plan-executor-routing.md` to set `EXECUTOR_TYPE` for `subagent_type="{EXECUTOR_TYPE}"` below.
 
@@ -693,12 +718,12 @@ increases monotonically across waves. `{status}` is `complete` (success),
 
        <execution_context>
        ORCHESTRATOR build-time embed (NOT a sub-agent runtime step): before this dispatch, read each file listed below and replace this note with those files' contents, inlined verbatim in this block in the listed order. Never leave `@`-include lines in the dispatched prompt — `@path` never expands inside an Agent() `prompt="..."` string (#3324), so an include arrives as literal text the executor never sees.
-       - `.claude/gsd-core/workflows/execute-plan.md`
-       - `.claude/gsd-core/templates/summary.md`
-       - `.claude/gsd-core/references/checkpoints.md`
-       ${TDD_APPLICABLE ? '- `.claude/gsd-core/references/tdd.md`' : ''}  # #3990/#4265: type: tdd, tdd="true", or workflow.tdd_mode
-       - `.claude/gsd-core/references/worktree-path-safety.md`
-       ${CONTEXT_WINDOW < 200000 ? '' : '- `.claude/gsd-core/references/executor-examples.md`'}
+       - `/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/execute-plan.md`
+       - `/Users/holz/Projects/holzWave/.claude/gsd-core/templates/summary.md`
+       - `/Users/holz/Projects/holzWave/.claude/gsd-core/references/checkpoints.md`
+       ${TDD_APPLICABLE ? '- `/Users/holz/Projects/holzWave/.claude/gsd-core/references/tdd.md`' : ''}  # #3990/#4265: type: tdd, tdd="true", or workflow.tdd_mode
+       - `/Users/holz/Projects/holzWave/.claude/gsd-core/references/worktree-path-safety.md`
+       ${CONTEXT_WINDOW < 200000 ? '' : '- `/Users/holz/Projects/holzWave/.claude/gsd-core/references/executor-examples.md`'}
        </execution_context>
 
        <required_reading>
@@ -755,7 +780,7 @@ increases monotonically across waves. `{status}` is `complete` (success),
 
    ```
        <sequential_execution>
-       You are running as a SEQUENTIAL executor agent on the main working tree.
+       You are running as a SEQUENTIAL executor agent on the main working tree (set SEQUENTIAL=true in your Step 0 commit guard; a linked phase worktree on the configured branch is allowed, #4799).
        Use normal git commits (with hooks). Do NOT use --no-verify.
        Run the `<project_root_pin>` guard before your first Edit/Write and before every commit (#4254).
        REQUIRED ORDER: Write SUMMARY.md → commit → only then any narration. No text between Write and commit (truncation risk; #2070 rescue is not primary defense).
@@ -971,6 +996,16 @@ increases monotonically across waves. `{status}` is `complete` (success),
 
 5.8. **Handle test gate failures (when `WAVE_FAILURE_COUNT > 0`):**
 
+   Read the count the post-merge gate recorded (#4915); a shell variable set in step 5.6 is gone by now:
+
+   ```bash
+   # gsd-handoff:begin wave-failure-read
+   _GSD_HANDOFF="$( { git rev-parse --absolute-git-dir 2>/dev/null || echo "${TMPDIR:-/tmp}/gsd-$(pwd | cksum | cut -d' ' -f1)"; } )/gsd-handoff"; mkdir -p "$_GSD_HANDOFF"
+   WAVE_FAILURE_COUNT=$(wc -l < "$_GSD_HANDOFF/wave-failures" 2>/dev/null | tr -d ' ' || true); WAVE_FAILURE_COUNT=${WAVE_FAILURE_COUNT:-0}
+   echo "WAVE_FAILURE_COUNT=${WAVE_FAILURE_COUNT}"
+   # gsd-handoff:end wave-failure-read
+   ```
+
    ```
    ## ⚠ Post-Merge Test Failure (cumulative failures: ${WAVE_FAILURE_COUNT})
 
@@ -1044,9 +1079,9 @@ increases monotonically across waves. `{status}` is `complete` (success),
    **Step 7.3 — `class == "unknown-failure"`:**
    Report failed plan and ask Continue/Stop; continuing may cascade into dependent plan failures.
 
-@.claude/gsd-core/references/execute-phase-quota-recovery.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/execute-phase-quota-recovery.md
 
-@.claude/gsd-core/references/execute-phase-between-wave-reset.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/execute-phase-between-wave-reset.md
 
 8. **Execute checkpoint plans between waves** — see `<checkpoint_handling>`.
 9. **Proceed to next wave.**
@@ -1083,8 +1118,8 @@ When executor returns a checkpoint AND `AUTO_MODE` is `true`:
    [Awaiting section from agent return]
    ```
 5. User responds: "approved"/"done" | issue description | decision selection
-6. **Spawn continuation agent (NOT resume)** using continuation-prompt.md template:
-   - `{completed_tasks_table}`: From checkpoint return
+6. **Spawn continuation agent (NOT resume)** with a prompt built from these placeholders (there is no separate template file; this list is the contract):
+   - `{completed_tasks_table}`: From checkpoint return, wrapped in a `<completed_tasks>` tag (the executor's continuation handling keys on it)
    - `{resume_task_number}` + `{resume_task_name}`: Current task
    - `{user_response}`: What user provided
    - `{resume_instructions}`: Based on checkpoint type
@@ -1216,7 +1251,7 @@ Verify-work will walk you through each item and mark the phase complete when all
 **If user reports issues now:** Proceed to gap closure.
 
 **If gaps_found:**
-@.claude/gsd-core/references/execute-phase-requirement-revert.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/execute-phase-requirement-revert.md
 ```
 ## ⚠ Phase {X}: {Name} — Gaps Found
 
@@ -1347,7 +1382,7 @@ transition in **post-completion mode**: SKIP its `verify_completion` and
 `update_roadmap_and_state` (re-running `phase.complete` would double-write state) and
 BEGIN at `evolve_project`, running the full set through `offer_next_phase`.
 
-@.claude/gsd-core/workflows/transition.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/transition.md
 </step>
 
 </process>

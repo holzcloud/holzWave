@@ -65,7 +65,9 @@ const node_fs_1 = __importDefault(require("node:fs"));
 const node_child_process_1 = __importDefault(require("node:child_process"));
 const pattern_cjs_1 = require("./pattern.cjs");
 const frontmatter_fence_cjs_1 = require("./frontmatter-fence.cjs");
+const markdown_line_diff_cjs_1 = require("./markdown-line-diff.cjs");
 const runtime_name_policy_cjs_1 = require("./runtime-name-policy.cjs");
+const read_only_git_env_cjs_1 = require("./read-only-git-env.cjs");
 /**
  * Convert a filesystem path to POSIX form (forward slashes) by translating the
  * platform-native separator. Single seam for native→POSIX conversion.
@@ -249,6 +251,8 @@ const MANAGED_HOOK_BASENAMES_BY_SURFACE = {
         'gsd-worktree-path-guard.js',
         // #4221: secret-file read guard (Read|Grep|Bash).
         'gsd-secret-read-guard.js',
+        // #5465: SessionStart PATH persistence through $CLAUDE_ENV_FILE.
+        'gsd-path-export.js',
     ]),
     'codex-toml': new Set([
         'gsd-check-update.js',
@@ -279,6 +283,8 @@ const MANAGED_HOOK_COMMAND_BASENAMES_BY_SURFACE = {
         'gsd-worktree-path-guard.js',
         // #4221: secret-file read guard (Read|Grep|Bash).
         'gsd-secret-read-guard.js',
+        // #5465: SessionStart PATH persistence through $CLAUDE_ENV_FILE.
+        'gsd-path-export.js',
     ]),
     'codex-toml': new Set([
         'gsd-check-update.js',
@@ -613,8 +619,20 @@ function execGit(args, opts = {}) {
     // Non-interactive defaults: a hung credential prompt or terminal-input
     // probe must surface as a timeout, not block the tool forever. Callers
     // can override via opts.env.
+    //
+    // #5048: readOnlyGitEnv() as well. execGit is the shared seam behind every
+    // git call the tool makes, including the read-only ones (`status`,
+    // `diff --cached`, `rev-parse`, `log`, …). By default git refreshes the index
+    // and takes an *optional* `.git/index.lock` to write the refreshed copy back,
+    // so a read can lose a race against a real `git add` / `git commit` and fail
+    // it with `Unable to create '.git/index.lock': File exists`. The owner is
+    // src/read-only-git-env.cts, shared with every other read-only seam, so this
+    // call site cannot drift from them. The variable disables only those optional
+    // index operations; a caller that genuinely needs one (a writing command, or a
+    // status whose freshness it wants persisted) can still set it back through
+    // opts.env, which is spread last on purpose.
     const env = {
-        ...process.env,
+        ...(0, read_only_git_env_cjs_1.readOnlyGitEnv)(),
         GIT_TERMINAL_PROMPT: '0',
         GCM_INTERACTIVE: 'never',
         ...(opts.env || {}),
@@ -1053,16 +1071,40 @@ function leadingFrontmatterLineCount(text) {
     // The lines before the closing fence, plus the closing fence line itself.
     return text.slice(0, fence.closingStart).split('\n').length;
 }
-function _normalizeMd(content) {
+/** A leading BOM is not part of the first line's content when aligning two documents. */
+function withoutBom(line) {
+    return line !== undefined && line.charCodeAt(0) === 0xFEFF ? line.slice(1) : (line ?? '');
+}
+function _normalizeMd(content, prior) {
     if (!content || typeof content !== 'string')
         return content;
     let text = content.replace(/\r\n/g, '\n');
     const lines = text.split('\n');
+    // #5165: when the document being replaced is known, only the junctions the
+    // write touched are normalized; every other region stays byte-identical.
+    let scope = null;
+    let priorLines = [];
+    if (typeof prior === 'string' && prior !== '') {
+        priorLines = prior.replace(/\r\n/g, '\n').split('\n');
+        // A BOM on either first line must not make an unchanged line look rewritten.
+        const alignPrior = [withoutBom(priorLines[0]), ...priorLines.slice(1)];
+        const alignNext = [withoutBom(lines[0]), ...lines.slice(1)];
+        const match = (0, markdown_line_diff_cjs_1.matchLines)(alignPrior, alignNext);
+        if (match)
+            scope = (0, markdown_line_diff_cjs_1.writeScope)(match, priorLines.length);
+    }
     // The frontmatter block is YAML, not markdown: its lines are published exactly as written.
     // A `# comment` is not a heading, and a blank line inserted into a multi-line quoted scalar
     // or removed from a block scalar changes the value (found while implementing #5105).
     const frontmatterLines = leadingFrontmatterLineCount(text);
     const result = [];
+    // A separating blank the rules add. In scoped mode (#5165) two rules that fire on
+    // the same junction add ONE blank: the whole-document pass collapses them in its
+    // final blank-run regex, which scoped mode must not apply to runs the write kept.
+    const blank = () => {
+        if (scope === null || result[result.length - 1] !== '')
+            result.push('');
+    };
     const fenceRegex = /^```/;
     const insideFence = new Array(lines.length);
     let fenceOpen = false;
@@ -1095,11 +1137,23 @@ function _normalizeMd(content) {
         const prevTrimmed = prev.trimEnd();
         const trimmed = line.trimEnd();
         const isFenceLine = fenceRegex.test(trimmed);
-        if (/^#{1,6}\s/.test(trimmed) && i > 0 && prevTrimmed !== '' && prevTrimmed !== '---')
-            result.push('');
-        if (isFenceLine && i > 0 && prevTrimmed !== '' && !insideFence[i] && (i === 0 || !insideFence[i - 1] || isFenceLine)) {
+        // A heading or fence line the write authored brings its own separation, even
+        // where it replaced a prose line in place (#5165). One that replaced a heading
+        // or fence (a rename, a renumber) inherits the spacing around it instead.
+        const isStructural = (text) => /^#{1,6}\s/.test(text.trimEnd()) || fenceRegex.test(text.trimEnd());
+        const replacedPrior = scope !== null ? scope.replacedPriorIndex(i) : -1;
+        const authoredStructure = scope !== null && scope.lineWritten(i) && isStructural(line)
+            && !(replacedPrior >= 0 && isStructural(priorLines[replacedPrior] ?? ''));
+        const keptBefore = scope !== null && !authoredStructure && i > 0 && scope.junctionKept(i - 1);
+        const keptAfter = scope !== null && !authoredStructure && i < lines.length - 1 && scope.junctionKept(i);
+        // A blank-line run is collapsed only where the write made it (#5165).
+        if (scope !== null && line === '' && result.length > 0 && result[result.length - 1] === '' && !keptBefore)
+            continue;
+        if (/^#{1,6}\s/.test(trimmed) && i > 0 && prevTrimmed !== '' && prevTrimmed !== '---' && !keptBefore)
+            blank();
+        if (isFenceLine && i > 0 && prevTrimmed !== '' && !insideFence[i] && (i === 0 || !insideFence[i - 1] || isFenceLine) && !keptBefore) {
             if (i === 0 || !insideFence[i - 1])
-                result.push('');
+                blank();
         }
         // No "separate a list from a preceding paragraph" rule (#3854, #4725).
         // This pass re-normalizes the ENTIRE document on every .md write, so an
@@ -1111,30 +1165,32 @@ function _normalizeMd(content) {
         // from the after-heading rule below. The after-a-bullet rule at the end
         // of this loop is a different transition (list→prose) and is unaffected.
         result.push(line);
-        if (/^#{1,6}\s/.test(trimmed) && i < lines.length - 1 && (lines[i + 1] ?? '').trimEnd() !== '')
-            result.push('');
-        if (/^```\s*$/.test(trimmed) && i > 0 && insideFence[i - 1] && i < lines.length - 1 && (lines[i + 1] ?? '').trimEnd() !== '')
-            result.push('');
-        if (/^(\s*[-*+]\s|\s*\d+\.\s)/.test(line) && i < lines.length - 1) {
+        if (/^#{1,6}\s/.test(trimmed) && i < lines.length - 1 && (lines[i + 1] ?? '').trimEnd() !== '' && !keptAfter)
+            blank();
+        if (/^```\s*$/.test(trimmed) && i > 0 && insideFence[i - 1] && i < lines.length - 1 && (lines[i + 1] ?? '').trimEnd() !== '' && !keptAfter)
+            blank();
+        if (/^(\s*[-*+]\s|\s*\d+\.\s)/.test(line) && i < lines.length - 1 && !keptAfter) {
             const next = lines[i + 1];
             if (next !== undefined && next.trimEnd() !== '' && !/^(\s*[-*+]\s|\s*\d+\.\s)/.test(next) && !/^\s/.test(next))
-                result.push('');
+                blank();
         }
     }
     // The frontmatter lines are `result`'s first entries, unchanged; the blank-run collapse
     // applies from the line ending that closes the block onward.
     const head = result.slice(0, frontmatterLines).join('\n');
     text = result.join('\n');
-    text = head + text.slice(head.length).replace(/\n{3,}/g, '\n\n');
+    text = scope === null ? head + text.slice(head.length).replace(/\n{3,}/g, '\n\n') : text;
     text = text.replace(/\n*$/, '\n');
     return text;
 }
 function normalizeContent(filePath, content, opts = {}) {
     const encoding = opts.encoding ?? 'utf-8';
+    if (opts.verbatim === true)
+        return { content: content ?? '', encoding };
     const isMd = node_path_1.default.extname(filePath).toLowerCase() === '.md';
     let normalized;
     if (isMd) {
-        normalized = _normalizeMd(content);
+        normalized = _normalizeMd(content, opts.prior);
     }
     else {
         normalized = (content ?? '').replace(/\r\n/g, '\n').replace(/\n*$/, '\n');
@@ -1156,7 +1212,7 @@ function normalizeContent(filePath, content, opts = {}) {
  * do not simplify this back to a direct string comparison.
  */
 function contentChangedAfterNormalize(filePath, before, after) {
-    return normalizeContent(filePath, after).content !== normalizeContent(filePath, before).content;
+    return normalizeContent(filePath, after, { prior: before }).content !== normalizeContent(filePath, before, { prior: before }).content;
 }
 // Rename errnos that are transient on Windows: a concurrent reader (or an AV
 // scanner / indexer) holding the target open makes renameSync fail briefly.
@@ -1208,8 +1264,59 @@ function retryRenameSync(fromPath, toPath) {
     if (err !== null)
         throw err;
 }
+/**
+ * Largest on-disk Markdown document read back as the `prior` of a scoped write.
+ * A larger file is normalized whole (the pre-#5165 behavior) rather than read and
+ * diffed on every write.
+ */
+const MAX_PRIOR_BYTES = 2 * 1024 * 1024;
+/**
+ * The Markdown document a write replaces, or undefined when there is none worth
+ * diffing against: no file, not a regular file (a FIFO or device reports size 0
+ * and would block or never end), unreadable, or larger than MAX_PRIOR_BYTES. The
+ * bound is enforced on the bytes actually read from one open descriptor, so a
+ * file that grows after the check cannot exceed it.
+ */
+function readPriorMarkdown(filePath, encoding) {
+    let fd;
+    try {
+        // O_NONBLOCK keeps opening a FIFO from waiting for a writer; it is absent on Windows.
+        fd = node_fs_1.default.openSync(filePath, node_fs_1.default.constants.O_RDONLY | (node_fs_1.default.constants.O_NONBLOCK ?? 0));
+        const stat = node_fs_1.default.fstatSync(fd);
+        if (!stat.isFile() || stat.size > MAX_PRIOR_BYTES)
+            return undefined;
+        // One byte of headroom: reading it means the file grew past what was measured.
+        const buffer = Buffer.alloc(stat.size + 1);
+        let length = 0;
+        while (length < buffer.length) {
+            const read = node_fs_1.default.readSync(fd, buffer, length, buffer.length - length, null);
+            if (read === 0)
+                break;
+            length += read;
+        }
+        if (length > stat.size)
+            return undefined;
+        return buffer.toString(encoding, 0, length);
+    }
+    catch {
+        return undefined; // no prior document (new file or unreadable): normalize it whole
+    }
+    finally {
+        if (fd !== undefined) {
+            try {
+                node_fs_1.default.closeSync(fd);
+            }
+            catch { /* already closed */ }
+        }
+    }
+}
 function platformWriteSync(filePath, content, opts = {}) {
-    const { content: normalized, encoding } = normalizeContent(filePath, content, opts);
+    // #5165: a Markdown write is scoped to what it changed relative to the file it replaces.
+    let prior = opts.prior;
+    if (prior === undefined && opts.verbatim !== true && node_path_1.default.extname(filePath).toLowerCase() === '.md') {
+        prior = readPriorMarkdown(filePath, opts.encoding ?? 'utf-8');
+    }
+    const { content: normalized, encoding } = normalizeContent(filePath, content, { ...opts, prior });
     node_fs_1.default.mkdirSync(node_path_1.default.dirname(filePath), { recursive: true });
     const tmpPath = filePath + '.tmp.' + process.pid;
     // Step 1: write the sibling tmp file. If THIS fails, nothing was published, so a

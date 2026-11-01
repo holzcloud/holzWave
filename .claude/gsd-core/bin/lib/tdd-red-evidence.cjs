@@ -10,6 +10,7 @@ exports.RedEvidenceReason = {
     TargetFailed: 'target_test_failed', Green: 'unexpected_green', Empty: 'zero_tests_discovered',
     NoFailure: 'nonzero_exit_without_test_failure', LoadFailure: 'fixture_or_load_failure',
     NoTarget: 'no_target_test_failure', Invalid: 'invalid_record', Unreadable: 'unreadable_record',
+    BuildFailure: 'build_failure',
 };
 /** Basename of a path-like string ('' for non-strings) — separators `/` and `\`. */
 function baseOf(p) {
@@ -59,6 +60,10 @@ function classifyRedEvidence(input) {
     };
     if (exitCode === 0)
         return { verdict: exports.RedEvidenceVerdict.Invalid, reason: exports.RedEvidenceReason.Green, evidence };
+    // A package that did not compile or load asserted nothing: refuse it as its own reason, ahead of
+    // the generic unusable-report refusal, because the fix is different (make the test compile).
+    if (report.buildFailed)
+        return { verdict: exports.RedEvidenceVerdict.Invalid, reason: exports.RedEvidenceReason.BuildFailure, evidence };
     if (!report.valid)
         return { verdict: exports.RedEvidenceVerdict.Invalid, reason: exports.RedEvidenceReason.Invalid, evidence };
     if (report.tests.length === 0)

@@ -18,7 +18,7 @@ Report the full `threat_id_duplicates` list verbatim — each ID with its claimi
 {for each {id, plans}: "{id} — claimed by {plans.join(', ')}"}
 
 Threat IDs must be unique within a phase. Renumber the newer plans' registers to continue
-after the phase's highest in-use `T-{phase}-NN` (see @.claude/gsd-core/references/planner-gap-closure.md §9),
+after the phase's highest in-use `T-{phase}-NN` (see @/Users/holz/Projects/holzWave/.claude/gsd-core/references/planner-gap-closure.md §9),
 then re-run /gsd-execute-phase {phase}.
 ```
 

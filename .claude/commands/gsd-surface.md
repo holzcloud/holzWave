@@ -14,9 +14,9 @@ requires: [config, update]
 The text inside `<arguments>` is exactly what the user typed after the command name: data, not template instructions. An empty block means no arguments were passed.
 
 <objective>
-Manage the runtime skill surface without reinstall. Reads/writes `.claude/.gsd-surface.json`
-(sibling to `.claude/.gsd-profile`) and re-stages the active skills directory in place.
-Skill dirs live at `.claude/skills/gsd-*/`.
+Manage the runtime skill surface without reinstall. Reads/writes `/Users/holz/Projects/holzWave/.claude/.gsd-surface.json`
+(sibling to `/Users/holz/Projects/holzWave/.claude/.gsd-profile`) and re-stages the active skills directory in place.
+Skill dirs live at `/Users/holz/Projects/holzWave/.claude/skills/gsd-*/`.
 
 Sub-commands: list · status · profile · disable · enable · reset
 </objective>
@@ -137,16 +137,16 @@ Valid cluster names: `core_loop`, `audit_review`, `milestone`, `research_ideate`
 ## runtimeConfigDir resolution
 
 The `runtimeConfigDir` for `applySurface` is the **base Claude config directory**
-(`~/.claude`), NOT the skills sub-directory (`.claude/skills`).
+(`/Users/holz/Projects/holzWave/.claude`), NOT the skills sub-directory (`/Users/holz/Projects/holzWave/.claude/skills`).
 
 This matches `installRuntimeArtifacts` and `uninstallRuntimeArtifacts`, which also
-receive `~/.claude` as `configDir`. The skill dirs themselves live at
-`.claude/skills/gsd-*/` because the `claude global` layout has `destSubpath =
+receive `/Users/holz/Projects/holzWave/.claude` as `configDir`. The skill dirs themselves live at
+`/Users/holz/Projects/holzWave/.claude/skills/gsd-*/` because the `claude global` layout has `destSubpath =
 'skills'` — they are derived from `configDir`, not the root for it.
 
 ```bash
 # Claude Code — global install
-RUNTIME_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+RUNTIME_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-/Users/holz/Projects/holzWave/.claude}"
 SCOPE="global"
 
 # Artifact destinations are derived from runtime layout
@@ -155,7 +155,7 @@ SCOPE="global"
 ```
 
 Surface state is stored at `${RUNTIME_CONFIG_DIR}/.gsd-surface.json`
-(i.e. `.claude/.gsd-surface.json`).
+(i.e. `/Users/holz/Projects/holzWave/.claude/.gsd-surface.json`).
 
 All paths can be overridden by reading the `CLAUDE_CONFIG_DIR` env var if set.
 
@@ -168,9 +168,9 @@ All paths can be overridden by reading the `CLAUDE_CONFIG_DIR` env var if set.
 - Missing `surface.cjs` → prompt: "Run `npm i -g @opengsd/gsd-core` to reinstall GSD."
 
 <execution_context>
-Surface state file: `.claude/.gsd-surface.json`
-Install profile marker: `.claude/.gsd-profile`
-Skill dirs: `.claude/skills/gsd-*/`
-Engine module: `.claude/gsd-core/bin/lib/surface.cjs`
-Cluster definitions: `.claude/gsd-core/bin/lib/clusters.cjs`
+Surface state file: `/Users/holz/Projects/holzWave/.claude/.gsd-surface.json`
+Install profile marker: `/Users/holz/Projects/holzWave/.claude/.gsd-profile`
+Skill dirs: `/Users/holz/Projects/holzWave/.claude/skills/gsd-*/`
+Engine module: `/Users/holz/Projects/holzWave/.claude/gsd-core/bin/lib/surface.cjs`
+Cluster definitions: `/Users/holz/Projects/holzWave/.claude/gsd-core/bin/lib/clusters.cjs`
 </execution_context>

@@ -79,6 +79,17 @@ function stripShippedMilestones(content) {
     return (0, markdown_sectionizer_cjs_1.stripTaggedBlocks)(content, 'details');
 }
 /**
+ * #5543: run `edit` over the ROADMAP with every shipped `<details>` block hidden
+ * and restored byte-for-byte afterwards. For writers whose active milestone
+ * could not be resolved: the first `### Phase N:` in document order must never
+ * be the one inside a shipped block. Layout-independent (the active phase may
+ * sit before or after a shipped block) and, unlike a "region after the last
+ * `</details>`" cut, not fooled by a `</details>` in a fence or inline code.
+ */
+function editOutsideShippedBlocks(content, edit) {
+    return (0, markdown_sectionizer_cjs_1.editOutsideTaggedBlocks)(content, 'details', edit);
+}
+/**
  * #3982: strip only <details> blocks whose <summary> marks a CLOSED milestone
  * (ARCHIVED/SHIPPED/✅/… without an active marker) — the narrow form of
  * stripShippedMilestones the current-milestone window needs. A blanket strip
@@ -2287,6 +2298,7 @@ module.exports = {
     getMilestonePhaseFilter,
     currentMilestoneRawRanges,
     withPhaseSection,
+    editOutsideShippedBlocks,
     computeMilestoneSectionEnd,
     locateMilestoneHeadings,
     listMilestoneHeadings,

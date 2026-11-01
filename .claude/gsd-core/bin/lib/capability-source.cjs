@@ -32,6 +32,8 @@ const node_os_1 = __importDefault(require("node:os"));
 const node_https_1 = __importDefault(require("node:https"));
 const node_crypto_1 = __importDefault(require("node:crypto"));
 // eslint-disable-next-line @typescript-eslint/no-require-imports
+const { resolveGsdHome } = require('./runtime-homes.cjs');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const shellSeam = require('./shell-command-projection.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const capValidator = require('./capability-validator.cjs');
@@ -984,7 +986,7 @@ async function resolveTarball(parsed, opts, gsdHome, hostVersion) {
 async function resolveCapabilitySource(spec, opts = {}) {
     const parsed = parseSpec(spec);
     const hostVersion = opts.hostVersion ?? readHostVersion();
-    const gsdHome = opts.gsdHome ?? process.env['GSD_HOME'] ?? node_os_1.default.homedir();
+    const gsdHome = opts.gsdHome || resolveGsdHome();
     switch (parsed.kind) {
         case 'local':
             return resolveLocal(parsed, opts, gsdHome, hostVersion);

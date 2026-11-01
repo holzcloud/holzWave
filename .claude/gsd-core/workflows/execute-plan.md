@@ -6,7 +6,7 @@ Execute a phase prompt (PLAN.md) and create the outcome summary (SUMMARY.md).
 Read STATE.md before any operation to load project context.
 Read config.json for planning behavior settings.
 
-@.claude/gsd-core/references/git-integration.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/git-integration.md
 </required_reading>
 
 <atomic_close_out_invariant>
@@ -42,10 +42,14 @@ Valid GSD subagent types (use exact names — do not fall back to 'general-purpo
 <step name="init_context" priority="first">
 Load execution context (paths only to minimize orchestrator context):
 
-@.claude/gsd-core/references/gsd-run-resolver.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/gsd-run-resolver.md
 
 ```bash
-GSD_WS=$(echo " $ARGUMENTS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
+IFS= read -rd '' GSD_ARGS <<'GSD_ARGS_END_413007cfc1c41f1241db55136b86a896' || true
+$ARGUMENTS
+GSD_ARGS_END_413007cfc1c41f1241db55136b86a896
+GSD_ARGS=${GSD_ARGS%$'\n'}
+GSD_WS=$(echo " $GSD_ARGS" | sed -nE 's/.* --ws +([A-Za-z0-9][A-Za-z0-9._-]*).*/--ws \1/p' | head -n 1)
 INIT=$(gsd_run query init.execute-phase ${GSD_WS:+--ws=${GSD_WS##* }} "${PHASE}")
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 ```
@@ -137,7 +141,7 @@ Otherwise: Apply checkpoint-based routing below.
   gsd_run query dispatch-isolation --raw --force-isolation none >/dev/null 2>&1 || true
   ```
 
-  Segment dispatches therefore carry no `{harnessFlag}`.
+  Segment dispatches therefore carry no `{harnessFlag}` and DO carry a `<sequential_execution>` block (`You are running as a SEQUENTIAL executor agent on the main working tree (set SEQUENTIAL=true in your Step 0 commit guard, #4799).`) so the segment executor's commit guard does not apply the per-agent branch allow-list in a linked phase worktree.
 
 <!-- #2508 runtime-aware-dispatch -->
 
@@ -295,7 +299,7 @@ For `type: tdd` plans — RED-GREEN-REFACTOR:
 
 1. **Infrastructure** (first TDD plan only): detect project, install framework, config, verify empty suite
 2. **Cycle (#3990: stated ONCE; #4267: cited correctly):** execute RED → GREEN → REFACTOR
-exactly as specified in the canonical `.claude/gsd-core/references/tdd.md` reference — the
+exactly as specified in the canonical `/Users/holz/Projects/holzWave/.claude/gsd-core/references/tdd.md` reference — the
 "Red-Green-Refactor Cycle" section's commit-scope contract (`test({phase}-{plan})` →
 `feat({phase}-{plan})` → `refactor({phase}-{plan})`, RED must fail, GREEN must pass, REFACTOR
 commits only on change), the "Gate Enforcement Rules" section's "Fail-Fast Rules" subsection,
@@ -349,7 +353,7 @@ Display: `### CHECKPOINT: [Type]` heading → Progress {X}/{Y} → Task name →
 
 After response: verify if specified. Pass → continue. Fail → inform, wait. WAIT for user — do NOT hallucinate completion.
 
-See .claude/gsd-core/references/checkpoints.md for details.
+See /Users/holz/Projects/holzWave/.claude/gsd-core/references/checkpoints.md for details.
 </step>
 
 <step name="checkpoint_return_for_orchestrator">
@@ -402,7 +406,7 @@ fi
 grep -A 50 "^user_setup:" .planning/phases/XX-name/{phase}-{plan}-PLAN.md | head -50
 ```
 
-If user_setup exists: create `{phase}-USER-SETUP.md` using the template at `.claude/gsd-core/templates/user-setup.md` (or its `.claude/gsd-core/templates/user-setup.compact.md` variant — resolve per `.claude/gsd-core/references/compact-content-gate.md` §"Streams 1b and 4"). Per service: env vars table, account setup checklist, dashboard config, local dev notes, verification commands. Status "Incomplete". Set `USER_SETUP_CREATED=true`. If empty/missing: skip.
+If user_setup exists: create `{phase}-USER-SETUP.md` using the template at `/Users/holz/Projects/holzWave/.claude/gsd-core/templates/user-setup.md` (or its `/Users/holz/Projects/holzWave/.claude/gsd-core/templates/user-setup.compact.md` variant — resolve per `/Users/holz/Projects/holzWave/.claude/gsd-core/references/compact-content-gate.md` §"Streams 1b and 4"). Per service: env vars table, account setup checklist, dashboard config, local dev notes, verification commands. Status "Incomplete". Set `USER_SETUP_CREATED=true`. If empty/missing: skip.
 </step>
 
 <step name="create_summary">
@@ -411,7 +415,7 @@ emit narrative output between the Write tool call and the commit tool call.
 Truncation at this boundary is a known failure mode (see #2070 rescue logic in
 execute-phase.md step 5.5).
 
-Create `{phase}-{plan}-SUMMARY.md` at `.planning/phases/XX-name/`. Use the template at `.claude/gsd-core/templates/summary.md` (or `summary.compact.md` — same `compact-content-gate.md` resolution as the USER-SETUP template above).
+Create `{phase}-{plan}-SUMMARY.md` at `.planning/phases/XX-name/`. Use the template at `/Users/holz/Projects/holzWave/.claude/gsd-core/templates/summary.md` (or `summary.compact.md` — same `compact-content-gate.md` resolution as the USER-SETUP template above).
 
 **Frontmatter:** phase, plan, subsystem, tags | requires/provides/affects | tech-stack.added/patterns | key-files.created/modified | key-decisions | requirements-completed (**MUST** copy `requirements` array from PLAN.md frontmatter verbatim) | duration ($DURATION), completed ($PLAN_END_TIME date).
 
@@ -514,14 +518,14 @@ Extract requirement IDs from the plan's frontmatter (e.g., `requirements: [AUTH-
 **Shared-ID gate (#2388):** a requirement ID declared by more than one plan in this phase must not read `Complete` until every plan declaring it has finished (produced a `*-SUMMARY.md`) — otherwise the first plan to finish flips it `Complete` while its sibling plans are still running, before phase verification ever gets a chance to catch a real gap. Compute the ready subset first, then mark only those:
 
 ```bash
-READY=$(gsd_run query requirements.ready-ids "${PLAN_PATH}" ${REQ_IDS} --raw)
+READY=$(gsd_run query requirements.ready-ids "${PLAN_PATH}" ${REQ_IDS})
 READY_IDS=$(printf '%s' "$READY" | jq -r '.ready[]' 2>/dev/null | tr '\n' ' ')
 if [ -n "$(printf '%s' "$READY_IDS" | tr -d '[:space:]')" ]; then
   gsd_run query requirements.mark-complete ${READY_IDS}
 fi
 ```
 
-`requirements.ready-ids` is read-only: it scans sibling `*-PLAN.md` files in this plan's phase directory and blocks an ID only when a sibling ALSO declares it and that sibling has no `*-SUMMARY.md` yet. An ID no sibling declares is always ready (single-plan requirements mark immediately, no added latency). A blocked ID is re-evaluated the next time any plan in this phase finishes its own `update_requirements` step, and becomes ready once the LAST declaring plan's SUMMARY exists.
+`requirements.ready-ids` is read-only and prints JSON by default (`--raw` prints a prose summary `jq` cannot read, so the ready list would always be empty, #4956): it scans sibling `*-PLAN.md` files in this plan's phase directory and blocks an ID only when a sibling ALSO declares it and that sibling has no `*-SUMMARY.md` yet. An ID no sibling declares is always ready (single-plan requirements mark immediately, no added latency). A blocked ID is re-evaluated the next time any plan in this phase finishes its own `update_requirements` step, and becomes ready once the LAST declaring plan's SUMMARY exists.
 </step>
 
 <step name="git_commit_metadata">

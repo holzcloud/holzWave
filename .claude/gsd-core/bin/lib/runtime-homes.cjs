@@ -40,6 +40,7 @@ exports.resolveConfigHomeFromDescriptor = resolveConfigHomeFromDescriptor;
 exports.resolveAntigravityGlobalDir = resolveAntigravityGlobalDir;
 exports.detectAntigravityDirAmbiguity = detectAntigravityDirAmbiguity;
 exports.resolveKimiGlobalDir = resolveKimiGlobalDir;
+exports.resolveGsdHome = resolveGsdHome;
 exports.resolveKimiHooksTomlDir = resolveKimiHooksTomlDir;
 exports.getGlobalConfigDir = getGlobalConfigDir;
 exports.resolveSkillsBaseFromDescriptor = resolveSkillsBaseFromDescriptor;
@@ -403,6 +404,23 @@ exports.NON_REGISTRY_CONFIG_HOME_DESCRIPTORS = [
  * through resolveConfigHomeFromDescriptor and have no `kind`/`name` shape.
  */
 exports.GSD_LOCATION_ENV_KEYS = ['GSD_HOME', 'GSD_AGENTS_DIR'];
+/**
+ * #5017: the ONE rule for the root of the GSD-owned store (`$GSD_HOME/.gsd/`:
+ * defaults.json, consent.json, capability overlays) — `GSD_HOME` when set and
+ * non-blank, otherwise the home directory. The config loader, the install-time
+ * resolvers, the installer's defaults writer and capability staging all call
+ * this, so one configuration gives one answer at install time, at dispatch time
+ * and in the staged capabilities. The hooks (cold-tree, no lib import) and the
+ * settings / new-project workflows (shell) carry the same rule inline; a test
+ * pins each of them to it.
+ *
+ * `fallbackHome` lets a caller that already holds an injected home directory
+ * (the install-time resolvers' test seam) keep using it when GSD_HOME is unset.
+ * A blank `GSD_HOME` is "unset": `''` must never become a relative store path.
+ */
+function resolveGsdHome(fallbackHome = node_os_1.default.homedir()) {
+    return process.env['GSD_HOME'] || fallbackHome;
+}
 /**
  * Resolve the directory holding the Kimi product's OWN native config.toml —
  * the file that product itself reads for providers/models/hooks/etc, and the

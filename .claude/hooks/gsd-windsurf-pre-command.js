@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// gsd-hook-version: 1.17.0
+// gsd-hook-version: 1.19.0
 // gsd-windsurf-pre-command.js — Windsurf/Cascade pre_run_command hook (ADR-1239 / #2100)
 //
 // Cascade (Windsurf's agent) invokes this script before each shell-command

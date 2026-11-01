@@ -17,12 +17,19 @@
  * tolerant. A plan id that is not `<phase>-<plan>` (a plan named `.*-PLAN.md`) matches nothing,
  * and a git failure is "no commits" exactly as before.
  *
+ * Cross-plan GREEN (#4867): a gap closure is planned as a RED-only probe plan plus the plan that
+ * `depends_on` it and carries the fix. A `type: tdd` plan with its own RED but no GREEN is credited
+ * with a `feat(...)` commit under any plan that lists it in `depends_on`, directly or through a
+ * chain; the row carries `greenFrom` and the report names the supplier. Its own RED is still
+ * required, and a plan nothing depends on is scored on its own commits alone.
+ *
  * Argv after the verb: `<phase>` (a number; an unresolvable phase reports zero plans).
  */
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.TDD_ROW_REASON = void 0;
 exports.evaluateTddReviewCheckpoint = evaluateTddReviewCheckpoint;
 const node_path_1 = __importDefault(require("node:path"));
 const gate_verdict_cjs_1 = require("./gate-verdict.cjs");
@@ -31,7 +38,10 @@ const gate_evidence_cjs_1 = require("./gate-evidence.cjs");
 const gate_evaluation_scope_cjs_1 = require("./gate-evaluation-scope.cjs");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const frontmatterMod = require("./frontmatter.cjs");
-const { frontmatterKeyHasValue } = frontmatterMod;
+const { frontmatterKeyHasValue, extractFrontmatter } = frontmatterMod;
+exports.TDD_ROW_REASON = {
+    GREEN_BEFORE_RED: 'green_before_red',
+};
 /**
  * True when the plan's frontmatter declares `type: tdd` (CRLF included, #2449). The block is the
  * one fence owner's, read as RAW text — not through the YAML parser — so a block the parser refuses
@@ -42,20 +52,69 @@ const { frontmatterKeyHasValue } = frontmatterMod;
 function isTddPlan(content) {
     return frontmatterKeyHasValue(content, 'type', 'tdd');
 }
+/** A `depends_on` token as a plan id: `01.1-20`, `01.1-20-PLAN` and `01.1-20-PLAN.md` all name plan `01.1-20`. */
+function toPlanId(token) {
+    return token.trim().replace(/-PLAN(?:\.md)?$/i, '');
+}
 /**
- * The commit types (`test`, `feat`, `refactor`, …) among the plan's own commits — those that
- * touched at least one path (`pathspecs: ['.']`, as the old `git log -- .` lookup did). An
- * unresolvable scope (git unavailable, an id that is not `<phase>-<plan>`) is "no commits".
+ * The plan ids a plan lists in `depends_on` (#4867). A plan whose frontmatter does not parse, or has
+ * no `depends_on`, depends on nothing: the pairing below only ever ADDS credit, so an unreadable
+ * link can never turn a failing plan into a passing one.
  */
-function planCommitKinds(projectDir, planId) {
+function dependsOnOf(content) {
+    // `extractFrontmatter` does not throw: an unparseable block is an empty result, so `depends_on` is absent.
+    const value = extractFrontmatter(content)['depends_on'];
+    const tokens = Array.isArray(value) ? value.map(String) : typeof value === 'string' ? value.split(',') : [];
+    return tokens.map(toPlanId).filter((id) => id !== '');
+}
+/** Every plan that depends on `planId`, directly or through a chain (#4867); a cycle is walked once. */
+function transitiveDependents(planId, dependents) {
+    const seen = new Set();
+    const queue = [planId];
+    while (queue.length > 0) {
+        for (const next of dependents.get(queue.shift()) ?? []) {
+            if (next !== planId && !seen.has(next)) {
+                seen.add(next);
+                queue.push(next);
+            }
+        }
+    }
+    return [...seen].sort();
+}
+/**
+ * The plan's own commits (`test`, `feat`, `refactor`, …) — those that touched at least one path
+ * (`pathspecs: ['.']`, as the old `git log -- .` lookup did) — with the sha the ordering check needs.
+ * An unresolvable scope (git unavailable, an id that is not `<phase>-<plan>`) is "no commits".
+ */
+function planCommits(projectDir, planId) {
     const scope = (0, gate_evaluation_scope_cjs_1.resolveEvaluationScope)(projectDir, { kind: 'plan', planId }, { pathspecs: ['.'], commitsOnly: true });
-    const kinds = new Set();
+    const commits = [];
     for (const commit of scope.commits) {
         const kind = /^([a-z]+)\(/.exec(commit.subject)?.[1];
         if (kind)
-            kinds.add(kind);
+            commits.push({ sha: commit.sha, kind });
     }
-    return kinds;
+    return commits;
+}
+const shasOfKind = (commits, kind) => commits.filter((c) => c.kind === kind).map((c) => c.sha);
+/**
+ * Whether some GREEN descends from some RED (#5275). Decided by ancestry only — never log position or
+ * commit date — so a history merged from worktree branches is judged by what each commit descends from.
+ * `true` as soon as one pair is in order; `null` when git could not answer for a pair and none was
+ * in order (an environment fault is not a violation, so the caller keeps the credit); else `false`.
+ */
+function greenFollowsRed(projectDir, reds, greens) {
+    let unanswered = false;
+    for (const red of reds) {
+        for (const green of greens) {
+            const redIsAncestor = (0, gate_evaluation_scope_cjs_1.commitIsAncestor)(projectDir, red, green);
+            if (redIsAncestor === true)
+                return true;
+            if (redIsAncestor === null)
+                unanswered = true;
+        }
+    }
+    return unanswered ? null : false;
 }
 /**
  * The verdict when the review could not read a plan or the phase directory. Advisory policy is
@@ -91,6 +150,9 @@ function evaluateTddReviewCheckpoint(input) {
     const phaseDir = located.kind === 'found' ? located.value : '';
     // Find all PLAN.md files with type: tdd in frontmatter
     const tddPlanFiles = [];
+    // #4867: plan id -> the plans that list it in `depends_on`, over EVERY plan of the phase (a
+    // dependent GREEN plan is usually `type: execute`, not `tdd`).
+    const dependents = new Map();
     const unreadable = [];
     if (phaseDir) {
         const entries = (0, gate_evidence_cjs_1.readDirEvidence)(phaseDir);
@@ -110,8 +172,13 @@ function evaluateTddReviewCheckpoint(input) {
                     const plan = (0, gate_evidence_cjs_1.readTextEvidence)(planPath);
                     if (plan.kind === 'unreadable')
                         unreadable.push({ source: planPath, reason: plan.reason });
-                    else if (plan.kind === 'found' && isTddPlan(plan.value))
-                        tddPlanFiles.push(planPath);
+                    else if (plan.kind === 'found') {
+                        if (isTddPlan(plan.value))
+                            tddPlanFiles.push(planPath);
+                        const planId = node_path_1.default.basename(planPath, '-PLAN.md');
+                        for (const dep of dependsOnOf(plan.value))
+                            dependents.set(dep, [...(dependents.get(dep) ?? []), planId]);
+                    }
                 }
             }
         }
@@ -134,17 +201,41 @@ function evaluateTddReviewCheckpoint(input) {
     const rows = [];
     for (const planPath of tddPlanFiles) {
         const planId = node_path_1.default.basename(planPath, '-PLAN.md');
-        const kinds = planCommitKinds(projectDir, planId);
-        const red = kinds.has('test');
-        const green = kinds.has('feat');
-        const refactor = kinds.has('refactor');
+        const commits = planCommits(projectDir, planId);
+        const reds = shasOfKind(commits, 'test');
+        const red = reds.length > 0;
+        const refactor = commits.some((c) => c.kind === 'refactor');
+        // #5275: with a RED present, a GREEN counts only when it descends from a RED. Without one there is
+        // nothing to order against and the plan is already missing RED, so a GREEN commit stays credited.
+        const inOrder = (greens) => greens.length > 0 && (!red || greenFollowsRed(projectDir, reds, greens) !== false);
+        const ownGreens = shasOfKind(commits, 'feat');
+        const ownOk = inOrder(ownGreens);
+        // #4867: a RED-only probe plan is satisfied by the GREEN of a plan that (transitively) declares
+        // `depends_on` it. Only a real `feat(...)` commit under such a plan counts, and it must follow the
+        // RED too (#5275); the plan's own RED is still required, and a plan nothing depends on is scored
+        // on its own commits alone.
+        const dependentGreens = ownOk
+            ? []
+            : transitiveDependents(planId, dependents).map((id) => ({ id, greens: shasOfKind(planCommits(projectDir, id), 'feat') }));
+        const greenFrom = dependentGreens.filter((d) => inOrder(d.greens)).map((d) => d.id);
+        const green = ownOk || greenFrom.length > 0;
+        const anyGreenCommit = ownGreens.length > 0 || dependentGreens.some((d) => d.greens.length > 0);
         const missing = [];
         if (!red)
             missing.push('RED');
-        if (!green)
+        if (!anyGreenCommit)
             missing.push('GREEN');
-        const status = missing.length === 0 ? 'Pass' : 'FAIL';
-        rows.push({ planId, red, green, refactor, status, missing });
+        const status = missing.length === 0 && green ? 'Pass' : 'FAIL';
+        // Both commit kinds exist but no GREEN follows a RED: its own reason. A row that fails for a
+        // missing commit keeps the exact shape it always had (`missing` already says why).
+        const reason = status === 'FAIL' && missing.length === 0
+            ? exports.TDD_ROW_REASON.GREEN_BEFORE_RED
+            : undefined;
+        rows.push({
+            planId, red, green, refactor, status, missing,
+            ...(reason ? { reason } : {}),
+            ...(greenFrom.length > 0 ? { greenFrom } : {}),
+        });
     }
     const violations = rows.filter(r => r.status === 'FAIL').length;
     // Build review table
@@ -160,10 +251,15 @@ function evaluateTddReviewCheckpoint(input) {
         tableDivider,
         ...tableRows,
     ].join('\n');
+    for (const r of rows.filter(row => row.greenFrom)) {
+        table += `\n\nPlan ${r.planId} GREEN is supplied by dependent plan ${(r.greenFrom ?? []).join(', ')}.`;
+    }
     if (violations > 0) {
         table += '\n\n⚠ Gate violations are advisory — review before advancing.';
         for (const r of rows.filter(row => row.status === 'FAIL')) {
-            table += `\n  Plan ${r.planId} missing: ${r.missing.join(', ')} gate commit(s).`;
+            table += r.reason === exports.TDD_ROW_REASON.GREEN_BEFORE_RED
+                ? `\n  Plan ${r.planId} GREEN precedes RED: no feat(...) commit descends from a test(...) commit.`
+                : `\n  Plan ${r.planId} missing: ${r.missing.join(', ')} gate commit(s).`;
             table += `\n  Expected commit pattern: test(${r.planId}): ... → feat(${r.planId}): ...`;
         }
     }

@@ -26,8 +26,8 @@ Output: {phase_num}-UAT.md tracking all test results. If issues found: diagnosed
 </objective>
 
 <execution_context>
-@.claude/gsd-core/workflows/verify-work.md
-@.claude/gsd-core/templates/UAT.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/verify-work.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/templates/UAT.md
 </execution_context>
 
 <context>

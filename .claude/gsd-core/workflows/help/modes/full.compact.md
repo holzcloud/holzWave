@@ -175,7 +175,7 @@ Usage: `/gsd-sketch --wrap-up`
 
 Usage: `/gsd-capture Add auth token refresh`
 
-**`/gsd-capture --note <text>`** — Zero-friction timestamped note to `.planning/notes/` (or `.claude/notes/` globally). Subcommands: append (default), list, promote (note → todo). Works without a project.
+**`/gsd-capture --note <text>`** — Zero-friction timestamped note to `.planning/notes/` (or `/Users/holz/Projects/holzWave/.claude/notes/` globally). Subcommands: append (default), list, promote (note → todo). Works without a project.
 
 Usage: `/gsd-capture --note refactor the hook system`
 Usage: `/gsd-capture --note promote 3`

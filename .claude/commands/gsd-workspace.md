@@ -34,10 +34,10 @@ Mode routing:
 </routing>
 
 <execution_context>
-@.claude/gsd-core/workflows/new-workspace.md
-@.claude/gsd-core/workflows/list-workspaces.md
-@.claude/gsd-core/workflows/remove-workspace.md
-@.claude/gsd-core/references/ui-brand.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/new-workspace.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/list-workspaces.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/remove-workspace.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/ui-brand.md
 </execution_context>
 
 <context>

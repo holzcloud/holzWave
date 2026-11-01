@@ -26,7 +26,7 @@ string** when nothing resolved.
 
 ## Lookup Table
 
-@.claude/gsd-core/references/model-profiles.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/model-profiles.md
 
 ## Passing the model to a spawn
 

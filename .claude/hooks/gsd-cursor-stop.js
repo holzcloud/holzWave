@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// gsd-hook-version: 1.17.0
+// gsd-hook-version: 1.19.0
 // gsd-cursor-stop.js — Cursor stop hook (ADR-1239 / #2089)
 //
 // Cursor invokes this script when the agent stops responding.

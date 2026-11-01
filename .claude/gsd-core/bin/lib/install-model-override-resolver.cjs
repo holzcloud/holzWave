@@ -34,6 +34,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
  */
 const node_path_1 = __importDefault(require("node:path"));
 const node_os_1 = __importDefault(require("node:os"));
+const runtime_homes_cjs_1 = require("./runtime-homes.cjs");
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- install-fs-adapter.cjs is an export= CommonJS module
 const installFsAdapter = require("./install-fs-adapter.cjs");
 const { installFs } = installFsAdapter;
@@ -57,7 +58,7 @@ const { resolveTierEntry: gsdResolveTierEntry, resolveModelPolicy: gsdResolveMod
  */
 function readGsdGlobalModelOverrides(options = {}) {
     try {
-        const home = options.homedir ? options.homedir() : node_os_1.default.homedir();
+        const home = (0, runtime_homes_cjs_1.resolveGsdHome)(options.homedir ? options.homedir() : node_os_1.default.homedir());
         const defaultsPath = node_path_1.default.join(home, '.gsd', 'defaults.json');
         if (!installFs().existsSync(defaultsPath))
             return null;
@@ -139,7 +140,7 @@ function readGsdAgentTools(config) {
  * model override resolver.
  */
 function readGsdEffectiveAgentTools(targetDir = null, options = {}) {
-    const home = options.homedir ? options.homedir() : node_os_1.default.homedir();
+    const home = (0, runtime_homes_cjs_1.resolveGsdHome)(options.homedir ? options.homedir() : node_os_1.default.homedir());
     const globalConfig = _readGsdConfigFile(node_path_1.default.join(home, '.gsd', 'defaults.json'), 'global defaults');
     let projectConfig = null;
     if (targetDir) {
@@ -170,7 +171,7 @@ function readGsdEffectiveAgentTools(targetDir = null, options = {}) {
  * baked, letting the runtime's own default/session model govern).
  */
 function readGsdRuntimeProfileResolver(targetDir = null) {
-    const homeDefaults = _readGsdConfigFile(node_path_1.default.join(node_os_1.default.homedir(), '.gsd', 'defaults.json'), '~/.gsd/defaults.json');
+    const homeDefaults = _readGsdConfigFile(node_path_1.default.join((0, runtime_homes_cjs_1.resolveGsdHome)(), '.gsd', 'defaults.json'), '~/.gsd/defaults.json');
     // #2875 defect fix (Generative Fix Divergence): same shared walk as
     // readGsdEffectiveModelOverrides above — see that call site's comment.
     let projectConfig = null;

@@ -496,7 +496,7 @@ function _resolveNamedConverter(converterName, kindLabel) {
  * @param converterName name of converter function in Runtime Artifact Conversion exports
  * @param configDir     runtime config dir (for .gsd-source marker resolution)
  */
-function convertedAgentsKind(destSubpath, prefix, converterName, configDir, sourceContext, scope) {
+function convertedAgentsKind(destSubpath, prefix, converterName, configDir, sourceContext, scope, excludeSuffixes) {
     return {
         kind: 'agents',
         destSubpath,
@@ -569,7 +569,7 @@ function convertedAgentsKind(destSubpath, prefix, converterName, configDir, sour
             // ADR-1235 §1: when agentCtx is provided (by createRuntimeArtifactInstallPlan
             // for descriptor-driven runtimes), thread it through so stageAgentsForRuntimeWithConverter
             // can apply the full pre-converter + post-converter sequence in the correct order.
-            return stageAgentsForRuntimeWithConverter(sourceRootFor(sourceContext, 'agents'), resolved, converter, (0, install_scope_cjs_1.isGlobalScope)(scope), agentCtx?.runtime ? agentCtx : undefined);
+            return stageAgentsForRuntimeWithConverter(sourceRootFor(sourceContext, 'agents'), resolved, converter, (0, install_scope_cjs_1.isGlobalScope)(scope), agentCtx?.runtime ? agentCtx : undefined, excludeSuffixes);
         },
     };
 }
@@ -713,7 +713,7 @@ function dispatchKindEntry(entry, runtime, configDir, scope, capabilityRegistry,
         case 'agents':
             result = converter == null
                 ? agentsKind(destSubpath, prefix, configDir, sourceContext)
-                : convertedAgentsKind(destSubpath, prefix, converter, configDir, sourceContext, scope);
+                : convertedAgentsKind(destSubpath, prefix, converter, configDir, sourceContext, scope, entry.excludeSuffixes);
             break;
         case 'skills':
             if (converter == null) {
@@ -973,10 +973,14 @@ const DEFAULT_NEW_PROJECT_COMMAND = '/gsd-new-project';
  * trigger exists is decided by the registered surface, not by this table. A
  * runtime absent here is invoked as `/<trigger>`.
  */
+// Agent Skills hosts that start a skill with `/skill:<name>` (kimi; pi, #5547 —
+// pi never accepts a bare `/<name>` for a skill).
+const slashSkillInvocation = (trigger) => `/skill:${trigger}`;
 const TRIGGER_INVOCATION = {
     codex: (trigger) => `$${trigger}`,
     cursor: (trigger) => `${trigger} (mention the skill name)`,
-    kimi: (trigger) => `/skill:${trigger}`,
+    kimi: slashSkillInvocation,
+    pi: slashSkillInvocation,
 };
 /**
  * The command a native-extension runtime registers instead of per-workflow

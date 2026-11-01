@@ -29,7 +29,7 @@ Routes to the update workflow which handles:
 </objective>
 
 <execution_context>
-@.claude/gsd-core/workflows/update.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/update.md
 </execution_context>
 
 <flags>
@@ -48,6 +48,6 @@ Parse the first token of the `<arguments>` block:
 </process>
 
 <execution_context_extended>
-@.claude/gsd-core/workflows/sync-skills.md
-@.claude/gsd-core/workflows/reapply-patches.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/sync-skills.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/reapply-patches.md
 </execution_context_extended>

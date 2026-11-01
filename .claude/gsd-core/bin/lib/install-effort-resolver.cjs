@@ -35,7 +35,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
  */
 const node_fs_1 = __importDefault(require("node:fs"));
 const node_path_1 = __importDefault(require("node:path"));
-const node_os_1 = __importDefault(require("node:os"));
+const runtime_homes_cjs_1 = require("./runtime-homes.cjs");
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- install-fs-adapter.cjs is an export= CommonJS module
 const installFsAdapter = require("./install-fs-adapter.cjs");
 const { installFs } = installFsAdapter;
@@ -154,7 +154,7 @@ function _findAncestorGsdConfigPath(targetDir) {
  * @param targetDir  Runtime install root (walks up to find .planning/).
  */
 function readGsdEffectiveEffortConfig(targetDir = null) {
-    const homeDefaults = _readGsdConfigFile(node_path_1.default.join(node_os_1.default.homedir(), '.gsd', 'defaults.json'), '~/.gsd/defaults.json');
+    const homeDefaults = _readGsdConfigFile(node_path_1.default.join((0, runtime_homes_cjs_1.resolveGsdHome)(), '.gsd', 'defaults.json'), '~/.gsd/defaults.json');
     let projectConfig = null;
     if (targetDir) {
         const candidate = _findAncestorGsdConfigPath(targetDir);

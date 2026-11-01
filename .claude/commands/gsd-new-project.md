@@ -38,11 +38,11 @@ Initialize a new project through unified flow: questioning → research (optiona
 </objective>
 
 <execution_context>
-@.claude/gsd-core/workflows/new-project.md
-@.claude/gsd-core/references/questioning.md
-@.claude/gsd-core/references/ui-brand.md
-@.claude/gsd-core/templates/project.md
-@.claude/gsd-core/templates/requirements.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/new-project.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/questioning.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/ui-brand.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/templates/project.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/templates/requirements.md
 </execution_context>
 
 <process>

@@ -38,8 +38,8 @@ Context budget: ~15% orchestrator, 100% fresh per subagent.
 </objective>
 
 <execution_context>
-@.claude/gsd-core/workflows/execute-phase.md
-@.claude/gsd-core/references/ui-brand.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/execute-phase.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/ui-brand.md
 </execution_context>
 
 

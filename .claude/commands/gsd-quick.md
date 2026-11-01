@@ -45,7 +45,7 @@ Granular flags are composable: `--discuss --research --validate` gives the same 
 </objective>
 
 <execution_context>
-@.claude/gsd-core/workflows/quick.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/quick.md
 </execution_context>
 
 <context>

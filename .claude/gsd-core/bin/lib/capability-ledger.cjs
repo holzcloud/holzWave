@@ -807,6 +807,28 @@ function reconcile(runtimeDir) {
     }
     return result;
 }
+/**
+ * #5121: the one bounded read for a SKILL.md found by walking a skill root. A skill file is untrusted
+ * repository (or installed-runtime) content: a symlink to /dev/zero exhausts memory and a FIFO blocks
+ * the process, because a bare readFileSync does neither a type nor a size check. Reuses the fd protocol
+ * of readSmallRegularFile and maps its fail-closed "unreadable" conditions (not a regular file after
+ * following symlinks, over the cap) to null, so a caller treats the file as it treats a missing one.
+ * Any other IO error still throws, as the unbounded read did.
+ *
+ * 256 KiB: the largest shipped SKILL.md is ~21 KB, so the cap is >10x headroom while still bounding the
+ * allocation a hostile repository can force.
+ */
+const SKILL_FILE_MAX_BYTES = 256 * 1024;
+function readSkillFile(filePath) {
+    try {
+        return readSmallRegularFile(filePath, SKILL_FILE_MAX_BYTES);
+    }
+    catch (err) {
+        if (err instanceof LedgerIOError && (err.code === 'ENXIO' || err.code === 'EISDIR' || err.code === 'EFBIG'))
+            return null;
+        throw err;
+    }
+}
 module.exports = {
     readLedger,
     readLedgerStrict,
@@ -822,6 +844,9 @@ module.exports = {
     // #1459 finding 1 (HIGH): the RAW-BYTES variant — the SOLE correct reader for the byte-exact,
     // injective consent content-hash binding (a utf8 decode is lossy and could collide binary artifacts).
     readSmallRegularFileBuffer,
+    // #5121: bounded SKILL.md read shared by skill discovery, the installed-runtime manifest and capability skills.
+    readSkillFile,
+    SKILL_FILE_MAX_BYTES,
     // Exported for testing / introspection
     LEDGER_FILE_NAME,
     CorruptLedgerError,

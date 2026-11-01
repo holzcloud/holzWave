@@ -180,8 +180,75 @@ function normalizeTestCommand(rawCmd, cwd) {
 function cmdNormalizeTestCommand(cwd, rawCmd) {
     process.stdout.write(normalizeTestCommand(rawCmd ?? '', cwd));
 }
+const PACKAGE_MANAGERS = ['npm', 'pnpm', 'yarn', 'bun'];
+// Lockfile order only matters when a project somehow carries several; the
+// `packageManager` field outranks all of them.
+const LOCKFILE_MANAGERS = [
+    ['pnpm-lock.yaml', 'pnpm'],
+    ['yarn.lock', 'yarn'],
+    ['bun.lock', 'bun'],
+    ['bun.lockb', 'bun'],
+];
+// The script name is spliced into a shell command by the caller, so it is
+// restricted to a plain identifier. Anything else is refused (empty output).
+const SCRIPT_NAME = /^[A-Za-z0-9_][A-Za-z0-9:_-]{0,63}$/;
+// Same bounded-read stance as the rest of this module: a package.json larger
+// than this is not a real manifest, so it is not parsed.
+const MAX_PACKAGE_JSON_BYTES = 1024 * 1024;
+function packageManagerFromField(cwd) {
+    try {
+        const pkgPath = node_path_1.default.join(cwd, 'package.json');
+        const stat = node_fs_1.default.statSync(pkgPath);
+        if (!stat.isFile() || stat.size > MAX_PACKAGE_JSON_BYTES)
+            return null;
+        const pkg = JSON.parse(node_fs_1.default.readFileSync(pkgPath, 'utf-8'));
+        if (typeof pkg !== 'object' || pkg === null)
+            return null;
+        const field = pkg.packageManager;
+        if (typeof field !== 'string')
+            return null;
+        const name = field.split('@')[0];
+        return PACKAGE_MANAGERS.includes(name) ? name : null;
+    }
+    catch {
+        return null;
+    }
+}
+function detectPackageManager(cwd) {
+    const declared = packageManagerFromField(cwd);
+    if (declared)
+        return declared;
+    for (const [lockfile, manager] of LOCKFILE_MANAGERS) {
+        try {
+            if (node_fs_1.default.statSync(node_path_1.default.join(cwd, lockfile)).isFile())
+                return manager;
+        }
+        catch { /* absent: try the next lockfile */ }
+    }
+    return 'npm';
+}
+/**
+ * Command that runs package script `script` with the project's package manager.
+ * `test` uses the manager's short form where it has one; `bun test` is bun's
+ * own runner, not the package script, so bun always goes through `bun run`.
+ * Returns '' for a script name that is not a plain identifier.
+ */
+function resolvePackageManagerCommand(script, cwd) {
+    if (typeof script !== 'string' || !SCRIPT_NAME.test(script))
+        return '';
+    const manager = detectPackageManager(cwd);
+    if (script === 'test' && manager !== 'bun')
+        return `${manager} test`;
+    return `${manager} run ${script}`;
+}
+/** CLI handler for `gsd-tools query resolve-package-manager <script>`. */
+function cmdResolvePackageManager(cwd, script) {
+    process.stdout.write(resolvePackageManagerCommand(script ?? '', cwd));
+}
 module.exports = {
     normalizeTestCommand,
     cmdNormalizeTestCommand,
     isAlreadyOneShot,
+    resolvePackageManagerCommand,
+    cmdResolvePackageManager,
 };

@@ -1,4 +1,4 @@
-@.claude/gsd-core/references/response-language-directive.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/response-language-directive.md
 
 <purpose>
 Display GSD command help at the tier the user asked for. Output ONLY the reference content of the chosen mode. Do NOT add project-specific analysis, git status, next-step suggestions, or any commentary beyond the reference.

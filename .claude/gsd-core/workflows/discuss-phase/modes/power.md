@@ -10,7 +10,7 @@ Apply response_language to all user-facing prose — narration between tool call
 ## Dispatch
 
 ```
-Read @.claude/gsd-core/workflows/discuss-phase-power.md
+Read @/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/discuss-phase-power.md
 ```
 
 Execute it end-to-end. Do not continue with the standard interactive steps.
@@ -21,7 +21,7 @@ The power user mode generates ALL questions upfront into machine-readable
 and human-friendly files, then waits for the user to answer at their own
 pace before processing all answers in a single pass.
 
-1. Run the same phase analysis (gray area identification) as standard mode
+1. Load the phase SPEC (`check_spec`, from the init facts `has_spec` / `spec_path`), then run the same phase analysis (gray area identification) as standard mode, about HOW only when a SPEC locks the requirements
 2. Write all questions to
    `{phase_dir}/{padded_phase}-QUESTIONS.json` and
    `{phase_dir}/{padded_phase}-QUESTIONS.html`

@@ -2986,6 +2986,8 @@ async function cmdWebsearch(query, options, raw) {
                         'Accept': 'application/json',
                         'X-Subscription-Token': apiKey
                     },
+                    // never follow redirects: X-Subscription-Token must not leave api.search.brave.com (#5409)
+                    redirect: 'manual',
                     signal: ac.signal
                 });
             }
@@ -3011,7 +3013,9 @@ async function cmdWebsearch(query, options, raw) {
             const status = response.status;
             const isRetryable = status === 429 || status >= 500;
             if (!isRetryable) {
-                // Non-retryable 4xx — fail immediately, no attempts field
+                // Non-retryable 4xx and every 3xx (redirect: 'manual' hands them back as-is, #5409) —
+                // fail immediately, no attempts field. Keep 3xx out of isRetryable.
+                response.body?.cancel().catch(() => { });
                 output({ available: false, error: `API error: ${status}` }, raw, '');
                 return;
             }

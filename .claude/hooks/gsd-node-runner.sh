@@ -1,5 +1,5 @@
 #!/bin/sh
-# gsd-hook-version: 1.17.0
+# gsd-hook-version: 1.19.0
 # gsd-node-runner.sh — GSD portable node resolver (#3662).
 #
 # Managed JS hook commands under --portable-hooks route through this script:

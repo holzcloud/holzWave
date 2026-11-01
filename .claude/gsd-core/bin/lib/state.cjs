@@ -14,10 +14,13 @@ const node_path_1 = __importDefault(require("node:path"));
 const pattern_cjs_1 = require("./pattern.cjs");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const ioMod = require("./io.cjs");
-const { output, error, declineNoOp, formatDiagnosticToken } = ioMod;
+const { output, error, declineNoOp, formatDiagnosticToken, ERROR_REASON } = ioMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const cliExitModule = require("./cli-exit.cjs");
 const { ExitError } = cliExitModule;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const capabilityLedgerMod = require("./capability-ledger.cjs");
+const { readSmallRegularFile } = capabilityLedgerMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const stateContract = require("./state-contract.cjs");
 const { publishStateContract } = stateContract;
@@ -316,19 +319,51 @@ function cmdStateGet(cwd, section, raw) {
         output({ error: `Section or field "${section}" not found` }, raw, '');
     }
 }
-function readTextArgOrFile(cwd, value, filePath, label) {
+/**
+ * #4926: cap on a `--<flag>-file` text input. Twice the 128 KiB one argv string
+ * can carry on Linux, so the file form never takes less than the inline form,
+ * and the entry echoed back on stdout stays small.
+ */
+const TEXT_FILE_MAX_BYTES = 256 * 1024;
+/**
+ * Resolve a text argument that may instead be supplied as a file (`--<flag>`
+ * or `--<flag>-file`).
+ *
+ * #4926: the file is a read-once INPUT — its contents are copied into
+ * STATE.md and the path itself is never written, recorded, or resolved
+ * again — so it is not a project-write resource and is not confined to the
+ * project root. A scratch file from an agent's temp directory is accepted.
+ * A relative path still resolves against the project root.
+ *
+ * A file that cannot be read is a caller error and goes through the fault
+ * path — stderr, non-zero exit (USAGE), `--json-errors` envelope — rather than
+ * an `{ added: false }` payload at exit 0 that a shell caller gating on `$?`
+ * reads as success while nothing was written.
+ *
+ * An unconfined path is hostile input, so the read goes through
+ * `readSmallRegularFile`: a FIFO, a device (`/dev/zero`, a piped `/dev/stdin`)
+ * or a directory is refused without blocking, and a file over
+ * TEXT_FILE_MAX_BYTES is refused without being read.
+ */
+function readTextArgOrFile(cwd, value, filePath, flag) {
     if (!filePath)
         return value;
-    // Path traversal guard: ensure file resolves within project directory
-    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/unbound-method
-    const { assertWithinRoot, PathAcceptance } = require('./security.cjs');
-    const contained = assertWithinRoot(filePath, cwd, `${label} path`, PathAcceptance.AbsoluteInsideRoot);
+    const refuse = (why) => error(`--${flag}-file could not be read: ${formatDiagnosticToken(filePath)}${why ? ` (${why})` : ''}`, ERROR_REASON.USAGE);
+    let content;
     try {
-        return node_fs_1.default.readFileSync(contained, 'utf-8').trimEnd();
+        content = readSmallRegularFile(node_path_1.default.resolve(cwd, filePath), TEXT_FILE_MAX_BYTES);
     }
-    catch {
-        throw new Error(`${label} file not found: ${filePath}`);
+    catch (err) {
+        const code = err.code;
+        if (code === 'EFBIG')
+            return refuse(`larger than ${TEXT_FILE_MAX_BYTES} bytes`);
+        if (code === 'EISDIR' || code === 'ENXIO')
+            return refuse('not a regular file');
+        return refuse(code);
     }
+    if (content === null)
+        return refuse('ENOENT');
+    return content.trimEnd();
 }
 function cmdStatePatch(cwd, patches, raw) {
     // Validate all field names before processing
@@ -735,7 +770,7 @@ function cmdStateAdvancePlan(cwd, raw) {
         // silently absorbed.
         const body = stripFrontmatter(content);
         const positionScope = matchCurrentPositionSection(body) ?? body;
-        const positionPhase = parseProsePhaseField((0, state_document_cjs_1.stateExtractField)(positionScope, 'Phase')).phase;
+        const positionPhase = parseProsePhaseField((0, state_document_cjs_1.stateExtractField)(positionScope, 'Phase'), resolvePhaseIdConvention(cwd)).phase;
         // #4093: a Current Position section with ZERO labeled fields has no
         // `Phase:` line either; frontmatter `current_phase` is the documented
         // survivor of body drift (the reporter's document still carried it, and
@@ -1224,25 +1259,19 @@ function cmdStateUpdateProgress(cwd, raw) {
 }
 function cmdStateAddDecision(cwd, options, raw) {
     const statePath = planningPaths(cwd).state;
-    if (!node_fs_1.default.existsSync(statePath)) {
-        output({ error: 'STATE.md not found' }, raw, undefined);
-        return;
-    }
+    // #4926: every refusal from this verb goes through the fault path (non-zero
+    // exit), so a caller gating on `$?` never reads success while nothing was written.
+    if (!node_fs_1.default.existsSync(statePath))
+        return error('STATE.md not found', ERROR_REASON.USAGE);
     const { phase, summary, summary_file, rationale, rationale_file } = options;
-    let summaryText = undefined;
-    let rationaleText = '';
-    try {
-        summaryText = readTextArgOrFile(cwd, summary, summary_file, 'summary');
-        rationaleText = readTextArgOrFile(cwd, rationale || '', rationale_file, 'rationale') || '';
-    }
-    catch (err) {
-        output({ added: false, reason: err.message }, raw, 'false');
-        return;
-    }
-    if (!summaryText) {
-        output({ error: 'summary required' }, raw, undefined);
-        return;
-    }
+    const summaryText = readTextArgOrFile(cwd, summary, summary_file, 'summary');
+    // The rationale is optional: blank, inline or file, means "no rationale".
+    const rationaleInput = readTextArgOrFile(cwd, rationale || '', rationale_file, 'rationale') || '';
+    const rationaleText = rationaleInput.trim() ? rationaleInput : '';
+    // A blank inline value is refused the same as a blank file (the file form is
+    // trimEnd()ed by readTextArgOrFile, the inline form is not).
+    if (!summaryText || !summaryText.trim())
+        return error('summary required — pass a non-blank --summary or --summary-file', ERROR_REASON.USAGE);
     // #3231/#3481: `--phase` omitted → resolve from the STATE.md being written, via
     // the canonical ladder `state prune` uses. A decision entry is a permanent
     // record, so a literal `[Phase ?]` written while `current_phase` sat three
@@ -1254,7 +1283,7 @@ function cmdStateAddDecision(cwd, options, raw) {
     if (!phaseId) {
         const rawState = node_fs_1.default.readFileSync(statePath, 'utf-8');
         const fm = extractFrontmatter(rawState, statePath);
-        phaseId = resolveCurrentPhaseId(fm, stripFrontmatter(rawState)) ?? undefined;
+        phaseId = resolveCurrentPhaseId(fm, stripFrontmatter(rawState), resolvePhaseIdConvention(cwd)) ?? undefined;
     }
     const entry = `- [Phase ${phaseId || '?'}]: ${summaryText}${rationaleText ? ` — ${rationaleText}` : ''}`;
     let _added = false;
@@ -1310,23 +1339,14 @@ function cmdStateAddDecision(cwd, options, raw) {
 }
 function cmdStateAddBlocker(cwd, text, raw) {
     const statePath = planningPaths(cwd).state;
-    if (!node_fs_1.default.existsSync(statePath)) {
-        output({ error: 'STATE.md not found' }, raw, undefined);
-        return;
-    }
+    // #4926: every refusal from this verb goes through the fault path (non-zero
+    // exit), so a caller gating on `$?` never reads success while nothing was written.
+    if (!node_fs_1.default.existsSync(statePath))
+        return error('STATE.md not found', ERROR_REASON.USAGE);
     const blockerOptions = typeof text === 'object' && text !== null ? text : { text: text };
-    let blockerText = undefined;
-    try {
-        blockerText = readTextArgOrFile(cwd, blockerOptions.text, blockerOptions.text_file, 'blocker');
-    }
-    catch (err) {
-        output({ added: false, reason: err.message }, raw, 'false');
-        return;
-    }
-    if (!blockerText) {
-        output({ error: 'text required' }, raw, undefined);
-        return;
-    }
+    const blockerText = readTextArgOrFile(cwd, blockerOptions.text, blockerOptions.text_file, 'text');
+    if (!blockerText || !blockerText.trim())
+        return error('text required — pass a non-blank --text or --text-file', ERROR_REASON.USAGE);
     const entry = `- ${blockerText}`;
     let _added = false;
     let created = false;
@@ -1379,25 +1399,16 @@ function cmdStateAddBlocker(cwd, text, raw) {
 }
 function cmdStateAddRoadmapEvolution(cwd, options, raw) {
     const statePath = planningPaths(cwd).state;
-    if (!node_fs_1.default.existsSync(statePath)) {
-        output({ error: 'STATE.md not found' }, raw, undefined);
-        return;
-    }
+    // #4926: every refusal from this verb goes through the fault path (non-zero
+    // exit), so a caller gating on `$?` never reads success while nothing was written.
+    if (!node_fs_1.default.existsSync(statePath))
+        return error('STATE.md not found', ERROR_REASON.USAGE);
     const { phase, action, after, note, note_file, urgent } = options;
-    let noteText = undefined;
-    try {
-        noteText = readTextArgOrFile(cwd, note, note_file, 'note');
-    }
-    catch (err) {
-        output({ added: false, reason: err.message }, raw, 'false');
-        return;
-    }
+    const noteText = readTextArgOrFile(cwd, note, note_file, 'note');
     // Reject missing / empty / whitespace-only notes — an evolution entry with no
     // narrative is meaningless and would corrupt the section with a dangling bullet.
-    if (!noteText || !noteText.trim()) {
-        output({ error: 'note required' }, raw, undefined);
-        return;
-    }
+    if (!noteText || !noteText.trim())
+        return error('note required — pass a non-blank --note or --note-file', ERROR_REASON.USAGE);
     // Flatten line breaks so the entry is always a single Markdown bullet. The
     // dedupe + rendering contract is line-oriented; a multiline --note-file would
     // otherwise spill continuation lines outside the bullet and defeat dedupe.
@@ -1417,7 +1428,7 @@ function cmdStateAddRoadmapEvolution(cwd, options, raw) {
     if (!phaseId) {
         const rawState = node_fs_1.default.readFileSync(statePath, 'utf-8');
         const fm = extractFrontmatter(rawState, statePath);
-        phaseId = resolveCurrentPhaseId(fm, stripFrontmatter(rawState)) ?? undefined;
+        phaseId = resolveCurrentPhaseId(fm, stripFrontmatter(rawState), resolvePhaseIdConvention(cwd)) ?? undefined;
     }
     const entry = `- Phase ${phaseId || '?'} ${actionText}${afterText}: ${flatNote}${urgentText}`;
     let duplicate = false;
@@ -1984,26 +1995,27 @@ function preferNewerLastActivity(existingFm, derivedFm) {
         derivedFm['last_activity'] = exRaw;
     }
 }
-function parseProsePhaseField(value) {
+function parseProsePhaseField(value, convention) {
     // #2121 Phase 2 (#2125): delegate to the canonical anchored parser so this
     // module holds no independent prose phase-id regex. Drives #2111 — the
     // anchored parser returns { phase: null } for a "Milestone vX.Y complete"
     // body line (the old unanchored regex mined the minor-version digit, e.g.
     // v0.5 -> "5"), so syncStateFrontmatter's #905 guard preserves the real
     // current_phase instead of clobbering it.
-    return parsePhaseFromProse(value);
+    // #5626: under `milestone-prefixed` the id is the whole `M-NN`; the convention comes from its owner.
+    return parsePhaseFromProse(value, convention);
 }
-function resolveStatePhase(fm, body) {
+function resolveStatePhase(fm, body, convention) {
     const currentPositionScope = matchCurrentPositionSection(body) ?? body;
     const frontmatterRaw = (0, state_document_cjs_1.stateFieldValue)(fm, body, 'current_phase', null).value;
     const legacyRaw = (0, state_document_cjs_1.stateFieldValue)(fm, currentPositionScope, null, 'Current Phase').value;
     const currentPositionRaw = (0, state_document_cjs_1.stateFieldValue)(fm, currentPositionScope, null, 'Phase').value;
     const sources = {
-        frontmatter: parseProsePhaseField(frontmatterRaw).phase,
-        legacy_current_phase: parseProsePhaseField(legacyRaw).phase,
-        current_position_phase: parseProsePhaseField(currentPositionRaw).phase,
+        frontmatter: parseProsePhaseField(frontmatterRaw, convention).phase,
+        legacy_current_phase: parseProsePhaseField(legacyRaw, convention).phase,
+        current_position_phase: parseProsePhaseField(currentPositionRaw, convention).phase,
     };
-    const prosePhase = parseProsePhaseField(currentPositionRaw);
+    const prosePhase = parseProsePhaseField(currentPositionRaw, convention);
     return {
         phase: sources.frontmatter ?? sources.legacy_current_phase ?? sources.current_position_phase,
         name: (0, state_document_cjs_1.stateFieldValue)(fm, body, 'current_phase_name', null).value
@@ -2058,9 +2070,9 @@ function resolveStatePhase(fm, body) {
  * Reconcile the two only by giving `resolveStatePhase` an explicit scope
  * parameter — never by pointing this at it and dropping the difference.
  */
-function resolveCurrentPhaseId(fm, body) {
+function resolveCurrentPhaseId(fm, body, convention) {
     const positionSection = sliceCurrentPositionSection(body);
-    const prosePhase = positionSection !== null ? parseProsePhaseField((0, state_document_cjs_1.stateFieldValue)(fm, positionSection, null, 'Phase').value).phase : null;
+    const prosePhase = positionSection !== null ? parseProsePhaseField((0, state_document_cjs_1.stateFieldValue)(fm, positionSection, null, 'Phase').value, convention).phase : null;
     return (0, state_document_cjs_1.stateFieldValue)(fm, body, 'current_phase', 'Current Phase').value ?? prosePhase;
 }
 function parseProseLastActivityField(value) {
@@ -2098,7 +2110,7 @@ function cmdStateSnapshot(cwd, raw) {
     // so it is scopeable exactly like Stopped At under ## Session. Fall back to
     // full-body search only when no ## Current Position section exists, so files
     // with no section heading keep their current behaviour.
-    const resolvedPhase = resolveStatePhase(fm, body);
+    const resolvedPhase = resolveStatePhase(fm, body, resolvePhaseIdConvention(cwd));
     const currentPhase = resolvedPhase.phase;
     const currentPhaseName = resolvedPhase.name;
     const totalPhasesRaw = (0, state_document_cjs_1.stateFieldValue)(fm, body, 'total_phases', 'Total Phases').value;
@@ -2520,7 +2532,7 @@ milestoneExplicitlyNull) {
     // section overwrites current_phase here, and the next read surfaces it. Fall
     // back to full-body search when no ## Current Position section exists.
     const currentPositionScope = matchCurrentPositionSection(bodyContent) ?? bodyContent;
-    const prosePhase = parseProsePhaseField((0, state_document_cjs_1.stateExtractField)(currentPositionScope, 'Phase'));
+    const prosePhase = parseProsePhaseField((0, state_document_cjs_1.stateExtractField)(currentPositionScope, 'Phase'), cwd ? resolvePhaseIdConvention(cwd) : null);
     const currentPhase = (0, state_document_cjs_1.stateExtractField)(bodyContent, 'Current Phase') ?? prosePhase.phase;
     const currentPhaseName = (0, state_document_cjs_1.stateExtractField)(bodyContent, 'Current Phase Name') ?? prosePhase.name;
     const currentPlan = (0, state_document_cjs_1.stateExtractField)(bodyContent, 'Current Plan');
@@ -2788,8 +2800,14 @@ milestoneExplicitlyNull) {
                         // — no second ROADMAP parser here. A ROADMAP without a canonical
                         // `## Progress` table resolves no table → floor inert (disk count
                         // stands), the owner's own answer to "what is countable".
+                        // #5165: the milestone-grouped `## Progress` table keeps every
+                        // milestone's rows and sits OUTSIDE any narrower roadmapScope, so the
+                        // floor names the milestone STATE asserts (assertedMilestoneVersion —
+                        // present on every resync path, unlike the optional storedMilestone
+                        // parameter) and the owner counts only that milestone's rows. No row
+                        // for it => nulls => the floor is inert and the disk count stands.
                         const roadmapCompletedPhases = roadmapScope !== null && safeToUseRoadmapCount && !diskCountsWithheld
-                            ? deriveProgressFromRoadmap(roadmapScope).completedPhases
+                            ? deriveProgressFromRoadmap(roadmapScope, assertedMilestoneVersion ?? storedMilestone).completedPhases
                             : null;
                         const flooredCompletedPhases = roadmapCompletedPhases !== null
                             ? Math.max(diskCompletedPhases, roadmapCompletedPhases)
@@ -3216,6 +3234,8 @@ function applyAuthoritativeProgressSubkeys(fm, intent, opts) {
     for (const [subkey, value] of Object.entries(intent)) {
         if (typeof value !== 'number' || !Number.isFinite(value))
             continue;
+        if (subkey === 'percent')
+            continue; // composed below, never applied raw (#5165)
         if (!getFieldClassification(`progress.${subkey}`))
             continue;
         const isCompletedCounter = subkey === 'completed_phases' || subkey === 'completed_plans';
@@ -3233,10 +3253,18 @@ function applyAuthoritativeProgressSubkeys(fm, intent, opts) {
     }
     // percent: applied only when a completed counter moved (coherent with the
     // counters that just landed) or when no percent exists to contradict.
+    // #5165 / ADR-4629 §8.5: `computeProgressPercent` is the one composition
+    // owner (min(plan fraction, phase fraction)) that every resyncing write uses.
+    // When the block carries the counters it needs, the percent is composed by
+    // that owner over the counters just landed, so a later resyncing write
+    // cannot move what this transition wrote. The intent's own percent (a
+    // phase-only fraction) is only the fallback for a block without plan counts.
     const intentPercent = intent['percent'];
     if (typeof intentPercent === 'number' && Number.isFinite(intentPercent) && (completedMoved || (0, state_document_cjs_1.toFiniteNumber)(base['percent']) === null)) {
-        if (!Object.is(base['percent'], intentPercent)) {
-            base['percent'] = intentPercent;
+        const composed = (0, state_document_cjs_1.computeProgressPercent)((0, state_document_cjs_1.toFiniteNumber)(base['completed_plans']), (0, state_document_cjs_1.toFiniteNumber)(base['total_plans']), (0, state_document_cjs_1.toFiniteNumber)(base['completed_phases']), (0, state_document_cjs_1.toFiniteNumber)(base['total_phases']), SCOPE.COMPLETE);
+        const nextPercent = composed !== null ? composed : intentPercent;
+        if (!Object.is(base['percent'], nextPercent)) {
+            base['percent'] = nextPercent;
             changed = true;
         }
     }
@@ -3820,7 +3848,10 @@ function assertStatePreservationOptions(options, caller) {
         throw err;
     }
 }
-function applyPostSyncPreservation(originalContent, transformedContent, syncedContent, statePath, options) {
+function applyPostSyncPreservation(originalContent, transformedContent, syncedContent, statePath, options, 
+// #5626: the project's phase-id convention, resolved by the caller from its cwd (null: unset). Trailing and
+// optional so `options` stays the fifth parameter the options guard and its callers rely on.
+phaseIdConvention = null) {
     assertStatePreservationOptions(options, 'applyPostSyncPreservation');
     const { resync, authoritativeFm, deriveProgressKeys, divergedFields, explicitProgressField, preWriteState } = options;
     // Bug #1230: delta heuristic — snapshot pre-transform body source fields so
@@ -3877,7 +3908,7 @@ function applyPostSyncPreservation(originalContent, transformedContent, syncedCo
     const preCurrentPositionScope = matchCurrentPositionSection(preBody) ?? preBody;
     const preBodyCurrentPlan = (0, state_document_cjs_1.stateExtractField)(preBody, 'Current Plan');
     const preBodyCurrentPhase = (0, state_document_cjs_1.stateExtractField)(preBody, 'Current Phase')
-        ?? parseProsePhaseField((0, state_document_cjs_1.stateExtractField)(preCurrentPositionScope, 'Phase')).phase;
+        ?? parseProsePhaseField((0, state_document_cjs_1.stateExtractField)(preCurrentPositionScope, 'Phase'), phaseIdConvention).phase;
     const preBodyPausedAt = (0, state_document_cjs_1.stateExtractField)(preSessionScope, 'Paused At');
     const preBodyLastActivityRaw = (0, state_document_cjs_1.stateExtractField)(preBody, 'Last Activity')
         ?? (0, state_document_cjs_1.stateExtractField)(preBody, 'Last activity');
@@ -3903,7 +3934,7 @@ function applyPostSyncPreservation(originalContent, transformedContent, syncedCo
     const postCurrentPositionScope = matchCurrentPositionSection(postBody) ?? postBody;
     const postBodyCurrentPlan = (0, state_document_cjs_1.stateExtractField)(postBody, 'Current Plan');
     const postBodyCurrentPhase = (0, state_document_cjs_1.stateExtractField)(postBody, 'Current Phase')
-        ?? parseProsePhaseField((0, state_document_cjs_1.stateExtractField)(postCurrentPositionScope, 'Phase')).phase;
+        ?? parseProsePhaseField((0, state_document_cjs_1.stateExtractField)(postCurrentPositionScope, 'Phase'), phaseIdConvention).phase;
     const postBodyPausedAt = (0, state_document_cjs_1.stateExtractField)(postSessionScope, 'Paused At');
     const postBodyLastActivityRaw = (0, state_document_cjs_1.stateExtractField)(postBody, 'Last Activity')
         ?? (0, state_document_cjs_1.stateExtractField)(postBody, 'Last activity');
@@ -4120,7 +4151,7 @@ function applyPostSyncPreservation(originalContent, transformedContent, syncedCo
 function syncAndPreserveStateMd(originalContent, transformedContent, statePath, cwd, options) {
     assertStatePreservationOptions(options, 'syncAndPreserveStateMd');
     const synced = syncStateFrontmatter(transformedContent, cwd, options.authoritativeFm);
-    return applyPostSyncPreservation(originalContent, transformedContent, synced, statePath, options);
+    return applyPostSyncPreservation(originalContent, transformedContent, synced, statePath, options, cwd ? resolvePhaseIdConvention(cwd) : null);
 }
 /**
  * Atomic read-modify-write for STATE.md.
@@ -4778,8 +4809,9 @@ function stateSectionScopeUnits(units, sectionTargets) {
  * matching `readStateTarget`'s long-standing special case.
  */
 function verifyStateWriteIntent(intent, preContent, postContent, statePath, bodyDeltas) {
-    const pre = (0, shell_command_projection_cjs_1.normalizeContent)(statePath, preContent).content;
-    const post = (0, shell_command_projection_cjs_1.normalizeContent)(statePath, postContent).content;
+    // #5165: the write lands scoped to what it changed (platformWriteSync reads the file it replaces).
+    const pre = (0, shell_command_projection_cjs_1.normalizeContent)(statePath, preContent, { prior: preContent }).content;
+    const post = (0, shell_command_projection_cjs_1.normalizeContent)(statePath, postContent, { prior: preContent }).content;
     const preFm = extractFrontmatter(pre, statePath);
     const postFm = extractFrontmatter(post, statePath);
     const preBody = stripFrontmatter(pre);
@@ -4978,7 +5010,7 @@ function applyStateWriteIntent(statePath, intent, transformFn, cwd, options = {}
             return unwritten(verification);
         (0, shell_command_projection_cjs_1.platformWriteSync)(statePath, candidate);
         const reread = (0, shell_command_projection_cjs_1.platformReadSync)(statePath) || '';
-        if (reread !== (0, shell_command_projection_cjs_1.normalizeContent)(statePath, candidate).content) {
+        if (reread !== (0, shell_command_projection_cjs_1.normalizeContent)(statePath, candidate, { prior: pre }).content) {
             return Object.freeze({
                 ok: false,
                 reasons: Object.freeze([STATE_WRITE_INTENT_FAILURE.REREAD_MISMATCH]),
@@ -5044,7 +5076,7 @@ function cmdStateJson(cwd, raw) {
         const bodyPausedAt = (0, state_document_cjs_1.stateExtractField)(sessionScope, 'Paused At');
         const bodyPhaseSource = (0, state_document_cjs_1.stateExtractField)(body, 'Phase');
         const bodyCurrentPhase = (0, state_document_cjs_1.stateExtractField)(body, 'Current Phase')
-            ?? parseProsePhaseField((0, state_document_cjs_1.stateExtractField)(positionScope, 'Phase')).phase;
+            ?? parseProsePhaseField((0, state_document_cjs_1.stateExtractField)(positionScope, 'Phase'), resolvePhaseIdConvention(cwd)).phase;
         const bodyCurrentPlan = (0, state_document_cjs_1.stateExtractField)(body, 'Current Plan');
         const bodyStatus = (0, state_document_cjs_1.stateExtractField)(body, 'Status');
         // #3836: mirrors applyPostSyncPreservation's own derivation (state.cts
@@ -5098,6 +5130,23 @@ function cmdStateJson(cwd, raw) {
     output(built, raw, JSON.stringify(built, null, 2));
 }
 /**
+ * 1-based position of the first plan with no summary, when SOME of the phase's plans already have
+ * one (a gap-closure re-entry: plans 1..17 are done and 18 and 19 are the gap plans, #4945).
+ * `null` when no plan is summarized yet, when every plan is, or when the phase directory cannot be
+ * found: the phase then starts at plan 1, exactly as before. Plans and summaries are paired by the
+ * phase locator's own rule, so this agrees with `init` and `phase-plan-index`.
+ */
+function firstPlanToRun(cwd, phaseNumber) {
+    const located = phaseLocatorMod.findPhaseInternal(cwd, String(phaseNumber));
+    if (!located || !located.found)
+        return null;
+    const { plans, incomplete_plans: incomplete } = located;
+    if (incomplete.length === 0 || incomplete.length === plans.length)
+        return null;
+    const index = plans.indexOf(incomplete[0]);
+    return index === -1 ? null : index + 1;
+}
+/**
  * Update STATE.md when a new phase begins execution.
  * Updates body text fields (Current focus, Status, Last Activity, Current Position)
  * and synchronizes frontmatter via writeStateMd.
@@ -5144,6 +5193,8 @@ function cmdStateBeginPhase(cwd, phaseNumber, phaseName, planCount, raw) {
         phaseNumber: phaseNumber,
         phaseName: phaseName ?? null,
         planCount: planCount ?? null,
+        // #4945: a gap-closure re-entry starts at the first plan still to run, not at plan 1.
+        startPlan: firstPlanToRun(cwd, phaseNumber),
     };
     const deps = {
         clock: clock_cjs_1.realClock,
@@ -5497,7 +5548,8 @@ function cmdStatePlannedPhase(cwd, phaseNumber, phaseName, planCount, raw) {
         if (!intent.phaseName) {
             const preFm = extractFrontmatter(content, statePath);
             const curatedName = preFm['current_phase_name'];
-            if (typeof curatedName === 'string' && curatedName.trim().length > 0) {
+            // #5369: a status fragment a pre-fix write left as the name is not curated; do not reassert it.
+            if (typeof curatedName === 'string' && curatedName.trim().length > 0 && !phaseIdMod.isPlannedPhaseStatusPhrase(curatedName)) {
                 rmwOptions.authoritativeFm = { current_phase_name: curatedName };
             }
         }
@@ -5726,7 +5778,7 @@ function cmdStateValidate(cwd, raw, opts = {}) {
     const { fm, body, scope: initialScope } = readStateFrontmatterScoped(content, statePath);
     const scope = initialScope;
     const status = (0, state_document_cjs_1.stateFieldValue)(fm, body, 'status', 'Status').value || '';
-    const resolvedPhase = resolveStatePhase(fm, body);
+    const resolvedPhase = resolveStatePhase(fm, body, resolvePhaseIdConvention(cwd));
     const currentPhase = resolvedPhase.phase;
     const totalPlansRaw = (0, state_document_cjs_1.stateFieldValue)(fm, body, 'total_plans_in_phase', 'Total Plans in Phase').value;
     const totalPlansInPhase = totalPlansRaw ? parseInt(totalPlansRaw, 10) : null;
@@ -6180,7 +6232,7 @@ function cmdStatePrune(cwd, options, raw) {
     const body = stripFrontmatter(rawState);
     // Prune needs an integer cutoff, so it parses the resolved id itself; a
     // non-numeric or absent id lands on 0 and prune bails, as before.
-    const currentPhase = parseInt(String(resolveCurrentPhaseId(fm, body)), 10) || 0;
+    const currentPhase = parseInt(String(resolveCurrentPhaseId(fm, body, resolvePhaseIdConvention(cwd))), 10) || 0;
     const cutoff = currentPhase - keepRecent;
     if (cutoff <= 0) {
         emit({ pruned: false, reason: `Only ${currentPhase} phases — nothing to prune with --keep-recent ${keepRecent}` }, raw, 'false');

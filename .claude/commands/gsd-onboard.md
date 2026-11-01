@@ -31,9 +31,9 @@ Guide brownfield onboarding for an existing codebase by routing through the exis
 </objective>
 
 <execution_context>
-@.claude/gsd-core/workflows/onboard.md
-@.claude/gsd-core/references/ui-brand.md
-@.claude/gsd-core/references/gate-prompts.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/onboard.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/ui-brand.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/gate-prompts.md
 </execution_context>
 
 <context>

@@ -57,6 +57,7 @@ exports.releaseMilestonePhase = releaseMilestonePhase;
 const node_fs_1 = __importDefault(require("node:fs"));
 const node_path_1 = __importDefault(require("node:path"));
 const clock_cjs_1 = require("./clock.cjs");
+const git_info_exclude_cjs_1 = require("./git-info-exclude.cjs");
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- planning-workspace.cjs is an export= CommonJS module
 const planningWorkspace = require("./planning-workspace.cjs");
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- active-workstream-store.cjs is an export= CommonJS module
@@ -122,7 +123,13 @@ function readClaim(cwd) {
 }
 function writeClaim(cwd, claim) {
     ensureClaimDir(cwd);
-    node_fs_1.default.writeFileSync(milestoneLockPath(cwd), JSON.stringify(claim, null, 2) + '\n');
+    const lockPath = milestoneLockPath(cwd);
+    node_fs_1.default.writeFileSync(lockPath, JSON.stringify(claim, null, 2) + '\n');
+    // #5551: the claim is per-machine state, never project content. Keep it out
+    // of `git status` (the ship preflight refuses a dirty tree). Every write, not
+    // only the first, so a claim file that predates this fix is covered too; the
+    // helper is idempotent and best-effort.
+    (0, git_info_exclude_cjs_1.excludeFromGit)(node_path_1.default.dirname(lockPath), exports.MILESTONE_LOCK_FILENAME);
 }
 // planningWorkspace.planningDir targets .planning (or the workstream-scoped
 // variant); the parent is created by every GSD command that gets this far, but

@@ -34,7 +34,10 @@ const gate_phase_context_cjs_1 = require("./gate-phase-context.cjs");
 const planningWorkspace = require("./planning-workspace.cjs");
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- verification.cjs is an export= CommonJS module
 const verificationMod = require("./verification.cjs");
-const { planningDir } = planningWorkspace;
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- phase-id.cjs is an export= CommonJS module
+const phaseIdMod = require("./phase-id.cjs");
+const { scopeToPhase } = phaseIdMod;
+const { planningDir, isPhaseSpecFile, findPhaseSpecIn } = planningWorkspace;
 const { defaultPhaseCleanCommitTimesMs } = verificationMod;
 /**
  * Pure comparator: which of `entries` have an effective last-changed time
@@ -54,7 +57,7 @@ function buildContextDriftMessage(staleArtifacts, phaseArg, projectDir) {
     if (staleArtifacts.some((f) => f.endsWith('-PATTERNS.md'))) {
         parts.push(`Regenerate patterns: delete the PATTERNS.md file, then re-run ${(0, runtime_slash_cjs_1.runtimeCommand)(projectDir, 'plan-phase')}.`);
     }
-    if (staleArtifacts.some((f) => f.endsWith('-VALIDATION.md') || (f.endsWith('-SPEC.md') && !f.endsWith('-AI-SPEC.md') && !f.endsWith('-UI-SPEC.md')))) {
+    if (staleArtifacts.some((f) => f.endsWith('-VALIDATION.md') || isPhaseSpecFile(f))) {
         parts.push('Regenerate or manually reconcile VALIDATION.md / SPEC.md against the current decisions.');
     }
     parts.push('Do not hand-inject the newer decisions into a prompt as a substitute for regenerating — that carries the staleness forward.');
@@ -98,7 +101,9 @@ function runContextDriftGate(cwd, phaseArg) {
     const researchFile = phaseFiles.find((f) => f.endsWith('-RESEARCH.md'));
     const patternsFile = phaseFiles.find((f) => f.endsWith('-PATTERNS.md'));
     const validationFile = phaseFiles.find((f) => f.endsWith('-VALIDATION.md'));
-    const specFile = phaseFiles.find((f) => f.endsWith('-SPEC.md') && !f.endsWith('-AI-SPEC.md') && !f.endsWith('-UI-SPEC.md'));
+    // #5629: the shared phase-SPEC predicate (the init payloads' `has_spec` / `spec_path` use the same one).
+    // Scoped to this phase's own artifacts, as init scopes it, so a misfiled `02-SPEC.md` agrees in both.
+    const specFile = findPhaseSpecIn(scopeToPhase(phaseFiles, node_path_1.default.basename(phaseDir)));
     const upstreamFiles = [researchFile, patternsFile, validationFile, specFile].filter((f) => !!f);
     if (upstreamFiles.length === 0) {
         return skip('no-upstream-artifacts');

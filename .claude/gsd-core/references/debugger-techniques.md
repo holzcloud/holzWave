@@ -241,12 +241,12 @@ git bisect bad              # or good, based on testing
 **Example:** Stale hook warning persists after update
 ```
 Check code says:  hooksDir = path.join(configDir, 'hooks')
-                  configDir = .claude
-                  → checks .claude/hooks/
+                  configDir = /Users/holz/Projects/holzWave/.claude
+                  → checks /Users/holz/Projects/holzWave/.claude/hooks/
 
 Installer says:   hooksDest = path.join(targetDir, 'hooks')
-                  targetDir = .claude/gsd-core
-                  → writes to .claude/gsd-core/hooks/
+                  targetDir = /Users/holz/Projects/holzWave/.claude/gsd-core
+                  → writes to /Users/holz/Projects/holzWave/.claude/gsd-core/hooks/
 
 MISMATCH: Checker looks in wrong directory → hooks "not found" → reported as stale
 ```

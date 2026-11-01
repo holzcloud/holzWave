@@ -43,6 +43,7 @@ const node_fs_1 = __importDefault(require("node:fs"));
 const node_path_1 = __importDefault(require("node:path"));
 const node_child_process_1 = require("node:child_process");
 const markdown_sectionizer_cjs_1 = require("./markdown-sectionizer.cjs");
+const read_only_git_env_cjs_1 = require("./read-only-git-env.cjs");
 const runtime_slash_cjs_1 = require("./runtime-slash.cjs");
 // #3696: the calendar-validity predicate moved to the STATE.md document module
 // so `state validate` can assert the same `last_activity` invariant this reader
@@ -222,6 +223,18 @@ function readGitSignals(cwd) {
                 windowsHide: true,
                 stdio: ['pipe', 'pipe', 'pipe'],
                 timeout: 10_000,
+                // #5048: readGitSignals runs `git status`, which by default refreshes
+                // the index and takes an *optional* `.git/index.lock` to write the
+                // refreshed copy back. That lock is the one a real `git add` / `git
+                // commit` needs, so a routine "which phase am I in" probe can fail
+                // someone else's commit with `Unable to create '.git/index.lock': File
+                // exists`. GIT_OPTIONAL_LOCKS=0 turns off exactly that optional write.
+                // The `rev-parse` / `log` calls sharing this helper never open the
+                // index, so the variable is inert for them. The block itself is owned by
+                // src/read-only-git-env.cts and shared with every other read-only seam;
+                // parity across every read-only surface is asserted in
+                // tests/git-optional-locks-parity.test.cjs.
+                env: (0, read_only_git_env_cjs_1.readOnlyGitEnv)(),
             });
         }
         catch {
@@ -675,6 +688,28 @@ function actionsFor(situation, s, runtime = 'claude') {
     }
 }
 // ─── Summary line ─────────────────────────────────────────────────────────────
+function phaseSummary(s) {
+    const phase = s.current_phase;
+    // Preserve the milestone ordinal introduced by #5228 when it is known.
+    const at = phase === null ? -1 : s.milestone_phases.findIndex((id) => comparePhaseNum(id, phase) === 0);
+    if (at >= 0)
+        return `Phase ${at + 1} of ${s.milestone_phases.length}`;
+    const total = s.total_phases;
+    const legacy = `Phase ${phase ?? '?'} of ${total ?? '?'}`;
+    const roadmapTotal = s.roadmap_total_phases;
+    // Keep the recorded pair when roadmap counts are unavailable, or when the
+    // pair can describe a single milestone without changing its existing text.
+    if (phase === null || total === null || roadmapTotal === null || roadmapTotal <= 0
+        || (total === roadmapTotal && comparePhaseNum(phase, total) <= 0)) {
+        return legacy;
+    }
+    // When the recorded pair cannot safely describe this roadmap, label its
+    // counts separately rather than printing a mixed-scope ratio.
+    const roadmapDone = s.roadmap_completed_phases;
+    return roadmapDone === null
+        ? `Phase ${phase} (${roadmapTotal} roadmap phases)`
+        : `Phase ${phase} (${roadmapDone} of ${roadmapTotal} roadmap phases complete)`;
+}
 function buildSummary(situation, s) {
     switch (situation) {
         case 'no-project':
@@ -688,7 +723,7 @@ function buildSummary(situation, s) {
         case 'needs-first-phase':
             return 'Project initialized — plan your first phase';
         case 'planning':
-            return `${phasePosition(s)} — needs a plan`;
+            return `${phaseSummary(s)} — needs a plan`;
         case 'executing':
             return progressLine('executing', s);
         case 'verify-pending':
@@ -702,24 +737,10 @@ function buildSummary(situation, s) {
             return 'Unsure of state — showing progress';
     }
 }
-/**
- * "Phase N of M" for the current phase. N is the phase's 1-based position in
- * the current milestone's ordered phase list (#5228), so a milestone that
- * continues the numbering of an earlier one (phases 9-17) reads "Phase 1 of 9",
- * not "Phase 9 of 9". When the phase is not in that list (or the roadmap lists
- * none) the STATE.md figures are printed as recorded.
- */
-function phasePosition(s) {
-    const current = s.current_phase;
-    const at = current === null ? -1 : s.milestone_phases.findIndex((id) => comparePhaseNum(id, current) === 0);
-    if (at >= 0)
-        return `Phase ${at + 1} of ${s.milestone_phases.length}`;
-    return `Phase ${s.current_phase ?? '?'} of ${s.total_phases ?? '?'}`;
-}
 function progressLine(tail, s) {
     const parts = [];
     if (s.current_phase !== null && s.total_phases !== null) {
-        parts.push(phasePosition(s));
+        parts.push(phaseSummary(s));
     }
     else if (s.current_phase !== null) {
         parts.push(`Phase ${s.current_phase}`);

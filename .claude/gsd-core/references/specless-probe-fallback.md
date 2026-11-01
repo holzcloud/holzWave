@@ -26,7 +26,7 @@ SPECLESS_FALLBACK=true; [[ "$SPECLESS_CFG" == "false" ]] && SPECLESS_FALLBACK=fa
 # ad-hoc awk (contract pinned by tests/spec-section.test.cjs). Resolve via the edge-probe install-dir
 # idiom; build only in a source checkout, else fail loud (never silently mis-detect).
 _GSD_RT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
-_gsd_lib() { for _d in "$_GSD_RT/gsd-core/bin/lib" "$_GSD_RT/bin/lib" "$_GSD_RT/.claude/bin/lib" ".claude/gsd-core/bin/lib" ".claude/bin/lib"; do [ -f "$_d/$1" ] && { echo "$_d/$1"; return; }; done; }
+_gsd_lib() { for _d in "$_GSD_RT/gsd-core/bin/lib" "$_GSD_RT/bin/lib" "$_GSD_RT/.claude/bin/lib" "/Users/holz/Projects/holzWave/.claude/gsd-core/bin/lib" "/Users/holz/Projects/holzWave/.claude/bin/lib"; do [ -f "$_d/$1" ] && { echo "$_d/$1"; return; }; done; }
 SPEC_SECTION_JS=$(_gsd_lib spec-section.cjs)
 if [ -z "$SPEC_SECTION_JS" ] && [ -f "$_GSD_RT/tsconfig.build.json" ] && [ -f "$_GSD_RT/src/spec-section.cts" ]; then
   npm --prefix "$_GSD_RT" run build:lib 2>/dev/null || true; SPEC_SECTION_JS=$(_gsd_lib spec-section.cjs)
@@ -65,12 +65,12 @@ phase requirement IDs (`{phase_req_ids}`) instead of a SPEC interview. Leave `$C
 
 ```bash
 # Resolve the compiled edge-probe.cjs against the GSD install dir via RUNTIME_DIR (#448) — NOT the
-# consuming project's git root — falling back to git toplevel / .claude (spec-phase.md:198 idiom).
+# consuming project's git root — falling back to git toplevel / /Users/holz/Projects/holzWave/.claude (spec-phase.md:198 idiom).
 _GSD_RT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 EDGE_PROBE_JS=$(for _c in \
   "$_GSD_RT/gsd-core/bin/lib/edge-probe.cjs" "$_GSD_RT/bin/lib/edge-probe.cjs" \
-  "$_GSD_RT/.claude/bin/lib/edge-probe.cjs" ".claude/gsd-core/bin/lib/edge-probe.cjs" \
-  ".claude/bin/lib/edge-probe.cjs"; do [ -f "$_c" ] && { echo "$_c"; break; }; done)
+  "$_GSD_RT/.claude/bin/lib/edge-probe.cjs" "/Users/holz/Projects/holzWave/.claude/gsd-core/bin/lib/edge-probe.cjs" \
+  "/Users/holz/Projects/holzWave/.claude/bin/lib/edge-probe.cjs"; do [ -f "$_c" ] && { echo "$_c"; break; }; done)
 # Build ONLY inside a verified GSD source checkout; --prefix pins npm so we never trigger the
 # consuming project's build:lib. Never silent-skip (RR-04) — fail loud if unresolvable.
 if [ -z "$EDGE_PROBE_JS" ]; then
@@ -78,8 +78,8 @@ if [ -z "$EDGE_PROBE_JS" ]; then
     npm --prefix "$_GSD_RT" run build:lib 2>/dev/null || true
     EDGE_PROBE_JS=$(for _c in \
       "$_GSD_RT/gsd-core/bin/lib/edge-probe.cjs" "$_GSD_RT/bin/lib/edge-probe.cjs" \
-      "$_GSD_RT/.claude/bin/lib/edge-probe.cjs" ".claude/gsd-core/bin/lib/edge-probe.cjs" \
-      ".claude/bin/lib/edge-probe.cjs"; do [ -f "$_c" ] && { echo "$_c"; break; }; done)
+      "$_GSD_RT/.claude/bin/lib/edge-probe.cjs" "/Users/holz/Projects/holzWave/.claude/gsd-core/bin/lib/edge-probe.cjs" \
+      "/Users/holz/Projects/holzWave/.claude/bin/lib/edge-probe.cjs"; do [ -f "$_c" ] && { echo "$_c"; break; }; done)
   fi
   [ -n "$EDGE_PROBE_JS" ] || { echo "ERROR: edge-probe.cjs not found — reinstall GSD or run \`npm run build:lib\`." >&2; exit 1; }
 fi
@@ -137,7 +137,7 @@ prompt (Step 8). When `EDGE_ABSENT=0`, `$COVERAGE` is empty and this does not ru
 
 There is NO compiled prohibition engine and NO `node` invocation (ADR-550 D7b) — the gsd-planner runs
 this in-prompt. Full two-stage protocol, canon-referral rule, and status×verification schema live in
-`.claude/gsd-core/references/prohibition-probe.md` (do not inline it). Summary:
+`/Users/holz/Projects/holzWave/.claude/gsd-core/references/prohibition-probe.md` (do not inline it). Summary:
 
 - **Stage 1 — Recall (adversarial).** Per requirement: *"What could this feature silently become that
   the author would NOT want, but the spec does not forbid?"* Over-produce (~10 raw must-NOT candidates).

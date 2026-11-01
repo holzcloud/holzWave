@@ -176,7 +176,8 @@ function isSameHost(parsed) {
  * equality comparison (never parsed as a date). The pair (pid, startTime) uniquely identifies a
  * process instance: even if a crashed holder's pid is REUSED, the new process's start-time differs.
  * Returns null on ANY error / unobtainable value (liveness cannot be VERIFIED → steal-eligible past
- * the deadman). The shell-outs only run on the rare STEAL-decision path, never the happy path.
+ * the deadman). Probing ANOTHER pid only happens on the rare STEAL-decision path; this process's own
+ * start-time is probed on its first lock acquire (see selfStartTime) — never at module load (#5327).
  */
 function getProcessStartTime(pid) {
     if (!Number.isInteger(pid) || pid <= 0)
@@ -208,11 +209,37 @@ function getProcessStartTime(pid) {
         return null;
     }
 }
-/** THIS process's start-time, captured ONCE at module load so we never re-shell on every lock write. */
-const _selfStartTime = getProcessStartTime(process.pid);
-/** Serialize the lockfile body: JSON carrying the owner token, pid, hostname, cached start-time, ts. */
-function lockFileBody(token) {
-    return JSON.stringify({ token, pid: process.pid, hostname: node_os_1.default.hostname(), startTime: _selfStartTime, ts: Date.now() });
+/**
+ * THIS process's start-time, probed on the first lock acquire and cached so later acquires never re-shell.
+ * Not probed at module load: every config read loads this module, and most never take a lock (#5327).
+ * Only a successful probe is cached. A failed one (a PowerShell launch past its 5 s timeout on a loaded
+ * Windows host) is retried on the next acquire, up to SELF_PROBE_ATTEMPTS probes in all, so a host whose
+ * probe never succeeds pays a bounded cost instead of one launch per acquire.
+ * Probed per acquire ATTEMPT, before the O_EXCL create, so a process whose first acquire meets a live
+ * holder still pays it: probing after a successful create instead would widen the empty-body window
+ * that the steal path's `LOCK_STALE_MS` floor relies on.
+ */
+const SELF_PROBE_ATTEMPTS = 2;
+let _selfStartTime = null;
+let _selfProbeAttempts = 0;
+function selfStartTime() {
+    if (_selfStartTime === null && _selfProbeAttempts < SELF_PROBE_ATTEMPTS) {
+        _selfProbeAttempts++;
+        // Through the same injectable probe the steal path uses, so the value acquireLock records and the
+        // value a test pins are one source (a hard-wired live probe made the recorded value depend on
+        // PowerShell's cold start, which turned `next` red on a Windows runner).
+        _selfStartTime = _lockProbes.getProcessStartTime(process.pid);
+    }
+    return _selfStartTime;
+}
+/** Forget the cached self start-time and its attempt count (the probe it came from was just replaced). */
+function resetSelfStartTime() {
+    _selfStartTime = null;
+    _selfProbeAttempts = 0;
+}
+/** Serialize the lockfile body: JSON carrying the owner token, pid, hostname, start-time, ts. */
+function lockFileBody(token, startTime) {
+    return JSON.stringify({ token, pid: process.pid, hostname: node_os_1.default.hostname(), startTime, ts: Date.now() });
 }
 // ---------------------------------------------------------------------------
 // Liveness probes (test seam)
@@ -364,6 +391,9 @@ function acquireLock(lockPath, opts) {
         ? opts.maxAttempts
         : LOCK_MAX_ATTEMPTS;
     const waitForFresh = !!(opts && opts.waitForFresh);
+    // Probe BEFORE the O_EXCL create: the first probe can be a PowerShell launch, and between the create
+    // and the body write a racing acquirer sees an empty lockfile. That window must stay sub-ms (#5327).
+    const startTime = selfStartTime();
     // A held lock that is NOT steal-eligible: fail-fast (return null) by default, or BACK OFF + RETRY
     // (continue) when waitForFresh and a retry budget remains — so a contended consent writer serializes.
     const blocked = (attempt) => {
@@ -382,7 +412,7 @@ function acquireLock(lockPath, opts) {
             // write/close error, best-effort unlink the file we just created and bail. fs.writeFileSync(fd, …)
             // flushes the WHOLE buffer (no short-write) unlike a bare fs.writeSync.
             try {
-                node_fs_1.default.writeFileSync(fd, lockFileBody(token));
+                node_fs_1.default.writeFileSync(fd, lockFileBody(token, startTime));
             }
             catch (writeErr) {
                 try {
@@ -549,11 +579,14 @@ module.exports = {
     _setLockProbes(probes) {
         if (typeof probes.isPidAlive === 'function')
             _lockProbes.isPidAlive = probes.isPidAlive;
-        if (typeof probes.getProcessStartTime === 'function')
+        if (typeof probes.getProcessStartTime === 'function') {
             _lockProbes.getProcessStartTime = probes.getProcessStartTime;
+            resetSelfStartTime();
+        }
     },
     _resetLockProbes() {
         _lockProbes.isPidAlive = _realIsPidAlive;
         _lockProbes.getProcessStartTime = getProcessStartTime;
+        resetSelfStartTime();
     },
 };

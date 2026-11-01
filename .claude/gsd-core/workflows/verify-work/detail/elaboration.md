@@ -73,7 +73,7 @@ Spawning parallel debug agents to investigate each issue.
 ```
 
 - Load diagnose-issues workflow
-- Follow @.claude/gsd-core/workflows/diagnose-issues.md
+- Follow @/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/diagnose-issues.md
 - Spawn parallel debug agents for each issue
 - Collect root causes
 - Update UAT.md with root causes

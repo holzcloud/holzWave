@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// gsd-hook-version: 1.17.0
+// gsd-hook-version: 1.19.0
 // GSD Workflow Guard — PreToolUse hook
 // Detects when Claude attempts file edits outside a GSD workflow context
 // (no active /gsd- skill or Task subagent) and injects an advisory warning.
@@ -81,7 +81,7 @@ function forceGitAddCwds(command, defaultCwd) {
 }
 
 function currentBranch(cwd) {
-  const result = spawnSync('git', ['branch', '--show-current'], {
+  const result = spawnSync('git', ['branch', '--show-current'], { // allow-index-refresh: reads HEAD only, never opens the index
     cwd,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],

@@ -1,4 +1,4 @@
-@.claude/gsd-core/references/response-language-directive.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/references/response-language-directive.md
 
 <purpose>
 Generate a post-session summary document capturing work performed, outcomes achieved, and estimated resource usage. Writes SESSION_REPORT.md to .planning/reports/ for human review and stakeholder sharing.

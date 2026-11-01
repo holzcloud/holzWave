@@ -35,9 +35,11 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MAX_COMMITS_CEILING = exports.SCOPE_EXCLUSION_PATHSPECS = void 0;
 exports.extractTaskCommitRefs = extractTaskCommitRefs;
+exports.qualifiedPlanSubjectPattern = qualifiedPlanSubjectPattern;
 exports.planSubjectPattern = planSubjectPattern;
 exports.isSafeRefArgument = isSafeRefArgument;
 exports.isSafeDateArgument = isSafeDateArgument;
+exports.commitIsAncestor = commitIsAncestor;
 exports.resolveEvaluationScope = resolveEvaluationScope;
 exports.evaluateEvaluationScope = evaluateEvaluationScope;
 const node_fs_1 = __importDefault(require("node:fs"));
@@ -46,6 +48,9 @@ const shell_command_projection_cjs_1 = require("./shell-command-projection.cjs")
 const gate_verdict_cjs_1 = require("./gate-verdict.cjs");
 const gate_phase_context_cjs_1 = require("./gate-phase-context.cjs");
 const pattern_cjs_1 = require("./pattern.cjs");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const planningWorkspaceMod = require("./planning-workspace.cjs");
+const { readScopedConfigValue } = planningWorkspaceMod;
 const gate_evidence_cjs_1 = require("./gate-evidence.cjs");
 // ─── Constants ────────────────────────────────────────────────────────────────
 /** Paths that are never part of a code-review or UI scope (planning artifacts, lockfiles). */
@@ -108,24 +113,123 @@ function paddedPattern(value) {
     return `0*${(0, pattern_cjs_1.escapeEre)(intPart)}${(0, pattern_cjs_1.escapeEre)(m[2] ?? '')}`;
 }
 /**
+ * The `<phase>-<plan>` fragment of a plan subject pattern, or null when `id` is not that shape.
+ *
+ * Zero-padding tolerant in both halves: `03-01` yields `0*3-0*1`, so `feat(03-01):`, `test(3-1):`
+ * and `fix(03-01)!:` match while `feat(03-010):` does not (#4003, #4619, #4748).
+ */
+function phasePlanPattern(id) {
+    const dash = id.indexOf('-');
+    const phasePart = dash > 0 ? id.slice(0, dash) : '';
+    const planPart = dash > 0 ? id.slice(dash + 1) : '';
+    if (/^[0-9A-Za-z.]+$/.test(phasePart) && /^[0-9A-Za-z.]+$/.test(planPart)) {
+        return `${paddedPattern(phasePart)}-${paddedPattern(planPart)}`;
+    }
+    return null;
+}
+/**
+ * The anchored subject pattern for a `<phase>-<plan>` ERE fragment, optionally behind one scope
+ * qualifier as the group `(<qualifier>-)?`.
+ *
+ * Every spelling of a plan id goes through this one builder: the bare id, the id carrying the
+ * configured project code (#5271), and the workstream-qualified id `<ws>-<phase>-<plan>` that #5177
+ * proposes. The qualifier is ERE-escaped, so a workstream name (a path segment, not a project-code
+ * token) is matched literally. The group is a real capture group, never `(?:…)`: the pattern goes
+ * to `git log --extended-regexp`, and POSIX ERE has no non-capturing group.
+ */
+function qualifiedPlanSubjectPattern(fragment, qualifier = null) {
+    const group = qualifier === null ? '' : `(${(0, pattern_cjs_1.escapeEre)(qualifier)}-)?`;
+    return `^[a-z]+\\(${group}${fragment}\\)!?:`;
+}
+/**
+ * The `<CODE>-` prefix of `planId` when it is EXACTLY the project's configured `project_code`
+ * followed by a dash — the separator included — else null.
+ *
+ * The match is CASE-SENSITIVE and anchored to the configured value. The phase-id module's
+ * `stripProjectCodePrefix` grammar (case-insensitive, any code before a digit) recognises ANY
+ * letter prefix, which is deliberately wider than the project: `AUTH-01-02` and `setup-1-2` are
+ * ids this project never assigned a code to, and stripping their prefixes made them resolve
+ * another plan's commits (#5271). Only the code the project actually configures may be
+ * stripped, so an id that merely LOOKS coded keeps its literal-match guarantee.
+ */
+function configuredCodePrefix(planId, projectCode) {
+    if (projectCode === null || !isUsableProjectCode(projectCode))
+        return null;
+    const prefix = `${projectCode}-`;
+    return planId.startsWith(prefix) ? prefix : null;
+}
+/**
  * The anchored subject pattern for a plan id, or null when `planId` is empty, over-long or carries a
  * control / whitespace character.
  *
  * A `<phase>-<plan>` id (`03-01`) is zero-padding tolerant: `feat(03-01):`, `test(3-1):` and
- * `fix(03-01)!:` match, `feat(03-010):` does not. Any other id (a plan FILE NAME that does not follow
- * the numbering) is matched LITERALLY — every ERE metacharacter escaped — so `x.*` or `a[b]` can only
- * match a commit that names that exact id, and never widens the pattern.
+ * `fix(03-01)!:` match, `feat(03-010):` does not. An id carrying the CONFIGURED project code
+ * (`PRJ-01-01` with `project_code: "PRJ"`, #5271) matches either spelling of the SAME plan —
+ * `feat(PRJ-01-01):` and `feat(01-01):` — because the two init verbs hand out different phase
+ * tokens for one plan. The code is stripped ONLY when it is the configured one: an id like
+ * `AUTH-01-02` or `setup-1-2`, which merely looks coded, is matched LITERALLY — every ERE
+ * metacharacter escaped — so it can only match a commit naming that exact id and never widens the
+ * pattern to another plan's commits. Any other id (a plan FILE NAME that does not follow the
+ * numbering) is matched literally for the same reason.
+ *
+ * `projectCode` is the project's configured `project_code`; with none (no config, no `planningDir`),
+ * every id is matched literally, which is the pre-#5271 behaviour.
  */
-function planSubjectPattern(planId) {
+function planSubjectPattern(planId, projectCode = null) {
     if (planId.length === 0 || planId.length > 200 || /[\s\x00-\x1f\x7f]/.test(planId))
         return null;
-    const dash = planId.indexOf('-');
-    const phasePart = dash > 0 ? planId.slice(0, dash) : '';
-    const planPart = dash > 0 ? planId.slice(dash + 1) : '';
-    if (/^[0-9A-Za-z.]+$/.test(phasePart) && /^[0-9A-Za-z.]+$/.test(planPart)) {
-        return `^[a-z]+\\(${paddedPattern(phasePart)}-${paddedPattern(planPart)}\\)!?:`;
+    const direct = phasePlanPattern(planId);
+    if (direct)
+        return qualifiedPlanSubjectPattern(direct);
+    // #5271: `init.execute-phase` returns `phase_number: "PRJ-01"` where `init.plan-phase` returns
+    // `padded_phase: "01"`, and every gate builds its `--plan` from the former. Splitting `PRJ-01-01`
+    // at its FIRST dash leaves `01-01` as the plan half, which is not a plan number, so the id fell
+    // through to the literal pattern that no executor commit can ever carry — an empty scope at exit
+    // 0, which is the correct answer for a plan that has NOT started and the wrong one for one that
+    // has. Retry on the CONFIGURED project-code-stripped id, with the code OPTIONAL so the commit the
+    // executor actually wrote still matches.
+    //
+    // The `(PRJ-)?` group comes from `qualifiedPlanSubjectPattern`, and it rides ONLY on a remainder
+    // that could be a plan number, so an empty or non-numeric remainder keeps the whole id literal —
+    // never WIDER than the pre-#5271 pattern.
+    const prefix = configuredCodePrefix(planId, projectCode);
+    if (prefix !== null) {
+        const stripped = planId.slice(prefix.length);
+        const coded = phasePlanPattern(stripped);
+        // The only remainder `phasePlanPattern` cannot split is the N-segment milestone shape
+        // (`01-02-03`), so require that whole shape: a bare `1`, `01-` or a trailing dash would
+        // otherwise widen the optional group onto `feat(1):`.
+        const planShaped = coded !== null || /^\d[0-9A-Za-z.]*(-[0-9A-Za-z.]+){2,}$/.test(stripped);
+        if (!planShaped)
+            return qualifiedPlanSubjectPattern((0, pattern_cjs_1.escapeEre)(planId));
+        return qualifiedPlanSubjectPattern(coded ?? (0, pattern_cjs_1.escapeEre)(stripped), projectCode);
     }
-    return `^[a-z]+\\(${(0, pattern_cjs_1.escapeEre)(planId)}\\)!?:`;
+    return qualifiedPlanSubjectPattern((0, pattern_cjs_1.escapeEre)(planId));
+}
+/**
+ * Whether a configured `project_code` can safely be stripped from a plan id and put in a pattern.
+ *
+ * `config-set` stores `project_code` unvalidated and docs/CONFIGURATION.md calls it "any short
+ * string", so this is a SAFETY check, not the phase-id module's uppercase grammar: a letter first,
+ * then letters, digits, `_`, `.` or `-`, at most 32 characters. That admits `gsd` and `AUTH-X`
+ * (which the uppercase grammar left in the #5271 symptom) while excluding whitespace, control
+ * characters and anything long enough to be a sentence. The value is ERE-escaped by the pattern
+ * builder, so no metacharacter it admits can change the pattern.
+ */
+function isUsableProjectCode(code) {
+    return /^[A-Za-z][A-Za-z0-9_.-]{0,31}$/.test(code);
+}
+/**
+ * The project's configured `project_code`, or null when it is absent, non-string or unusable
+ * (`isUsableProjectCode`). An unusable value reads as ABSENT: the coded id keeps its LITERAL
+ * spelling, which is never WIDER than the pre-#5271 pattern, since a literal id can only match a
+ * subject naming that exact id.
+ */
+function configuredProjectCode(projectDir) {
+    const { present, value } = readScopedConfigValue(projectDir, ['project_code']);
+    if (!present || typeof value !== 'string')
+        return null;
+    return isUsableProjectCode(value) ? value : null;
 }
 // ─── Git plumbing ─────────────────────────────────────────────────────────────
 class ScopeUnreadable extends Error {
@@ -189,6 +293,23 @@ function isSafeDateArgument(candidate) {
 function isAncestor(git, sha, of) {
     return gitOrNo(git, ['merge-base', '--is-ancestor', sha, of]) !== null;
 }
+/**
+ * Whether commit `sha` is an ancestor of commit `of` (#5275): ancestry, never log position or commit
+ * date, so a history merged from worktree branches is judged by what it descends from. `null` means
+ * git could not answer (missing, hung, a bad object): the caller must not read that as "no".
+ */
+function commitIsAncestor(projectDir, sha, of, execGit) {
+    if (!isSafeRefArgument(sha) || !isSafeRefArgument(of))
+        return null;
+    try {
+        return isAncestor(makeGit(projectDir, execGit ?? shell_command_projection_cjs_1.execGit), sha, of);
+    }
+    catch (error) {
+        if (error instanceof ScopeUnreadable)
+            return null;
+        throw error;
+    }
+}
 // ─── The resolver ─────────────────────────────────────────────────────────────
 function emptyScope(unit) {
     return {
@@ -210,7 +331,7 @@ function resolveEvaluationScope(projectDir, unit, options = {}) {
         if (unit.kind === 'phase')
             resolvePhase(projectDir, unit, scope, git, ref, options, repoRoot);
         else
-            resolveBySubject(unit, scope, git, ref, options, repoRoot);
+            resolveBySubject(projectDir, unit, scope, git, ref, options, repoRoot);
         return scope;
     }
     catch (error) {
@@ -388,7 +509,7 @@ function resolvePhase(projectDir, unit, scope, git, ref, options, repoRoot) {
     scope.commits = parseLog(git(['log', `${scope.rangeBase}..${ref}`, logFormat(options.includeBody === true), '-n', String(max)]), options.includeBody === true);
     finalizeFiles(scope, repoRoot, rangeFiles(git, scope.rangeBase, ref));
 }
-function resolveBySubject(unit, scope, git, ref, options, repoRoot) {
+function resolveBySubject(projectDir, unit, scope, git, ref, options, repoRoot) {
     const withBody = options.includeBody === true;
     // Refuse rather than truncate: a silently dropped positive pathspec narrows the match.
     const pathspecs = options.pathspecs ?? [];
@@ -412,7 +533,7 @@ function resolveBySubject(unit, scope, git, ref, options, repoRoot) {
     const grepArgs = [];
     let anchored = null;
     if (unit.kind === 'plan') {
-        const pattern = planSubjectPattern(unit.planId);
+        const pattern = planSubjectPattern(unit.planId, configuredProjectCode(projectDir));
         if (pattern === null)
             throw new ScopeUnreadable('invalid-plan-id');
         grepArgs.push('--extended-regexp', `--grep=${pattern}`);

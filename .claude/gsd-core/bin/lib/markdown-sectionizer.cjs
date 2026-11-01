@@ -25,6 +25,9 @@ exports.updateBullet = updateBullet;
 exports.updateHeading = updateHeading;
 exports.extractTaggedBlocks = extractTaggedBlocks;
 exports.stripTaggedBlocks = stripTaggedBlocks;
+exports.editOutsideTaggedBlocks = editOutsideTaggedBlocks;
+exports.maskFences = maskFences;
+exports.editOutsideFences = editOutsideFences;
 exports.replaceSection = replaceSection;
 exports.withSection = withSection;
 exports.deleteSection = deleteSection;
@@ -849,6 +852,116 @@ function stripTaggedBlocks(content, tagName, allowAttributes = false, caseSensit
     if (typeof tagName !== 'string' || tagName.length === 0)
         return content;
     return content.replace(taggedBlockPattern(tagName, caseSensitive ? 'g' : 'gi', allowAttributes), '');
+}
+/**
+ * Run `edit` over `content` with every `<tagName>…</tagName>` block hidden from
+ * it, then put the blocks back byte-for-byte (#5543). The blocks are swapped for
+ * one-line placeholder comments, so `edit` sees the rest of the document in its
+ * original order and cannot touch, or be captured by, a block's contents.
+ *
+ * Same hardened block pattern as `stripTaggedBlocks` (exact `<tag>` opener, so
+ * `<details open>` stays visible to `edit`). If `edit` returns a non-string, or
+ * drops a placeholder, the original `content` is returned unchanged rather than
+ * a document with a block missing.
+ *
+ * Nested blocks are NOT supported, exactly as for `extractTaggedBlocks` and
+ * `stripTaggedBlocks`: the first `</tag>` closes the block. Every ROADMAP reader
+ * that strips shipped milestones shares that grammar, so this writer sees the
+ * same blocks those readers do.
+ */
+function editOutsideTaggedBlocks(content, tagName, edit, allowAttributes = false, caseSensitive = false) {
+    if (typeof content !== 'string' || content.length === 0)
+        return content;
+    if (typeof tagName !== 'string' || tagName.length === 0)
+        return edit(content);
+    const blocks = [];
+    let nonce = 0;
+    while (content.includes(`<!-- gsd-masked-${tagName}-${nonce}-`))
+        nonce += 1;
+    const placeholder = (i) => `<!-- gsd-masked-${tagName}-${nonce}-${i} -->`;
+    const masked = content.replace(taggedBlockPattern(tagName, caseSensitive ? 'g' : 'gi', allowAttributes), (block) => {
+        blocks.push(block);
+        return placeholder(blocks.length - 1);
+    });
+    if (blocks.length === 0)
+        return edit(content);
+    const edited = edit(masked);
+    if (typeof edited !== 'string')
+        return content;
+    let restored = edited;
+    for (let i = 0; i < blocks.length; i++) {
+        const marker = placeholder(i);
+        const at = restored.indexOf(marker);
+        if (at === -1 || restored.indexOf(marker, at + marker.length) !== -1)
+            return content;
+        restored = restored.slice(0, at) + blocks[i] + restored.slice(at + marker.length);
+    }
+    return restored;
+}
+/**
+ * Hide every fenced code block from a line-oriented edit. State-transition writers locate their
+ * target with `/^Field:.*$/m`-style patterns; those match a fenced EXAMPLE of the field as readily
+ * as the live line, so the example got the new value and the live line stayed stale. Masking each
+ * block to a single `<!-- gsd-masked-fence-… -->` line lets the same pattern see only live lines;
+ * `restore` splices the blocks back byte-for-byte (CRLF included — the original line text is kept).
+ * The fence grammar is `scanFencedBlocks`' (the one every reader here uses), and an unterminated
+ * fence masks to the end of the content, as `stripFencedCode` treats it.
+ */
+function maskFences(content) {
+    const identity = { masked: content, restore: (edited) => edited };
+    if (typeof content !== 'string' || content.length === 0)
+        return identity;
+    const lines = content.split('\n');
+    const blocks = scanFencedBlocks(lines);
+    if (blocks.length === 0)
+        return identity;
+    let nonce = 0;
+    while (content.includes(`<!-- gsd-masked-fence-${nonce}-`))
+        nonce += 1;
+    const placeholder = (i) => `<!-- gsd-masked-fence-${nonce}-${i} -->`;
+    const kept = [];
+    const originals = [];
+    let cursor = 0;
+    for (const block of blocks) {
+        const end = block.closeLineIdx === -1 ? lines.length - 1 : block.closeLineIdx;
+        for (; cursor < block.openLineIdx; cursor++)
+            kept.push(lines[cursor]);
+        originals.push(lines.slice(block.openLineIdx, end + 1).join('\n'));
+        kept.push(placeholder(originals.length - 1));
+        cursor = end + 1;
+    }
+    for (; cursor < lines.length; cursor++)
+        kept.push(lines[cursor]);
+    return {
+        masked: kept.join('\n'),
+        restore(edited) {
+            if (typeof edited !== 'string')
+                return null;
+            let restored = edited;
+            for (let i = 0; i < originals.length; i++) {
+                const marker = placeholder(i);
+                const at = restored.indexOf(marker);
+                if (at === -1 || restored.indexOf(marker, at + marker.length) !== -1)
+                    return null;
+                restored = restored.slice(0, at) + originals[i] + restored.slice(at + marker.length);
+            }
+            return restored;
+        },
+    };
+}
+/**
+ * Run `edit` over `content` with every fenced code block hidden from it (see `maskFences`).
+ * Content without a fence is edited as given. An edit that returns a non-string, or that loses a
+ * placeholder, returns the original content unchanged.
+ */
+function editOutsideFences(content, edit) {
+    if (typeof content !== 'string' || content.length === 0)
+        return content;
+    const mask = maskFences(content);
+    const edited = edit(mask.masked);
+    if (typeof edited !== 'string')
+        return content;
+    return mask.restore(edited) ?? content;
 }
 // ─── replaceSection ───────────────────────────────────────────────────────────
 /**

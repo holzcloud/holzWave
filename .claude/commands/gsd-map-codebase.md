@@ -25,7 +25,7 @@ Output: .planning/codebase/ folder with 7 structured documents about the codebas
 </objective>
 
 <execution_context>
-@.claude/gsd-core/workflows/map-codebase.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/map-codebase.md
 </execution_context>
 
 <flags>
@@ -38,7 +38,7 @@ Output: .planning/codebase/ folder with 7 structured documents about the codebas
 Arguments: see the `<arguments>` block above.
 
 Parse the first token of the `<arguments>` block:
-- If it is `--fast`: strip the flag, then read and execute `.claude/gsd-core/workflows/scan.md` (passing remaining args including optional --focus). Load it on demand here — it is deliberately not in `<execution_context>`, so the common full-map path does not pay for it.
+- If it is `--fast`: strip the flag, then read and execute `/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/scan.md` (passing remaining args including optional --focus). Load it on demand here — it is deliberately not in `<execution_context>`, so the common full-map path does not pay for it.
 - If it is `--query`: strip the flag, run the intel workflow (passing remaining args as the subcommand).
 - Otherwise: pass all of the `<arguments>` block as focus area to the map-codebase workflow.
 

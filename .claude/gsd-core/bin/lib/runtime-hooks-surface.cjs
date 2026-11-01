@@ -1264,10 +1264,10 @@ function configuredEntrypointsForHook(configDir, hookName, opts) {
     const bash = resolveBashExecutable(opts);
     if (isShellHook) {
         // An unresolved bash must still surface as an interpreterCandidates entry
-        // (the literal token, same as the portableHooks runner below) so
+        // (the sentinel token, same as the portableHooks runner below) so
         // validateConfiguredEntrypoints reports 'unresolved-interpreter' instead
         // of silently skipping the check because the field is absent.
-        return [{ ...target, interpreterCandidates: [bash === null ? 'bash' : bash] }];
+        return [{ ...target, interpreterCandidates: [bash === null ? UNRESOLVED_BASH_SENTINEL : bash] }];
     }
     // #4249: check the SAME stable alias buildNodeRunnerChainToken bakes as its
     // first candidate (normalizeNodePath rewrites a version-manager shim like
@@ -1287,7 +1287,7 @@ function configuredEntrypointsForHook(configDir, hookName, opts) {
         runtime,
         configPath,
         scriptPath: node_path_1.default.join(configDir, 'hooks', NODE_RUNNER_RESOLVER_HOOK),
-        interpreterCandidates: bash === null ? ['bash'] : [bash],
+        interpreterCandidates: bash === null ? [UNRESOLVED_BASH_SENTINEL] : [bash],
         platform,
     };
     return [runner, { ...target, interpreterCandidates: nodeCandidates }];
@@ -1297,6 +1297,15 @@ function recordConfiguredHookCommand(command, configDir, hookName, opts) {
         opts.configuredEntrypoints.push(...configuredEntrypointsForHook(configDir, hookName, opts).map(entry => ({ ...entry, command })));
     }
     return command;
+}
+// #5100: the two null-runner branches of buildHookCommand share this. No
+// command was ever built, so track() (which needs one) cannot record the
+// hook — push the entry directly instead, so the gate sees it rather than
+// the hook going silently unregistered.
+function recordUnresolvedBashEntrypoint(configDir, hookName, opts) {
+    if (opts.configuredEntrypoints) {
+        opts.configuredEntrypoints.push(...configuredEntrypointsForHook(configDir, hookName, opts));
+    }
 }
 function buildHookCommand(configDir, hookName, opts) {
     if (!opts)
@@ -1323,15 +1332,9 @@ function buildHookCommand(configDir, hookName, opts) {
         const runner = resolveBashRunner(opts);
         if (runner === null) {
             // #4249 (antigravity review): this early return skips `track()` below,
-            // so an unresolved bash on win32 (no Git Bash found) previously left
-            // this hook silently unregistered with nothing for
-            // validateConfiguredEntrypoints to reject — configuredEntrypointsForHook's
-            // own 'unresolved bash must still surface' comment describes intent this
-            // return never reached. Push the entry directly (no `command`, since
-            // none was ever built) so the gate actually sees it.
-            if (opts.configuredEntrypoints) {
-                opts.configuredEntrypoints.push(...configuredEntrypointsForHook(configDir, hookName, opts));
-            }
+            // which needs a command that was never built — record the entry
+            // directly so the gate can reject it.
+            recordUnresolvedBashEntrypoint(configDir, hookName, opts);
             return null;
         }
         if (opts.portableHooks) {
@@ -1374,9 +1377,13 @@ function buildHookCommand(configDir, hookName, opts) {
             configDir,
             homeDir: node_os_1.default.homedir(),
         });
-        // Absolute Git-Bash discovery on win32 when available (#580); `bash` on
-        // PATH otherwise — the same assumption .sh hooks already make.
-        const resolverRunner = resolveBashRunner(opts) || 'bash';
+        // #5100: same contract as the .sh early return. A bare `bash` is how
+        // win32 reaches WSL's System32 launcher, and the gate used to accept it.
+        const resolverRunner = resolveBashRunner(opts);
+        if (resolverRunner === null) {
+            recordUnresolvedBashEntrypoint(configDir, hookName, opts);
+            return null;
+        }
         return track(shellCmdProjection.projectShellCommandText({
             runnerToken: resolverRunner,
             argTokens: [
@@ -2158,6 +2165,9 @@ const SETTINGS_JSON_HOOK_ROWS = deepFreeze([
     // Guard: only register if the hook file was actually installed (#1754, #1817).
     { file: 'gsd-check-update.js', event: 'SessionStart', command: { opts: 'updateCheckCommand' },
         configuredMessage: 'Configured update check hook', skipLabel: 'update check hook' },
+    // #5465: persists the gsd-core bin directory on PATH through $CLAUDE_ENV_FILE (SessionStart-only).
+    { file: 'gsd-path-export.js', event: 'SessionStart', timeout: 5, command: { build: 'js' },
+        configuredMessage: 'Configured PATH persistence hook', skipLabel: 'PATH persistence hook' },
     { file: 'gsd-context-monitor.js', event: 'post', matcher: 'Bash|Edit|Write|MultiEdit|Agent|Task', timeout: 10,
         command: { opts: 'contextMonitorCommand' },
         configuredMessage: 'Configured context window monitor hook', skipLabel: 'context monitor hook',
@@ -2710,6 +2720,30 @@ function referencesHook(h, hookName) {
         (Array.isArray(args) && args.some(a => typeof a === 'string' && a.includes(hookName))) ||
         (typeof url === 'string' && url.includes(hookName));
 }
+// #5100: the writer emits the bare `bash` token when the Git Bash policy
+// finds nothing, and the gate resolves that token through the same policy —
+// never a PATH scan. One shared definition so the two sides cannot drift.
+const UNRESOLVED_BASH_SENTINEL = 'bash';
+const WIN32_BARE_BASH_TOKENS = [UNRESOLVED_BASH_SENTINEL, 'bash.exe'];
+function isWin32BareBashToken(candidate, platform) {
+    if ((platform || process.platform) !== 'win32')
+        return false;
+    // Equality already rejects any path: a string holding a separator can never
+    // equal a bare token, so no explicit separator guard is needed here.
+    return WIN32_BARE_BASH_TOKENS.includes(candidate.trim().toLowerCase());
+}
+// #5100: the literal `bash` sentinel means "Git Bash policy found nothing"
+// (#4249). Resolve that token through resolveBashExecutable, never a PATH
+// scan — WSL's System32\bash.exe is on PATH and cannot see Windows paths.
+function win32BareBashResolves(candidate, platform, deps) {
+    if (!isWin32BareBashToken(candidate, platform))
+        return null;
+    return resolveBashExecutable({
+        platform: 'win32',
+        env: deps.env,
+        existsSync: deps.existsSync,
+    }) !== null;
+}
 function validateConfiguredEntrypoints(entries, deps = {}) {
     const statSync = deps.statSync ?? node_fs_1.default.statSync;
     const accessSync = deps.accessSync ?? node_fs_1.default.accessSync;
@@ -2766,7 +2800,12 @@ function validateConfiguredEntrypoints(entries, deps = {}) {
                 invalid.push({ runtime: entry.runtime, configPath: entry.configPath, role: 'script', path: entry.scriptPath, reason: 'not-executable' });
             }
         }
-        if (entry.interpreterCandidates && !entry.interpreterCandidates.some(candidate => resolve(candidate, { platform: entry.platform, requireExecutable: true }) !== null)) {
+        if (entry.interpreterCandidates && !entry.interpreterCandidates.some(candidate => {
+            const bareBash = win32BareBashResolves(candidate, entry.platform, deps);
+            if (bareBash !== null)
+                return bareBash;
+            return resolve(candidate, { platform: entry.platform, requireExecutable: true }) !== null;
+        })) {
             invalid.push({ runtime: entry.runtime, configPath: entry.configPath, role: 'interpreter', path: entry.interpreterCandidates.join(' | '), reason: 'unresolved-interpreter' });
         }
     }
@@ -2856,6 +2895,11 @@ module.exports = {
     resolveBashExecutable,
     resolveBashRunner,
     NODE_RUNNER_RESOLVER_HOOK,
+    // #5100: the literal the writer records for an unresolved Git Bash and the
+    // gate resolves through the Git Bash policy. Exported so a consumer that
+    // needs to recognise that entry imports it rather than respelling it;
+    // bin/install.js keys on the entry having no command instead.
+    UNRESOLVED_BASH_SENTINEL,
     // Atomic write seam (shared with bin/install.js so all writes participate
     // in install.js's _cleanTmpFiles() scoped temp-cleanup).
     atomicWriteFileSync,

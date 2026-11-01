@@ -25,11 +25,11 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 const node_fs_1 = __importDefault(require("node:fs"));
-const node_os_1 = __importDefault(require("node:os"));
 const node_path_1 = __importDefault(require("node:path"));
 const shell_command_projection_cjs_1 = require("./shell-command-projection.cjs");
 // #4717: runtime-identity fill — env rung + per-install marker rung.
 const runtime_slash_cjs_1 = require("./runtime-slash.cjs");
+const runtime_homes_cjs_1 = require("./runtime-homes.cjs");
 const runtime_name_policy_cjs_1 = require("./runtime-name-policy.cjs");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const planningWorkspace = require("./planning-workspace.cjs");
@@ -156,6 +156,15 @@ const CONFIG_DEFAULTS = {
     planner_stall_detection_enabled: _getNestedConfigDefault('planner', 'stall_detection_enabled'),
     max_prompt_tokens: _getNestedConfigDefault('review', 'max_prompt_tokens'),
 };
+/**
+ * Resolve `git.repo_tagging` (#5706) from hand-edited configuration. Only the
+ * two documented enum members are honored; any other stored value (a number,
+ * null, an unknown string, a wrong-case spelling) reads as the default `single`
+ * and never throws, so a bad hand edit cannot enable per-repository tagging.
+ */
+function resolveRepoTagging(value) {
+    return value === 'per_repo' ? 'per_repo' : 'single';
+}
 /**
  * Resolve the planner watchdog policy from hand-edited configuration.
  * Only a real JSON boolean may override the default; strings/numbers/null
@@ -849,6 +858,7 @@ function loadConfigResolvedInternal(cwd, options = {}) {
             base_branch: get('base_branch', { section: 'git', field: 'base_branch' }),
             protected_branches: getNested('git', 'protected_branches'),
             allow_default_branch_commits: getNested('git', 'allow_default_branch_commits'),
+            repo_tagging: resolveRepoTagging(getNested('git', 'repo_tagging')),
             phase_branch_template: get('phase_branch_template', { section: 'git', field: 'phase_branch_template' }) ?? defaults.phase_branch_template,
             milestone_branch_template: get('milestone_branch_template', { section: 'git', field: 'milestone_branch_template' }) ?? defaults.milestone_branch_template,
             quick_branch_template: get('quick_branch_template', { section: 'git', field: 'quick_branch_template' }) ?? defaults.quick_branch_template,
@@ -935,7 +945,7 @@ function loadConfigResolvedInternal(cwd, options = {}) {
         // untouched. Faults in the global file stay silent in this branch (the
         // project config governs; the nearer file is the actionable one).
         try {
-            const shadowHome = process.env['GSD_HOME'] || node_os_1.default.homedir();
+            const shadowHome = (0, runtime_homes_cjs_1.resolveGsdHome)();
             const shadowPath = node_path_1.default.join(shadowHome, '.gsd', 'defaults.json');
             const shadowRead = _readConfigFile(shadowPath);
             if (shadowRead.kind === 'ok') {
@@ -997,7 +1007,7 @@ function loadConfigResolvedInternal(cwd, options = {}) {
         }
         // Branch D or E: no .planning/
         try {
-            const home = process.env['GSD_HOME'] || node_os_1.default.homedir();
+            const home = (0, runtime_homes_cjs_1.resolveGsdHome)();
             const globalDefaultsPath = node_path_1.default.join(home, '.gsd', 'defaults.json');
             const globalRead = _readConfigFile(globalDefaultsPath);
             if (globalRead.kind === 'fault') {

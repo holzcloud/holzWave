@@ -20,6 +20,8 @@ const markdown_sectionizer_cjs_1 = require("./markdown-sectionizer.cjs");
 const io = require("./io.cjs");
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- config-loader.cjs is an export= CommonJS module
 const configLoader = require("./config-loader.cjs");
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- capability-ledger.cjs is an export= CommonJS module
+const capabilityLedger = require("./capability-ledger.cjs");
 const project_root_cjs_1 = require("./project-root.cjs");
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- model-resolver.cjs is an export= CommonJS module
 const modelResolver = require("./model-resolver.cjs");
@@ -96,7 +98,7 @@ const { getRoadmapPhaseInternal, getMilestoneInfo, stripShippedMilestones, extra
 const { pathExistsInternal, generateSlugInternal, toPosixPath } = coreUtils;
 const { comparePhaseNum, normalizePhaseName, stripProjectCodePrefix, PHASE_NUMBER_TOKEN_SOURCE, PHASE_DEP_REF_SOURCE, isForeignPrefixedPhaseQuery, isSentinelPhaseId, extractPhaseToken, scopeToPhase, renderPhaseBranchName, parsePhaseId, renderPhaseId, phaseHeadingPrefixSrcFor, PHASE_HEADING_BASELINE, buildPhaseHeadingScanRegex, } = phaseId;
 const { pruneOrphanedWorktrees } = worktreeSafety;
-const { planningPaths, planningDir, planningRoot, todosDir, listAvailableWorkstreams, peekActiveWorkstream, resolveEnvWorkstream, diagnoseUnresolvedActiveWorkstream, describeUnresolvedWorkstreamReason, findContextMdIn, resolvePhaseIdConvention, worktreesOptedOut, } = planningWorkspace;
+const { planningPaths, planningDir, planningRoot, todosDir, listAvailableWorkstreams, peekActiveWorkstream, resolveEnvWorkstream, diagnoseUnresolvedActiveWorkstream, describeUnresolvedWorkstreamReason, findContextMdIn, findPhaseSpecIn, resolvePhaseIdConvention, worktreesOptedOut, } = planningWorkspace;
 const { extractFrontmatter, frontmatterBlock } = frontmatterMod;
 const { isPhaseComplete, resolveVerificationFile, resolveUatFile, VERIFICATION_STATUS, VerificationStatusError } = verificationMod;
 const { evaluateUatPassed } = uatPredicateMod;
@@ -174,6 +176,28 @@ function resolvePhaseDisplayName(phaseInfo, roadmapPhase) {
     return roadmapPhase?.['phase_name']
         || phaseInfo?.['phase_name']
         || null;
+}
+/**
+ * #5629: the phase SPEC as init facts, for every init payload a SPEC-consuming workflow parses
+ * (discuss-phase via `phase-op`, discuss-phase-assumptions, plan-phase). `has_spec` is always present;
+ * `spec_path` (absolute, posix) only when a plain `NN-SPEC.md` exists. One predicate (`findPhaseSpecIn`, shared
+ * with the context-drift gate) decides, so a UI-SPEC or AI-SPEC is never mistaken for the requirements lock and
+ * no workflow globs for it. A phase with no directory yet, or one that cannot be read, has no SPEC.
+ */
+function phaseSpecFacts(phaseDirAbs) {
+    if (!phaseDirAbs)
+        return { has_spec: false };
+    let files;
+    try {
+        files = node_fs_1.default.readdirSync(phaseDirAbs);
+    }
+    catch {
+        return { has_spec: false };
+    }
+    // Scoped to THIS phase's own artifacts first (#3511), like the sibling artifact lookups: a misfiled
+    // `02-SPEC.md` in phase 03's directory must not win (the context-drift gate scopes the same way).
+    const spec = findPhaseSpecIn(scopeToPhase(files, node_path_1.default.basename(phaseDirAbs)));
+    return spec ? { has_spec: true, spec_path: toPosixPath(node_path_1.default.join(phaseDirAbs, spec)) } : { has_spec: false };
 }
 /**
  * #2994 (review finding, DEFECT.GENERATIVE-FIX): shared archived/not-found
@@ -597,6 +621,28 @@ function detectFallowConfig(cwd) {
  */
 function detectGitCreateTag(cwd) {
     return readConfigJsonValue(cwd, ['git', 'create_tag']) !== false;
+}
+/**
+ * `git.repo_tagging` ground truth (#5706, epic #3628): the milestone tagging
+ * mode exposed to `complete-milestone.md`. Only the documented `per_repo`
+ * opts in; an absent key or any other stored value reads as the default
+ * `single` (today's behavior), matching `loadConfig`'s resolution.
+ */
+function detectRepoTagging(cwd) {
+    return readConfigJsonValue(cwd, ['git', 'repo_tagging']) === 'per_repo' ? 'per_repo' : 'single';
+}
+/**
+ * The configured `planning.sub_repos` (#5706): an array of non-empty repo
+ * names, possibly empty. A legacy top-level `sub_repos` is honored when the
+ * nested key is absent, the same flat-then-nested order `loadConfig` applies.
+ * Non-string members are dropped; any degraded read yields `[]`.
+ */
+function detectSubRepos(cwd) {
+    const nested = readConfigJsonValue(cwd, ['planning', 'sub_repos']);
+    const raw = nested !== undefined ? nested : readConfigJsonValue(cwd, ['sub_repos']);
+    if (!Array.isArray(raw))
+        return [];
+    return raw.filter((name) => typeof name === 'string' && name.trim() !== '');
 }
 /**
  * `state:phase-mvp-mode` ground truth (design doc §Behavior table: ROADMAP.md
@@ -1137,6 +1183,8 @@ function cmdInitPlanPhase(cwd, phase, raw, options = {}) {
         state_path: node_fs_1.default.existsSync(statePath) ? toPosixPath(statePath) : null,
         roadmap_path: node_fs_1.default.existsSync(roadmapPath) ? toPosixPath(roadmapPath) : null,
         requirements_path: node_fs_1.default.existsSync(requirementsPath) ? toPosixPath(requirementsPath) : null,
+        // #5629: the phase SPEC (plan-phase lifts its Edge Coverage from it; no workflow globs for it).
+        ...phaseSpecFacts(phaseInfo?.['directory'] ? node_path_1.default.join(cwd, phaseInfo['directory']) : null),
         patterns_path: null,
     };
     if (phaseInfo?.['directory']) {
@@ -1932,6 +1980,8 @@ function cmdInitDiscussPhaseAssumptions(cwd, phase, raw, options = {}) {
         plan_count: phaseInfo?.['plans']?.length || 0,
         roadmap_exists: node_fs_1.default.existsSync(node_path_1.default.join(planningDir(cwd), 'ROADMAP.md')),
         planning_exists: node_fs_1.default.existsSync(planningDir(cwd)),
+        // #5629: the phase SPEC, so assumptions mode honours it like the default flow does.
+        ...phaseSpecFacts(phaseDir ? node_path_1.default.join(cwd, phaseDir) : null),
     };
     // #2994 (Phase 6.3): additive, optional field — degrades to null, never throws.
     const sectionManifestOptions = {
@@ -2063,6 +2113,8 @@ function cmdInitPhaseOp(cwd, phase, raw) {
         state_path: node_fs_1.default.existsSync(statePath) ? toPosixPath(statePath) : null,
         roadmap_path: node_fs_1.default.existsSync(roadmapPath) ? toPosixPath(roadmapPath) : null,
         requirements_path: node_fs_1.default.existsSync(requirementsPath) ? toPosixPath(requirementsPath) : null,
+        // #5629: the phase SPEC (discuss-phase reads it from here; no workflow globs for it).
+        ...phaseSpecFacts(phaseDir ? node_path_1.default.join(cwd, phaseDir) : null),
     };
     if (phaseInfo?.['directory']) {
         const phaseDirFull = node_path_1.default.join(cwd, phaseInfo['directory']);
@@ -3014,9 +3066,23 @@ function cmdInitCompleteMilestone(cwd, raw, options = {}) {
         milestones_path: node_fs_1.default.existsSync(milestonesPath) ? toPosixPath(milestonesPath) : null,
         project_path: node_fs_1.default.existsSync(projectPath) ? toPosixPath(projectPath) : null,
         requirements_path: node_fs_1.default.existsSync(requirementsPath) ? toPosixPath(requirementsPath) : null,
+        // #5706 (epic #3628): the repositories configured for this project and the
+        // milestone tagging mode, so the workflow reads both from one init call.
+        sub_repos: detectSubRepos(cwd),
+        repo_tagging: detectRepoTagging(cwd),
     };
+    // #5195: `state:flat-mode` gates the PROJECT.md evolution review. PROJECT.md
+    // is shared across workstreams (the `projectPath` comment above), so a
+    // workstream's milestone close must not rewrite or stage it — the same
+    // decision `cmdInitNewMilestone` applies to its Part A (#2308), resolved from
+    // the same authority (`GSD_WORKSTREAM` env, else the stored pointer) so the
+    // gate cannot disagree with the workstream-scoped paths returned above.
+    // Read-only peek: no self-heal side effect from building a report field (#3579).
+    const workstreamActive = !!(resolveEnvWorkstream() ?? peekActiveWorkstream(cwd));
     result['section_manifest'] = buildSectionManifestField(cwd, null, options, 'complete-milestone', {
         gitCreateTag,
+        workstreamActive,
+        flatMode: !workstreamActive,
     });
     output(withProjectRoot(cwd, result), raw);
 }
@@ -3773,7 +3839,7 @@ function buildAgentSkillsBlock(config, agentType, projectRoot, diagnostics) {
     }).join('\n');
     return `<agent_skills>\nRead these user-configured skills:\n${lines}\n</agent_skills>`;
 }
-function cmdAgentSkills(cwd, agentType, raw, jsonMode) {
+function cmdAgentSkills(cwd, agentType, raw, jsonMode, skillsOnly = false) {
     if (!agentType) {
         output('', raw, '');
         return;
@@ -3804,8 +3870,13 @@ function cmdAgentSkills(cwd, agentType, raw, jsonMode) {
     // (a real exit code) instead of a prose config-get gate. Compact is tried
     // first when requested; a missing compact sibling falls back to canonical
     // with the fallback disclosed in the payload itself, never a silent switch.
+    //
+    // #5122: `skillsOnly` (the CLI's `--skills-only`) is the agent's own
+    // self-load. It wants configured skills and nothing else, so it skips the
+    // fallback on every runtime — otherwise a non-Claude agent reads its own
+    // persona back into itself as if it were a skills block.
     let agentPayloadVariant = null;
-    if (!block) {
+    if (!block && !skillsOnly) {
         const runtime = (config && config['runtime']) || process.env['GSD_RUNTIME'] || 'claude';
         if (runtime !== 'claude') {
             const agentCheck = checkAgentsInstalled(runtime, projectRoot);
@@ -4071,7 +4142,7 @@ function buildSkillManifest(cwd, skillsDir = null) {
             if (!entry.isDirectory())
                 continue;
             const skillMdPath = node_path_1.default.join(rootPath, entry.name, 'SKILL.md');
-            const content = (0, shell_command_projection_cjs_1.platformReadSync)(skillMdPath);
+            const content = capabilityLedger.readSkillFile(skillMdPath);
             if (content !== null) {
                 if (pushSkillEntry(`${entry.name}/SKILL.md`, content, skillMdPath))
                     skillCount++;
@@ -4096,7 +4167,7 @@ function buildSkillManifest(cwd, skillsDir = null) {
                 if (!nested.isDirectory())
                     continue;
                 const nestedSkillMd = node_path_1.default.join(nestedSkillsDir, nested.name, 'SKILL.md');
-                const nestedContent = (0, shell_command_projection_cjs_1.platformReadSync)(nestedSkillMd);
+                const nestedContent = capabilityLedger.readSkillFile(nestedSkillMd);
                 if (nestedContent === null)
                     continue;
                 // Use forward-slash separator explicitly so manifest paths are posix-style

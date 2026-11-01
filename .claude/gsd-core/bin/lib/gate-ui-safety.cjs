@@ -21,6 +21,8 @@ const gate_phase_context_cjs_1 = require("./gate-phase-context.cjs");
 const gate_evaluation_scope_cjs_1 = require("./gate-evaluation-scope.cjs");
 const runtime_slash_cjs_1 = require("./runtime-slash.cjs");
 const ui_safety_gate_cjs_1 = require("./ui-safety-gate.cjs");
+const ui_frontend_evidence_cjs_1 = require("./ui-frontend-evidence.cjs");
+const gate_evidence_cjs_1 = require("./gate-evidence.cjs");
 const UI_FILE_EXTENSIONS_RE = /\.(tsx|jsx|css|scss|sass|less|vue|svelte|html)$/i;
 const UI_PATH_PATTERNS_RE = /\/(components|pages|views|screens|layouts|ui|frontend)\//i;
 /**
@@ -32,7 +34,10 @@ const UI_PATH_PATTERNS_RE = /\/(components|pages|views|screens|layouts|ui|fronte
  *       git call is bounded by the resolver's seam; an unreadable scope is reported, not "clean").
  *   (d) Phase directory → `*-UI-SPEC.md`.
  *
- * `block = frontend && hasUiFiles && !hasUiSpec`.
+ *   (c') Static frontend evidence (`readStaticFrontendEvidence`, the definition `computeUiPlanGate` uses),
+ *       probed only for a frontend phase that changed UI files (#5646).
+ *
+ * `block = frontend && hasUiFiles && hasFrontendEvidence && !hasUiSpec`.
  */
 function computeUiSafetyGate(projectDir, phase) {
     // (a) phase section text (same two-pass lookup as computeUiPlanGate)
@@ -43,14 +48,27 @@ function computeUiSafetyGate(projectDir, phase) {
     // (c) any UI files in the phase's own commits? (deleted paths count: a removed component is a UI change)
     const scope = (0, gate_evaluation_scope_cjs_1.resolveEvaluationScope)(projectDir, { kind: 'phase', phase });
     const hasUiFiles = scope.changedFiles.some((f) => f.trim() && (UI_FILE_EXTENSIONS_RE.test(f) || UI_PATH_PATTERNS_RE.test(f)));
+    // (c') #5646 — static structural corroboration, the same evidence `computeUiPlanGate` requires (#3312):
+    // `hasUiFiles` is a weak signal (an `.html` fixture, or any file under a `ui/` directory in any
+    // language), so on its own it halted projects with no frontend that the plan gate had cleared. Only
+    // probed when it could change the answer. `unreadable` (#5170) is a manifest or tree the probe could
+    // not look at: absence of evidence is then not established, and the verdict says so (below).
+    const frontendEvidence = frontend && hasUiFiles ? (0, ui_frontend_evidence_cjs_1.readStaticFrontendEvidence)(projectDir) : (0, gate_evidence_cjs_1.evidenceNone)();
+    const hasFrontendEvidence = frontendEvidence.kind === 'found';
     // (d) phase directory and *-UI-SPEC.md
     // `none` is "no spec"; `unreadable` is "could not look" (#5170) and is carried to the verdict.
     const uiSpec = (0, gate_phase_context_cjs_1.locateUiSpec)(projectDir, phase);
     const hasUiSpec = uiSpec.kind === 'found';
-    const readError = roadmapReadError ?? (uiSpec.kind === 'unreadable' ? uiSpec.reason : undefined);
-    // block only when: this is a frontend phase AND UI files were changed AND no UI-SPEC exists
-    const block = frontend && hasUiFiles && !hasUiSpec;
-    const result = { frontend, hasUiFiles, hasUiSpec, block };
+    // Unreadable frontend evidence only matters when it could flip the verdict: with a UI-SPEC present the
+    // gate does not block whatever the tree holds.
+    const frontendReadError = frontendEvidence.kind === 'unreadable' && !hasUiSpec
+        ? `static frontend evidence could not be read (${frontendEvidence.reason})`
+        : undefined;
+    const readError = roadmapReadError ?? (uiSpec.kind === 'unreadable' ? uiSpec.reason : undefined) ?? frontendReadError;
+    // block only when: this is a frontend phase AND UI files were changed AND the project has static
+    // frontend evidence AND no UI-SPEC exists
+    const block = frontend && hasUiFiles && hasFrontendEvidence && !hasUiSpec;
+    const result = { frontend, hasUiFiles, hasFrontendEvidence, hasUiSpec, block };
     if (block) {
         result.message = `UI files changed in this wave but no UI-SPEC.md exists for Phase ${phase}. ` +
             `Run ${(0, runtime_slash_cjs_1.runtimeCommand)(projectDir, `ui-phase ${phase}`)} to generate the design contract before continuing.`;

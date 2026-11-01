@@ -24,7 +24,7 @@ planning via /gsd-plan-phase --reviews.
 </objective>
 
 <execution_context>
-@.claude/gsd-core/workflows/review.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/review.md
 </execution_context>
 
 <context>

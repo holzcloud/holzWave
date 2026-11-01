@@ -32,6 +32,7 @@ exports.parseModelBanner = parseModelBanner;
 exports.parseTranscriptModel = parseTranscriptModel;
 exports.checkEgressHost = checkEgressHost;
 exports.probeLane = probeLane;
+exports.probeHttpLanes = probeHttpLanes;
 exports.writeReviewOrStub = writeReviewOrStub;
 exports.emptyOutputDiagnosis = emptyOutputDiagnosis;
 exports.handleOpencodeOutput = handleOpencodeOutput;
@@ -318,14 +319,18 @@ async function probeLane(plan, deps) {
             // Only a STRING config value names a host. `String(unknown)` would turn an object into the
             // literal '[object Object]' and probe that as a URL — a nonsense destination reported as
             // "unreachable" rather than as the misconfiguration it is.
+            // For openai-http, `plan.host` is already resolved by `resolveLanePlan` (config → default,
+            // unset sentinels like "null" handled) — probe the destination the run would use.
             const configured = deps.configGet(probe.hostConfigKey);
-            const base = (0, review_lane_invocation_cjs_1.normalizeHost)((typeof configured === 'string' ? configured : '') ||
-                (plan.transport === 'openai-http' ? plan.host : ''));
+            const base = (0, review_lane_invocation_cjs_1.normalizeHost)((plan.transport === 'openai-http' ? plan.host : '') || (typeof configured === 'string' ? configured : ''));
             if (!base) {
                 return { available: false, reason: review_lane_invocation_cjs_1.LANE_UNAVAILABLE.HOST_UNREACHABLE, detail: 'no host resolved' };
             }
-            const r = await deps.httpJson(`${base}${probe.path}`, { method: 'GET', timeoutMs: probe.timeoutMs });
-            return r.ok
+            // D7: reachable ⇒ available. Any HTTP answer (401 behind an auth proxy, 404, 3xx) proves a
+            // server is there; only a transport failure (status 0) does not. Redirects are not followed:
+            // a probe must not issue a request to a host the descriptor never named.
+            const r = await deps.httpJson(`${base}${probe.path}`, { method: 'GET', timeoutMs: probe.timeoutMs, probe: true });
+            return r.status > 0
                 ? { available: true }
                 : {
                     available: false,
@@ -340,6 +345,25 @@ async function probeLane(plan, deps) {
                 detail: `unknown probe kind '${String(probe.kind)}'`,
             };
     }
+}
+/**
+ * `<slug>:available|missing` rows for the openai-http lanes in `lanes` (all, or those in `selected`).
+ * Prerequisite binaries are not folded in: the caller reports `jq` separately. An unresolvable lane
+ * reads `missing` and its reason is returned in `warnings` rather than swallowed.
+ */
+async function probeHttpLanes(lanes, selected, resolve, deps) {
+    // Probes run concurrently (each has its own timeout); Promise.all keeps descriptor order, and
+    // warnings are collected from the results afterwards so their order never depends on resolve timing.
+    const results = await Promise.all(lanes
+        .filter((l) => l.transport === 'openai-http' && (selected.length === 0 || selected.includes(l.slug)))
+        .map(async (lane) => {
+        const r = resolve(lane);
+        const up = r.ok && (await probeLane({ ...r.plan, requiresBinaries: [] }, deps)).available;
+        return { row: `${lane.slug}:${up ? 'available' : 'missing'}`, warning: r.ok ? null : `${lane.slug}: ${r.detail}` };
+    }));
+    const rows = results.map((x) => x.row);
+    const warnings = results.flatMap((x) => (x.warning === null ? [] : [x.warning]));
+    return { rows, warnings };
 }
 /* ------------------------------------------------------------------ *
  * Empty-output policy (#2494 / #2605 / #2794)
@@ -940,6 +964,11 @@ async function runOpenAiCompatible(plan, promptText, deps) {
     let model = plan.model;
     if (!model && plan.modelsUrl) {
         const listed = await deps.httpJson(plan.modelsUrl, { method: 'GET', timeoutMs: 2_000 });
+        // A redirect is a lane failure, not "discovery found nothing" (#5433): the host answered with
+        // somewhere else to go, so the configured URL is wrong and the completions request would be too.
+        if (listed.status >= 300 && listed.status < 400 && listed.error) {
+            return { review: '', rawBody: listed.error, model: recordedModel(plan.fallbackModel, exports.MODEL_SOURCE.REQUESTED) };
+        }
         if (listed.ok) {
             try {
                 const parsed = JSON.parse(listed.body);

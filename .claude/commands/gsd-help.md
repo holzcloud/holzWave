@@ -21,7 +21,7 @@ Output ONLY the reference content of the chosen tier. Do NOT add:
 </objective>
 
 <execution_context>
-@.claude/gsd-core/workflows/help.md
+@/Users/holz/Projects/holzWave/.claude/gsd-core/workflows/help.md
 </execution_context>
 
 <context>
@@ -29,5 +29,5 @@ Arguments: see the `<arguments>` block above.
 </context>
 
 <process>
-Follow .claude/gsd-core/workflows/help.md, using the contents of the `<arguments>` block as its arguments.
+Follow /Users/holz/Projects/holzWave/.claude/gsd-core/workflows/help.md, using the contents of the `<arguments>` block as its arguments.
 </process>
