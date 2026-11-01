@@ -31,9 +31,9 @@
 
 ## Behind today
 
-- Preview releases only (`0.0.1-beta1`), unsigned: no Developer ID or notarisation on macOS, no Authenticode on Windows. The author has run it on macOS, Windows and Linux.
+- Preview releases only (`0.0.1-beta2`), unsigned: no Developer ID or notarisation on macOS, no Authenticode on Windows. The author has run it on macOS and Windows; the Linux packages of `0.0.1-beta2` were built on a GitHub runner and not started on a Linux desktop for this release.
 - Tauri 3 and `libghostty-vt` are pre-release; their APIs move and the build pins exact versions.
-- A single maintainer, and no CI by design: everything is built and tested locally.
+- A single maintainer. Everything is built and tested locally; the one exception is a manual GitHub workflow (`linux-packages.yml`) that builds the Linux packages on an amd64 runner, because Zig 0.17 crashes in the Mac's emulated container. It never runs on a push.
 
 ## What it aims to do differently
 
@@ -59,7 +59,7 @@
 
 Built and tested by the author on macOS, Windows and Linux: local shell, resize, wide Unicode; tiled panes, dividers, tabs, workspaces; scrollback,
 selection, copy, paste; saved layout; WebGL2 with Canvas 2D fallback. SSH, WSL and Docker connections with a connection manager, and file browsers and previews (Markdown, text, images,
-video, audio; local and over SFTP) are built (core and page; see the notes above). So are the AI chat with its providers and
+video, audio, PDF; local and over SFTP) are built (core and page; see the notes above). So are the AI chat with its providers and
 surfaces, the on-device model, the widgets (described by a JSON Schema), the `^R` binding, a history that follows the host of the focused pane, and the system monitor of this computer and of Linux hosts over SSH. These were tested against test
 servers and scripted providers, not yet against real providers or a real Apple model; the manual
 rows are in Part 7 of [test-plan.md](test-plan.md). The native integrations are built too: Kubernetes, Talos, Azure CLI and

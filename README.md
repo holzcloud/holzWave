@@ -18,7 +18,8 @@ Nextcloud, and an AI chat that sees your terminal only after you share that pane
 
 > [!WARNING]
 > **Beta preview.** holzWave is at `0.0.1-beta2`: a preview build, unsigned (no Developer ID, no notarisation, no Authenticode).
-> The author has run it on macOS (Apple Silicon), Windows and Linux. The window in the images below is the
+> The author has run it on macOS (Apple Silicon) and Windows. The Linux packages of `0.0.1-beta2` were built on a GitHub runner
+> and were not started on a Linux desktop by the author for this release (earlier alphas and betas were run on Linux). The window in the images below is the
 > design for the release; the table [What works today](#what-works-today) says what is built and what is tested.
 
 ## Install (macOS, Apple Silicon)
@@ -45,7 +46,9 @@ Every [release](https://github.com/holzcloud/holzWave/releases) carries the pack
 - **Linux (x86_64):** `.deb`, `.rpm` and `.AppImage`; they need glibc 2.39 or newer and WebKitGTK 4.1 (Ubuntu 24.04+,
   Debian 13+, Fedora 40+).
 
-Both are built on a Mac (Windows as a cross build, Linux in an amd64 container) and tested by the author on Windows and Linux; reports of what breaks are the point of the preview.
+The Windows installer is built on a Mac as a GNU-ABI cross build (not the MSVC build) and was run by the author. The Linux packages of
+`0.0.1-beta2` were built once on a GitHub runner (Ubuntu 24.04, amd64, in the repository's build container; a manual workflow) because Zig 0.17
+crashes in the Mac's emulated container. They were not started on a Linux desktop for this release. Reports of what breaks are the point of the preview.
 
 ## Install (server, Docker or Kubernetes)
 
@@ -122,7 +125,7 @@ the design rules are in [docs/design.md](docs/design.md).
 
 ## What works today
 
-Built and tested by the author on macOS, Windows and Linux:
+Built and tested by the author on macOS and Windows, and on Linux up to `0.0.1-beta1` (the `0.0.1-beta2` Linux packages were not started):
 
 | Feature | Status |
 |---|---|
@@ -166,14 +169,15 @@ More in [docs/building.md](docs/building.md).
 
 ## Roadmap
 
-Phase 1 (spike) is done, phase 2 (desktop MVP, including the Windows and Linux versions, which the author has run) is
+Phase 1 (spike) is done, phase 2 (desktop MVP, including the Windows and Linux versions, which the author has run up to `0.0.1-beta1`) is
 built, and phase 3 (SSH, WSL, Docker, connection manager), phase 4 (file browser, previews, editor), the encrypted sync
 and the `wsh` CLI are built and tested against test servers. The system monitor (local and over SSH), the history search
 and the sidebar with widgets are built too, and so are the AI chat and the on-device model, whose manual checks wait for
 real accounts and Macs (Part 7 of the [test plan](docs/test-plan.md)). The native integrations (Kubernetes, Talos, Azure
 CLI, GAM7) are built and tested against fake tools and recorded fixtures; their rows for real clusters and accounts and for
 Windows and Linux hardware are open (Part 9 of the test plan). The web build (a server in one container, with the same window in a browser) is built and tested in containers; its rows for a real cluster, identity provider, authenticators, certificate authority, proxy and browsers are open (Part 10 of the test plan). Mobile comes next.
-Versions go `0.0.1-alpha3`, `0.0.1-beta1`, `0.0.1-beta2` (now), `0.0.1`.
+Versions go `0.0.1-alpha3`, `0.0.1-beta1`, `0.0.1-beta2` (now), `0.0.1`. `0.0.1-beta2` added the native integrations, the web build and
+libghostty on Ghostty 1.4 (Zig 0.17) with a fix for the scrollback limit.
 Full plan: [docs/roadmap.md](docs/roadmap.md).
 
 ## Documentation

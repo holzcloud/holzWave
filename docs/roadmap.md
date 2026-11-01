@@ -40,7 +40,7 @@ Done when: a shell runs in the window, the renderer is chosen with the measureme
 
 ## Phase 2 — Desktop MVP
 
-Status in `0.0.1-beta1` (macOS, Windows and Linux; preview packages are on the GitHub releases page): implemented and
+Status in `0.0.1-beta2` (macOS, Windows and Linux; preview packages are on the GitHub releases page): implemented and
 covered by the automated suites. What no suite can see is the human checklist in [test-plan.md](test-plan.md), which the
 owner runs on real machines.
 
@@ -59,7 +59,7 @@ Does not exist yet:
 - **Phase 2.2:** Windows (ConPTY, WebView2, installer) and Linux (X11 and Wayland, Flatpak, AppImage, deb and rpm),
   with their own default key tables and the OS-driven UI font size (DESK-30, DESK-31). The owner runs the per-platform
   list of [test-plan.md](test-plan.md) on their own hardware (D-22). `0.0.1-alpha1` to
-  `0.0.1-alpha3` and `0.0.1-beta1` are released (D-21). **Status: written and cross-checked from the Mac, and run by the owner on Windows and Linux machines.** The Windows runtime (ConPTY shell, PowerShell directory tracking, exit poll, launchers, AltGr and the per-OS key
+  `0.0.1-alpha3`, `0.0.1-beta1` and `0.0.1-beta2` are released (D-21). **Status: written and cross-checked from the Mac, and run by the owner on Windows and Linux machines.** The Windows runtime (ConPTY shell, PowerShell directory tracking, exit poll, launchers, AltGr and the per-OS key
   tables, the OS text size), the Linux runtime, a per-user unsigned NSIS installer configuration and the deb, rpm and
   AppImage configuration exist; the code compiles for both platforms from the Mac, the Linux tests pass in a container and
   a deb, an rpm and an AppImage were built there. The build guides are [build-windows.md](build-windows.md) and

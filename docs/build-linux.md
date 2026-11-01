@@ -1,7 +1,8 @@
 # Building holzWave on Linux
 
 For the owner's own Linux machines (a Debian family and a Fedora family distribution, X11 and Wayland). Everything here
-is built and run locally: no step uses GitHub to build, creates a tag or a release, or needs a CI file (Phase 2 D-04).
+is built and run locally: no step here uses GitHub to build, creates a tag or a release (Phase 2 D-04). The one GitHub build is the manual
+`linux-packages.yml` workflow that made the `0.0.1-beta2` packages on an amd64 runner.
 The result is a `.deb`, an `.rpm` and an AppImage; the packages are not signed (signing is Phase 10).
 
 > [!IMPORTANT]
@@ -143,9 +144,9 @@ root of the checkout, not in `app`:
 
 | Format | Folder | Name on x86_64 (the container made the arm64 ones) |
 |---|---|---|
-| deb | `target/release/bundle/deb/` | `holzWave_0.0.1-beta1_amd64.deb` (arm64: `..._arm64.deb`) |
-| rpm | `target/release/bundle/rpm/` | `holzWave-0.0.1-beta1-1.x86_64.rpm` (arm64: `...aarch64.rpm`) |
-| AppImage | `target/release/bundle/appimage/` | `holzWave_0.0.1-beta1_amd64.AppImage` (the arm64 one was `..._aarch64.AppImage`) |
+| deb | `target/release/bundle/deb/` | `holzWave_0.0.1-beta2_amd64.deb` (arm64: `..._arm64.deb`) |
+| rpm | `target/release/bundle/rpm/` | `holzWave-0.0.1-beta2-1.x86_64.rpm` (arm64: `...aarch64.rpm`) |
+| AppImage | `target/release/bundle/appimage/` | `holzWave_0.0.1-beta2_amd64.AppImage` (the arm64 one was `..._aarch64.AppImage`) |
 
 Look in the folder: the bundler chooses the names. The package's `Depends` (deb) and `Requires` (rpm) are
 WebKitGTK 4.1 and GTK 3; nothing else, and no package runs an install script (the container build checked both, and
@@ -160,9 +161,9 @@ command is the reported workaround (unverified here).
 ### Install and remove
 
 ```sh
-sudo apt install ./target/release/bundle/deb/holzWave_0.0.1-beta1_amd64.deb      # Debian family; resolves WebKitGTK
-sudo dnf install ./target/release/bundle/rpm/holzWave-0.0.1-beta1-1.x86_64.rpm   # Fedora family
-chmod +x ./target/release/bundle/appimage/holzWave_0.0.1-beta1_amd64.AppImage    # AppImage: nothing is installed
+sudo apt install ./target/release/bundle/deb/holzWave_0.0.1-beta2_amd64.deb      # Debian family; resolves WebKitGTK
+sudo dnf install ./target/release/bundle/rpm/holzWave-0.0.1-beta2-1.x86_64.rpm   # Fedora family
+chmod +x ./target/release/bundle/appimage/holzWave_0.0.1-beta2_amd64.AppImage    # AppImage: nothing is installed
 ```
 
 The installed program is `holzwave-app`, the menu entry is "holzWave" under System or Terminal, and the desktop file is
