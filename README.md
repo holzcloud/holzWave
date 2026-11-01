@@ -4,7 +4,7 @@
 
 <br>
 
-[![Status](https://img.shields.io/badge/status-0.0.1--beta1%20in%20development-FF8FB8?style=for-the-badge)](docs/roadmap.md)
+[![Status](https://img.shields.io/badge/status-0.0.1--beta2%20in%20development-FF8FB8?style=for-the-badge)](docs/roadmap.md)
 [![License](https://img.shields.io/github/license/holzcloud/holzwave?style=for-the-badge&color=4B5563)](LICENSE)
 [![Rust](https://img.shields.io/badge/core-Rust-8D3F63?style=for-the-badge&logo=rust&logoColor=white)](docs/architecture.md)
 
@@ -17,7 +17,7 @@ Nextcloud, and an AI chat that sees your terminal only after you share that pane
 **completely offline**, on the device, with no account and no key. Website: [holzcloud.ch/holzwave](https://holzcloud.ch/holzwave).
 
 > [!WARNING]
-> **Beta preview.** holzWave is at `0.0.1-beta1`: a preview build, unsigned (no Developer ID, no notarisation, no Authenticode).
+> **Beta preview.** holzWave is at `0.0.1-beta2`: a preview build, unsigned (no Developer ID, no notarisation, no Authenticode).
 > The author has run it on macOS (Apple Silicon), Windows and Linux. The window in the images below is the
 > design for the release; the table [What works today](#what-works-today) says what is built and what is tested.
 
@@ -173,7 +173,7 @@ and the sidebar with widgets are built too, and so are the AI chat and the on-de
 real accounts and Macs (Part 7 of the [test plan](docs/test-plan.md)). The native integrations (Kubernetes, Talos, Azure
 CLI, GAM7) are built and tested against fake tools and recorded fixtures; their rows for real clusters and accounts and for
 Windows and Linux hardware are open (Part 9 of the test plan). The web build (a server in one container, with the same window in a browser) is built and tested in containers; its rows for a real cluster, identity provider, authenticators, certificate authority, proxy and browsers are open (Part 10 of the test plan). Mobile comes next.
-Versions go `0.0.1-alpha3`, `0.0.1-beta1` (now), `0.0.1`.
+Versions go `0.0.1-alpha3`, `0.0.1-beta1`, `0.0.1-beta2` (now), `0.0.1`.
 Full plan: [docs/roadmap.md](docs/roadmap.md).
 
 ## Documentation

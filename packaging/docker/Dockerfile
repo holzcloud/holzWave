@@ -99,7 +99,7 @@ RUN --mount=type=cache,id=holzwave-cargo-registry,target=/opt/cargo/registry,sha
 # ---- the runtime ------------------------------------------------------------------------------------------------
 FROM debian:trixie-20261027-slim@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a84fa1debe0c24a7e0c3ec4 AS runtime
 ARG EXTRA_PACKAGES=""
-ARG VERSION=0.0.1-beta1
+ARG VERSION=0.0.1-beta2
 ARG REVISION=unknown
 ARG DEBIAN_FRONTEND=noninteractive
 
