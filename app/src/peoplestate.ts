@@ -1,7 +1,7 @@
 // The pure part of the people dialog (docs/design.md 6.29): the reading of what `GET /api/admin/accounts` answers, the state
 // words with their glyphs, the time words and the invitation. No DOM and no network here, so node tests it on the compiled file.
 // The server sends data and codes, never a sentence; every sentence the dialog says is here.
-import { CHANGE_FAILED } from "./accountstate.js";
+import { CHANGE_FAILED, wholeId } from "./accountstate.js";
 import { messageFor } from "./loginstate.js";
 
 /** The most accounts the page takes from the server, and the longest strings. */
@@ -40,8 +40,7 @@ const str = (v: unknown, max: number): string | null => (typeof v === "string" &
 
 function readRow(raw: unknown): Row | null {
   if (!isObject(raw)) return null;
-  // The server numbers its accounts: the id arrives as a whole number and is kept as its digits, the form it has in a path.
-  const id = typeof raw.id === "number" ? (Number.isSafeInteger(raw.id) && raw.id >= 0 ? String(raw.id) : null) : str(raw.id, MAX_ID);
+  const id = wholeId(raw.id, MAX_ID);
   const username = str(raw.username, MAX_NAME);
   const displayName = str(raw.display_name, MAX_NAME);
   if (id === null || id === "" || username === null || displayName === null) return null;

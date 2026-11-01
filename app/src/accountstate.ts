@@ -54,6 +54,13 @@ const MAX_ID = 128;
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const str = (v: unknown, max: number): string | null => (typeof v === "string" && v.length <= max ? v : null);
+/**
+ * An id the way the server sends it: the server numbers its accounts and passkeys, so a whole non-negative number arrives and is kept
+ * as its digits (the form it has in a path); a bounded string is kept as it is. Anything else (a fraction, a negative number, a number
+ * past the safe range) is not an id.
+ */
+export const wholeId = (v: unknown, max: number): string | null =>
+  typeof v === "number" ? (Number.isSafeInteger(v) && v >= 0 ? String(v) : null) : str(v, max);
 const time = (v: unknown): number | null => {
   if (typeof v !== "string" || v.length > 64) return null;
   const ms = Date.parse(v);
@@ -62,7 +69,7 @@ const time = (v: unknown): number | null => {
 
 function readPasskey(raw: unknown): Passkey | null {
   if (!isObject(raw)) return null;
-  const id = str(raw.id, MAX_ID);
+  const id = wholeId(raw.id, MAX_ID);
   const name = str(raw.name, MAX_NAME);
   const createdMs = time(raw.created_at);
   if (id === null || id === "" || name === null || createdMs === null) return null;
@@ -86,7 +93,7 @@ function readSessionRow(raw: unknown): SessionRow | null {
 export function readMe(raw: unknown): Me | null {
   if (!isObject(raw) || !isObject(raw.account)) return null;
   const a = raw.account;
-  const id = str(a.id, MAX_ID);
+  const id = wholeId(a.id, MAX_ID);
   const username = str(a.username, MAX_NAME);
   const displayName = str(a.display_name, MAX_NAME);
   const role = a.role === "admin" || a.role === "member" ? a.role : null;

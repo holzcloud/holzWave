@@ -5,6 +5,7 @@
 // as SKIP, printing the reason); a skip in Chromium is a failure.
 import { generateKeyPairSync } from "node:crypto";
 import { runTest, skip, openPage, signIn, check, equal, poll, answered, runEntry, inviteLink } from "./lib.mjs";
+import { LAST_WAY } from "../../dist/accountstate.js";
 
 if (process.env.HW_ENGINE !== "chromium") skip("no virtual authenticator in this engine");
 
@@ -72,6 +73,23 @@ await runTest("passkey", {}, async ({ harness, open }) => {
     await page.waitForSelector("canvas#term");
     await poll(async () => ((await secretsState(page)) === "unlocked" ? true : undefined), "the store is unlocked after the passkey sign-in with PRF");
     withPrf.state = await secretsState(page);
+    // The account dialog lists the passkey: the server sends its id as a number, which is also the path of its removal.
+    await page.locator("canvas#term").click();
+    await runEntry(page, "Account…");
+    const account = page.getByRole("dialog", { name: "Account", exact: true });
+    await account.waitFor();
+    const keys = account.locator('[data-group="passkeys"] .acc-item');
+    await poll(async () => ((await keys.count()) === 1 ? true : undefined), "the account dialog lists the one passkey");
+    withPrf.listed = (await keys.locator(".acc-name").innerText()).trim();
+    // It is the only way in: removing it is refused with the sentence for that, which means the numeric id reached the route.
+    await keys.getByRole("button", { name: "Remove" }).click();
+    await keys.getByRole("button", { name: "Click again to remove" }).click();
+    const status = account.locator(".set-status");
+    await poll(async () => ((await status.innerText()).trim() !== "" ? true : undefined), "the account dialog answers the removal");
+    equal((await status.innerText()).trim(), LAST_WAY, "the only passkey cannot be removed");
+    equal(await keys.count(), 1, "the passkey is still listed");
+    await account.getByRole("button", { name: "Close" }).click();
+    await account.waitFor({ state: "detached" });
     context.expectClean("the context with PRF");
     await key.cdp.send("WebAuthn.removeVirtualAuthenticator", { authenticatorId: key.authenticatorId });
   }
@@ -128,7 +146,7 @@ await runTest("passkey", {}, async ({ harness, open }) => {
 
   adminContext.expectClean("the administrator's context");
   console.log(
-    `passkey: with PRF (ctap2.1, internal, resident key, user verification, hasPrf true): enrolled, signed out and in, store ${withPrf.state}; ` +
+    `passkey: with PRF (ctap2.1, internal, resident key, user verification, hasPrf true): enrolled, signed out and in, store ${withPrf.state}, the account dialog listed "${withPrf.listed}" and refused to remove the last way in; ` +
       `without PRF (hasPrf false): signed in, store ${withoutPrf.state}, the unlock dialog offers the passphrase; unknown credential: "${FAILED.slice(0, 20)}..."`,
   );
 });

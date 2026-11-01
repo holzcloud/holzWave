@@ -19,13 +19,13 @@ const NOW = Date.parse("2026-10-27T12:00:00Z");
 const iso = (secondsAgo) => new Date(NOW - secondsAgo * 1000).toISOString();
 
 const ME = {
-  account: { id: "a1", username: "holz", display_name: "Holz", role: "admin" },
+  account: { id: 7, username: "holz", display_name: "Holz", role: "admin" },
   oidc: null,
   password: true,
   totp: true,
   passkeys: [
-    { id: "k1", name: "MacBook", created_at: iso(900_000), last_used: iso(100) },
-    { id: "k2", name: "Phone", created_at: iso(900_000), last_used: null },
+    { id: 1, name: "MacBook", created_at: iso(900_000), last_used: iso(100) },
+    { id: 2, name: "Phone", created_at: iso(900_000), last_used: null },
   ],
   secrets: { state: "unlocked", passphrase: false, recovery: true },
   sessions: [
@@ -38,7 +38,7 @@ const me = (over = {}) => readMe({ ...ME, ...over });
 
 test("readMe_reads_the_documented_shape", () => {
   const read = readMe(ME);
-  assert.deepEqual(read.account, { id: "a1", username: "holz", displayName: "Holz", role: "admin" });
+  assert.deepEqual(read.account, { id: "7", username: "holz", displayName: "Holz", role: "admin" });
   assert.equal(read.password, true);
   assert.equal(read.totp, true);
   assert.equal(read.oidc, null);
@@ -48,6 +48,20 @@ test("readMe_reads_the_documented_shape", () => {
   assert.deepEqual(read.secrets, { state: "unlocked", passphrase: false, recovery: true });
   assert.equal(read.sessions.length, 3);
   assert.equal(readMe({ ...ME, oidc: { id: "corp", name: "Company SSO" } }).oidc.name, "Company SSO");
+});
+
+test("readMe_reads_the_ids_the_way_the_server_sends_them", () => {
+  // The server numbers its accounts and passkeys (JSON numbers); the page keeps them as digits, the form they have in a path.
+  const read = readMe(ME);
+  assert.equal(read.account.id, "7");
+  assert.deepEqual(read.passkeys.map((k) => k.id), ["1", "2"]);
+  // A bounded string is still an id; a fraction, a negative number or a number past the safe range is not.
+  assert.equal(me({ account: { ...ME.account, id: "a1" } }).account.id, "a1");
+  assert.equal(me({ passkeys: [{ ...ME.passkeys[0], id: "k1" }] }).passkeys[0].id, "k1");
+  for (const bad of [1.5, -1, 2 ** 60, Number.NaN, null, true, {}, [], ""]) {
+    assert.equal(me({ account: { ...ME.account, id: bad } }), null, `account id ${String(bad)}`);
+    assert.equal(me({ passkeys: [{ ...ME.passkeys[0], id: bad }] }), null, `passkey id ${String(bad)}`);
+  }
 });
 
 test("readMe_refuses_lists_that_are_too_long", () => {
