@@ -2,11 +2,14 @@
 // pane is sent to the server and its path is typed into that pane, like a paste. `web.ts` starts this module on the web platform
 // only; the desktop page never loads it.
 //
-// The drop. While a file is dragged over a pane that runs a shell, the pane shows a dashed edge and the label `Drop to upload`. A drop
-// sends each file, one after the other (16 at most), as the raw body of `PUT /api/upload?name=<file name>` through the page's one
-// request function (`http` of the bridge: the session cookie, the CSRF token, no redirect, same origin only), says what it does in the
-// status line, and types the returned path, quoted for the shell, through the paste path of the pane under the drop. A refusal says why
-// and types nothing. A drag that carries files is taken everywhere on the page, so the browser never navigates to a dropped file.
+// The drop. While a file is dragged over a pane that takes it (a pane that runs a shell, a chat, a file browser), the pane shows a dashed
+// edge and the label `Drop to upload`. A drop sends each file, one after the other (16 at most), as the raw body of
+// `PUT /api/upload?name=<file name>` through the page's one request function (`http` of the bridge: the session cookie, the CSRF token,
+// no redirect, same origin only), says what it does in the status line, and then hands the returned path to the pane under the drop: a
+// shell gets it quoted, typed through its paste path; a chat gets the same quoted path in the message being written; a file browser
+// that lists the upload folder reads the list again and selects the file. A refusal says why and gives the pane nothing. A drag that
+// carries files is taken everywhere on the page, so the browser never navigates to a dropped file, and a pane that takes nothing (a
+// preview, the monitor, a tool view) shows no edge.
 //
 // The download. A file that the core grants (it grants images, video, audio and PDF files) can be taken out by an explicit act only: the
 // entry `Download` of the row menu of the file browser (opened by the context-menu gesture, the context-menu key or Shift+F10) or of the
@@ -17,7 +20,7 @@
 // Nothing of a file (its name, its path) is kept: the upload folder shown on the label is held in memory until the page goes.
 import { registerAction } from "./actions.js";
 import { HttpError, call, http } from "./bridge.js";
-import { focusedFile } from "./blocks.js";
+import { focusedFile, insertIntoChat, revealUploaded } from "./blocks.js";
 import type { FileRef } from "./blocks.js";
 import { el, loadStyles } from "./dom.js";
 import { paneBlocks } from "./blockstate.js";
@@ -29,23 +32,26 @@ import { state } from "./state.js";
 import { showNotice } from "./status.js";
 import { sessionEnded } from "./websession.js";
 import {
-  DOWNLOAD_ONLY_SENTENCE, DROP_LABEL, GrantList, MAX_DROP_FILES, baseName, batchText, readGrant, readUploaded, refusalText, shellQuote,
-  takeFiles, uploadFolder, uploadUrl, uploadingText,
+  DOWNLOAD_FAILED, DROP_LABEL, GrantList, MAX_DROP_FILES, baseName, batchText, downloadRefusal, dropTarget, readGrant, readGrantWhy,
+  readUploaded, refusalText, shellQuote, takeFiles, uploadFolder, uploadUrl, uploadingText,
 } from "./webstate.js";
+import type { DropTarget } from "./webstate.js";
 
-/** One file waiting to be sent, with the pane under its drop and the count of paths already typed for that drop. */
+/** One file waiting to be sent, with the pane under its drop, what that pane does with a path, and the count of paths already typed for that drop. */
 interface Job {
   file: File;
   pane: number;
+  target: DropTarget;
   drop: { typed: number };
 }
 
-/** What the status line says when the run of uploads ends. */
+/** What the status line says when the run of uploads ends. `elsewhere` is the upload folder when a file browser took a file and did not list that folder. */
 interface Batch {
   ok: number;
   failed: string[];
   over: number;
   folders: number;
+  elsewhere?: string;
 }
 
 const fresh = (): Batch => ({ ok: 0, failed: [], over: 0, folders: 0 });
@@ -93,15 +99,17 @@ interface Box {
   height: number;
 }
 
-/** The pane that takes an upload at a window point: a pane that runs a shell, with no layer open and a session that is alive. Null otherwise. */
-function acceptingPane(x: number, y: number): { id: number; box: Box } | null {
+/** The pane that takes an upload at a window point (a shell, a chat or a file browser), with no layer open and a session that is alive. Null otherwise. */
+function acceptingPane(x: number, y: number): { id: number; box: Box; target: DropTarget } | null {
   const c = canvas();
   if (c === null || sessionEnded() || document.querySelector(".dlg-backdrop, .palette-backdrop.open") !== null) return null;
   const box = c.getBoundingClientRect();
   const at = paneAt(state.metrics, state.view, x - box.left, y - box.top);
-  if (at === null || paneBlocks.has(at[0])) return null;
+  if (at === null) return null;
+  const target = dropTarget(paneBlocks.get(at[0])?.kind);
+  if (target === null) return null;
   const r = paneRect(state.metrics, at[1]);
-  return { id: at[0], box: { left: box.left + r.x, top: box.top + r.y, width: r.w, height: r.h } };
+  return { id: at[0], box: { left: box.left + r.x, top: box.top + r.y, width: r.w, height: r.h }, target };
 }
 
 /** Take the edge away. */
@@ -201,11 +209,11 @@ function onDrop(e: DragEvent): void {
   hideTarget();
   const accepting = acceptingPane(e.clientX, e.clientY);
   if (dt === null || accepting === null) return;
-  take(filesOf(dt), accepting.id);
+  take(filesOf(dt), accepting.id, accepting.target);
 }
 
 /** Queue the files of one drop for `pane`, at most 16 waiting at a time; say what was left out. */
-function take(list: { file: File; directory: boolean }[], pane: number): void {
+function take(list: { file: File; directory: boolean }[], pane: number, target: DropTarget): void {
   const taken = takeFiles(list);
   const pending = queue.length + (running ? 1 : 0);
   const room = Math.max(0, MAX_DROP_FILES - pending);
@@ -213,7 +221,7 @@ function take(list: { file: File; directory: boolean }[], pane: number): void {
   batch.over += taken.over + (taken.files.length - files.length);
   batch.folders += taken.folders;
   const drop = { typed: 0 };
-  for (const item of files) queue.push({ file: item.file, pane, drop });
+  for (const item of files) queue.push({ file: item.file, pane, target, drop });
   if (files.length === 0 && !running) {
     showNotice(batchText(batch));
     batch = fresh();
@@ -222,7 +230,23 @@ function take(list: { file: File; directory: boolean }[], pane: number): void {
   void run();
 }
 
-/** Send one file and type its path. A refusal or a failure is counted, never thrown. */
+/** Hand the stored path to the pane that took the file: type it, add it to the message, or show the file in the list. */
+async function deliver(job: Job, path: string): Promise<void> {
+  if (job.target === "shell") {
+    await pasteText(job.pane, (job.drop.typed > 0 ? " " : "") + shellQuote(path));
+    job.drop.typed++;
+    focusInput();
+  } else if (job.target === "chat") {
+    // The chat puts the space between a path and the words before it itself, so the second path of a drop is separated like the first.
+    insertIntoChat(job.pane, shellQuote(path));
+  } else {
+    // A file browser types nothing; when it lists another folder it stays where it is and the status line names the folder.
+    if (!(await revealUploaded(job.pane, path))) batch.elsewhere = uploadFolder(path);
+    focusInput();
+  }
+}
+
+/** Send one file and give its path to the pane. A refusal or a failure is counted, never thrown. */
 async function send(job: Job): Promise<void> {
   showNotice(uploadingText(job.file.name));
   try {
@@ -230,10 +254,7 @@ async function send(job: Job): Promise<void> {
     if (answer === null) throw new Error("the answer is not an upload");
     folder = uploadFolder(answer.path);
     batch.ok++;
-    const text = (job.drop.typed > 0 ? " " : "") + shellQuote(answer.path);
-    job.drop.typed++;
-    await pasteText(job.pane, text);
-    focusInput();
+    await deliver(job, answer.path);
   } catch (e) {
     batch.failed.push(e instanceof HttpError ? refusalText(e.status, e.body) : "upload failed");
   }
@@ -276,13 +297,22 @@ function revokeAll(): void {
   for (const token of grants.clear()) revoke(token);
 }
 
+/** Why the core refused to grant `file`, in words: the stable code of `file_grant_why`, or the plain sentence when the question has no answer. */
+async function refusalSentence(file: FileRef): Promise<string> {
+  try {
+    return downloadRefusal(readGrantWhy(await call<unknown>("file_grant_why", { source: file.source, path: file.path })));
+  } catch {
+    return DOWNLOAD_FAILED;
+  }
+}
+
 /** Take `file` out of the server: ask for a grant, follow its address with a download link, keep the grant in the bounded list. */
 export async function downloadFile(file: FileRef): Promise<void> {
   let raw: unknown;
   try {
     raw = await call<unknown>("file_grant", { source: file.source, path: file.path });
   } catch {
-    showNotice(DOWNLOAD_ONLY_SENTENCE); // the core refuses a kind it does not grant
+    showNotice(await refusalSentence(file)); // the core's own text is for people; the host's code says why
     return;
   }
   const granted = readGrant(raw);
@@ -290,7 +320,7 @@ export async function downloadFile(file: FileRef): Promise<void> {
     // An answer that is not a same-origin grant is not followed, and what it granted ends.
     const token = typeof raw === "object" && raw !== null ? (raw as { token?: unknown }).token : undefined;
     if (typeof token === "string") revoke(token);
-    showNotice(DOWNLOAD_ONLY_SENTENCE);
+    showNotice(DOWNLOAD_FAILED);
     return;
   }
   const old = grants.add(granted.token);

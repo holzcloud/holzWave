@@ -266,7 +266,9 @@ A reverse proxy in front of the server may compress the page files; the WebSocke
 - The audit files are not rotated.
 - The namespace needs the Pod Security level `baseline`, and `allowPrivilegeEscalation: false` stops the server from starting.
 - A program's clipboard escape sequence does nothing in the browser, as on the desktop. Download works for images, video, audio
-  and PDF files; upload takes a file dropped on a shell pane.
+  and PDF files, and a refused download says why (secrets locked, file not found, not allowed to read it, another kind of file).
+  Upload takes a file dropped on a shell pane, on a chat pane (the path goes into the message) and on a file browser (the
+  file is selected when the list shows the upload folder).
 - The dependency lock of the project holds two generations of the `rsa` crate: one comes with the SSH client and one with the OpenID
   Connect library.
 - Linux only: the server and its isolation tests run in a Linux container; nothing ran on Windows or iOS, and the isolation tests

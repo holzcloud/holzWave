@@ -29,6 +29,7 @@ import {
 } from "./blockstate.js";
 import type { BlockInfo, FileEntry, Listing, Opened } from "./blockstate.js";
 import type { View } from "./types.js";
+import { sameFolder } from "./webstate.js";
 
 let layer: HTMLElement | null = null;
 let applyView: (v: View) => void = () => {};
@@ -45,6 +46,13 @@ export interface Instance {
   key(e: KeyboardEvent): boolean;
   /** The file this block holds on to now: the selected file of a browser, the file of a preview; absent or null for the others. */
   file?(): FileRef | null;
+  /** Add text to the message of a chat block, at the caret; absent for the others. */
+  insert?(text: string): void;
+  /**
+   * A file was uploaded to `path` of this computer: a file browser that lists that folder reads it again and selects the file, and
+   * answers true; any other answers false and does not move. Absent for the other blocks.
+   */
+  reveal?(path: string): Promise<boolean>;
   dispose(): void;
 }
 
@@ -65,6 +73,20 @@ let refreshing = false;
 export function focusedFile(): FileRef | null {
   const focus = state.view?.focus;
   return (focus === undefined ? undefined : instances.get(focus))?.file?.() ?? null;
+}
+
+/** Add `text` to the message being written in the chat pane `pane`. False when that pane is not a chat. */
+export function insertIntoChat(pane: number, text: string): boolean {
+  const chat = instances.get(pane);
+  if (chat?.insert === undefined) return false;
+  chat.insert(text);
+  return true;
+}
+
+/** Show an uploaded file in the file browser pane `pane`: true when that browser lists the folder of `path` and now selects the file, false when it does not (or is no browser). */
+export async function revealUploaded(pane: number, path: string): Promise<boolean> {
+  const browser = instances.get(pane);
+  return browser?.reveal === undefined ? false : browser.reveal(path);
 }
 
 // ---- asking the core ---------------------------------------------------------------------------------------------
@@ -199,7 +221,7 @@ function filesBlock(info: BlockInfo, root: HTMLElement): Instance {
     (rows[selected] as HTMLElement | undefined)?.scrollIntoView({ block: "nearest" });
   };
 
-  const load = async (target: string): Promise<void> => {
+  const load = async (target: string, select?: string): Promise<void> => {
     const mine = ++loading;
     failure = "";
     draw();
@@ -207,7 +229,8 @@ function filesBlock(info: BlockInfo, root: HTMLElement): Instance {
       const answer = readListing(await call<unknown>("files_list", { source: current.source, path: target }));
       if (!answer) throw new Error("the list could not be read");
       listing = answer;
-      selected = 0;
+      // A file that was just uploaded is the selected row; anything else starts at the top.
+      selected = select === undefined ? 0 : Math.max(0, visibleEntries(answer.entries, showHidden).findIndex((e) => e.name === select));
       void call("block_update", { pane: current.pane, path: answer.path }).catch(() => {});
     } catch (e) {
       failure = String(e);
@@ -278,6 +301,13 @@ function filesBlock(info: BlockInfo, root: HTMLElement): Instance {
     file() {
       const entry = shown[selected];
       return listing && entry?.kind === "file" ? { source: current.source, path: joinPath(listing.path, entry.name) } : null;
+    },
+    async reveal(full) {
+      // Only this computer's own folder is the upload folder: the same path on a saved connection is another folder.
+      const at = full.lastIndexOf("/");
+      if (current.source !== "local" || listing === null || at < 0 || !sameFolder(listing.path, at === 0 ? "/" : full.slice(0, at))) return false;
+      await load(listing.path, full.slice(at + 1));
+      return true;
     },
     key(e) {
       // The context-menu key and Shift+F10 open the row menu of the selected file in the browser build.
@@ -779,6 +809,9 @@ function chatBlock(info: BlockInfo, root: HTMLElement): Instance {
     },
     key() {
       return false;
+    },
+    insert(text) {
+      view.insert(text);
     },
     dispose() {
       view.dispose();

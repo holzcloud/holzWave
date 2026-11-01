@@ -67,6 +67,8 @@ export interface ChatView {
   readonly conversation: string;
   /** Give the keyboard to the composer. */
   focus(): void;
+  /** Add `text` to the message being written, at the caret; see `Mounted.insert`. Never sends. */
+  insert(text: string): void;
   /** Show another conversation in this view. */
   show(conversation: string): void;
   /** Remove the view's nodes and listeners; the session stays, so a tab switch costs nothing. */
@@ -712,6 +714,22 @@ class Mounted implements ChatView {
 
   focus(): void {
     this.input.focus({ preventScroll: true });
+  }
+
+  /**
+   * Add `text` to the message being written, in place of the selection or at the caret, through the composer's own input path (the
+   * count and the button follow), and leave the caret after it with the keyboard in the composer. A word before the caret gets one
+   * space between it and `text` (none after a space or a line break, none at the start). Never sends.
+   */
+  insert(text: string): void {
+    const field = this.input;
+    const start = field.selectionStart;
+    const end = field.selectionEnd;
+    const before = field.value.slice(0, start);
+    const gap = before === "" || /\s$/.test(before) ? "" : " ";
+    field.setRangeText(gap + text, start, end, "end");
+    field.dispatchEvent(new Event("input"));
+    this.focus();
   }
 
   /**

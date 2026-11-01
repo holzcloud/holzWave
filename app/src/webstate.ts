@@ -189,6 +189,35 @@ export const ONLY_SIXTEEN = "Only 16 files at a time.";
 /** The status line says this when a drop held a folder: only files are sent. */
 export const FOLDERS_SKIPPED = "Folders are not uploaded.";
 
+/** What a pane does with an uploaded file: a shell types the path, a chat adds it to the message, a file browser shows the file. */
+export type DropTarget = "shell" | "chat" | "files";
+
+/**
+ * What a pane takes from a drop, from the kind of its block: a pane that is no block runs a shell; a chat and a file browser take files;
+ * a preview, the monitor, a tool view and any kind this page does not know take nothing.
+ */
+export function dropTarget(kind: string | undefined): DropTarget | null {
+  if (kind === undefined) return "shell";
+  return kind === "chat" || kind === "files" ? kind : null;
+}
+
+/** Whether two folder paths of the server are the same folder: equal once one trailing slash is left off. An empty path is no folder. */
+export function sameFolder(a: string, b: string): boolean {
+  const bare = (path: string): string => (path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path);
+  return a !== "" && b !== "" && bare(a) === bare(b);
+}
+
+/** The longest folder the status line names, in characters, ellipsis included. */
+const SHOWN_FOLDER = 64;
+
+/** A folder path as the status line shows it: control and direction characters replaced, a long one cut at its start (its end is what tells it apart). */
+export function shownFolder(path: string): string {
+  // eslint-disable-next-line no-control-regex
+  const clean = path.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "\ufffd");
+  const characters = Array.from(clean);
+  return characters.length <= SHOWN_FOLDER ? clean : `\u2026${characters.slice(-(SHOWN_FOLDER - 1)).join("")}`;
+}
+
 /** The longest file name the address carries, in UTF-8 bytes. */
 const NAME_BYTES = 200;
 
@@ -308,12 +337,13 @@ export const uploadingText = (name: string): string => `Uploading ${shownName(na
 export const uploadedText = (count: number): string => (count === 1 ? "Uploaded" : `Uploaded ${count} files`);
 
 /**
- * What the status line says when a run of uploads ends: how many arrived, the words of the last refusal, and the files and folders
- * that were not taken. One part stands alone; several are sentences.
+ * What the status line says when a run of uploads ends: how many arrived (and the folder when a file browser took them while it
+ * showed another one), the words of the last refusal, and the files and folders that were not taken. One part stands alone; several
+ * are sentences.
  */
-export function batchText(done: { ok: number; failed: readonly string[]; over: number; folders: number }): string {
+export function batchText(done: { ok: number; failed: readonly string[]; over: number; folders: number; elsewhere?: string }): string {
   const parts: string[] = [];
-  if (done.ok > 0) parts.push(uploadedText(done.ok));
+  if (done.ok > 0) parts.push(done.elsewhere ? `${uploadedText(done.ok)} to ${shownFolder(done.elsewhere)}` : uploadedText(done.ok));
   const last = done.failed.at(-1);
   if (last !== undefined) parts.push(notUploaded(last));
   if (done.over > 0) parts.push(ONLY_SIXTEEN);
@@ -329,6 +359,36 @@ export const MAX_GRANTS = 16;
 
 /** The status line says this when the core refuses a grant: it grants images, video, audio and PDF files only. */
 export const DOWNLOAD_ONLY_SENTENCE = "Download works for images, video, audio and PDF files.";
+
+/** The sentence for a refusal the page cannot tell the reason of: the question failed, was not answered, or named a reason it does not know. */
+export const DOWNLOAD_FAILED = "Not downloaded: download failed.";
+
+/** The reasons the host names for a refused grant, in the codes it will always use (`file_grant_why`). */
+export type GrantCode = "locked" | "not_found" | "denied" | "kind" | "other";
+
+const GRANT_CODES: readonly string[] = ["locked", "not_found", "denied", "kind", "other"];
+
+/** The reason of an answer of `file_grant_why`: its string member `code` when it is one of the five, else `other`. Nothing else of the answer is read. */
+export function readGrantWhy(json: unknown): GrantCode {
+  const code = record(json)?.code;
+  return typeof code === "string" && GRANT_CODES.includes(code) ? (code as GrantCode) : "other";
+}
+
+/** The status line for a refused download, from the reason. */
+export function downloadRefusal(code: GrantCode): string {
+  switch (code) {
+    case "kind":
+      return DOWNLOAD_ONLY_SENTENCE;
+    case "locked":
+      return "Not downloaded: secrets are locked.";
+    case "not_found":
+      return "Not downloaded: file not found.";
+    case "denied":
+      return "Not downloaded: not allowed to read it.";
+    case "other":
+      return DOWNLOAD_FAILED;
+  }
+}
 
 /** The grants the page made for downloads, oldest first, at most 16. */
 export class GrantList {

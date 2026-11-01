@@ -2456,32 +2456,52 @@ connection is down the panes show their last screen. When the browser reports th
 the mark `offline` stays for good, no layer opens and nothing reconnects. The marks stand in this order: session ended (alone; nothing else
 is shown then), offline or reconnecting, session ends, secrets locked. The status line shows no mark while the page cannot learn its session.
 
-**Upload by drop.** While a file is dragged over a pane that runs a shell, the pane shows a hairline dashed edge (1 px, `--hw-rose`, with
-`--hw-rose-wash` inside, 2 px inside the pane's box so that it does not meet a divider) and, centred, a small box with the label `Drop to upload`
-(uppercase, tracked). Once the page has seen an answer of the server the box also says `to` and the upload folder in mono; the first drop after the
-page loads shows the label alone, because the page does not know the folder yet. Rose marks the target of the action. A drag that carries no
-file shows nothing; a pane that runs no shell (a file browser, a preview, the monitor, a chat) shows no edge and accepts nothing, and the cursor
-says so. A drag of files is the page's wherever it is: a drop on the title bar, the status line, a pane that takes nothing or while a layer is open
-uploads nothing, and the browser never opens the dropped file or leaves the page; a link dragged in from another page is not followed either,
-and a text field keeps its own drop.
+**Upload by drop.** While a file is dragged over a pane that takes it (a pane that runs a shell, a chat, or a file browser), the pane shows a hairline
+dashed edge (1 px, `--hw-rose`, with `--hw-rose-wash` inside, 2 px inside the pane's box so that it does not meet a divider) and, centred, a small box
+with the label `Drop to upload` (uppercase, tracked). Once the page has seen an answer of the server the box also says `to` and the upload folder in mono;
+the first drop after the page loads shows the label alone, because the page does not know the folder yet. The label and the edge are the same on the
+three kinds of pane; what the pane does with the file is told below. Rose marks the target of the action. A drag that carries no file shows nothing; a
+pane that takes nothing (a preview, the monitor, a tool view) shows no edge, and the cursor says so. A drag of files is the page's wherever it is: a drop
+on the title bar, the status line, a pane that takes nothing or while a layer is open uploads nothing, and the browser never opens the dropped file or
+leaves the page; a link dragged in from another page is not followed either, and a text field keeps its own drop.
 
 Each file goes to the server on its own, one after the other, at most 16 for a drop (the 17th and the rest are not sent, and the status line says
-so). When a file has arrived its path, quoted for the shell with single quotes, is typed into the pane under the drop like a paste, never followed by
-`Enter`; several paths are separated by a space. A path with a line break in it is quoted and goes through the confirmation of every paste. The
-status line says what happens in words: `Uploading <name>` for the file on its way (a long name is cut with an ellipsis), then `Uploaded`
-(`Uploaded 3 files`) when the run ends. A refusal says why and types nothing: `Not uploaded: too large.`, `Not uploaded: name not allowed.`,
-`Not uploaded: try again.` (too many requests, or the server is busy), `Not uploaded: secrets are locked.`, `Not uploaded: sign in again.` and
-`Not uploaded: upload failed.` for any other answer, an answer that is not an upload and a connection that failed. After a run with more than one
-outcome the sentences follow each other (`Uploaded 2 files. Not uploaded: too large.`), and the sentences `Only 16 files at a time.` and
-`Folders are not uploaded.` end the run when they apply; a folder is never sent. When the session has ended nothing is sent.
+so). The path the server answers is then given to the pane under the drop, and what that means depends on the pane:
+
+| Pane | What the path becomes | Never |
+|---|---|---|
+| shell | its path, quoted for the shell with single quotes, is typed into the pane like a paste; several paths are separated by a space; a path with a line break in it is quoted and goes through the confirmation of every paste | followed by `Enter` |
+| chat | the same quoted path is added to the message being written, where the caret is (in place of a selection), with one space between it and the words before it and none at the start or after a space or a line break; the composer keeps the keyboard and its count follows | sent |
+| file browser | nothing is typed. When the list shows the upload folder (the same folder of this computer, not a saved connection), it is read again and the new file is the selected row, scrolled into view; the status line says `Uploaded`. When the list shows any other folder, or the files of a saved connection, it does not move, nothing is selected, and the status line names the folder: `Uploaded to <folder>` (`Uploaded 3 files to <folder>`; a long folder is cut at its start) | taking the person away from the folder they are in |
+
+The status line says what happens in words: `Uploading <name>` for the file on its way (a long name is cut with an ellipsis), then `Uploaded`
+(`Uploaded 3 files`, with `to <folder>` after the count in the one case above) when the run ends. A refusal says why and gives the pane nothing:
+`Not uploaded: too large.`, `Not uploaded: name not allowed.`, `Not uploaded: try again.` (too many requests, or the server is busy),
+`Not uploaded: secrets are locked.`, `Not uploaded: sign in again.` and `Not uploaded: upload failed.` for any other answer, an answer that is not an
+upload and a connection that failed. After a run with more than one outcome the sentences follow each other (`Uploaded 2 files. Not uploaded: too large.`),
+and the sentences `Only 16 files at a time.` and `Folders are not uploaded.` end the run when they apply; a folder is never sent. When the session has ended
+nothing is sent.
 
 **Download.** A file that the core grants (it grants images, video, audio and PDF files) can be taken out by an explicit act only: the entry
 `Download` of the row menu of a file in the file browser (6.5), and the palette entry `Download`, which acts on the selected file of the
 focused file browser or on the file of a focused preview and is not listed otherwise. Nothing is downloaded or granted by selecting a row, by
 opening the menu or by looking at the palette. The act asks the core for a short-lived grant and follows its address on the page's own origin
-with a download link, so the browser saves the file under its own name. A kind that the core does not grant says
-`Download works for images, video, audio and PDF files.` in the status line, in words, as an upload's refusal is said. The page keeps at most 16
-grants of its own for downloads, ends the oldest when a 17th is made, and ends all of them when the page is closed.
+with a download link, so the browser saves the file under its own name. The page keeps at most 16 grants of its own for downloads, ends the
+oldest when a 17th is made, and ends all of them when the page is closed.
+
+A refusal says why, in the status line, in words, as an upload's refusal is said. The core's own text of a refusal is for people and changes, so the
+page asks the host for the reason after a refusal and reads one name from its answer; the sentence follows from the name and from nothing else, and
+the file's name, path or the core's text are never in it:
+
+| Reason | Sentence |
+|---|---|
+| the secrets are locked and the file lives on a saved connection | `Not downloaded: secrets are locked.` |
+| the file is gone | `Not downloaded: file not found.` |
+| the person may not read it | `Not downloaded: not allowed to read it.` |
+| it is not an image, a video, audio or a PDF (or it is a folder) | `Download works for images, video, audio and PDF files.` |
+| any other reason, a question that failed, an answer the page does not know, an address that is not the page's own | `Not downloaded: download failed.` |
+
+The core refuses no grant for the size of a file, so there is no sentence for one.
 
 **The row menu.** In the browser build a file row of the file browser (and no other row; a folder row keeps the system's menu) opens a menu
 by the context-menu gesture (a right press, or the long press the system maps to it), by the context-menu key and by `Shift+F10`; the row becomes

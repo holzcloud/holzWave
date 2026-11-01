@@ -607,8 +607,12 @@ Known limits of this build, so they are not reported as defects:
 - A program's clipboard escape sequence does nothing in the browser, exactly as on the desktop. A paste and a copy use the
   browser's own clipboard rules, inside the gesture.
 - A download works for the kinds the core grants (images, video, audio and PDF); any other file is refused with the
-  sentence `Download works for images, video, audio and PDF files.` The refusal says the same for every reason. A file
-  dropped on a shell pane is uploaded to the person's home; the chat pane and the file browser take no drop yet.
+  sentence `Download works for images, video, audio and PDF files.` A refusal for another reason says that reason (`Not
+  downloaded: secrets are locked.`, `file not found.`, `not allowed to read it.`, `download failed.`). The core refuses no
+  grant for size. A file dropped on a shell pane is uploaded to the person's home and its path is typed; on a chat pane the
+  path goes into the message and is not sent; on a file browser that lists the upload folder the file becomes the selected
+  row, and on one that lists another folder the status line names the folder. A preview, the monitor and a tool view take
+  no drop.
 - Background work while the saved passwords are locked (sync, an assistant turn) reports that secrets are locked; the
   assistant turn keeps the core's sentence about the keychain, and a few error texts of the core quote an argument back
   to the page.
