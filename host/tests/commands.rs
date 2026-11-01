@@ -974,6 +974,69 @@ fn tracer_a_range_reads_its_arguments_strictly_and_a_grant_of_a_text_file_is_ref
     assert_eq!(world.call("file_grant", &args), Outcome::Err(json_string(&own)));
 }
 
+/// What `file_grant_why` answers for `path` on `source`: the stable code.
+fn grant_why(world: &World, source: &str, path: &str) -> String {
+    let args = format!(r#"{{"source":{},"path":{}}}"#, json_string(source), json_string(path));
+    let answer = answer(world.call("file_grant_why", &args));
+    assert_eq!(answer.as_object().map(|o| o.len()), Some(1), "one member and no text of the core: {answer}");
+    answer["code"].as_str().expect("a code").to_owned()
+}
+
+#[test]
+fn a_refused_grant_has_a_stable_code_that_never_depends_on_the_text_of_the_core() {
+    let world = World::new("grant-why");
+    let (picture, _) = write_picture(&world, "p.bin", 4096);
+    let note = world.dir.join("note.txt");
+    std::fs::write(&note, "not a picture").expect("a text file");
+    let gone = world.dir.join("gone.png");
+    let folder = world.dir.join("folder");
+    std::fs::create_dir(&folder).expect("a folder");
+
+    assert_eq!(grant_why(&world, "local", note.to_str().expect("utf-8")), "kind", "a text file is not granted");
+    assert_eq!(grant_why(&world, "local", folder.to_str().expect("utf-8")), "kind", "a folder is not granted");
+    assert_eq!(grant_why(&world, "local", gone.to_str().expect("utf-8")), "not_found");
+    assert_eq!(grant_why(&world, "local", "relative/none.png"), "not_found");
+    assert_eq!(grant_why(&world, "local", ""), "other", "an empty path is refused by the core as a bad path");
+    assert_eq!(grant_why(&world, "no-such-connection", "/x"), "other", "a source nobody knows");
+    // The question is asked after a refusal; a file the core would grant has no refusal to explain, and says the plain code.
+    assert_eq!(grant_why(&world, "local", &picture), "other");
+    // The refusal itself is what it always was: a string, with the core's own text.
+    let own = world.core.file_grant("local", note.to_str().expect("utf-8")).expect_err("refused");
+    let args = format!(r#"{{"source":"local","path":{}}}"#, json_string(note.to_str().expect("utf-8")));
+    assert_eq!(world.call("file_grant", &args), Outcome::Err(json_string(&own)));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_the_person_may_not_read_is_denied_and_nothing_is_granted_by_asking() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new("grant-why-denied");
+    let (path, _) = write_picture(&world, "locked.png", 4096);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let readable = std::fs::File::open(&path).is_ok(); // a process that ignores the mode (root) cannot be denied
+    let code = grant_why(&world, "local", &path);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod back");
+    if !readable {
+        assert_eq!(code, "denied");
+    }
+    let before = world.events();
+    let _ = grant_why(&world, "local", &path);
+    assert_eq!(world.core.granted("anything"), None, "asking why grants nothing");
+    assert_eq!(world.events(), before);
+}
+
+#[test]
+fn a_locked_store_is_told_apart_from_a_missing_file_for_a_source_that_needs_a_secret() {
+    let (world, vault) = vaulted("grant-why-locked");
+    let save = r#"{"profile":{"id":"web","name":"Web","host":"example.test","user":"u","auth":"password"},"secret":{"kind":"set","value":"pw-for-the-test"}}"#;
+    answer(world.call("connection_save", save));
+    vault.lock();
+
+    assert_eq!(grant_why(&world, "web", "/home/u/a.png"), "locked");
+    let own = world.core.file_grant("web", "/home/u/a.png").expect_err("the store is locked");
+    assert!(!own.is_empty(), "the refusal of file_grant is a text of the core, kept as it is");
+}
+
 /// A host that is the neutral one in everything but what a server sets: the address of a file, the process list, the text
 /// scale and the source of the Local Network permission.
 struct Elsewhere {
