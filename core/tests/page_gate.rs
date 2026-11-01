@@ -504,7 +504,7 @@ fn the_socket_has_no_door_to_a_decision() {
 fn the_page_file_loads_only_its_own_files() {
     let found = page_problems(INDEX_HTML);
     assert!(found.is_empty(), "the page file loads or runs something that is not its own:\n  {}", found.join("\n  "));
-    assert!(INDEX_HTML.contains("<script type=\"module\" src=\"./main.js\">"), "the scan did not see the page's own script");
+    assert!(INDEX_HTML.contains("<script type=\"module\" src=\"/main.js\">"), "the scan did not see the page's own script");
 }
 
 #[test]
@@ -577,5 +577,5 @@ fn the_scanners_can_fail() {
     for want in ["script element with no src", "base element", "iframe element", "meta element with http-equiv", "style or event attribute on <body>", "names an address"] {
         assert!(found.iter().any(|l| l.contains(want)), "the page scan missed {want}: {found:?}");
     }
-    assert!(page_problems("<script type=\"module\" src=\"./main.js\"></script>").is_empty());
+    assert!(page_problems("<script type=\"module\" src=\"/main.js\"></script>").is_empty());
 }
