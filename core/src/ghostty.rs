@@ -641,6 +641,11 @@ pub struct GhosttyEngine {
 impl GhosttyEngine {
     pub fn new(cols: u16, rows: u16, max_scrollback: usize) -> Result<Self> {
         let mut terminal = Terminal::new(cols, rows).map_err(eng)?;
+        // libghostty-vt has two scrollback limits, lines and bytes, and the first one reached wins. A fresh terminal has
+        // a byte limit of only 10 000 bytes (about 1 000 rows at 80 columns), which cut every pane to that whatever
+        // `max_scrollback` said. The byte limit is removed, so the line limit is the bound: libghostty-vt prunes whole
+        // pages and a page holds a fixed amount of memory, so the memory of the history stays bounded by the lines.
+        terminal.set_scrollback_max_bytes(None).map_err(eng)?;
         terminal.set_scrollback_max_lines(Some(max_scrollback)).map_err(eng)?;
         // Grapheme clustering (mode 2027) is off in a fresh libghostty terminal: every code point of a ZWJ family or a
         // flag gets a cell of its own, so the layout disagrees with Unicode. It is on from the start here, as the
