@@ -122,7 +122,16 @@ export async function showPdf(host: HTMLElement, token: string, size: number, st
     rendering?.cancel();
     rendering = null;
     const mine = ++drawn;
-    const p = await doc.getPage(page);
+    let p: PdfPage;
+    try {
+      p = await doc.getPage(page);
+    } catch (e) {
+      // A page PDF.js has not fetched yet is a request to the worker. `dispose` destroys the loading task, and PDF.js
+      // rejects what is still pending then (`Error("Transport destroyed")`, a plain Error with no class of its own). Nothing
+      // waits for this draw any more, so that one case ends here; any other failure is still reported.
+      if (gone) return;
+      throw e;
+    }
     if (gone || mine !== drawn) return;
     const base = p.getViewport({ scale: 1 });
     fitted = area.clientWidth;

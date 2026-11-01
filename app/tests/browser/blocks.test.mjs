@@ -12,6 +12,7 @@ export default async function ({ page, url, errors }) {
   await previewCase(page, url);
   await editFlagCase(page, url);
   await pdfCase(page, url);
+  await pdfCloseCase(page, url);
   await safeHtmlCase(page, url);
   // That case feeds the allow-list hostile markup: the policy reports the style and the handlers it parses, nothing else.
   await dropInertReports(page, errors);
@@ -384,11 +385,15 @@ async function safeHtmlCase(page, url) {
 // canvas, paged with the buttons and the keys, and the grant ends with the pane.
 const TINY_PDF = "JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUiA1IDAgUl0gL0NvdW50IDIgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA2MTIgNzkyXSAvQ29udGVudHMgNCAwIFIgL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgNyAwIFIgPj4gPj4gPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCA0NSA+PgpzdHJlYW0KQlQgL0YxIDI0IFRmIDcyIDcwMCBUZCAoSGVsbG8gaG9seldhdmUpIFRqIEVUCmVuZHN0cmVhbQplbmRvYmoKNSAwIG9iago8PCAvVHlwZSAvUGFnZSAvUGFyZW50IDIgMCBSIC9NZWRpYUJveCBbMCAwIDYxMiA3OTJdIC9Db250ZW50cyA2IDAgUiAvUmVzb3VyY2VzIDw8IC9Gb250IDw8IC9GMSA3IDAgUiA+PiA+PiA+PgplbmRvYmoKNiAwIG9iago8PCAvTGVuZ3RoIDQyID4+CnN0cmVhbQpCVCAvRjEgMjQgVGYgNzIgNzAwIFRkIChTZWNvbmQgcGFnZSkgVGogRVQKZW5kc3RyZWFtCmVuZG9iago3IDAgb2JqCjw8IC9UeXBlIC9Gb250IC9TdWJ0eXBlIC9UeXBlMSAvQmFzZUZvbnQgL0hlbHZldGljYSA+PgplbmRvYmoKeHJlZgowIDgKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDA5IDAwMDAwIG4gCjAwMDAwMDAwNTggMDAwMDAgbiAKMDAwMDAwMDEyMSAwMDAwMCBuIAowMDAwMDAwMjQ3IDAwMDAwIG4gCjAwMDAwMDAzNDIgMDAwMDAgbiAKMDAwMDAwMDQ2OCAwMDAwMCBuIAowMDAwMDAwNTYwIDAwMDAwIG4gCnRyYWlsZXIKPDwgL1NpemUgOCAvUm9vdCAxIDAgUiA+PgpzdGFydHhyZWYKNjMwCiUlRU9GCg==";
 
-async function pdfCase(page, url) {
-  await page.addInitScript((b64) => {
+/** The core's `file_range` for the tiny PDF, installed before the page scripts of the next page load. */
+const stubRange = (page) =>
+  page.addInitScript((b64) => {
     const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
     window.__MOCK__.on("file_range", ({ offset, len }) => bytes.slice(offset, offset + len));
   }, TINY_PDF);
+
+async function pdfCase(page, url) {
+  await stubRange(page);
   const GRANT = { url: "holzfile://localhost/fedcba9876543210fedcba9876543210", token: "fedcba9876543210fedcba9876543210", mime: "application/pdf", size: 853 };
   await open(page, url, [PREVIEW("/home/holz/tiny.pdf")], {
     __OPEN: { name: "tiny.pdf", size: 853, content: "pdf", mime: "application/pdf", language: null, html: null, text: null },
@@ -441,4 +446,46 @@ async function pdfCase(page, url) {
   });
   await page.evaluate(() => window.__MOCK__.emit("layout", window.__MOCK__.view()));
   await page.waitForFunction(() => window.__MOCK__.callsOf("file_revoke").length === 1);
+}
+
+// The viewer is closed while PDF.js still waits for its worker. A page that was never fetched is a message to the worker, and
+// closing the viewer destroys the loading task, which rejects what is pending (`Error("Transport destroyed")`). Nobody waits
+// for that any more, so the page must not report it. The order is fixed here and not left to the speed of the machine: the
+// worker answers in a message event, which runs only after the task that closed the viewer has ended, so the answer always
+// arrives after the destroy. (Left to the speed of the machine, this was a test that failed on two of three runs.)
+async function pdfCloseCase(page, url) {
+  await stubRange(page);
+  await open(page, url, []);
+  const rejected = await page.evaluate(async (size) => {
+    const reasons = [];
+    window.addEventListener("unhandledrejection", (e) => reasons.push(String(e.reason?.message ?? e.reason)));
+    // The worker is ended when the destroy is acknowledged; its answers arrive before that, in order.
+    let ended = () => {};
+    const stop = Worker.prototype.terminate;
+    Worker.prototype.terminate = function () {
+      stop.call(this);
+      ended();
+    };
+    const { showPdf } = await import(new URL("pdfview.js", location.href).href);
+    const scenario = async (steps) => {
+      const done = new Promise((r) => (ended = r));
+      const host = document.body.appendChild(document.createElement("div"));
+      const view = await showPdf(host, "fedcba9876543210fedcba9876543210", size, () => {});
+      await steps(view, host);
+      await done;
+      await new Promise((r) => setTimeout(r, 50)); // the report of an unhandled rejection is an event of its own
+      host.remove();
+    };
+    // Closed in the task that opened it: the first page is still on its way.
+    await scenario(async (view) => view.dispose());
+    // Next page and close in one task: page 2 was never fetched, page 1 is drawn.
+    await scenario(async (view, host) => {
+      while (!host.querySelector(".pdf-zoom")?.textContent) await new Promise((r) => setTimeout(r, 5));
+      if (!view.key({ key: "PageDown" })) throw new Error("the viewer did not take the key");
+      view.dispose();
+    });
+    Worker.prototype.terminate = stop;
+    return reasons;
+  }, 853);
+  assert.deepEqual(rejected, [], "closing the viewer must not leave a rejection behind");
 }
