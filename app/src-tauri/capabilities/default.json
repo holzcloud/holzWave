@@ -74,6 +74,7 @@
     "allow-file-open",
     "allow-file-stat",
     "allow-file-grant",
+    "allow-file-grant-why",
     "allow-file-revoke",
     "allow-file-range",
     "allow-file-save",

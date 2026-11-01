@@ -560,6 +560,13 @@ on Windows and Android) with byte ranges, so a video starts and seeks at once an
 path in the URL, so the page cannot ask for a file it was not given; a grant ends when its preview goes
 (`file_revoke`), at most 256 live at once. Responses say `nosniff`, `no-store` and `Content-Security-Policy: sandbox`.
 
+A refused grant answers the core's own sentence, which is for people and is not a contract. A page that wants to say why asks
+`file_grant_why` for the same file after the refusal: the answer is one member, `code`, and its values never change
+(`locked`: the secrets are locked and the source needs one; `not_found`: nothing is at the path on this computer; `denied`:
+the person's own account may not read it; `kind`: not an image, video, audio or PDF, or a folder; `other`: anything else,
+including every absence on a saved connection, which the core does not yet report apart from its other errors). The
+command grants nothing, reads at most the first bytes the grant reads, and repeats nothing of what it was sent.
+
 The **chat** is a block of kind `chat`: its path is the id of its conversation and its source is always this computer. The
 messages are kept by the conversation store, never in `pane_blocks.json`. The same chat can be shown in the sidebar column
 instead (not a block, not in the layout file, one place at a time). A finished reply is Markdown that the core renders

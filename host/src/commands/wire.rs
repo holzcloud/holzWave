@@ -231,6 +231,30 @@ impl From<CopyState> for CopyStateMsg {
     }
 }
 
+/// Why a file grant is refused, as a name that does not change: the page maps it to a sentence. The core's own text of a
+/// refusal is not part of the protocol (it is for people, and it quotes what was sent), so the page reads this and not that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantCode {
+    /// The secrets of the person are locked, and the source needs one (a saved login).
+    Locked,
+    /// The file is not there (it was moved or deleted), or the path names nothing.
+    NotFound,
+    /// The person's own account may not read the file.
+    Denied,
+    /// The file is not an image, a video, audio or a PDF (or it is a folder): the only kinds the core grants.
+    Kind,
+    /// Any other reason; the page says it plainly.
+    Other,
+}
+
+/// The answer of `file_grant_why`: the stable code of the reason, and nothing else. Never the core's text and never a
+/// part of what was asked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct GrantWhy {
+    pub code: GrantCode,
+}
+
 /// The answer of `file_grant`: the address the page loads the file from beside the grant. It serializes as the `url`
 /// first and then the members of the core's grant (`token`, `mime`, `size`), as the desktop always answered.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

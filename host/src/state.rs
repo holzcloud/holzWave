@@ -44,6 +44,7 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use crate::ai_host::{AiHost, AiParts, AiPayload};
+use crate::commands::wire::GrantCode;
 use crate::ai_exec::RemoteExecs;
 use crate::login_prompt::{PromptEnd, PromptHost};
 use crate::ai_tools::{ExecFault, FileTarget, TerminalTarget};
@@ -94,6 +95,13 @@ fn load_connections(
     let (connections, status) = Connections::load(dir, secrets, user_home(), live_panes);
     connections.forget_secrets(dropped);
     (connections, status)
+}
+
+/// Whether `path` is an absolute path of this computer that names nothing (a link that points nowhere counts): the one
+/// case of "not found" that is known without reading the core's text.
+fn absent_here(path: &str) -> bool {
+    let path = Path::new(path);
+    path.is_absolute() && matches!(std::fs::metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
 // ---- what the webview sees -------------------------------------------------------------------------------------
@@ -1929,6 +1937,38 @@ impl AppCore {
     /// path, and the file's media type and size.
     pub fn file_grant(&self, source: &str, path: &str) -> Result<Grant, String> {
         self.blocks.grant(&self.connections, source, path).map_err(|e| e.to_string())
+    }
+
+    /// Why a grant for the file at `path` is refused, as a code that does not change. It asks the source the same three
+    /// things the grant asks (the entry, the first bytes, the kind of the file) and reads the answer by the typed error
+    /// and by the kind, never by the text of the core's refusal. Nothing is granted. A file that would be granted has no
+    /// refusal to explain and answers `Other`.
+    pub fn file_grant_why(&self, source: &str, path: &str) -> GrantCode {
+        use holzwave_core::files::Kind as EntryKind;
+        use holzwave_core::preview::{Content, SNIFF, classify};
+        let probe = || -> holzwave_core::Result<bool> {
+            let src = self.blocks.source(&self.connections, source)?;
+            let entry = src.stat(path)?;
+            if entry.kind != EntryKind::File {
+                return Ok(false);
+            }
+            let head = src.read_range(path, 0, SNIFF as u64)?;
+            Ok(matches!(classify(&entry.name, &head).content, Content::Image | Content::Video | Content::Audio | Content::Pdf))
+        };
+        match probe() {
+            Ok(false) => GrantCode::Kind,
+            Ok(true) => GrantCode::Other,
+            Err(error) if crate::locked::is_locked(&error) => GrantCode::Locked,
+            Err(holzwave_core::Error::Io(io)) => match io.kind() {
+                std::io::ErrorKind::NotFound => GrantCode::NotFound,
+                std::io::ErrorKind::PermissionDenied => GrantCode::Denied,
+                _ => GrantCode::Other,
+            },
+            // The core says "no such file" as a text only (`Unsupported`), so an absence on this computer is read from the
+            // file system itself and not from that text. A saved connection has no such answer yet and says `Other`.
+            Err(holzwave_core::Error::Unsupported(_)) if source == LOCAL && absent_here(path) => GrantCode::NotFound,
+            Err(_) => GrantCode::Other,
+        }
     }
 
     /// End a grant when the preview that used it is gone.

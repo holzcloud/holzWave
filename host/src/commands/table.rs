@@ -320,6 +320,12 @@ macro_rules! host_commands {
                 run: files::file_grant, web: same
             }
             {
+                name: file_grant_why, shell: generated, group: files, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [source: String, path: String],
+                answers: GrantWhy,
+                run: files::file_grant_why, web: same
+            }
+            {
                 name: file_range, shell: generated, group: files, scope: none, mode: async, cap: CAP_DEFAULT,
                 args: [token: String, offset: u64, len: u64],
                 answers: raw tauri::ipc::Response, fails: String,

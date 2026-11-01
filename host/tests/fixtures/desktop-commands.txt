@@ -63,6 +63,7 @@ files_list|none|async|source,path|Listing|String
 file_open|none|async|source,path|Opened|String
 file_stat|none|async|source,path|Entry|String
 file_grant|none|async|source,path|GrantAnswer|String
+file_grant_why|none|async|source,path|GrantWhy|-
 file_range|none|async|token,offset,len|tauri::ipc::Response|String
 file_revoke|none|sync|token|()|-
 file_save|none|async|source,path,text,expected_modified,expected_digest|Saved|String

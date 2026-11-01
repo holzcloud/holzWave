@@ -995,7 +995,7 @@ fn a_refused_grant_has_a_stable_code_that_never_depends_on_the_text_of_the_core(
     assert_eq!(grant_why(&world, "local", note.to_str().expect("utf-8")), "kind", "a text file is not granted");
     assert_eq!(grant_why(&world, "local", folder.to_str().expect("utf-8")), "kind", "a folder is not granted");
     assert_eq!(grant_why(&world, "local", gone.to_str().expect("utf-8")), "not_found");
-    assert_eq!(grant_why(&world, "local", "relative/none.png"), "not_found");
+    assert_eq!(grant_why(&world, "local", "relative/none.png"), "other", "a path the source refuses before it looks");
     assert_eq!(grant_why(&world, "local", ""), "other", "an empty path is refused by the core as a bad path");
     assert_eq!(grant_why(&world, "no-such-connection", "/x"), "other", "a source nobody knows");
     // The question is asked after a refusal; a file the core would grant has no refusal to explain, and says the plain code.
@@ -1946,7 +1946,7 @@ fn surface_file_lists_every_golden_command() {
     let lines = surface_lines();
     let surface_names: BTreeSet<&str> = lines.iter().map(|(name, _)| *name).collect();
 
-    assert_eq!(lines.len(), 119, "one line for each command that was declared");
+    assert_eq!(lines.len(), 120, "one line for each command that was declared");
     assert_eq!(surface_names.len(), lines.len(), "no command twice");
     assert_eq!(surface_names, golden_names);
     for (_, line) in &lines {

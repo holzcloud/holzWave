@@ -7,7 +7,7 @@
 use holzwave_core::blocks::{Opened, Saved};
 use holzwave_core::files::{Entry, Listing};
 
-use super::wire::GrantAnswer;
+use super::wire::{GrantAnswer, GrantWhy};
 use crate::ranges::CHUNK;
 use crate::state::AppCore;
 
@@ -17,6 +17,13 @@ use crate::state::AppCore;
 /// ends with [`file_revoke`].
 pub fn file_grant(core: &AppCore, source: String, path: String) -> Result<GrantAnswer, String> {
     core.file_grant(&source, &path).map(|grant| GrantAnswer { url: core.host().file_url(&grant.token), grant })
+}
+
+/// Why `file_grant` refuses the file at `path` of `source`, as a code that does not change (`locked`, `not_found`, `denied`,
+/// `kind`, `other`). The page asks after a refusal, so it can say the reason in words; the refusal itself is the core's text
+/// and stays as it was. It grants nothing and answers nothing but the code.
+pub fn file_grant_why(core: &AppCore, source: String, path: String) -> GrantWhy {
+    GrantWhy { code: core.file_grant_why(&source, &path) }
 }
 
 /// `len` bytes of a granted file from `offset` (at most [`CHUNK`]), as raw bytes: what the PDF viewer reads pages with,

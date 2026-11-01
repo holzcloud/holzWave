@@ -118,6 +118,7 @@ fn main() {
     "file_open",
     "file_stat",
     "file_grant",
+    "file_grant_why",
     "file_revoke",
     "file_range",
     "file_save",

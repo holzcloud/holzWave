@@ -35,7 +35,7 @@ pub mod prelude {
     pub use super::settings;
     pub use super::terminal;
     pub use super::wire::{
-        CopyOpMsg, CopyStateMsg, EditActionMsg, GrantAnswer, MouseActionMsg, MouseButtonMsg, PasteOutcomeMsg,
+        CopyOpMsg, CopyStateMsg, EditActionMsg, GrantAnswer, GrantWhy, MouseActionMsg, MouseButtonMsg, PasteOutcomeMsg,
         SearchOpMsg, SelectOpMsg,
     };
     pub use crate::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, RemovalView, TicketView};
