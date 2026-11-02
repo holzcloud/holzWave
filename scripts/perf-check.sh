@@ -102,8 +102,8 @@ case "$group" in
             --ignored --nocapture --test-threads=1 > target/perf.log 2>&1 || status=$?
         ;;
     web)
-        echo "perf-check: web: not yet" >&2
-        exit 2
+        build_page
+        node app/tests/web/perf.mjs > target/perf.log 2>&1 || status=$?
         ;;
 esac
 if [ "$status" -ne 0 ]; then

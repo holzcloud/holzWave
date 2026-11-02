@@ -22,11 +22,12 @@ mod perf_report;
 #[path = "support/ws_env.rs"]
 mod ws_env;
 
+use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use parity_env::{Line, Probed, Screen, fresh, start_focused_pane};
-use perf_report::{percentile, report};
+use parity_env::{Line, Probed, Screen, fresh, split_and_start, start_focused_pane};
+use perf_report::{percentile, report, rss_kib};
 use serde_json::{Value, json};
 use ws_env::{Got, Incoming, Person, WsOptions};
 
@@ -200,4 +201,220 @@ async fn perf_server_key_to_frame() {
     let p99: Vec<f64> = runs.iter().map(|r| r.1).collect();
     report("server.key_to_frame_p50_ms", "ms", &p50);
     report("server.key_to_frame_p99_ms", "ms", &p99);
+}
+
+// ---- reattach -----------------------------------------------------------------------------------------------------------
+
+const REATTACH_RUNS: usize = 10;
+
+/// `server.reattach_ms`: one pane keeps running (`cat`, with a screenful of text above it) while the sockets of its person come
+/// and go. The first socket is dropped without a close frame, as `reattach.rs` does. Each run is the time from the call that
+/// attaches a new socket of the same person (the TLS connection and the WebSocket upgrade) to the first full frame of that pane
+/// on it. What a page does after a reconnect is sent at once, as the page does it: the layout, then `request_full` for the pane.
+/// The sign-in of the person (a cookie made by the test application) is made before the clock starts.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "a measurement: sh scripts/perf-check.sh server"]
+async fn perf_server_reattach() {
+    let _one = exclusive();
+    let probed = Probed::start(WsOptions::default()).await;
+    let alice = probed.env.person("alice");
+    let mut line = fresh(&probed, &alice).await;
+    let pane = start_focused_pane(&mut line).await;
+    // Something on the screen, so that a full frame has rows to carry.
+    send_text(&mut line, pane, "seq 1 150\r").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    become_cat(&mut line, pane).await;
+
+    let mut times = Vec::with_capacity(REATTACH_RUNS);
+    for run in 0..=REATTACH_RUNS {
+        drop(line);
+        let key = alice.key;
+        probed.env.eventually("the socket to detach", |env| env.supervisor.account_stats(key).sockets == 0).await;
+        let signed = probed.env.sign_in_again(&alice);
+        let started = Instant::now();
+        let mut next = Line::new(probed.env.connect_as(&signed).await);
+        next.send("get_layout", &json!({})).await;
+        next.send("request_full", &json!({"pane": pane})).await;
+        let at = loop {
+            let frame = next_frame(&mut next, pane, BOUND).await.expect("no full frame of the pane after the new socket attached");
+            if frame.payload["full"].as_bool() == Some(true) {
+                break frame.at;
+            }
+        };
+        // The first attach warms the paths of a new socket; it is not one of the runs.
+        if run > 0 {
+            times.push(at.duration_since(started).as_secs_f64() * 1000.0);
+        }
+        line = next;
+        settle(&mut line, Duration::from_millis(100)).await;
+    }
+    report("server.reattach_ms", "ms", &times);
+}
+
+// ---- memory per pane ----------------------------------------------------------------------------------------------------
+
+/// The panes of a memory run (the worker's default limit is 64).
+const PANES: usize = 50;
+const MEMORY_RUNS: usize = 5;
+/// Set in the environment of the child process that takes one memory figure.
+const MEMORY_CHILD: &str = "HOLZWAVE_PERF_SERVER_MEMORY_CHILD";
+/// The marker line a pane prints when its flood is done; the typed command holds it split by quotes, so only the output is
+/// a line of exactly these characters.
+const MARKER: &str = "hw-mark";
+
+/// The text of a row of a frame: its runs joined, the NULs of wide characters and the blanks at the end cut.
+fn row_text(row: &Value) -> String {
+    let mut text = String::new();
+    for run in row["runs"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        text.push_str(run[0].as_str().unwrap_or_default());
+    }
+    text.replace('\0', "").trim_end().to_owned()
+}
+
+/// Reads the next `frame` event of any pane that holds `needle` in its text (`""` takes every frame): the payload, or `None`
+/// when nothing came within `within`. The cheap test on the text comes before the parse, so a flood costs the reader little.
+async fn next_frame_with(line: &mut Line, needle: &str, within: Duration) -> Option<Value> {
+    let deadline = Instant::now() + within;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        match line.client.read(left).await {
+            Got::Message(Incoming::Text(text)) => {
+                if !text.starts_with("{\"event\":\"frame\"") || !text.contains(needle) {
+                    continue;
+                }
+                let mut value: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("a frame that is not JSON ({e})"));
+                return Some(value["payload"].take());
+            }
+            Got::Message(Incoming::Close(code, _)) => panic!("the server closed the socket during the memory run: {code:?}"),
+            Got::Message(_) => {}
+            Got::Ended => panic!("the socket ended during the memory run"),
+            Got::Quiet => return None,
+        }
+    }
+}
+
+/// Reads frames until every pane in `wanted` has a row that is exactly `needle` (a pane is struck from the list when it has).
+async fn until_every_pane_shows(line: &mut Line, wanted: &mut Vec<u64>, needle: &str, within: Duration) {
+    let deadline = Instant::now() + within;
+    while !wanted.is_empty() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let frame = next_frame_with(line, needle, left).await;
+        let Some(payload) = frame else { panic!("{} panes never showed {needle:?}", wanted.len()) };
+        let shown = payload["changed"].as_array().map(Vec::as_slice).unwrap_or_default().iter().any(|row| row_text(row) == needle);
+        if let (true, Some(pane)) = (shown, payload["pane"].as_u64()) {
+            wanted.retain(|p| *p != pane);
+        }
+    }
+}
+
+/// Whether a frame payload has drawn a row that is not blank (the prompt of a shell).
+fn drew_something(payload: &Value) -> bool {
+    payload["changed"].as_array().map(Vec::as_slice).unwrap_or_default().iter().any(|row| !row_text(row).is_empty())
+}
+
+/// Strikes the panes from `wanted` that a frame among `events` shows drawn, and drops the events: the commands of the split and
+/// of the start keep the frames that came meanwhile, and a prompt that came then must count.
+fn take_drawn(line: &mut Line, wanted: &mut Vec<u64>) {
+    for event in std::mem::take(&mut line.events) {
+        if event["event"] == "frame" && drew_something(&event["payload"]) {
+            if let Some(pane) = event["payload"]["pane"].as_u64() {
+                wanted.retain(|p| *p != pane);
+            }
+        }
+    }
+    line.strays.clear();
+}
+
+/// Reads frames until every pane in `wanted` has drawn a row that is not blank (the prompt of its shell).
+async fn until_every_pane_has_drawn(line: &mut Line, wanted: &mut Vec<u64>, within: Duration) {
+    let deadline = Instant::now() + within;
+    take_drawn(line, wanted);
+    while !wanted.is_empty() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let frame = next_frame_with(line, "", left).await;
+        let Some(payload) = frame else { panic!("{} panes never drew a prompt", wanted.len()) };
+        if let (true, Some(pane)) = (drew_something(&payload), payload["pane"].as_u64()) {
+            wanted.retain(|p| *p != pane);
+        }
+    }
+}
+
+/// The figure of one run, taken in a process of its own so that nothing an earlier test left resident is in the delta (a process
+/// does not give freed memory back at once). It prints `RAWMEM <empty> <scrollback>`: KiB per pane, the delta of the resident
+/// set of the whole process divided by the panes.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "run by perf_server_memory, in a process of its own"]
+async fn perf_server_memory_child() {
+    if std::env::var_os(MEMORY_CHILD).is_none() {
+        return;
+    }
+    let probed = Probed::start(WsOptions::default()).await;
+    let alice = probed.env.person("alice");
+    let mut line = fresh(&probed, &alice).await;
+    line.events.clear();
+
+    let before_empty = rss_kib().expect("resident memory is not readable on this OS");
+    // The panes are made with the calls a browser makes: the first pane of the layout, then splits of the focused one.
+    let mut panes = vec![start_focused_pane(&mut line).await];
+    let mut drawing: Vec<u64> = panes.clone();
+    for _ in 1..PANES {
+        let pane = split_and_start(&mut line).await;
+        panes.push(pane);
+        drawing.push(pane);
+        // The answers keep the frames that came meanwhile; a prompt among them counts, then they go (they are not measured).
+        take_drawn(&mut line, &mut drawing);
+    }
+    until_every_pane_has_drawn(&mut line, &mut drawing, BOUND).await;
+    settle(&mut line, Duration::from_millis(500)).await;
+    let before_feed = rss_kib().expect("resident memory");
+
+    // 30 000 lines of 150 characters on every pane: the default scrollback holds 10 000 lines, 20 000 are to spare. The marker
+    // after the flood tells that the pane has printed it all (a printed line of its own, split by quotes in the command).
+    let alphabet: String = (0..150).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
+    let flood = format!("yes {alphabet} | head -n 30000; echo hw-m\"\"ark\r");
+    for pane in &panes {
+        send_text(&mut line, *pane, &flood).await;
+    }
+    let mut flooding = panes.clone();
+    until_every_pane_shows(&mut line, &mut flooding, MARKER, Duration::from_secs(300)).await;
+    settle(&mut line, Duration::from_millis(500)).await;
+    let after_feed = rss_kib().expect("resident memory");
+    let per = |from: u64, to: u64| to.saturating_sub(from) / PANES as u64;
+    println!("\nRAWMEM {} {}", per(before_empty, before_feed), per(before_feed, after_feed));
+}
+
+/// `server.memory_pane_empty_mib` and `server.memory_pane_scrollback_mib`: 50 panes in one server, the resident set of the whole
+/// process (the server, its in-process workers and the test's own socket) before any pane, after the 50 have drawn, and after
+/// each has printed 30 000 lines; the deltas divided by 50. Five runs, each in a fresh process (`perf_server_memory_child`).
+#[test]
+#[ignore = "a measurement: sh scripts/perf-check.sh server"]
+fn perf_server_memory() {
+    let _one = exclusive();
+    let exe = std::env::current_exe().expect("the path of the test binary");
+    let mut empty = Vec::new();
+    let mut full = Vec::new();
+    for _ in 0..MEMORY_RUNS {
+        let out = Command::new(&exe)
+            .args(["perf_server_memory_child", "--exact", "--ignored", "--nocapture", "--test-threads=1"])
+            .env(MEMORY_CHILD, "1")
+            .output()
+            .expect("the child process");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "the memory child failed: {}{}", text, String::from_utf8_lossy(&out.stderr));
+        let figures: Vec<f64> = text
+            .lines()
+            .find_map(|l| l.strip_prefix("RAWMEM "))
+            .expect("the child printed no RAWMEM line")
+            .split_whitespace()
+            .map(|n| n.parse::<f64>().expect("a number") / 1024.0)
+            .collect();
+        assert_eq!(figures.len(), 2, "RAWMEM has two figures");
+        empty.push(figures[0]);
+        full.push(figures[1]);
+    }
+    report("server.memory_pane_empty_mib", "mib", &empty);
+    report("server.memory_pane_scrollback_mib", "mib", &full);
 }
