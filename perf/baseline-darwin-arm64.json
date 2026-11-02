@@ -1,0 +1,58 @@
+{
+  "date": "2026-11-02",
+  "os": "darwin",
+  "arch": "arm64",
+  "cpu": "Apple M1 Max",
+  "cores": 10,
+  "commit": "d0babb76",
+  "metrics": {
+    "core.key_to_frame_p50_ms": {
+      "median": 0.134458,
+      "p95": 0.140209,
+      "unit": "ms",
+      "runs": 5
+    },
+    "core.key_to_frame_p99_ms": {
+      "median": 0.949334,
+      "p95": 1.4445000000000001,
+      "unit": "ms",
+      "runs": 5
+    },
+    "core.memory_pane_empty_mib": {
+      "median": 0.921875,
+      "p95": 0.921875,
+      "unit": "mib",
+      "runs": 5
+    },
+    "core.memory_pane_scrollback_mib": {
+      "median": 13.798828125,
+      "p95": 13.806640625,
+      "unit": "mib",
+      "runs": 5
+    },
+    "core.pane_output_mib_s": {
+      "median": 43.110165483044966,
+      "p95": 44.146264905480216,
+      "unit": "mib_s",
+      "runs": 5
+    },
+    "core.pane_start_ms": {
+      "median": 7.409208,
+      "p95": 8.599375,
+      "unit": "ms",
+      "runs": 10
+    },
+    "core.parse_mib_s": {
+      "median": 61.34346355093021,
+      "p95": 61.70692266285421,
+      "unit": "mib_s",
+      "runs": 5
+    },
+    "core.update_encode_ms": {
+      "median": 0.44489291999999964,
+      "p95": 0.44518312499999974,
+      "unit": "ms",
+      "runs": 5
+    }
+  }
+}

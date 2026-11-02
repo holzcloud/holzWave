@@ -4,12 +4,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { collect } from "../../../scripts/perf-collect.mjs";
 import { compare, TOLERANCE } from "../../../scripts/perf-compare.mjs";
+import { BASELINE_KEYS, mergeBaseline } from "../../../scripts/perf-baseline.mjs";
 
 const script = (name) => fileURLToPath(new URL(`../../../scripts/${name}`, import.meta.url));
 
@@ -267,4 +268,81 @@ test("perf-collect.mjs writes the run file, and exits 2 without writing it for a
     assert.match(bad.stderr, /no PERF line/);
     assert.equal(existsSync(none), false);
   });
+});
+
+// ---- the baseline files of the tree -----------------------------------------------------------------------------------
+
+const root = fileURLToPath(new URL("../../../", import.meta.url));
+const header = { date: "2026-11-02", os: "darwin", arch: "arm64", cpu: "Test CPU", cores: 8, commit: "abc1234" };
+
+test("mergeBaseline adds new metrics, keeps recorded ones without --replace and replaces them with it", () => {
+  const first = mergeBaseline(null, { metrics: { "core.a_ms": metric("ms", 1) } }, header);
+  assert.deepEqual(first.added, ["core.a_ms"]);
+  const later = { metrics: { "core.a_ms": metric("ms", 5), "server.b_ms": metric("ms", 2) } };
+  const kept = mergeBaseline(first.baseline, later, { ...header, commit: "def5678" });
+  assert.deepEqual(kept.added, ["server.b_ms"]);
+  assert.deepEqual(kept.kept, ["core.a_ms"]);
+  assert.equal(kept.baseline.metrics["core.a_ms"].median, 1, "a recorded metric is not overwritten");
+  assert.equal(kept.baseline.commit, "def5678", "the header is the last recording");
+  const replaced = mergeBaseline(first.baseline, later, header, { replace: true });
+  assert.deepEqual(replaced.replaced, ["core.a_ms"]);
+  assert.equal(replaced.baseline.metrics["core.a_ms"].median, 5);
+});
+
+test("mergeBaseline writes only the allowlisted keys and copies metrics field by field", () => {
+  const dirty = { ...header, host: "my-mac", user: "me", path: "/Users/me" };
+  const run = { metrics: { "core.a_ms": { ...metric("ms", 1), cwd: "/Users/me" } } };
+  const { baseline } = mergeBaseline(null, run, dirty);
+  assert.deepEqual(Object.keys(baseline).sort(), [...BASELINE_KEYS].sort());
+  assert.deepEqual(Object.keys(baseline.metrics["core.a_ms"]).sort(), ["median", "p95", "runs", "unit"]);
+});
+
+test("mergeBaseline refuses to extend the baseline of another CPU and a metric that is not a record", () => {
+  const first = mergeBaseline(null, { metrics: { "core.a_ms": metric("ms", 1) } }, header).baseline;
+  assert.throws(() => mergeBaseline(first, { metrics: {} }, { ...header, cpu: "Other CPU" }), /another CPU/);
+  assert.doesNotThrow(() => mergeBaseline(first, { metrics: {} }, { ...header, cpu: "Other CPU" }, { replace: true }));
+  assert.throws(() => mergeBaseline(null, { metrics: { "core.a_ms": { median: 0, p95: 1, unit: "ms", runs: 5 } } }, header), /positive/);
+});
+
+function everyString(value, out = []) {
+  if (typeof value === "string") out.push(value);
+  else if (value !== null && typeof value === "object") for (const v of Object.values(value)) everyString(v, out);
+  return out;
+}
+
+test("every perf/*.json of the tree has the allowlisted keys, valid metrics and no personal data", () => {
+  const dir = `${root}perf/`;
+  const files = existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".json")) : [];
+  for (const file of files) {
+    const doc = JSON.parse(readFileSync(`${dir}${file}`, "utf8"));
+    assert.deepEqual(Object.keys(doc).filter((k) => !BASELINE_KEYS.includes(k)), [], `${file}: a key outside the allowlist`);
+    assert.ok(Object.keys(doc.metrics).length > 0, `${file}: no metrics`);
+    for (const [name, m] of Object.entries(doc.metrics)) {
+      assert.deepEqual(Object.keys(m).sort(), ["median", "p95", "runs", "unit"], `${file}: ${name}`);
+      for (const key of ["median", "p95"]) {
+        assert.ok(typeof m[key] === "number" && Number.isFinite(m[key]) && m[key] > 0, `${file}: ${name} ${key}`);
+      }
+      assert.ok(Number.isInteger(m.runs) && m.runs >= 1, `${file}: ${name} runs`);
+      assert.ok(Object.hasOwn(TOLERANCE, m.unit), `${file}: ${name} unit`);
+    }
+    const strings = everyString(doc);
+    for (const text of strings) {
+      assert.doesNotMatch(text, /\/(Users|home|root|var|private|tmp)\//, `${file}: a path in ${text}`);
+    }
+    for (const own of [hostname(), userInfo().username, hostname().split(".")[0]]) {
+      assert.ok(own.length > 0 && !strings.includes(own), `${file}: carries the name of this host or user`);
+    }
+  }
+});
+
+test("no file under .github mentions perf- (the guard is run by a person, never by CI: D-12)", () => {
+  const walk = (dir) =>
+    readdirSync(dir).flatMap((name) => {
+      const path = `${dir}/${name}`;
+      return statSync(path).isDirectory() ? walk(path) : [path];
+    });
+  const dir = `${root}.github`;
+  for (const file of existsSync(dir) ? walk(dir) : []) {
+    assert.doesNotMatch(readFileSync(file, "utf8"), /perf-/, `${file} reaches the performance guard`);
+  }
 });
