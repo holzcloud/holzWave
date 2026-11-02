@@ -93,14 +93,14 @@ test("collect returns an object that has no prototype to pollute", () => {
 
 // ---- the comparison: the three tolerances at their exact limits -----------------------------------------------------
 
-test("a time metric is ok up to twice the baseline plus 0.5 ms and worse above", () => {
+test("a time metric is ok up to 1.5 times the baseline plus 0.1 ms and worse above", () => {
   const baseline = { metrics: { "core.t_ms": metric("ms", 1.0) } };
   const at = (median) => compare(baseline, { metrics: { "core.t_ms": metric("ms", median) } });
-  assert.equal(verdictOf(at(2.5), "core.t_ms"), "ok");
-  assert.equal(at(2.5).ok, true);
-  assert.equal(verdictOf(at(2.6), "core.t_ms"), "worse");
-  assert.equal(at(2.6).ok, false);
-  assert.equal(at(2.6).results[0].limit, 2.5);
+  assert.equal(verdictOf(at(1.6), "core.t_ms"), "ok");
+  assert.equal(at(1.6).ok, true);
+  assert.equal(verdictOf(at(1.7), "core.t_ms"), "worse");
+  assert.equal(at(1.7).ok, false);
+  assert.equal(at(1.7).results[0].limit, 1.6);
 });
 
 test("a throughput metric is ok down to half the baseline and worse below", () => {
@@ -136,7 +136,7 @@ test("a clearly better run is listed as better and does not fail", () => {
 
 test("the tolerance table is the one place that holds the numbers", () => {
   assert.deepEqual(Object.keys(TOLERANCE).sort(), ["mib", "mib_s", "ms"]);
-  assert.deepEqual(TOLERANCE.ms, { factor: 2, slack: 0.5, better: "lower" });
+  assert.deepEqual(TOLERANCE.ms, { factor: 1.5, slack: 0.1, better: "lower" });
   assert.deepEqual(TOLERANCE.mib_s, { factor: 0.5, slack: 0, better: "higher" });
   assert.deepEqual(TOLERANCE.mib, { factor: 1.5, slack: 4, better: "lower" });
 });
@@ -224,7 +224,7 @@ test("perf-compare.mjs prints a line per metric, PERF OK and exits 0 on a pass",
   withFiles({ "b.json": b, "r.json": b }, (p) => {
     const out = run("perf-compare.mjs", [p["b.json"], p["r.json"], "--scope", "core."]);
     assert.equal(out.status, 0, out.stderr);
-    assert.match(out.stdout, /^ok core\.a_ms 1 -> 1 \(limit 2\.5\)$/m);
+    assert.match(out.stdout, /^ok core\.a_ms 1 -> 1 \(limit 1\.6\)$/m);
     assert.match(out.stdout, /^PERF OK$/m);
   });
 });
@@ -235,7 +235,7 @@ test("perf-compare.mjs prints PERF WORSE and exits 1 on a regression", () => {
   withFiles({ "b.json": b, "r.json": r }, (p) => {
     const out = run("perf-compare.mjs", [p["b.json"], p["r.json"]]);
     assert.equal(out.status, 1);
-    assert.match(out.stdout, /^worse core\.a_ms 1 -> 3 \(limit 2\.5\)$/m);
+    assert.match(out.stdout, /^worse core\.a_ms 1 -> 3 \(limit 1\.6\)$/m);
     assert.match(out.stdout, /^PERF WORSE$/m);
   });
 });

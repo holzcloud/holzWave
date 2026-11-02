@@ -6,7 +6,7 @@
 // There is no fixed absolute target: a metric is judged by the baseline that was recorded on this machine, with the
 // tolerance table below (the planner's choice under D-15, the one place that holds the numbers):
 //
-//   time (ms)          worse when the median is more than  baseline * 2   + 0.5 ms
+//   time (ms)          worse when the median is more than  baseline * 1.5 + 0.1 ms
 //   throughput (mib_s) worse when the median is less than  baseline * 0.5
 //   memory (mib)       worse when the median is more than  baseline * 1.5 + 4 MiB
 //
@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 
 /** Per unit: the factor and the slack of the limit, and which direction is better. */
 export const TOLERANCE = {
-  ms: { factor: 2, slack: 0.5, better: "lower" },
+  ms: { factor: 1.5, slack: 0.1, better: "lower" },
   mib_s: { factor: 0.5, slack: 0, better: "higher" },
   mib: { factor: 1.5, slack: 4, better: "lower" },
 };
