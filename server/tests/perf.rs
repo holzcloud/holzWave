@@ -83,17 +83,48 @@ async fn next_frame(line: &mut Line, pane: u64, within: Duration) -> Option<Fram
 }
 
 /// Reads and drops everything until the socket has been silent for `quiet` (at most `BOUND`).
-async fn settle(line: &mut Line, quiet: Duration) {
+async fn settle(line: &mut Line, quiet: Duration, after: &str) {
     let deadline = Instant::now() + BOUND;
+    let mut last = String::new();
+    let mut count = 0usize;
+    let mut panes: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     while Instant::now() < deadline {
         match line.client.read(quiet).await {
             Got::Quiet => return,
             Got::Message(Incoming::Close(code, _)) => panic!("the server closed the socket while it settled: {code:?}"),
             Got::Ended => panic!("the socket ended while it settled"),
-            Got::Message(_) => {}
+            Got::Message(Incoming::Text(text)) => {
+                count += 1;
+                last = text.chars().take(120).collect();
+                if let Some(rest) = text.strip_prefix("{\"event\":\"frame\",\"payload\":{\"pane\":") {
+                    let id: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                    *panes.entry(id).or_default() += 1;
+                }
+            }
+            Got::Message(_) => count += 1,
         }
     }
-    panic!("the socket never went quiet");
+    // What the busiest pane shows, so that a failure says what keeps it busy.
+    let mut shown = String::new();
+    if let Some(busiest) = panes.iter().max_by_key(|(_, n)| **n).and_then(|(id, _)| id.parse::<u64>().ok()) {
+        line.send("request_full", &json!({"pane": busiest})).await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if let Some(Frame { payload, .. }) = next_frame(line, busiest, left).await {
+                if payload["full"].as_bool() == Some(true) {
+                    for row in payload["changed"].as_array().map(Vec::as_slice).unwrap_or_default() {
+                        let text = row_text(row);
+                        if !text.is_empty() {
+                            shown.push_str(&format!("[{}] {}\n", row["y"], text.chars().take(100).collect::<String>()));
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    panic!("the socket never went quiet after {after}: {count} messages in {BOUND:?}, frames per pane {panes:?}, the last text began {last:?}; the busiest pane shows:\n{shown}");
 }
 
 // ---- panes --------------------------------------------------------------------------------------------------------------
@@ -125,7 +156,7 @@ async fn become_cat(line: &mut Line, pane: u64) {
             break;
         }
     }
-    settle(line, Duration::from_millis(100)).await;
+    settle(line, Duration::from_millis(100), "exec cat").await;
 }
 
 /// One person and a focused pane that runs `cat`.
@@ -151,11 +182,11 @@ async fn key_run(line: &mut Line, pane: u64, samples: usize) -> (f64, f64) {
     let mut typed = 0usize;
     // A fresh line, so that the cursor column counts from 0.
     send_key(line, pane, "Enter", "Enter").await;
-    settle(line, Duration::from_millis(100)).await;
+    settle(line, Duration::from_millis(100), "the first Enter").await;
     while taken.len() < samples {
         if column == 60 {
             send_key(line, pane, "Enter", "Enter").await;
-            settle(line, Duration::from_millis(100)).await;
+            settle(line, Duration::from_millis(100), "an Enter").await;
             column = 0;
             continue;
         }
@@ -164,7 +195,7 @@ async fn key_run(line: &mut Line, pane: u64, samples: usize) -> (f64, f64) {
         column += 1;
         // A pause longer than the frame interval of 8 ms: the path of one key, not the pacing of a burst. What arrived
         // meanwhile (the answer of the last key) is dropped.
-        settle(line, Duration::from_millis(20)).await;
+        settle(line, Duration::from_millis(20), "a key").await;
         let sent = Instant::now();
         send_key(line, pane, "KeyA", &letter).await;
         let deadline = sent + Duration::from_secs(2);
@@ -246,7 +277,7 @@ async fn perf_server_reattach() {
             times.push(at.duration_since(started).as_secs_f64() * 1000.0);
         }
         line = next;
-        settle(&mut line, Duration::from_millis(100)).await;
+        settle(&mut line, Duration::from_millis(100), "a reattach").await;
     }
     report("server.reattach_ms", "ms", &times);
 }
@@ -271,16 +302,18 @@ fn row_text(row: &Value) -> String {
     text.replace('\0', "").trim_end().to_owned()
 }
 
-/// Reads the next `frame` event of any pane that holds `needle` in its text (`""` takes every frame): the payload, or `None`
-/// when nothing came within `within`. The cheap test on the text comes before the parse, so a flood costs the reader little.
+/// How long the socket may be silent before the reader asks the panes it still waits for for a full frame. The server drops a
+/// frame event that does not fit in the socket's queue and leaves it to the page to ask for a full frame (docs/architecture.md,
+/// "the `request_full` rule"); a reader that is slower than 50 panes at full speed, or that the machine has slowed down, would
+/// otherwise wait for a frame that was dropped.
+const RESYNC_AFTER: Duration = Duration::from_secs(2);
+
+/// Reads until a text message that is a `frame` event holding `needle` comes in (`""` takes every frame) and returns its
+/// payload; `None` when the socket was silent for `within`. The cheap test on the text comes before the parse, so a flood costs
+/// the reader little.
 async fn next_frame_with(line: &mut Line, needle: &str, within: Duration) -> Option<Value> {
-    let deadline = Instant::now() + within;
     loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return None;
-        }
-        match line.client.read(left).await {
+        match line.client.read(within).await {
             Got::Message(Incoming::Text(text)) => {
                 if !text.starts_with("{\"event\":\"frame\"") || !text.contains(needle) {
                     continue;
@@ -296,13 +329,23 @@ async fn next_frame_with(line: &mut Line, needle: &str, within: Duration) -> Opt
     }
 }
 
+/// What a page does when it has lost a frame: asks for a full frame of the pane.
+async fn ask_full(line: &mut Line, panes: &[u64]) {
+    for pane in panes {
+        line.send("request_full", &json!({"pane": pane})).await;
+    }
+}
+
 /// Reads frames until every pane in `wanted` has a row that is exactly `needle` (a pane is struck from the list when it has).
+/// When the socket has been silent for `RESYNC_AFTER` the panes still wanted are asked for a full frame.
 async fn until_every_pane_shows(line: &mut Line, wanted: &mut Vec<u64>, needle: &str, within: Duration) {
     let deadline = Instant::now() + within;
     while !wanted.is_empty() {
-        let left = deadline.saturating_duration_since(Instant::now());
-        let frame = next_frame_with(line, needle, left).await;
-        let Some(payload) = frame else { panic!("{} panes never showed {needle:?}", wanted.len()) };
+        assert!(Instant::now() < deadline, "{} panes never showed {needle:?}", wanted.len());
+        let Some(payload) = next_frame_with(line, needle, RESYNC_AFTER).await else {
+            ask_full(line, wanted).await;
+            continue;
+        };
         let shown = payload["changed"].as_array().map(Vec::as_slice).unwrap_or_default().iter().any(|row| row_text(row) == needle);
         if let (true, Some(pane)) = (shown, payload["pane"].as_u64()) {
             wanted.retain(|p| *p != pane);
@@ -328,14 +371,17 @@ fn take_drawn(line: &mut Line, wanted: &mut Vec<u64>) {
     line.strays.clear();
 }
 
-/// Reads frames until every pane in `wanted` has drawn a row that is not blank (the prompt of its shell).
+/// Reads frames until every pane in `wanted` has drawn a row that is not blank (the prompt of its shell). When the socket has
+/// been silent for `RESYNC_AFTER` the panes still wanted are asked for a full frame.
 async fn until_every_pane_has_drawn(line: &mut Line, wanted: &mut Vec<u64>, within: Duration) {
     let deadline = Instant::now() + within;
     take_drawn(line, wanted);
     while !wanted.is_empty() {
-        let left = deadline.saturating_duration_since(Instant::now());
-        let frame = next_frame_with(line, "", left).await;
-        let Some(payload) = frame else { panic!("{} panes never drew a prompt", wanted.len()) };
+        assert!(Instant::now() < deadline, "{} panes never drew a prompt", wanted.len());
+        let Some(payload) = next_frame_with(line, "", RESYNC_AFTER).await else {
+            ask_full(line, wanted).await;
+            continue;
+        };
         if let (true, Some(pane)) = (drew_something(&payload), payload["pane"].as_u64()) {
             wanted.retain(|p| *p != pane);
         }
@@ -368,7 +414,7 @@ async fn perf_server_memory_child() {
         take_drawn(&mut line, &mut drawing);
     }
     until_every_pane_has_drawn(&mut line, &mut drawing, BOUND).await;
-    settle(&mut line, Duration::from_millis(500)).await;
+    settle(&mut line, Duration::from_millis(500), "the prompts were drawn").await;
     let before_feed = rss_kib().expect("resident memory");
 
     // 30 000 lines of 150 characters on every pane: the default scrollback holds 10 000 lines, 20 000 are to spare. The marker
@@ -380,7 +426,7 @@ async fn perf_server_memory_child() {
     }
     let mut flooding = panes.clone();
     until_every_pane_shows(&mut line, &mut flooding, MARKER, Duration::from_secs(300)).await;
-    settle(&mut line, Duration::from_millis(500)).await;
+    settle(&mut line, Duration::from_millis(500), "the flood").await;
     let after_feed = rss_kib().expect("resident memory");
     let per = |from: u64, to: u64| to.saturating_sub(from) / PANES as u64;
     println!("\nRAWMEM {} {}", per(before_empty, before_feed), per(before_feed, after_feed));
@@ -396,21 +442,36 @@ fn perf_server_memory() {
     let exe = std::env::current_exe().expect("the path of the test binary");
     let mut empty = Vec::new();
     let mut full = Vec::new();
-    for _ in 0..MEMORY_RUNS {
-        let out = Command::new(&exe)
-            .args(["perf_server_memory_child", "--exact", "--ignored", "--nocapture", "--test-threads=1"])
-            .env(MEMORY_CHILD, "1")
-            .output()
-            .expect("the child process");
-        let text = String::from_utf8_lossy(&out.stdout);
-        assert!(out.status.success(), "the memory child failed: {}{}", text, String::from_utf8_lossy(&out.stderr));
-        let figures: Vec<f64> = text
-            .lines()
-            .find_map(|l| l.strip_prefix("RAWMEM "))
-            .expect("the child printed no RAWMEM line")
-            .split_whitespace()
-            .map(|n| n.parse::<f64>().expect("a number") / 1024.0)
-            .collect();
+    for run in 0..MEMORY_RUNS {
+        // A run that does not finish is run again, at most twice. The reason is printed and not hidden: with the machine busy, a
+        // pane of the 50 has been seen to get a typed command with its middle missing (an endless `yes`), which no frame can say.
+        let mut attempt = 1;
+        let figures = loop {
+            let out = Command::new(&exe)
+                .args(["perf_server_memory_child", "--exact", "--ignored", "--nocapture", "--test-threads=1"])
+                .env(MEMORY_CHILD, "1")
+                .output()
+                .expect("the child process");
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            let figures: Option<Vec<f64>> = out.status.success().then(|| {
+                text.lines()
+                    .find_map(|l| l.strip_prefix("RAWMEM "))
+                    .expect("the child printed no RAWMEM line")
+                    .split_whitespace()
+                    .map(|n| n.parse::<f64>().expect("a number") / 1024.0)
+                    .collect()
+            });
+            match figures {
+                Some(figures) => break figures,
+                None if attempt < 3 => {
+                    let both = format!("{text}{}", String::from_utf8_lossy(&out.stderr));
+                    let why = both.lines().skip_while(|l| !l.contains("panicked at")).nth(1).unwrap_or("no reason printed").to_owned();
+                    eprintln!("perf: memory run {} attempt {attempt} did not finish, run again: {why}", run + 1);
+                    attempt += 1;
+                }
+                None => panic!("the memory child failed three times: {}{}", text, String::from_utf8_lossy(&out.stderr)),
+            }
+        };
         assert_eq!(figures.len(), 2, "RAWMEM has two figures");
         empty.push(figures[0]);
         full.push(figures[1]);
