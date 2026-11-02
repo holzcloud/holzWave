@@ -111,6 +111,7 @@ publish "$appimage" "holzWave_${version}_x86_64.AppImage"
 
 echo "release-linux-container: built in an amd64 container (Ubuntu 24.04, emulated), not on Linux hardware: the owner's L rows record the runs on Linux."
 echo "release-linux-container: they need glibc 2.39 or newer and WebKitGTK 4.1; they are unsigned; the container cannot start the AppImage."
-echo "release-linux-container: nothing was published; to attach them: gh release upload v$version $out/holzWave_${version}_amd64.deb* $out/holzWave_${version}_x86_64.rpm* $out/holzWave_${version}_x86_64.AppImage*"
+echo "release-linux-container: they stay unsigned until you run: sh scripts/sign-linux.sh $version (minisign: a .minisig for each of the three and a signed SHA256SUMS; the key and its password stay on this machine)"
+echo "release-linux-container: nothing was published; after signing, to attach them: gh release upload v$version $out/holzWave_${version}_amd64.deb $out/holzWave_${version}_amd64.deb.minisig $out/holzWave_${version}_x86_64.rpm $out/holzWave_${version}_x86_64.rpm.minisig $out/holzWave_${version}_x86_64.AppImage $out/holzWave_${version}_x86_64.AppImage.minisig $out/SHA256SUMS $out/SHA256SUMS.minisig (sh scripts/sign-linux.sh $version prints this line with the full paths)"
 echo "release-linux-container: $(( $(date +%s) - started )) seconds"
 echo "release-linux-container: ok"

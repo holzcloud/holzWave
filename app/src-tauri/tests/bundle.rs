@@ -289,6 +289,86 @@ fn the_linux_container_build_is_amd64_and_says_what_it_is_not() {
     assert!(BUILD_LINUX_DOC.contains("glibc 2.39") && BUILD_LINUX_DOC.contains("emulated"), "docs/build-linux.md lacks the limits");
 }
 
+// ---- the signing scripts (plan 10-05, POL-03, D-10, D-12) ----------------------------------------------------------------
+
+const SIGN_LINUX: &str = include_str!("../../../scripts/sign-linux.sh");
+const VERIFY_RELEASE: &str = include_str!("../../../scripts/verify-release.sh");
+
+/// The lines of a script that are not blank and not comments, as written (the text between quotes is kept).
+fn code_lines(script: &str) -> Vec<&str> {
+    script.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).collect()
+}
+
+#[test]
+fn the_signing_scripts_never_publish_install_or_reach_the_network() {
+    // The owner uploads by hand: sign-linux.sh prints the `gh release upload` command and does not run it. Nothing here
+    // installs a tool (a missing minisign is exit 2 with the command that fixes it), pushes, tags or opens a connection,
+    // and nothing traces (`set -x` would print the password) or evaluates text.
+    for (name, script) in [("sign-linux.sh", SIGN_LINUX), ("verify-release.sh", VERIFY_RELEASE)] {
+        for line in commands(script) {
+            for forbidden in [
+                "gh release", "gh api", "git push", "git tag", "--publish", "brew install", "cargo install", "npm install", "apt-get",
+                "sudo ", "curl", "wget", "nc ", "eval ", "set -x",
+            ] {
+                assert!(!line.contains(forbidden), "{name} runs `{forbidden}`: {line}");
+            }
+        }
+    }
+
+    // The password: looked up in the operating system's secret store, and handed to minisign on standard input only.
+    let lines = commands(SIGN_LINUX);
+    for needed in ["security find-generic-password", "secret-tool lookup", "| minisign"] {
+        assert!(lines.iter().any(|l| l.contains(needed)), "sign-linux.sh has no command line with `{needed}`");
+    }
+    let raw = code_lines(SIGN_LINUX);
+    for line in &raw {
+        assert!(!line.starts_with("export ") && !line.contains(" export "), "sign-linux.sh exports something: {line}");
+        if line.contains("$password") {
+            // The only two places the variable is expanded: the printf that feeds minisign, and the test that it is not empty.
+            let feeds = line.starts_with(r#"printf '%s\n' "$password" | minisign "#);
+            let tests_empty = line.starts_with(r#"[ -n "$password" ] || fail "#);
+            assert!(feeds || tests_empty, "sign-linux.sh expands the password outside the printf that feeds minisign: {line}");
+        }
+        assert!(line.matches("$password").count() <= 1, "the password is expanded twice on one line: {line}");
+        for leak in ["echo \"$password", "echo $password", "printf \"$password", "-x \"$password", ">>\"$password"] {
+            assert!(!line.contains(leak), "sign-linux.sh prints the password: {line}");
+        }
+    }
+    assert!(raw.iter().any(|l| l.starts_with(r#"printf '%s\n' "$password" | minisign -S "#)), "the password does not go to minisign -S on standard input");
+    assert!(raw.iter().any(|l| l.starts_with("unset password")), "the password variable is not unset after the last signature");
+    // The key password never comes from a file, a prompt or the environment: no `read`, no `-w "$`, no HOLZWAVE_..._PASSWORD.
+    assert!(!SIGN_LINUX.contains("MINISIGN_PASSWORD") && !SIGN_LINUX.contains("MINISIGN_PASS"), "a password variable of the environment");
+    assert!(!raw.iter().any(|l| l.starts_with("read ") || l.contains(" read -")), "sign-linux.sh reads from the terminal or a file");
+    // Only the checks the script claims to make: every signature is verified with the public key before it says it is done.
+    assert!(SIGN_LINUX.contains("holzwave.pub") && SIGN_LINUX.contains("minisign -V -p"), "sign-linux.sh does not verify with the public key");
+}
+
+#[test]
+fn the_secret_key_has_no_place_in_the_repository() {
+    // The key file is encrypted and lives outside the tree; the script's default is under $HOME and it refuses a key inside
+    // the repository. A tracked `.key` or `.minisig` file, or a public key anywhere but packaging/minisign/holzwave.pub,
+    // fails here (the public half is meant to be committed, the signatures belong to a release and not to the tree).
+    let default = SIGN_LINUX
+        .lines()
+        .find(|l| l.trim_start().starts_with("key=") && l.contains("HOLZWAVE_MINISIGN_KEY"))
+        .expect("sign-linux.sh sets the key path from HOLZWAVE_MINISIGN_KEY");
+    assert!(default.contains("$HOME") || default.contains("${HOME"), "the default key path is not under HOME: {default}");
+    assert!(default.contains("/.minisign/holzwave.key"), "the default key path is not $HOME/.minisign/holzwave.key: {default}");
+    assert!(SIGN_LINUX.contains("is inside the repository"), "sign-linux.sh does not refuse a key inside the repository");
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let out = std::process::Command::new("git").arg("-C").arg(&root).args(["ls-files", "-z"]).output().expect("git runs");
+    assert!(out.status.success(), "git ls-files failed");
+    let listing = String::from_utf8(out.stdout).expect("file names are UTF-8");
+    for path in listing.split('\0').filter(|p| !p.is_empty()) {
+        assert!(!path.ends_with(".key"), "a secret key file is tracked: {path}");
+        assert!(!path.ends_with(".minisig"), "a signature file is tracked: {path}");
+        if path.ends_with(".pub") {
+            assert_eq!(path, "packaging/minisign/holzwave.pub", "a public key file is tracked where none belongs: {path}");
+        }
+    }
+}
+
 const INFO_PLIST: &str = include_str!("../Info.plist");
 
 #[test]
