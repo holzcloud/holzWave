@@ -92,7 +92,7 @@ default.
 | Divider | 1 px hairline, 8 px hit area, rose on hover, `col-resize` / `row-resize` |
 | Selection | rose at 35 % over the cell background, keeps glyph contrast |
 | Cursor | block, rose; hollow when the pane is unfocused; bar and underline per DECSCUSR |
-| Status bar | mono labels, uppercase: version, renderer, encoding and pane count, plus the copy-mode word and a notice while they last; no workspace segment (the workspaces are the pills of the title bar) |
+| Status bar | mono labels, uppercase: version, renderer, encoding and pane count, plus the copy-mode word, a notice and the target of a link under the pointer while they last; no workspace segment (the workspaces are the pills of the title bar) |
 | Overlays | command palette, theme picker, connection manager, and the request card of `wsh ai` (6.20): 24 px radius, the only elements with a shadow; the request card has no backdrop and never takes the keyboard |
 | Empty state | the logo's plank with one line of text; no illustrations |
 | Chat pane | a pane of its own kind (6.12): header `chat`, a bar with the provider chip, a transcript, a status line and a composer; flat and hairline, the only shadow is the provider sheet on a phone |
@@ -119,7 +119,7 @@ while the app runs.
 
 | Preference | OS signal the web view reports | Effect |
 |---|---|---|
-| Motion | `prefers-reduced-motion` | no chrome transitions (root class `motion-reduce`); the terminal grid never moves |
+| Motion | `prefers-reduced-motion` | no chrome transitions (root class `motion-reduce`); the terminal grid never moves, and an animated picture in a pane does not play (6.31) |
 | Contrast | `prefers-contrast: more` and `forced-colors` | hairlines use `--hw-ink-3`, dim text uses `--hw-ink-2`, the focus line is 2 px (root class `contrast-high`); under forced colours the chrome uses system colours |
 | Cursor blink | none of its own: it follows reduced motion | a cursor the program asked to blink does so with a 530 ms phase, unless the setting is `off`, or `system` with reduced motion; the phase restarts on output and on every key |
 | UI scale | **none on macOS**; Windows: the Text size setting; Linux: GNOME's `text-scaling-factor` (read by the shell, plan 02.2-09) | the user's `ui_scale` (75 to 200 %) times the OS factor, for the chrome only, and the font size actions; see below |
@@ -167,10 +167,10 @@ AI chat, AI chat states, AI sidebar, attention marks, drag) and a platform switc
    line), the active tab marker (wash, underline and the workspace diamond),
    divider hover, button hover wash (bar, dialog and search buttons), the selected palette row (wash and left bar),
    the focus ring of the palette and search inputs, the link underline (a link under the pointer with the modifier
-   held), hint labels, the key binding capture row, and the accent colour of settings checkboxes and radios.
+   held, a printed address and a link the program marked alike), the `Open` button of the link dialog (6.31), hint labels, the key binding capture row, and the accent colour of settings checkboxes and radios.
    Everything else is warm grey.
-5. **tmux-style status line.** A bottom strip of segments (panes, renderer, encoding, version), with the mode word and
-   the notice taking a segment while they last, and the Kubernetes context and the Azure subscription when the core has
+5. **tmux-style status line.** A bottom strip of segments (panes, renderer, encoding, version), with the mode word,
+   the notice and the target of a link under the pointer (6.31) taking a segment while they last, and the Kubernetes context and the Azure subscription when the core has
    one (6.11). It does not repeat the workspaces: they are the pills of the title bar.
 6. **Numbered tabs.** Tabs carry their number (`1 shell`) so `⌘1…9` is discoverable.
 7. **Command palette first.** Actions are reachable by name with a fuzzy palette (`⌘K`); the chrome stays small.
@@ -264,6 +264,9 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | Web: account | ![](design/web-account.png) | the account dialog (6.29) with its six groups and the layer `Confirm it is you` above it |
 | Web: people | ![](design/web-people.png) | the people dialog (6.29): the table of accounts with state marks, the menu of one row and the invitation link shown once |
 | Web: window | ![](design/web-window.png) | the window as the browser shows it (6.30): no window buttons, the marks of the status line, the upload target, the `Download` row menu and the Notifications setting |
+| Links | ![](design/links.png) | links in the output of a shell pane (6.31): two at rest with a dotted underline, one under the pointer with a solid underline and its target in the `LINK` segment of the status line, one with the open gesture held in rose, one in text the program underlined itself, and an address with a scheme that is not allowed, which stays plain text |
+| Link dialog | ![](design/link-ask.png) | the question `Open this link?` (6.31) for a link whose text names one site and whose target is another: the text and the target in mono, `Cancel` focused, `Open` solid rose |
+| Images | ![](design/images.png) | pictures in a shell pane (6.31): one in each of the three layers, a picture clipped at the edge of the pane body, a picture made of placeholder cells, and the cursor and a selection drawn over a picture |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
 
 ### 6.4 Shortcuts view
@@ -422,6 +425,7 @@ window runs in a web page (6.30); they say what the page is specified to do.
 | **Browser: no text-scale signal from the system.** The UI scale is the `ui_scale` setting alone, as on macOS | a web page has no OS text size to read; the browser's zoom is a separate setting | none planned |
 | **Browser: no local-network group and no notice.** Nothing of 6.24 is drawn | the privacy setting belongs to the app, and the browser build runs on a server, not on the person's computer | none planned |
 | **Browser: `Reveal in folder` and open-in-folder answer `Not available in the browser.`** and are absent from menus and the palette | the files are on the server, not in the person's file manager | the `Download` action replaces them |
+| **Browser: no `file` links.** A link the program marked with a `file` address, and a printed file path, are plain text: no underline, no click, hint mode skips them | a folder cannot be shown from a page, and the file is on the server, not on the person's computer; the other schemes behave as on the desktop (6.31) | the `Download` action |
 | **Browser: files are moved by upload and download.** A file dropped on a shell pane is uploaded to the upload folder and its server path is typed into the pane; `Download` in the row menu and the palette fetches a file through a short-lived link | the browser has no path to a file on the server and the server has none to the person's disk | none planned |
 
 ### 6.9 Sync
@@ -2544,14 +2548,14 @@ notice lasts (rule 5 of section 6), and nothing is asked of the server. A pane o
 same sentence and stays where it was; no outline is asked for on the way out. The palette lists every other entry as it does on the desktop.
 Copying and pasting use the clipboard of the browser (section 7).
 
-**Links.** A link in the visible output of a pane opens by the person's deliberate act, the same act as on the desktop: a click with `Ctrl` or
-`Cmd` held, either of the two. While the modifier is held the link under the pointer gets the underline and the pointer cursor (section 2, rule 4:
-the link underline); without it nothing is underlined and a click selects as always. Only `http`, `https` and `mailto` addresses are links, after
-the same checks as on the desktop. A web address opens in a new browser tab that cannot reach the page (`noopener`, `noreferrer`) and never in the
-page's own tab; a mail address is handed to the browser. There is no confirmation dialog, because the desktop has none: the click with the modifier
-is the act, and a hyperlink sequence in terminal output is not clickable, as on the desktop. A file path is not offered at all (no underline, no
-click, and hint mode skips it), because a folder cannot be shown from a browser. The links in a reply of the AI chat and the items with an address in
-the sidebar open in a new tab by a plain click, as they open the system browser on the desktop.
+**Links.** A link in the visible output of a pane, a printed address or a link the program marked (6.31), opens by the person's deliberate act, the
+same act as on the desktop: a click with `Ctrl` or `Cmd` held, either of the two. While the modifier is held the link under the pointer gets the
+underline and the pointer cursor (section 2, rule 4: the link underline); without it a click selects as always. Only `http`, `https` and `mailto`
+addresses are links in the browser, after the same checks as on the desktop. A web address opens in a new browser tab that cannot reach the page
+(`noopener`, `noreferrer`) and never in the page's own tab; a mail address is handed to the browser. When the visible text of a link and its
+target differ, the click asks first in the dialog of 6.31 (`Open this link?`), which looks the same here. A `file` link and a file path are not
+offered at all (no underline, no click, and hint mode skips them), because a folder cannot be shown from a browser. The links in a reply of the AI
+chat and the items with an address in the sidebar open in a new tab by a plain click, as they open the system browser on the desktop.
 
 **Full screen and the key lock.** The palette has the entry `Toggle full screen` in the browser build only (it is not drawn on the desktop) and it has no
 shortcut. It enters full screen from the press that runs it and leaves again when it is run once more; the page never enters full screen by itself.
@@ -2572,3 +2576,75 @@ colours and the dashed edge keeps its dashes; nothing moves, so `motion-reduce` 
 
 **Not drawn.** SSH key management, API tokens, shared panes, an audit viewer, a mobile layout of the page, a button that installs the page
 as an app, and a control that sets the upload folder (the server's configuration does).
+
+### 6.31 Links and images in a pane
+
+A program can mark a stretch of its output as a link (the terminal sequence OSC 8) and can draw pictures into the grid (the Kitty graphics protocol). Both
+are content of the program, so they are drawn inside the pane body and follow the rules of the grid: nothing here adds a control, and rose appears only
+where section 2 rule 4 names it. A printed address (`https://…`) keeps the look and the gesture it has; this section says what a marked link adds.
+
+**The link at rest.** A cell range that the program marked as a link carries a dotted underline of 1 px in the cell's own foreground colour, at the
+underline position. The dots are a second cue that does not depend on colour. A cell that already has an underline from the program keeps that
+underline and gets no extra dotted line; such a link is found by the hover rules below, so a link is never lost, only its resting cue. A link that
+wraps onto the next line is two ranges, and each is a link on its own.
+
+**Hover.** With the pointer over a link the underline becomes solid (the second cue) and the real target appears in the status line (the target
+rule below). Without the open gesture a click selects as always.
+
+**The gesture** is the one a printed address has: `Cmd` held on macOS, `Ctrl` held on Windows and Linux, either of the two in a browser. With the
+gesture held the link under the pointer gets a solid underline in `--hw-rose` and the pointer cursor.
+
+| State | What is drawn | Tone and second cue |
+|---|---|---|
+| At rest | dotted underline, 1 px, in the cell's foreground colour | the dots; no colour of its own |
+| Pointer over it | solid underline in the same colour; the target in the status line | the solid line in place of the dots, and the `LINK` segment |
+| Gesture held | solid underline in `--hw-rose`, pointer cursor | rose as the action colour, and the cursor shape |
+| The program already underlined the text | its own underline stays, no dotted line | found by hover and by hint mode |
+| A scheme that is not allowed | nothing: plain text | no underline, no click |
+| A `file` link in a server pane or in a browser | nothing: plain text | no underline, no click |
+
+**The target in the status line.** A segment at the left of the status line holds the label `LINK` (uppercase, tracked, `.label`) and the target in
+mono, with the scheme and the host in `--hw-ink` and the rest in `--hw-ink-2`. A target longer than the segment is cut in the middle with `…` so that
+the scheme, the host and the last 12 characters stay. It is there while the pointer is over a link and gone when it leaves. It does not use the
+segment of the notice. The full target is also the accessible name of the segment.
+
+**The question.** When the visible text of the link and its target differ, the click with the gesture opens a dialog of the shape of the close
+confirmation (title, body lines, two buttons, centred over a backdrop): the title `Open this link?`, a line `The text says` with the visible text in
+mono (cut at 120 characters), a line `The link goes to` with the full target in mono, wrapped and never cut, and two buttons, `Cancel` (focused
+first, the default) and `Open` (solid rose, section 2 rule 4). `Escape` and a click outside the dialog are `Cancel`. The dialog is a floating layer,
+so it may have a shadow. The texts are compared after the scheme (`http`, `https` or `mailto:`) and a trailing slash are ignored and with the host in
+lower case; when they are equal the click opens at once, as for a printed address. Every string in the dialog is set as text and never as markup.
+
+**Schemes.** Only the schemes of the allowed list are links. The list is `http`, `https`, `mailto` and `file` unless the settings file says
+otherwise. A range with another scheme is text and gets no underline. The list and the memory below are settings in the settings file, described in
+`docs/config.md`, like the `shell` setting; the Settings dialog has no row for either.
+
+**The `file` link.** On the desktop, in a local pane, a click with the gesture shows the file in its folder, as `Reveal` does for a file of the Files
+pane, and never opens or starts it; the question above applies to it when the text differs. In a pane of a server (an SSH pane, or any pane in a
+browser) a `file` link is not a link: no underline, no click, and hint mode skips it.
+
+**Hint mode** lists the marked links with the same labels as the printed ones, and choosing one does what the click does, including the question.
+
+**Pictures: layers.** A picture is drawn at its cells in one of three layers that the program chooses: below the cell backgrounds, between the
+backgrounds and the text, or above the text; within a layer the program's own order decides. It is clipped to the pane body, never over the pane
+header, the scrollbar or a neighbouring pane, and it moves with the text when the pane scrolls. The cursor, the selection wash and the marks of
+search and copy mode are drawn above every layer. A picture has no border, no rounded corner and no shadow (section 2 rule 4); transparent
+pixels show what lies under them.
+
+**Pictures: cells of the placeholder character.** Cells that carry the placeholder character of the protocol are drawn as the program's picture and
+never as a text glyph, and copying them copies spaces.
+
+**Pictures: animation.** An animated picture plays frame by frame at the program's own timing. Under reduced motion (the setting, or the system
+preference when the setting is `system`; the root class `motion-reduce`) it does not move: a picture that was never started shows its first frame,
+and a picture that was running stays on the frame it shows. There is no control to start it, and when reduced motion ends the animation goes on from
+where it stopped.
+
+**Pictures: memory.** When the picture memory of a pane is full the oldest pictures disappear, without a mark.
+
+**What is not drawn.** No row of the Settings dialog for the picture memory or the allowed schemes. A picture has no text alternative, and the
+accessible text of the terminal leaves it out. Under `forced-colors` and `contrast-high` pictures are drawn as sent, because they are content; the
+link underline takes the system link colour under `forced-colors` and keeps its dotted and solid forms.
+
+![Links in a pane](design/links.png)
+![The link dialog](design/link-ask.png)
+![Pictures in a pane](design/images.png)
