@@ -11,7 +11,12 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
+use libghostty_vt::alloc::Allocator;
 use libghostty_vt::render::{ImageIterator, ImageLayer, KittyPlacementKind};
 use libghostty_vt::terminal::{Point, PointCoordinate};
 use libghostty_vt::{RenderState, Terminal};
@@ -123,6 +128,81 @@ pub fn zlib_stored(data: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Writes the bits of a deflate stream: values least significant bit first, Huffman codes most significant first.
+struct Bits {
+    out: Vec<u8>,
+    acc: u64,
+    used: u32,
+}
+
+impl Bits {
+    fn put(&mut self, value: u32, count: u32) {
+        self.acc |= u64::from(value) << self.used;
+        self.used += count;
+        while self.used >= 8 {
+            self.out.push(self.acc as u8);
+            self.acc >>= 8;
+            self.used -= 8;
+        }
+    }
+
+    fn code(&mut self, code: u32, len: u32) {
+        self.put(code.reverse_bits() >> (32 - len), len);
+    }
+
+    /// A literal or length symbol of the fixed Huffman table.
+    fn symbol(&mut self, sym: u32) {
+        match sym {
+            0..=143 => self.code(0x30 + sym, 8),
+            144..=255 => self.code(0x190 + sym - 144, 9),
+            256..=279 => self.code(sym - 256, 7),
+            _ => self.code(0xC0 + sym - 280, 8),
+        }
+    }
+
+    /// A match of `len` (3..=258) bytes at distance 1.
+    fn run(&mut self, len: u32) {
+        const BASE: [u32; 29] = [
+            3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195,
+            227, 258,
+        ];
+        const EXTRA: [u32; 29] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+        let idx = BASE.iter().rposition(|&b| b <= len).expect("a length of at least 3");
+        self.symbol(257 + idx as u32);
+        self.put(len - BASE[idx], EXTRA[idx]);
+        self.code(0, 5); // distance code 0: distance 1
+    }
+}
+
+/// A real zlib stream that inflates to `n` zero bytes in about `n / 160` bytes (fixed Huffman, matches of 258 bytes at
+/// distance 1). This is the decompression bomb of the probes; nothing here allocates `n` bytes.
+pub fn zlib_zeros(n: u64) -> Vec<u8> {
+    let mut bits = Bits { out: vec![0x78, 0x01], acc: 0, used: 0 };
+    bits.put(1, 1); // final block
+    bits.put(1, 2); // fixed Huffman codes
+    if n > 0 {
+        bits.symbol(0);
+        let mut rest = n - 1;
+        while rest >= 258 {
+            bits.run(258);
+            rest -= 258;
+        }
+        if rest >= 3 {
+            bits.run(rest as u32);
+        } else {
+            for _ in 0..rest {
+                bits.symbol(0);
+            }
+        }
+    }
+    bits.symbol(256);
+    bits.put(0, 7); // pad the last byte
+    // Adler-32 of zeros: a stays 1 and b counts the bytes.
+    let adler = ((n % 65521) as u32) << 16 | 1;
+    bits.out.extend_from_slice(&adler.to_be_bytes());
+    bits.out
+}
+
 /// `pixels` from a fixed seed: `count` pixels of `bpp` bytes each, the same bytes on every run.
 pub fn seeded_pixels(seed: u64, count: usize, bpp: usize) -> Vec<u8> {
     let mut x = if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed };
@@ -230,7 +310,33 @@ pub struct Placed {
 /// A raw terminal of `cols` by `rows` cells with the given cell size in pixels and Kitty storage limit in bytes. The
 /// default limits of the library stay as they are: the three media are refused and one APC sequence may hold 65 MiB.
 pub fn raw_terminal(cols: u16, rows: u16, cell_px: (u32, u32), storage_limit: u64) -> Raw {
-    let mut terminal = Terminal::new(cols, rows).expect("terminal");
+    raw_from(Terminal::new(cols, rows).expect("terminal"), cols, rows, cell_px, storage_limit)
+}
+
+/// The same terminal, made with the given libghostty allocator (the probes pass [`counting_allocator`]).
+pub fn raw_terminal_with_alloc(
+    cols: u16,
+    rows: u16,
+    cell_px: (u32, u32),
+    storage_limit: u64,
+    alloc: &'static Allocator<'static>,
+) -> Raw {
+    raw_from(Terminal::new_with_alloc(alloc, cols, rows).expect("terminal"), cols, rows, cell_px, storage_limit)
+}
+
+/// The allocator of Rust's global allocator as a libghostty allocator, leaked so that it lives for the process. With a
+/// counting `#[global_allocator]` in the test binary, every allocation of a terminal made with it is counted.
+pub fn global_allocator() -> &'static Allocator<'static> {
+    Box::leak(Box::new(Allocator::GLOBAL))
+}
+
+fn raw_from(
+    mut terminal: Terminal<'static, 'static>,
+    cols: u16,
+    rows: u16,
+    cell_px: (u32, u32),
+    storage_limit: u64,
+) -> Raw {
     terminal.set_kitty_image_storage_limit(storage_limit).expect("storage limit");
     terminal.resize(cols, rows, cell_px.0, cell_px.1).expect("resize");
     let replies: Rc<RefCell<Vec<u8>>> = Rc::default();
@@ -255,6 +361,18 @@ impl Raw {
     /// Feed bytes to the terminal.
     pub fn feed(&mut self, bytes: &[u8]) {
         self.terminal.vt_write(bytes);
+    }
+
+    /// Bound one APC sequence (`None` returns to the library's default of 65 MiB).
+    pub fn set_apc_cap(&mut self, bytes: Option<usize>) {
+        self.terminal.set_apc_max_bytes_kitty(bytes).expect("apc cap");
+    }
+
+    /// How many error replies the terminal has written back since the buffer was last taken (`;E` starts the text of
+    /// every Kitty error reply: `EINVAL`, `ENOMEM`, ...). The replies stay in the buffer.
+    pub fn error_replies(&self) -> usize {
+        let buf = self.replies.borrow();
+        buf.windows(2).filter(|w| w == b";E").count()
     }
 
     /// Resize the grid and the cell size together.
@@ -344,5 +462,93 @@ pub fn rss_kib() -> Option<u64> {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         None
+    }
+}
+
+/// Samples the resident memory of the process from a thread every 5 ms while a probe feeds a terminal, and keeps the
+/// maximum. [`Sampler::finish`] stops the thread and takes one last sample.
+pub struct Sampler {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<u64>>,
+    baseline_kib: Option<u64>,
+}
+
+impl Sampler {
+    /// Start sampling. The baseline is the resident memory at this moment.
+    pub fn start() -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let handle = std::thread::spawn(move || {
+            let mut peak = 0;
+            loop {
+                if let Some(kib) = rss_kib() {
+                    peak = peak.max(kib);
+                }
+                if flag.load(Ordering::Relaxed) {
+                    return peak;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        Self { stop, handle: Some(handle), baseline_kib: rss_kib() }
+    }
+
+    /// Stop the thread. Returns `(baseline_kib, peak_kib)`, or `None` on a platform where memory cannot be read.
+    pub fn finish(mut self) -> Option<(u64, u64)> {
+        let last = rss_kib();
+        self.stop.store(true, Ordering::Relaxed);
+        let peak = self.handle.take()?.join().ok()?;
+        let baseline = self.baseline_kib?;
+        Some((baseline, peak.max(last?).max(baseline)))
+    }
+}
+
+impl Drop for Sampler {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// The 3072 bytes that one 4096-character chunk of a flood carries (a fixed pattern; the engine does not look at it).
+const FLOOD_BLOCK: usize = 3072;
+
+/// A slice of about 64 KiB of ready chunk commands for a flood: the first slice opens the transmission with `control`
+/// (and `m=1`), every other slice only continues it. The caller feeds slices until it has sent enough; no slice is ever
+/// larger than 64 KiB, so a probe never holds the payload it sends.
+pub struct FloodSource {
+    piece: Vec<u8>,
+    first: bool,
+    control: String,
+    sent_payload: u64,
+}
+
+impl FloodSource {
+    /// A flood that opens with `control`, for example `"a=T,f=32,s=5000,v=5000,i=1"`.
+    pub fn new(control: &str) -> Self {
+        let block = seeded_pixels(5, FLOOD_BLOCK / 4, 4);
+        Self { piece: base64(&block), first: true, control: control.to_string(), sent_payload: 0 }
+    }
+
+    /// The next slice (15 chunk commands, 61 KiB or so), `more` always true: the flood never finishes a transmission.
+    pub fn next_slice(&mut self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(64 * 1024);
+        for _ in 0..15 {
+            if self.first {
+                out.extend_from_slice(&chunk_first(&self.control, &self.piece, true));
+                self.first = false;
+            } else {
+                out.extend_from_slice(&chunk_next(&self.piece, true));
+            }
+            self.sent_payload += FLOOD_BLOCK as u64;
+        }
+        out
+    }
+
+    /// The payload bytes (decoded) sent so far.
+    pub fn sent_payload(&self) -> u64 {
+        self.sent_payload
     }
 }

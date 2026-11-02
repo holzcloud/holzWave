@@ -9,6 +9,10 @@
 
 mod kitty_support;
 
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use kitty_support::*;
 use libghostty_vt::Error;
 use libghostty_vt::kitty::graphics::ImageFormat;
@@ -234,6 +238,33 @@ fn chunked_and_zlib_transmissions_store_the_same_pixels() {
 }
 
 #[test]
+fn zlib_zeros_builder_inflates_in_the_engine() {
+    // The decompression bomb of the probes is built by hand: prove at small sizes that the engine reads it as zeros.
+    for n in [1u64, 2, 3, 4, 257, 258, 259, 300, 5000, 64 * 64 * 4] {
+        let zeros = zlib_zeros(n);
+        let mut t = raw_terminal(20, 5, (8, 16), 1 << 22);
+        // Kitty has no one-byte format, so a size that RGBA can describe (a multiple of 4) is checked byte for byte; any
+        // other size is sent as a 1x1 image and must be refused as a size mismatch, which also proves the stream itself
+        // inflated (a corrupt stream is a different reply).
+        if n % 4 == 0 {
+            t.feed(&apc(&format!("a=t,f=32,s={},v=1,i=1,o=z", n / 4), &zeros));
+            assert_eq!(t.take_replies(), "\\x1b_Gi=1;OK\\x1b\\\\", "n={n}");
+            let (data, w, h) = t.image_pixels(1).expect("image");
+            assert_eq!((w, h, data.len()), ((n / 4) as u32, 1, n as usize));
+            assert!(data.iter().all(|&b| b == 0), "n={n}: all zeros");
+        } else {
+            t.feed(&apc("a=t,f=32,s=1,v=1,i=1,o=z", &zeros));
+            let reply = t.take_replies();
+            assert!(reply.contains("EINVAL"), "n={n}: a size mismatch, not a corrupt stream: {reply}");
+            assert!(!reply.to_lowercase().contains("decompress"), "n={n}: {reply}");
+        }
+    }
+    // Ratio: 400 million bytes of zeros in about 2.5 MB.
+    let bomb = zlib_zeros(400_000_000);
+    assert!(bomb.len() < 3_000_000, "{} bytes", bomb.len());
+}
+
+#[test]
 fn place_and_delete_builders_work() {
     let mut t = raw_terminal(20, 5, (8, 16), 1 << 20);
     t.feed(&apc("a=t,f=32,s=1,v=1,i=11", &[1, 2, 3, 4]));
@@ -408,4 +439,330 @@ fn osc8_row_flag_follows_the_link_cells_in_the_swept_cases() {
     }
     eprintln!("FACT OSC 8 row flag: false positives in the 8 swept edits: {false_positives:?}");
     assert!(false_positives.is_empty(), "if this fails the engine plan must keep the per-cell check: {false_positives:?}");
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Hostile-stream probes. Ignored: they allocate hundreds of MiB on purpose and only run on request.
+//
+//   cargo test --release -p holzwave-core --test kitty_probe -- --ignored --nocapture
+//
+// Each probe starts from a fresh raw terminal with a 64 MiB storage limit and the library's default APC cap, feeds a
+// hostile stream in slices of 64 KiB (no probe holds the payload it sends), samples the resident memory of the process
+// every 5 ms, and prints one line:
+//
+//   PROBE <name>: peak_rss_mib=<n> stored_images=<n> error_replies=<n> baseline_rss_mib=<n> sent_mib=<n> ...
+//
+// `peak_rss_mib` is the absolute peak of the process; `baseline_rss_mib` is the resident memory when the probe began,
+// so the cost of the stream is the difference. A probe makes no assertion about the peak: the decision on how the
+// engine is bounded is taken from the numbers (see the plan 10-01 summary).
+// ---------------------------------------------------------------------------------------------------------------
+
+/// The storage limit of the probes: the default of the setting `image_memory_mib` (D-02).
+const PROBE_LIMIT: u64 = 64 * 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
+
+/// A counting allocator for the probes: live bytes, the peak, and (when armed) a null return for a large request that
+/// would take the live total past the cap. Small requests always succeed, so Rust's own bookkeeping (a reply buffer, a
+/// thread) can never be refused and abort the process; only the big buffers of a hostile stream are.
+struct Counting;
+
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+static PEAK: AtomicUsize = AtomicUsize::new(0);
+static CAP: AtomicUsize = AtomicUsize::new(usize::MAX);
+static REFUSED: AtomicUsize = AtomicUsize::new(0);
+const REFUSE_FROM: usize = 64 * 1024;
+
+impl Counting {
+    fn admit(size: usize) -> bool {
+        let cap = CAP.load(Ordering::Relaxed);
+        if cap != usize::MAX && size >= REFUSE_FROM && LIVE.load(Ordering::Relaxed).saturating_add(size) > cap {
+            REFUSED.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        true
+    }
+
+    fn grew(by: usize) {
+        let now = LIVE.fetch_add(by, Ordering::Relaxed) + by;
+        PEAK.fetch_max(now, Ordering::Relaxed);
+    }
+}
+
+// SAFETY: every call is forwarded to the system allocator unchanged; the counters only observe it.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if !Self::admit(layout.size()) {
+            return std::ptr::null_mut();
+        }
+        let p = unsafe { System.alloc(layout) };
+        if !p.is_null() {
+            Self::grew(layout.size());
+        }
+        p
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        if !Self::admit(layout.size()) {
+            return std::ptr::null_mut();
+        }
+        let p = unsafe { System.alloc_zeroed(layout) };
+        if !p.is_null() {
+            Self::grew(layout.size());
+        }
+        p
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) };
+        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        if new_size > layout.size() && !Self::admit(new_size - layout.size()) {
+            return std::ptr::null_mut();
+        }
+        let p = unsafe { System.realloc(ptr, layout, new_size) };
+        if !p.is_null() {
+            if new_size >= layout.size() {
+                Self::grew(new_size - layout.size());
+            } else {
+                LIVE.fetch_sub(layout.size() - new_size, Ordering::Relaxed);
+            }
+        }
+        p
+    }
+}
+
+#[global_allocator]
+static COUNTING: Counting = Counting;
+
+/// The probes share the process-wide memory counters and the resident-memory sampler, so they run one at a time even
+/// when the harness runs the ignored tests on several threads.
+static ONE_PROBE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    ONE_PROBE_AT_A_TIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn mib(kib: u64) -> u64 {
+    kib.div_ceil(1024)
+}
+
+/// Feed chunk commands that open with `control` and never finish, until `payload_bytes` have been sent (or, with
+/// `stop_on_error`, the terminal answers with an error). Returns the decoded payload bytes sent.
+fn flood(raw: &mut Raw, control: &str, payload_bytes: u64, stop_on_error: bool) -> u64 {
+    let mut source = FloodSource::new(control);
+    while source.sent_payload() < payload_bytes {
+        let slice = source.next_slice();
+        raw.feed(&slice);
+        if stop_on_error && raw.error_replies() > 0 {
+            break;
+        }
+    }
+    source.sent_payload()
+}
+
+/// One transmission in one APC, streamed: `ESC _ G control ;`, `base64_chars` characters from a fixed 64 KiB block of
+/// base64 text, `ESC \`. Nothing larger than 64 KiB is ever held by the probe.
+fn stream_one_apc(raw: &mut Raw, control: &str, base64_chars: usize) {
+    let block = base64(&seeded_pixels(6, 12 * 1024, 4)); // 49 152 bytes, 65 536 characters
+    assert_eq!(block.len(), 65536);
+    let mut head = vec![ESC, b'_', b'G'];
+    head.extend_from_slice(control.as_bytes());
+    head.push(b';');
+    raw.feed(&head);
+    let mut sent = 0;
+    while sent < base64_chars {
+        raw.feed(&block);
+        sent += block.len();
+    }
+    raw.feed(&[ESC, b'\\']);
+}
+
+/// Stop the sampler, count what the terminal holds, drop it and print the probe line. Returns the peak growth over the
+/// baseline in MiB (None where memory cannot be read).
+fn report(name: &str, raw: Raw, sampler: Sampler, sent_bytes: u64, extra: &str) -> Option<u64> {
+    let stored = raw.stored_among(8);
+    let errors = raw.error_replies();
+    let measured = sampler.finish();
+    drop(raw);
+    let after = rss_kib();
+    match measured {
+        Some((baseline, peak)) => {
+            println!(
+                "PROBE {name}: peak_rss_mib={} stored_images={stored} error_replies={errors} baseline_rss_mib={} sent_mib={} growth_mib={} after_drop_rss_mib={}{extra}",
+                mib(peak),
+                mib(baseline),
+                sent_bytes / MIB,
+                mib(peak - baseline),
+                after.map_or(0, mib),
+            );
+            Some(mib(peak - baseline))
+        }
+        None => {
+            println!("PROBE {name}: cannot measure memory on this platform; stored_images={stored} error_replies={errors}");
+            None
+        }
+    }
+}
+
+#[test]
+#[ignore = "probe: cargo test --release -p holzwave-core --test kitty_probe -- --ignored --nocapture chunk_flood_declared_100_mib"]
+fn chunk_flood_declared_100_mib() {
+    let _one = serial();
+    // A start chunk declaring 5000x5000 RGBA (100 MB), then m=1 chunks until 120 MB of payload has been sent.
+    let mut raw = raw_terminal(80, 24, (8, 16), PROBE_LIMIT);
+    let sampler = Sampler::start();
+    let sent = flood(&mut raw, "a=T,f=32,s=5000,v=5000,i=1", 120_000_000, false);
+    assert!(sent >= 120_000_000);
+    report("chunk_flood_declared_100_mib", raw, sampler, sent, "");
+}
+
+#[test]
+#[ignore = "probe: cargo test --release -p holzwave-core --test kitty_probe -- --ignored --nocapture chunk_flood_to_default_cap"]
+fn chunk_flood_to_default_cap() {
+    let _one = serial();
+    // The same until 410 MiB has been sent (the library's own cap for one transmission is 400 MiB) or the terminal
+    // answers with an error.
+    let mut raw = raw_terminal(80, 24, (8, 16), PROBE_LIMIT);
+    let sampler = Sampler::start();
+    let sent = flood(&mut raw, "a=T,f=32,s=5000,v=5000,i=1", 410 * MIB, true);
+    report("chunk_flood_to_default_cap", raw, sampler, sent, "");
+}
+
+#[test]
+#[ignore = "probe: cargo test --release -p holzwave-core --test kitty_probe -- --ignored --nocapture zlib_bomb"]
+fn zlib_bomb() {
+    let _one = serial();
+    // 2.5 MB of deflate that inflates to the 400 MB that a 10000x10000 RGBA declaration allows (just under the
+    // library's own 400 MiB cap), sent in 4096-character chunks, finished with m=0 so that the engine inflates it.
+    let mut raw = raw_terminal(80, 24, (8, 16), PROBE_LIMIT);
+    let bomb = zlib_zeros(400_000_000);
+    let pieces = chunked("a=T,f=32,s=10000,v=10000,o=z,i=1", &bomb, CHUNK_CHARS);
+    let sampler = Sampler::start();
+    for piece in &pieces {
+        raw.feed(piece);
+    }
+    // The text of the answer stays in the buffer: `report` counts the error replies in it.
+    let reply = raw.replies.borrow().escape_ascii().to_string();
+    let result = reply.trim_end_matches("\\x1b\\\\").rsplit(';').next().unwrap_or("").to_string();
+    let extra = format!(" compressed_mib={} result={result:?}", bomb.len() as u64 / MIB);
+    let sent = bomb.len() as u64;
+    report("zlib_bomb", raw, sampler, sent, &extra);
+}
+
+#[test]
+#[ignore = "probe: cargo test --release -p holzwave-core --test kitty_probe -- --ignored --nocapture single_huge_apc_default_cap"]
+fn single_huge_apc_default_cap() {
+    let _one = serial();
+    // One non-chunked transmission whose base64 text is 80 MB, with the library's default APC cap (65 MiB).
+    let mut raw = raw_terminal(80, 24, (8, 16), PROBE_LIMIT);
+    let sampler = Sampler::start();
+    stream_one_apc(&mut raw, "a=T,f=32,s=3873,v=3873,i=1", 80_000_000);
+    report("single_huge_apc_default_cap", raw, sampler, 80_000_000, "");
+}
+
+#[test]
+#[ignore = "probe: cargo test --release -p holzwave-core --test kitty_probe -- --ignored --nocapture single_huge_apc_8_mib_cap"]
+fn single_huge_apc_8_mib_cap() {
+    let _one = serial();
+    // The same after set_apc_max_bytes_kitty(Some(8 MiB)).
+    let mut raw = raw_terminal(80, 24, (8, 16), PROBE_LIMIT);
+    raw.set_apc_cap(Some(8 * 1024 * 1024));
+    let sampler = Sampler::start();
+    stream_one_apc(&mut raw, "a=T,f=32,s=3873,v=3873,i=1", 80_000_000);
+    report("single_huge_apc_8_mib_cap", raw, sampler, 80_000_000, "");
+}
+
+/// One scenario of the counting-allocator probe: a terminal whose every allocation goes through the counting global
+/// allocator (`Terminal::new_with_alloc` with [`global_allocator`]), armed to refuse a large request that would take the
+/// live total 96 MiB above where it stood when the scenario began. Prints whether the terminal survived (a small valid
+/// image is still accepted afterwards), how many allocations were refused and what the peak was.
+fn counting_scenario(name: &str, run: impl FnOnce(&mut Raw) -> u64) {
+    let mut raw = raw_terminal_with_alloc(80, 24, (8, 16), PROBE_LIMIT, global_allocator());
+    let live_at_start = LIVE.load(Ordering::Relaxed);
+    PEAK.store(live_at_start, Ordering::Relaxed);
+    REFUSED.store(0, Ordering::Relaxed);
+    CAP.store(live_at_start + (96 * MIB) as usize, Ordering::Relaxed);
+    let sampler = Sampler::start();
+    let sent = run(&mut raw);
+    CAP.store(usize::MAX, Ordering::Relaxed);
+    let refused = REFUSED.load(Ordering::Relaxed);
+    let counted_peak_mib = (PEAK.load(Ordering::Relaxed) - live_at_start) as u64 / MIB;
+    // An open transmission swallows the next transmit-like command as its next chunk, so close it first (an empty final
+    // chunk), then a small valid image must be accepted.
+    raw.feed(&apc("m=0", &[]));
+    raw.feed(&transmit_rgba(1, 1, "i=2,c=1,r=1", &[1, 2, 3, 4]));
+    let survived = raw.has_image(2);
+    let extra = format!(" survived={survived} refused_allocations={refused} counted_peak_mib={counted_peak_mib}");
+    report(name, raw, sampler, sent, &extra);
+    assert!(survived, "the terminal must still accept a small image after the refusal");
+}
+
+#[test]
+#[ignore = "probe: cargo test --release -p holzwave-core --test kitty_probe -- --ignored --nocapture chunk_flood_with_counting_allocator"]
+fn chunk_flood_with_counting_allocator() {
+    let _one = serial();
+    // The declared-100-MiB flood of the first probe against a terminal that cannot hold more than 96 MiB above its start.
+    counting_scenario("chunk_flood_with_counting_allocator", |raw| {
+        flood(raw, "a=T,f=32,s=5000,v=5000,i=1", 120_000_000, false)
+    });
+}
+
+#[test]
+#[ignore = "probe: cargo test --release -p holzwave-core --test kitty_probe -- --ignored --nocapture chunk_flood_with_counting_allocator_to_default_cap"]
+fn chunk_flood_with_counting_allocator_to_default_cap() {
+    let _one = serial();
+    // The flood that reached 402 MiB without the allocator, sent to the end (410 MiB), not stopped at the first error.
+    counting_scenario("chunk_flood_with_counting_allocator_to_default_cap", |raw| {
+        flood(raw, "a=T,f=32,s=5000,v=5000,i=1", 410 * MIB, false)
+    });
+}
+
+#[test]
+#[ignore = "probe: cargo test --release -p holzwave-core --test kitty_probe -- --ignored --nocapture chunk_flood_with_counting_allocator_zlib_bomb"]
+fn chunk_flood_with_counting_allocator_zlib_bomb() {
+    let _one = serial();
+    // The zlib bomb that inflated to 382 MiB without the allocator.
+    counting_scenario("chunk_flood_with_counting_allocator_zlib_bomb", |raw| {
+        let bomb = zlib_zeros(400_000_000);
+        for piece in chunked("a=T,f=32,s=10000,v=10000,o=z,i=1", &bomb, CHUNK_CHARS) {
+            raw.feed(&piece);
+        }
+        bomb.len() as u64
+    });
+}
+
+#[test]
+#[ignore = "probe: cargo test --release -p holzwave-core --test kitty_probe -- --ignored --nocapture pending_flood_persists_until_closed"]
+fn pending_flood_persists_until_closed() {
+    let _one = serial();
+    // The memory of an unfinished chunked transmission is not transient: it stays until the transmission is closed (or
+    // the terminal is reset). The terminal is made through the counting allocator (not armed) so that the live bytes
+    // are exact: resident-set numbers do not fall when the allocator keeps freed pages.
+    let mut raw = raw_terminal_with_alloc(80, 24, (8, 16), PROBE_LIMIT, global_allocator());
+    let start = LIVE.load(Ordering::Relaxed);
+    let at = |label: &str| {
+        let live = LIVE.load(Ordering::Relaxed) as i64 - start as i64;
+        println!("PROBE pending_flood_persists_until_closed: step={label} live_mib_over_start={}", live / MIB as i64);
+    };
+    at("start");
+    flood(&mut raw, "a=T,f=32,s=5000,v=5000,i=1", 120_000_000, false);
+    at("after_flood");
+    for i in 0..2000 {
+        raw.feed(format!("line {i} of ordinary program output\r\n").as_bytes());
+    }
+    at("after_2000_text_lines");
+    raw.feed(&apc("m=0", &[]));
+    at("after_closing_chunk");
+    println!(
+        "PROBE pending_flood_persists_until_closed: stored_images={} reply={}",
+        raw.stored_among(8),
+        raw.take_replies().chars().take(120).collect::<String>()
+    );
+    // A second flood, then a reset instead of a closing chunk.
+    flood(&mut raw, "a=T,f=32,s=5000,v=5000,i=1", 120_000_000, false);
+    at("after_second_flood");
+    raw.terminal.reset();
+    at("after_reset");
 }
