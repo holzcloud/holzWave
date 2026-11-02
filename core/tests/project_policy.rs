@@ -560,9 +560,9 @@ const RUST_NETWORK_TOKENS: [&str; 10] = [
 const PAGE_NETWORK_TOKENS: [&str; 7] =
     ["fetch(", "XMLHttpRequest", "WebSocket", "EventSource", "sendBeacon", "http://", "https://"];
 
-/// Build and CI configurations that must not exist (D-04: local only, no GitHub Actions).
-const CI_PATHS: [&str; 6] = [
-    ".github/workflows",
+/// Build and CI configurations that must not exist (D-04: local only, no push-triggered CI). GitHub Actions has one
+/// exception, the manual workflow below.
+const CI_PATHS: [&str; 5] = [
     ".circleci",
     ".gitlab-ci.yml",
     ".travis.yml",
@@ -1381,6 +1381,30 @@ fn no_ci_workflows_exist() {
     for relative in CI_PATHS {
         assert!(!root().join(relative).exists(), "{relative} exists: D-04 says local builds and tests only");
     }
+}
+
+/// The one workflow that may exist: the Linux packages are built on a native amd64 runner, started by hand.
+const MANUAL_WORKFLOW: &str = "linux-packages.yml";
+
+#[test]
+fn only_the_manual_linux_packages_workflow_exists() {
+    let dir = root().join(".github/workflows");
+    if !dir.exists() {
+        return;
+    }
+    let mut names: Vec<String> = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot read .github/workflows: {e}"))
+        .map(|entry| entry.expect("a directory entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, [MANUAL_WORKFLOW], "D-04: the only workflow allowed is {MANUAL_WORKFLOW}");
+
+    let source = fs::read_to_string(dir.join(MANUAL_WORKFLOW)).expect("the workflow is readable");
+    let on = source.split("\non:\n").nth(1).expect("the workflow has an `on:` block");
+    let on_block: Vec<&str> = on.lines().take_while(|line| line.starts_with(' ') || line.is_empty()).collect();
+    let on_keys: Vec<&str> =
+        on_block.iter().filter(|line| line.starts_with("  ") && !line.starts_with("   ")).map(|l| l.trim()).collect();
+    assert_eq!(on_keys, ["workflow_dispatch:"], "the workflow must start by hand only, never on push, pull request or schedule");
 }
 
 // ---- first-party sources ----------------------------------------------------------------------------------
