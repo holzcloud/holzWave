@@ -1,35 +1,74 @@
 #!/bin/sh
 # The performance guard (POL-02, D-14, D-15): measure this machine now and compare with the baseline that was recorded on it.
 #
-#   sh scripts/perf-check.sh                  # measure the core metrics, compare with perf/baseline-<os>-<arch>.json
-#   sh scripts/perf-check.sh --measure-only   # only measure: target/perf.log and target/perf-run.json (perf-record.sh uses it)
+#   sh scripts/perf-check.sh [group]                 # measure the group, compare with perf/baseline-<os>-<arch>.json
+#   sh scripts/perf-check.sh --measure-only [group]  # only measure: target/perf.log and target/perf-run.json (perf-record.sh uses it)
+#
+# Groups (the default is core):
+#   core       the engine and the pane actor, no socket (core/tests/perf.rs)          scope core.
+#   server     a real socket to the real server: key to frame, reattach, memory      scope server.   (server/tests/perf.rs)
+#   web        a real browser against the real server: key to paint, reload          scope web.      (app/tests/web/perf.mjs)
+#   container  the core and server tests in the Linux container, the reference for the server (D-16)   scope core.,server.
+#   all        core, server and web in turn; the exit status is the worst one
+#
+# A group is judged only on the metrics it measured (its scope), so a run of one group is never failed for lacking the metrics
+# of another. Inside the scope a metric the run lacks fails.
 #
 # Exit status: 0 no metric is clearly worse than the baseline ("PERF OK"), 1 one is ("PERF WORSE"), 2 the guard cannot
-# judge: no baseline for this machine, a measurement that failed, a log without a PERF line, an unreadable file. A guard
-# that cannot judge never passes.
+# judge: an unknown group, no baseline for this machine, a measurement that failed, a log without a PERF line, an unreadable
+# file. A guard that cannot judge never passes.
 #
 # Not part of `cargo test` or `npm test`, and no CI file reaches it (D-12): a person runs it, on the machine whose
-# baseline it is. The tolerances are in scripts/perf-compare.mjs; the measurements are core/tests/perf.rs.
+# baseline it is. The tolerances are in scripts/perf-compare.mjs; the measurements are core/tests/perf.rs,
+# server/tests/perf.rs and app/tests/web/perf.mjs.
 set -eu
 
 cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+
+GROUPS_LIST="core, server, web, container, all"
 
 measure_only=no
 group=core
 for arg in "$@"; do
     case "$arg" in
         --measure-only) measure_only=yes ;;
-        core) group=core ;;
+        core | server | web | container | all) group=$arg ;;
         *)
-            echo "usage: sh scripts/perf-check.sh [--measure-only] [core]" >&2
+            echo "usage: sh scripts/perf-check.sh [--measure-only] [group]   groups: $GROUPS_LIST" >&2
             exit 2
             ;;
     esac
 done
 
+# `all` runs every group of this machine on its own, so each is judged on its own scope; the worst status is the status.
+if [ "$group" = all ]; then
+    if [ "$measure_only" = yes ]; then
+        echo "perf-check: --measure-only takes one group, not all ($GROUPS_LIST)" >&2
+        exit 2
+    fi
+    worst=0
+    for g in core server web; do
+        status=0
+        sh scripts/perf-check.sh "$g" || status=$?
+        if [ "$status" -gt "$worst" ]; then worst=$status; fi
+    done
+    if [ "$worst" -ne 0 ]; then
+        echo "perf-check: all: at least one group did not pass (exit status $worst)" >&2
+    fi
+    exit "$worst"
+fi
+
 os=$(uname -s | tr '[:upper:]' '[:lower:]')
 arch=$(uname -m)
 baseline="perf/baseline-$os-$arch.json"
+
+case "$group" in
+    core | server | web) scope="$group." ;;
+    container)
+        echo "perf-check: container: not yet" >&2
+        exit 2
+        ;;
+esac
 
 # Look for the baseline before the minutes of measuring: a guard without one has nothing to say.
 if [ "$measure_only" = no ] && [ ! -f "$baseline" ]; then
@@ -40,10 +79,34 @@ fi
 . scripts/env.sh
 mkdir -p target
 
+# The server tests embed the page and the web file loads it, so it must be built, and from the current sources.
+build_page() {
+    if ! npm --prefix app run build > target/build.log 2>&1; then
+        tail -n 40 target/build.log >&2
+        echo "perf-check: the page did not build (log: target/build.log)" >&2
+        exit 2
+    fi
+}
+
 echo "perf-check: measuring group '$group' in release mode (a few minutes; the machine should be idle)"
 # The output goes to a file and not into a pipe, so that a failing test fails this script.
-if ! cargo test --locked --offline --release -p holzwave-core --test perf -- --ignored --nocapture --test-threads=1 \
-    > target/perf.log 2>&1; then
+status=0
+case "$group" in
+    core)
+        cargo test --locked --offline --release -p holzwave-core --test perf -- --ignored --nocapture --test-threads=1 \
+            > target/perf.log 2>&1 || status=$?
+        ;;
+    server)
+        build_page
+        cargo test --locked --offline --release -p holzwave-server --features in-process-workers --test perf -- \
+            --ignored --nocapture --test-threads=1 > target/perf.log 2>&1 || status=$?
+        ;;
+    web)
+        echo "perf-check: web: not yet" >&2
+        exit 2
+        ;;
+esac
+if [ "$status" -ne 0 ]; then
     tail -n 40 target/perf.log >&2
     echo "perf-check: the measurement failed (log: target/perf.log)" >&2
     exit 2
@@ -55,4 +118,4 @@ if [ "$measure_only" = yes ]; then
     exit 0
 fi
 
-node scripts/perf-compare.mjs "$baseline" target/perf-run.json --scope "$group."
+node scripts/perf-compare.mjs "$baseline" target/perf-run.json --scope "$scope"

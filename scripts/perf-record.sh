@@ -1,12 +1,12 @@
 #!/bin/sh
 # Record the performance baseline of this machine (POL-02, D-15, D-16).
 #
-#   sh scripts/perf-record.sh [core] [--replace]
+#   sh scripts/perf-record.sh [core|server|web|container|all] [--replace]
 #
-# It measures exactly as `perf-check.sh` does (it runs that script with --measure-only: one test command, one collector),
-# then writes or extends perf/baseline-<os>-<arch>.json. A metric that is already in the file is replaced only with
+# It measures exactly as `perf-check.sh` does (it runs that script with --measure-only: one test command, one collector per
+# group), then writes or extends perf/baseline-<os>-<arch>.json. A metric that is already in the file is replaced only with
 # --replace, and a baseline is replaced on purpose, with the reason in the commit message. New metrics are added, so a later
-# group extends the file of a machine without touching the first.
+# group extends the file of a machine without touching the first. `all` is core, server and web in turn.
 #
 # The file is a record of THIS machine only: the date, the operating system and architecture, the CPU model string, the core
 # count, the commit and the metrics. It holds no host name, user name, path or address.
@@ -19,9 +19,9 @@ replace=
 for arg in "$@"; do
     case "$arg" in
         --replace) replace=--replace ;;
-        core) group=core ;;
+        core | server | web | container | all) group=$arg ;;
         *)
-            echo "usage: sh scripts/perf-record.sh [core] [--replace]" >&2
+            echo "usage: sh scripts/perf-record.sh [core|server|web|container|all] [--replace]" >&2
             exit 2
             ;;
     esac
@@ -31,10 +31,22 @@ os=$(uname -s | tr '[:upper:]' '[:lower:]')
 arch=$(uname -m)
 baseline="perf/baseline-$os-$arch.json"
 
-sh scripts/perf-check.sh --measure-only "$group"
+if [ "$group" = container ]; then
+    echo "perf-record: container: not yet" >&2
+    exit 2
+fi
 
-mkdir -p perf
-node scripts/perf-baseline.mjs target/perf-run.json "$baseline" ${replace:+"$replace"}
+if [ "$group" = all ]; then
+    groups="core server web"
+else
+    groups=$group
+fi
+
+for g in $groups; do
+    sh scripts/perf-check.sh --measure-only "$g"
+    mkdir -p perf
+    node scripts/perf-baseline.mjs target/perf-run.json "$baseline" ${replace:+"$replace"}
+done
 
 echo "perf-record: $baseline"
 echo "perf-record: this file is a record of this machine only (cpu, cores, date, commit); do not copy it to another one"
