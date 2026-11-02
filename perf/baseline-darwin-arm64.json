@@ -4,7 +4,7 @@
   "arch": "arm64",
   "cpu": "Apple M1 Max",
   "cores": 10,
-  "commit": "d0babb76",
+  "commit": "da9b46f6",
   "metrics": {
     "core.key_to_frame_p50_ms": {
       "median": 0.134458,
@@ -53,6 +53,72 @@
       "p95": 0.44518312499999974,
       "unit": "ms",
       "runs": 5
+    },
+    "server.key_to_frame_p50_ms": {
+      "median": 0.5975410000000001,
+      "p95": 0.647875,
+      "unit": "ms",
+      "runs": 9
+    },
+    "server.key_to_frame_p99_ms": {
+      "median": 1.204167,
+      "p95": 1.9996250000000002,
+      "unit": "ms",
+      "runs": 9
+    },
+    "server.memory_pane_empty_mib": {
+      "median": 0.2919921875,
+      "p95": 0.29296875,
+      "unit": "mib",
+      "runs": 5
+    },
+    "server.memory_pane_scrollback_mib": {
+      "median": 4.423828125,
+      "p95": 4.4404296875,
+      "unit": "mib",
+      "runs": 5
+    },
+    "server.reattach_ms": {
+      "median": 2.929,
+      "p95": 3.366458,
+      "unit": "ms",
+      "runs": 10
+    },
+    "web.chromium.key_to_paint_p50_ms": {
+      "median": 2.800000011920929,
+      "p95": 2.9000000059604645,
+      "unit": "ms",
+      "runs": 5
+    },
+    "web.chromium.key_to_paint_p99_ms": {
+      "median": 15.699999988079071,
+      "p95": 22.30000001192093,
+      "unit": "ms",
+      "runs": 5
+    },
+    "web.chromium.reattach_paint_ms": {
+      "median": 114.50000001490116,
+      "p95": 126.90000000596046,
+      "unit": "ms",
+      "runs": 10
+    },
+    "web.webkit.key_to_paint_p50_ms": {
+      "median": 13,
+      "p95": 14,
+      "unit": "ms",
+      "runs": 5
+    },
+    "web.webkit.key_to_paint_p99_ms": {
+      "median": 23,
+      "p95": 24,
+      "unit": "ms",
+      "runs": 5
+    },
+    "web.webkit.reattach_paint_ms": {
+      "median": 158.5,
+      "p95": 170,
+      "unit": "ms",
+      "runs": 10
     }
   }
 }

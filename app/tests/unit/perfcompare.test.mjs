@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { collect } from "../../../scripts/perf-collect.mjs";
 import { compare, TOLERANCE } from "../../../scripts/perf-compare.mjs";
-import { BASELINE_KEYS, mergeBaseline } from "../../../scripts/perf-baseline.mjs";
+import { BASELINE_KEYS, mergeBaseline, parseMachine } from "../../../scripts/perf-baseline.mjs";
 
 const script = (name) => fileURLToPath(new URL(`../../../scripts/${name}`, import.meta.url));
 
@@ -302,6 +302,20 @@ test("mergeBaseline refuses to extend the baseline of another CPU and a metric t
   assert.throws(() => mergeBaseline(first, { metrics: {} }, { ...header, cpu: "Other CPU" }), /another CPU/);
   assert.doesNotThrow(() => mergeBaseline(first, { metrics: {} }, { ...header, cpu: "Other CPU" }, { replace: true }));
   assert.throws(() => mergeBaseline(null, { metrics: { "core.a_ms": { median: 0, p95: 1, unit: "ms", runs: 5 } } }, header), /positive/);
+});
+
+test("parseMachine reads the one PERF-MACHINE line of a container log and nothing the file name could be built from badly", () => {
+  const line = (o) => `PERF-MACHINE ${JSON.stringify(o)}`;
+  const good = { os: "Linux", arch: "aarch64", cpu: "aarch64", cores: 10 };
+  assert.deepEqual(parseMachine(`noise\n${line(good)}\nPERF {"name":"core.a_ms"}\n`), { os: "linux", arch: "aarch64", cpu: "aarch64", cores: 10 });
+  assert.throws(() => parseMachine("no line here\n"), /0 PERF-MACHINE lines/);
+  assert.throws(() => parseMachine(`${line(good)}\n${line(good)}\n`), /2 PERF-MACHINE lines/);
+  assert.throws(() => parseMachine("PERF-MACHINE {not json}"), /not JSON/);
+  assert.throws(() => parseMachine(line({ ...good, host: "box" })), /unknown field/);
+  assert.throws(() => parseMachine(line({ os: "Linux", arch: "aarch64", cpu: "x" })), /lacks cores/);
+  for (const bad of [{ os: "../etc" }, { os: "linux/x" }, { arch: "aarch64; rm" }, { arch: "a/b" }, { cpu: "x\ny" }, { cpu: "/Users/me" + "x".repeat(80) }, { cores: 0 }, { cores: 1.5 }, { cores: "8" }]) {
+    assert.throws(() => parseMachine(line({ ...good, ...bad })), /PERF-MACHINE/, JSON.stringify(bad));
+  }
 });
 
 function everyString(value, out = []) {

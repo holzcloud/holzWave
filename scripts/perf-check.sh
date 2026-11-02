@@ -62,16 +62,19 @@ os=$(uname -s | tr '[:upper:]' '[:lower:]')
 arch=$(uname -m)
 baseline="perf/baseline-$os-$arch.json"
 
+log=target/perf.log
 case "$group" in
     core | server | web) scope="$group." ;;
     container)
-        echo "perf-check: container: not yet" >&2
-        exit 2
+        # The container is another machine: its baseline is named by its own PERF-MACHINE line (perf/baseline-linux-aarch64.json
+        # on an Apple Silicon Mac), so it can only be looked for after the measurement.
+        scope="core.,server."
+        log=target/perf-container.log
         ;;
 esac
 
 # Look for the baseline before the minutes of measuring: a guard without one has nothing to say.
-if [ "$measure_only" = no ] && [ ! -f "$baseline" ]; then
+if [ "$group" != container ] && [ "$measure_only" = no ] && [ ! -f "$baseline" ]; then
     echo "perf-check: there is no baseline for this machine ($baseline). Record one first: sh scripts/perf-record.sh" >&2
     exit 2
 fi
@@ -105,17 +108,33 @@ case "$group" in
         build_page
         node app/tests/web/perf.mjs > target/perf.log 2>&1 || status=$?
         ;;
+    container)
+        # The mode builds the page, runs the two perf binaries in the container, prints what they print and keeps it in the log.
+        sh scripts/linux-container-test.sh perf || status=$?
+        ;;
 esac
 if [ "$status" -ne 0 ]; then
-    tail -n 40 target/perf.log >&2
-    echo "perf-check: the measurement failed (log: target/perf.log)" >&2
+    tail -n 40 "$log" >&2
+    echo "perf-check: the measurement failed (log: $log)" >&2
     exit 2
 fi
 
-node scripts/perf-collect.mjs target/perf.log target/perf-run.json
+node scripts/perf-collect.mjs "$log" target/perf-run.json
 
 if [ "$measure_only" = yes ]; then
     exit 0
+fi
+
+if [ "$group" = container ]; then
+    # The machine the log names, not this one.
+    baseline=$(node scripts/perf-baseline.mjs --name "$log") || {
+        echo "perf-check: the container log names no machine (PERF-MACHINE line)" >&2
+        exit 2
+    }
+    if [ ! -f "$baseline" ]; then
+        echo "perf-check: there is no baseline for the container ($baseline). Record one first: sh scripts/perf-record.sh container" >&2
+        exit 2
+    fi
 fi
 
 node scripts/perf-compare.mjs "$baseline" target/perf-run.json --scope "$scope"

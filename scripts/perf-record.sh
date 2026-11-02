@@ -31,11 +31,6 @@ os=$(uname -s | tr '[:upper:]' '[:lower:]')
 arch=$(uname -m)
 baseline="perf/baseline-$os-$arch.json"
 
-if [ "$group" = container ]; then
-    echo "perf-record: container: not yet" >&2
-    exit 2
-fi
-
 if [ "$group" = all ]; then
     groups="core server web"
 else
@@ -45,7 +40,14 @@ fi
 for g in $groups; do
     sh scripts/perf-check.sh --measure-only "$g"
     mkdir -p perf
-    node scripts/perf-baseline.mjs target/perf-run.json "$baseline" ${replace:+"$replace"}
+    if [ "$g" = container ]; then
+        # The container is another machine: the file name and the header (os, arch, cpu, cores) come from its own PERF-MACHINE
+        # line, never from this Mac.
+        baseline=$(node scripts/perf-baseline.mjs --name target/perf-container.log)
+        node scripts/perf-baseline.mjs target/perf-run.json "$baseline" --machine target/perf-container.log ${replace:+"$replace"}
+    else
+        node scripts/perf-baseline.mjs target/perf-run.json "$baseline" ${replace:+"$replace"}
+    fi
 done
 
 echo "perf-record: $baseline"

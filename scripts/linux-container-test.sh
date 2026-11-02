@@ -3,12 +3,19 @@
 #
 #   sh scripts/linux-container-test.sh [core|app|server|all] [-- <arguments for the test binaries>]    (default: core)
 #   sh scripts/linux-container-test.sh image
+#   sh scripts/linux-container-test.sh perf
 #
 # Modes: `core` runs `cargo test -p holzwave-core`, `app` runs `cargo test -p holzwave-app` (the app crate needs a
 # built page: `npm --prefix app run build` runs first), `server` runs `cargo test` for the packages of the browser build
 # (`holzwave-host`, `holzwave-server` and `holzwave-spawn-helper`; the server serves the built page, so the page is
 # built first as for `app`), `all` runs the whole workspace. Everything after `--` goes to
 # the test binaries, for example `-- --test-threads=1` or a test name.
+#
+# `perf` runs no test suite: it runs the two ignored release measurements, `holzwave-core --test perf` and
+# `holzwave-server --test perf` (the reference of the server, D-16; `sh scripts/perf-check.sh container` and
+# `perf-record.sh container` are its users), after the page has been built. It prints one `PERF-MACHINE {json}` line
+# (`uname`, the CPU model of /proc/cpuinfo or `uname -m` where the kernel names none, and the core count) and then the
+# `PERF` lines, and keeps everything in `target/perf-container.log` of the working tree. It takes no arguments after `--`.
 #
 # The container is `ubuntu:26.04`, which is arm64 on an Apple Silicon Mac: a proxy for x86_64 (the same kernel API
 # and the same code paths, not the same CPU). The first run builds the image `holzwave-linux-test` (build tools,
@@ -52,7 +59,7 @@ root=$(dirname "$here")
 
 mode=core
 case "${1:-}" in
-    core | app | server | all | image)
+    core | app | server | all | image | perf)
         mode=$1
         shift
         ;;
@@ -61,7 +68,7 @@ case "${1:-}" in
     "") ;;
     --) shift ;;
     *)
-        echo "usage: sh scripts/linux-container-test.sh [core|app|server|all|image] [-- <arguments for the test binaries>]" >&2
+        echo "usage: sh scripts/linux-container-test.sh [core|app|server|all|image|perf] [-- <arguments for the test binaries>]" >&2
         exit 2
         ;;
 esac
@@ -159,6 +166,48 @@ run_tests() {
     echo "linux-container-test: ok ($results test binaries)"
 }
 
+# The performance measurements in a container (the `perf` mode): the page is built on the Mac first (the server tests embed it),
+# then the working tree is streamed in as for the tests and the two ignored release tests run, one after the other. The
+# whole output, the PERF-MACHINE line first, goes to target/perf-container.log of the working tree (a tee to a file under
+# $root/target, so that nothing but the working tree is written on the Mac). Exit status: 1 when a test binary failed.
+run_perf() {
+    mkdir -p "$root/target"
+    perf_log="$root/target/perf-container.log"
+    : >"$perf_log" || exit 2
+    code=$(mktemp "${TMPDIR:-/tmp}/holzwave-linux-test-code.XXXXXX") || exit 2
+    echo "+ docker run $IMAGE cargo test --locked --release -p holzwave-core --test perf, then -p holzwave-server --test perf"
+    # The same image, --init and volumes as run_tests: no mount of the Mac's home, no added capability.
+    tree_stream | {
+        docker run --rm -i --init ${PLATFORM:+--platform "$PLATFORM"} \
+            -v holzwave-linux-cargo-registry:/root/.cargo/registry \
+            -v holzwave-linux-cargo-git:/root/.cargo/git \
+            -v holzwave-linux-target$SUFFIX:/work/target \
+            -e CARGO_TERM_COLOR=never \
+            ${CARGO_BUILD_JOBS:+-e CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS"} \
+            "$IMAGE" \
+            sh -c 'tar -x --no-same-owner -C /work || exit 1
+                os=$(uname -s | tr "[:upper:]" "[:lower:]")
+                arch=$(uname -m)
+                cpu=$(sed -n "s/^model name[[:space:]]*:[[:space:]]*//p" /proc/cpuinfo | head -n 1 | tr -cd "A-Za-z0-9 ._()@:/+-")
+                [ -n "$cpu" ] || cpu=$arch
+                cores=$(getconf _NPROCESSORS_ONLN)
+                printf "PERF-MACHINE {\"os\":\"%s\",\"arch\":\"%s\",\"cpu\":\"%s\",\"cores\":%s}\n" "$os" "$arch" "$cpu" "$cores"
+                status=0
+                cargo test --locked --release -p holzwave-core --test perf -- --ignored --nocapture --test-threads=1 || status=1
+                cargo test --locked --release -p holzwave-server --features in-process-workers --test perf -- --ignored --nocapture --test-threads=1 || status=1
+                exit $status'
+        echo $? >"$code"
+    } 2>&1 | tee "$perf_log"
+
+    status=$(cat "$code")
+    rm -f "$code"
+    if [ "$status" != 0 ]; then
+        echo "linux-container-test: perf FAILED (docker exit $status; log: target/perf-container.log)" >&2
+        exit 1
+    fi
+    echo "linux-container-test: perf ok (log: target/perf-container.log)"
+}
+
 # An image that holds another Zig than ZIG_VERSION (or was built before the label existed) is built again: the terminal
 # engine does not build with the wrong Zig, and a cached image would hide that behind a failure deep in the build.
 image_zig=$(docker image inspect -f '{{index .Config.Labels "ch.holzcloud.holzwave.zig"}}' "$IMAGE" 2>/dev/null)
@@ -172,6 +221,21 @@ fi
 
 if [ "$mode" = image ]; then
     echo "linux-container-test: the image $IMAGE is there"
+    exit 0
+fi
+
+if [ "$mode" = perf ]; then
+    if [ $# -gt 0 ]; then
+        echo "linux-container-test: perf takes no arguments" >&2
+        exit 2
+    fi
+    if ! command -v npm >/dev/null 2>&1; then
+        echo "linux-container-test: npm is missing: the server tests need a built page (app/dist)" >&2
+        exit 2
+    fi
+    echo "+ npm --prefix app run build"
+    (cd "$root" && npm --prefix app run build) || exit 1
+    run_perf
     exit 0
 fi
 
