@@ -114,6 +114,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocator-api2"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c880a97d28a3681c0267bd29cff89621202715b065127cd445fa0f0fe0aa2880"
+
+[[package]]
 name = "ammonia"
 version = "4.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2697,6 +2703,7 @@ dependencies = [
 name = "holzwave-core"
 version = "0.0.1-beta2"
 dependencies = [
+ "allocator-api2",
  "ammonia",
  "argon2 0.6.0",
  "chacha20poly1305",
@@ -3499,6 +3506,7 @@ name = "libghostty-vt"
 version = "0.2.1"
 source = "git+https://github.com/Uzaaft/libghostty-rs?rev=575ed6b8ceb79ffaf247ecf7e34333876b0d5be4#575ed6b8ceb79ffaf247ecf7e34333876b0d5be4"
 dependencies = [
+ "allocator-api2",
  "bitflags 2.13.2",
  "int-enum",
  "libghostty-vt-sys",

@@ -6,8 +6,11 @@
 //! own PNG decoder, so that a header which claims gigabytes is refused before anything is allocated.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::ptr::NonNull;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use allocator_api2::alloc::{AllocError, Allocator as RustAllocator, Global, Layout};
 use libghostty_vt::alloc::Allocator;
 use libghostty_vt::kitty::graphics::{DecodePng, DecodedImage, RustPngDecoder, set_png_decoder};
 
@@ -26,6 +29,22 @@ pub const MAX_IMAGE_DIMENSION: u32 = 10_000;
 /// 4096 characters, so 8 MiB is two thousand times that, and a single hostile sequence costs at most this much (the
 /// library's own default is 65 MiB).
 pub const KITTY_APC_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// The smallest request that [`BoundedAlloc`] may refuse. Everything smaller is always granted, so a refusal only ever
+/// hits the big buffers of a hostile stream (the data of an open transmission, an inflate, a PNG's pixels), never the
+/// small bookkeeping of the terminal, whose failure paths are not the ones that were written for an image that does
+/// not fit.
+pub const REFUSE_FROM_BYTES: usize = 64 * 1024;
+
+/// What one terminal may hold in live allocations while images arrive, as a function of its image limit: two screens
+/// of stored images (the main and the alternate screen each keep the limit), plus 64 MiB of room for the image that is
+/// being received. The room is what the library's growth needs: it grows the buffer of a transmission by half each
+/// time and holds the old and the new buffer at once, so an image of the limit's size peaks at about 2.4 times its
+/// size (measured: 140 MiB for a 58 MiB image), which the cap lets through.
+pub fn image_memory_cap(image_bytes: u64) -> usize {
+    let cap = image_bytes.saturating_mul(2).saturating_add(64 * 1024 * 1024);
+    usize::try_from(cap).unwrap_or(usize::MAX)
+}
 
 /// The eight bytes every PNG file starts with.
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
@@ -80,6 +99,97 @@ pub fn ensure_png_decoder() -> bool {
         // none is created without having passed here. The decoder is `Send + 'static` and never panics.
         unsafe { set_png_decoder(Some(Box::new(BoundedPng))) }.is_ok()
     })
+}
+
+/// What a terminal's allocator has seen, in bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageMemory {
+    /// Live allocations of the terminal right now.
+    pub live: usize,
+    /// The most live allocations at any time since the terminal was made.
+    pub peak: usize,
+    /// The bound: a request of [`REFUSE_FROM_BYTES`] or more that would take `live` past it is refused.
+    pub cap: usize,
+    /// How many requests have been refused.
+    pub refused: usize,
+}
+
+/// The allocator of one terminal: Rust's global allocator behind libghostty's allocator interface, with a count of the
+/// live bytes and a bound on them.
+///
+/// The library holds the data of a Kitty transmission that is still arriving in one growing buffer, and its zlib
+/// inflate and PNG decode write to buffers sized from what the program declares. Its own bound for one image is 400 MiB
+/// and it is applied only when the image is complete, so without this a program could make one pane hold 400 MiB for as
+/// long as it keeps a transmission open. A refused request makes the library drop that transmission and answer the
+/// program with an error; the terminal stays usable (tested with floods and a zlib bomb).
+///
+/// It is shared by nothing: every engine has its own, so one pane cannot use up the room of another. The count is exact
+/// for what the library allocates through it (the images and their loading buffers; the scrollback of the terminal is
+/// not allocated here, the library maps that memory itself).
+#[derive(Debug)]
+pub struct BoundedAlloc {
+    live: AtomicUsize,
+    peak: AtomicUsize,
+    cap: usize,
+    refused: AtomicUsize,
+}
+
+impl BoundedAlloc {
+    /// An allocator that refuses a request of [`REFUSE_FROM_BYTES`] or more that would take the live bytes past `cap`.
+    pub fn new(cap: usize) -> Self {
+        Self { live: AtomicUsize::new(0), peak: AtomicUsize::new(0), cap, refused: AtomicUsize::new(0) }
+    }
+
+    /// The counts so far.
+    pub fn memory(&self) -> ImageMemory {
+        ImageMemory {
+            live: self.live.load(Ordering::Relaxed),
+            peak: self.peak.load(Ordering::Relaxed),
+            cap: self.cap,
+            refused: self.refused.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Take `size` bytes into the count, or say no when a big request would pass the cap.
+    fn reserve(&self, size: usize) -> bool {
+        let mut live = self.live.load(Ordering::Relaxed);
+        loop {
+            let after = live.saturating_add(size);
+            if size >= REFUSE_FROM_BYTES && after > self.cap {
+                self.refused.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
+            match self.live.compare_exchange_weak(live, after, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => {
+                    self.peak.fetch_max(after, Ordering::Relaxed);
+                    return true;
+                }
+                Err(seen) => live = seen,
+            }
+        }
+    }
+}
+
+// SAFETY: every method forwards to `Global`, Rust's own allocator, with the layout it was given, so the memory is valid,
+// unique and sized as the trait requires. The count only observes: `deallocate` is called by the library with the
+// pointer and layout of an earlier `allocate`, and that is what is subtracted. `grow` and `shrink` are the trait's
+// provided methods (allocate a new block, copy, free the old one), so they go through the two methods below and the
+// count stays exact. Nothing here panics: a refused request is an `Err`, and the library turns that into an error reply.
+unsafe impl RustAllocator for BoundedAlloc {
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        if !self.reserve(layout.size()) {
+            return Err(AllocError);
+        }
+        Global.allocate(layout).inspect_err(|_| {
+            self.live.fetch_sub(layout.size(), Ordering::Relaxed);
+        })
+    }
+
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        self.live.fetch_sub(layout.size(), Ordering::Relaxed);
+        // SAFETY: the caller upholds the trait's contract, and the block came from `Global.allocate` above.
+        unsafe { Global.deallocate(ptr, layout) }
+    }
 }
 
 #[cfg(test)]
@@ -144,6 +254,63 @@ mod tests {
         assert!(decoder.decode_png(&alloc, &[]).is_none());
         // A good header with no body: the library's decoder is reached and says no, without a panic.
         assert!(decoder.decode_png(&alloc, &header(4, 4)).is_none());
+    }
+
+    fn layout(size: usize) -> Layout {
+        Layout::from_size_align(size, 8).expect("a layout")
+    }
+
+    #[test]
+    fn a_big_request_past_the_cap_is_refused_and_a_small_one_never_is() {
+        let alloc = BoundedAlloc::new(1 << 20);
+        let first = alloc.allocate(layout(600 * 1024)).expect("inside the cap");
+        // 600 KiB live; another 600 KiB would pass 1 MiB.
+        assert!(alloc.allocate(layout(600 * 1024)).is_err());
+        assert_eq!(alloc.memory().refused, 1);
+        assert_eq!(alloc.memory().live, 600 * 1024, "a refused request is not counted");
+        // A small request is granted even when the live bytes are at the cap.
+        let small = alloc.allocate(layout(4096)).expect("small requests are always granted");
+        let more: Vec<_> = (0..200).map(|_| alloc.allocate(layout(4096)).expect("granted")).collect();
+        assert!(alloc.memory().live > 1 << 20, "small requests may take the count past the cap");
+        // Freeing brings the count down and the room back.
+        for p in more {
+            unsafe { alloc.deallocate(p.cast(), layout(4096)) };
+        }
+        unsafe { alloc.deallocate(small.cast(), layout(4096)) };
+        unsafe { alloc.deallocate(first.cast(), layout(600 * 1024)) };
+        let again = alloc.allocate(layout(900 * 1024)).expect("room again after the free");
+        unsafe { alloc.deallocate(again.cast(), layout(900 * 1024)) };
+        let memory = alloc.memory();
+        assert_eq!((memory.live, memory.cap, memory.refused), (0, 1 << 20, 1));
+        assert!(memory.peak >= 900 * 1024);
+    }
+
+    #[test]
+    fn growing_goes_through_the_count_and_a_refused_grow_leaves_the_block_alone() {
+        let alloc = BoundedAlloc::new(1 << 20);
+        let block = alloc.allocate(layout(400 * 1024)).expect("block");
+        unsafe { block.cast::<u8>().as_ptr().write_bytes(0xAB, 400 * 1024) };
+        // The old and the new block are live together while a grow copies: 400 + 700 KiB is over the cap.
+        let refused = unsafe { alloc.grow(block.cast(), layout(400 * 1024), layout(700 * 1024)) };
+        assert!(refused.is_err());
+        assert_eq!(alloc.memory().live, 400 * 1024, "the old block is still counted and still there");
+        assert_eq!(unsafe { *block.cast::<u8>().as_ptr().add(1000) }, 0xAB);
+        // A grow that fits keeps the contents and moves the count to the new size.
+        let grown = unsafe { alloc.grow(block.cast(), layout(400 * 1024), layout(500 * 1024)) };
+        // 400 + 500 KiB is inside 1 MiB.
+        let grown = grown.expect("a grow inside the cap");
+        assert_eq!(alloc.memory().live, 500 * 1024);
+        assert_eq!(unsafe { *grown.cast::<u8>().as_ptr().add(399 * 1024) }, 0xAB);
+        unsafe { alloc.deallocate(grown.cast(), layout(500 * 1024)) };
+        assert_eq!(alloc.memory().live, 0);
+    }
+
+    #[test]
+    fn the_cap_follows_the_image_limit_and_cannot_overflow() {
+        const MIB: u64 = 1024 * 1024;
+        assert_eq!(image_memory_cap(64 * MIB), (2 * 64 + 64) as usize * MIB as usize);
+        assert_eq!(image_memory_cap(0), 64 * MIB as usize, "even with the protocol off the terminal keeps its room");
+        assert_eq!(image_memory_cap(u64::MAX), usize::MAX);
     }
 
     #[test]

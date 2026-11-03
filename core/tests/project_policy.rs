@@ -59,6 +59,13 @@ const WORKSPACE_ALLOWLIST: &[(&str, &[Dependency])] = &[
     (
         "holzwave-core",
         &[
+            (
+                "allocator-api2",
+                "the allocator trait that the engine's allocator feature speaks: the engine implements it to count and \
+                 bound what one terminal holds for Kitty images (images.rs). The engine's allocator_api feature requires \
+                 this same crate, so it is the one extra package in the lock; pinned exactly, optional through the \
+                 ghostty feature",
+            ),
             ("ammonia", "allow-list sanitiser for the Markdown HTML of previews (preview.rs)"),
             ("argon2", "Argon2id stretching of the sync passphrase into the file key (sync/crypto.rs)"),
             ("chacha20poly1305", "XChaCha20-Poly1305 authenticated encryption of every synced file (sync/crypto.rs)"),

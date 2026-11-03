@@ -4,6 +4,7 @@ use std::rc::Rc;
 use libghostty_vt::key::{self, Action, Key, OptionAsAlt};
 use libghostty_vt::mouse::{self, EncoderSize};
 use libghostty_vt::paste::Options as PasteOptions;
+use libghostty_vt::alloc::Allocator;
 use libghostty_vt::kitty::graphics::ImageFormat;
 use libghostty_vt::render::{
     CellIterator, Colors, CursorVisualStyle, Dirty, ImageIteration, ImageIterator, ImageLayer as VtLayer, ImageProtocol,
@@ -25,7 +26,7 @@ use crate::engine::{
     MouseAction, MouseButton, MouseEvent, PasteOutcome, RowUpdate, Screen, Scrollbar, SearchOp, SearchState, SelectMode,
     SelectOp, Span, TerminalEngine, Update, WheelEvent, WheelOutcome, Width, sanitize_program_bytes,
 };
-use crate::images::{self, DEFAULT_IMAGE_BYTES, KITTY_APC_MAX_BYTES};
+use crate::images::{self, BoundedAlloc, DEFAULT_IMAGE_BYTES, ImageMemory, KITTY_APC_MAX_BYTES};
 use crate::textread::{
     Cut, MAX_READ_BYTES, MAX_READ_ROWS, TextBuilder, TextRead, TextRegion, cell_is_hidden, rows_within_budget,
 };
@@ -803,6 +804,8 @@ pub struct GhosttyEngine {
     /// The image-list generation and the cell size at the last time the list was read: the list is read again only when
     /// one of them differs, so a frame without image changes costs one integer compare.
     last_images: Option<(u64, (u32, u32))>,
+    /// The allocator of `terminal`: its live bytes and its bound.
+    image_alloc: &'static BoundedAlloc,
     /// Whether [`TerminalEngine::tick_images`] moves animations on; the page turns it off for people who asked for less
     /// motion.
     animation: bool,
@@ -841,7 +844,13 @@ impl GhosttyEngine {
         if !images::ensure_png_decoder() {
             return Err(Error::Engine("the PNG decoder could not be installed".into()));
         }
-        let mut terminal = Terminal::new(cols, rows).map_err(eng)?;
+        // The terminal's allocator counts what the library holds for images and refuses a request that would take it past
+        // the bound (see [`BoundedAlloc`]). It must live as long as the terminal, and the terminal borrows it for
+        // `'static`, so it is leaked: about 64 bytes per engine for the life of the process.
+        let image_alloc: &'static BoundedAlloc =
+            Box::leak(Box::new(BoundedAlloc::new(images::image_memory_cap(image_bytes))));
+        let vt_alloc: &'static Allocator<'static> = Box::leak(Box::new(Allocator::from(image_alloc)));
+        let mut terminal = Terminal::new_with_alloc(vt_alloc, cols, rows).map_err(eng)?;
         // Kitty graphics: the limits are set before the first byte arrives and none of the results is ignored. The
         // three media that name data outside the stream are refused (the library's defaults, said out loud so that a
         // library bump cannot widen them), and the result is read back below.
@@ -948,6 +957,7 @@ impl GhosttyEngine {
             copy: None,
             image_iter: ImageIterator::new().map_err(eng)?,
             last_images: None,
+            image_alloc,
             animation: true,
         };
         // Fail closed: an engine whose terminal still allows a medium is not handed out.
@@ -966,6 +976,12 @@ impl GhosttyEngine {
             from_temp_file: self.terminal.kitty_image_temp_file_dir().map_err(eng)?.is_some(),
             from_shared_memory: self.terminal.is_kitty_image_from_shared_mem_allowed().map_err(eng)?,
         })
+    }
+
+    /// What the terminal's allocator holds for images right now, its peak, its bound and the number of requests it has
+    /// refused. The bound is the most a program can make this engine hold for images; see [`images::image_memory_cap`].
+    pub fn image_memory(&self) -> ImageMemory {
+        self.image_alloc.memory()
     }
 
     /// The generation of the stored image `id` on the screen that is showing, `None` when there is no such image or
