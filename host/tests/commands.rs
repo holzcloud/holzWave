@@ -22,6 +22,8 @@ use holzwave_host::windows::{CursorSpot, Place};
 #[derive(Default)]
 struct Counting {
     events: AtomicUsize,
+    /// Every frame that went out, to read the placements of a picture from.
+    frames: Mutex<Vec<holzwave_core::wire::FrameMsg>>,
     log: Mutex<Vec<(String, &'static str)>>,
     opened: Mutex<Vec<String>>,
 }
@@ -29,6 +31,9 @@ struct Counting {
 impl Sink for Counting {
     fn send(&self, target: Target, out: Out) {
         self.events.fetch_add(1, Ordering::SeqCst);
+        if let Out::Frame(frame) = &out {
+            self.frames.lock().unwrap_or_else(PoisonError::into_inner).push(frame.clone());
+        }
         let window = match target {
             Target::All => "*".to_owned(),
             Target::Window(label) => label.to_string(),
@@ -107,6 +112,23 @@ impl World {
     /// How many events named `name` went to the window `window`.
     fn sent(&self, window: &str, name: &str) -> usize {
         self.sink.log.lock().unwrap_or_else(PoisonError::into_inner).iter().filter(|(w, n)| w == window && *n == name).count()
+    }
+
+    /// The placements of the pictures that the frames of the core have told about, in the order they came.
+    fn placements(&self) -> Vec<holzwave_core::wire::PlacementMsg> {
+        let frames = self.sink.frames.lock().unwrap_or_else(PoisonError::into_inner);
+        frames.iter().flat_map(|frame| frame.images.iter().flatten().cloned()).collect()
+    }
+
+    /// How many different generations of image `id` the frames have told about.
+    fn generations(&self, id: u32) -> usize {
+        let mut seen: Vec<u64> = Vec::new();
+        for placement in self.placements().iter().filter(|p| p.0 == id) {
+            if !seen.contains(&placement.1) {
+                seen.push(placement.1);
+            }
+        }
+        seen.len()
     }
 
     /// The pane that has the focus in the window `main`.
@@ -622,6 +644,200 @@ fn copy_selection_answers_false_whatever_is_selected_and_touches_no_clipboard() 
     assert!(matches!(world.call("copy_selection", r#"{"pane":"x"}"#), Outcome::Err(_)), "the arguments are still read");
 }
 
+// ---- pictures: the raw pixel read and the reduced-motion switch ------------------------------------------------------
+
+/// The header of an `image_data` answer: width, height, total length in bytes and offset, big-endian.
+fn image_header(answer: &[u8]) -> (u32, u32, u32, u32) {
+    let number = |at: usize| u32::from_be_bytes(answer[at..at + 4].try_into().expect("four bytes"));
+    (number(0), number(4), number(8), number(12))
+}
+
+fn binary(outcome: Outcome) -> Vec<u8> {
+    match outcome {
+        Outcome::Binary(bytes) => bytes,
+        other => panic!("expected raw bytes, got {other:?}"),
+    }
+}
+
+/// A world whose focused pane has printed `script`'s picture and told about it; the pane, and the generation of the
+/// picture with the id 5.
+#[cfg(unix)]
+fn world_with_picture(tag: &str, script: &str) -> (World, u64, u64) {
+    let world = World::running(tag, "/bin/sh", &["-c", script]);
+    let pane = world.focus();
+    world.core.start_pane(pane, 80, 24, 8, 16).expect("the shell starts");
+    eventually("the placement of the picture", || !world.placements().is_empty());
+    let generation = world.placements()[0].1;
+    (world, pane, generation)
+}
+
+#[cfg(unix)]
+#[test]
+fn image_data_answers_the_header_and_the_pixels_of_a_real_pane() {
+    let (world, pane, generation) = world_with_picture("image-data", &format!("{PRINT_ONE_PIXEL}; sleep 30"));
+
+    let answer = binary(world.call("image_data", &image_args(pane, 5, generation, 0)));
+
+    assert_eq!(answer.len(), 16 + 4);
+    assert_eq!(image_header(&answer), (1, 1, 4, 0), "width, height, total, offset");
+    assert_eq!(&answer[16..], [0, 0, 0, 255]);
+    // From the middle, and with the offset in the header as the pixels start there.
+    let answer = binary(world.call("image_data", &image_args(pane, 5, generation, 3)));
+    assert_eq!((image_header(&answer), &answer[16..]), ((1, 1, 4, 3), &[255][..]));
+}
+
+#[cfg(unix)]
+#[test]
+fn image_data_at_or_past_the_end_answers_the_header_and_no_bytes() {
+    let (world, pane, generation) = world_with_picture("image-end", &format!("{PRINT_ONE_PIXEL}; sleep 30"));
+
+    for offset in [4, 5, 1 << 40, u64::MAX] {
+        let answer = binary(world.call("image_data", &image_args(pane, 5, generation, offset)));
+        assert_eq!(answer.len(), 16, "offset {offset}");
+        let (width, height, total, at) = image_header(&answer);
+        assert_eq!((width, height, total), (1, 1, 4), "offset {offset}");
+        assert!(u64::from(at) <= 4, "the offset in the header is at most the end: {at}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn image_data_cuts_a_big_picture_into_pieces_of_512_kib_that_join_to_the_whole() {
+    // 400 by 400 RGBA is 640000 bytes: one full piece and a rest. The picture is sent in the protocol's own chunks.
+    let script = r#"head -c 640000 /dev/zero | base64 | tr -d '\n' | fold -w 4096 | {
+        read -r first
+        printf '\033_Ga=T,f=32,s=400,v=400,i=5,c=1,r=1,m=1,q=2;%s\033\\' "$first"
+        while read -r line || [ -n "$line" ]; do printf '\033_Gm=1,q=2;%s\033\\' "$line"; done
+        printf '\033_Gm=0,q=2;\033\\'
+        sleep 30
+    }"#;
+    let (world, pane, generation) = world_with_picture("image-big", script);
+
+    let first = binary(world.call("image_data", &image_args(pane, 5, generation, 0)));
+    assert_eq!(image_header(&first), (400, 400, 640_000, 0));
+    assert_eq!(first.len(), 16 + 512 * 1024, "never more than one piece");
+    let rest = binary(world.call("image_data", &image_args(pane, 5, generation, 512 * 1024)));
+    assert_eq!(image_header(&rest), (400, 400, 640_000, 512 * 1024));
+    assert_eq!(rest.len(), 16 + 640_000 - 512 * 1024);
+    // Asking for the piece that starts 100 bytes before the end gives exactly those bytes.
+    let tail = binary(world.call("image_data", &image_args(pane, 5, generation, 639_900)));
+    assert_eq!(tail.len(), 16 + 100);
+}
+
+#[cfg(unix)]
+#[test]
+fn image_data_fails_with_one_constant_text_for_every_kind_of_missing_picture() {
+    let (world, pane, generation) = world_with_picture("image-missing", &format!("{PRINT_ONE_PIXEL}; sleep 30"));
+    let refused = |args: String| error_text(&world.call("image_data", &args));
+
+    assert_eq!(refused(image_args(pane + 1000, 5, generation, 0)), "no such image", "an unknown pane");
+    assert_eq!(refused(image_args(pane, 6, generation, 0)), "no such image", "an unknown picture");
+    assert_eq!(refused(image_args(pane, 5, generation + 1, 0)), "no such image", "another generation");
+    assert_eq!(refused(image_args(pane, 5, 0, 0)), "no such image", "generation 0 is never valid");
+    assert_eq!(refused(image_args(pane, u32::MAX, u64::MAX, u64::MAX)), "no such image", "the extremes");
+    // The text carries none of what was asked.
+    for args in [image_args(pane + 1000, 123_456, 98_765, 0), image_args(pane, 123_456, 98_765, 0)] {
+        let text = refused(args);
+        assert!(!text.contains("123456") && !text.contains("98765"), "{text}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn image_data_of_a_picture_that_was_deleted_fails_like_a_picture_that_never_was() {
+    let script = format!(r"{PRINT_ONE_PIXEL}; sleep 0.5; printf '\033_Ga=d,d=I,i=5\033\\'; sleep 30");
+    let (world, pane, generation) = world_with_picture("image-deleted", &script);
+    eventually("the empty list", || world.sink.frames.lock().unwrap().iter().any(|f| f.images.as_ref().is_some_and(Vec::is_empty)));
+
+    assert_eq!(error_text(&world.call("image_data", &image_args(pane, 5, generation, 0))), "no such image");
+}
+
+#[test]
+fn image_data_refuses_arguments_that_are_not_numbers_of_the_right_kind() {
+    let world = World::new("image-args");
+    for args in [
+        r#"{"pane":1,"image":-1,"generation":1,"offset":0}"#,
+        r#"{"pane":1,"image":4294967296,"generation":1,"offset":0}"#,
+        r#"{"pane":1,"image":1,"generation":"1","offset":0}"#,
+        r#"{"pane":1,"image":1,"generation":1.5,"offset":0}"#,
+        r#"{"pane":1,"image":1,"generation":1}"#,
+        r#"{"pane":1,"image":1,"generation":1,"offset":0,"len":10}"#,
+    ] {
+        assert!(matches!(world.call("image_data", args), Outcome::Err(_)), "{args}");
+    }
+}
+
+#[test]
+fn image_data_and_set_image_animation_are_rows_in_the_terminal_group_with_the_shape_of_the_plan() {
+    let data = lookup("image_data").expect("image_data");
+    assert_eq!(data.group, "terminal");
+    assert_eq!((data.scope, data.mode, data.cap, data.web), (Scope::None, Mode::Async, CAP_DEFAULT, Web::Same));
+    assert!(data.raw);
+    assert_eq!(data.answer.replace(' ', ""), "tauri::ipc::Response");
+    assert_eq!(data.error, Some("String"));
+    let args: Vec<(&str, &str)> = data.args.iter().map(|arg| (arg.name, arg.ty)).collect();
+    assert_eq!(args, [("pane", "PaneId"), ("image", "u32"), ("generation", "u64"), ("offset", "u64")]);
+
+    let switch = lookup("set_image_animation").expect("set_image_animation");
+    assert_eq!(switch.group, "terminal");
+    assert_eq!((switch.scope, switch.mode, switch.cap, switch.web), (Scope::None, Mode::Sync, CAP_DEFAULT, Web::Same));
+    assert!(!switch.raw);
+    assert_eq!(switch.error, None);
+    let args: Vec<(&str, &str)> = switch.args.iter().map(|arg| (arg.name, arg.ty)).collect();
+    assert_eq!(args, [("enabled", "bool")], "it takes no pane: motion is the person's window");
+}
+
+#[test]
+fn set_image_animation_answers_nothing_takes_no_pane_and_needs_the_switch() {
+    let world = World::new("animation-args");
+
+    assert_eq!(world.call("set_image_animation", r#"{"enabled":false}"#), Outcome::Ok("null".into()));
+    assert_eq!(world.call("set_image_animation", r#"{"enabled":true}"#), Outcome::Ok("null".into()));
+    let with_pane = error_text(&world.call("set_image_animation", r#"{"pane":1,"enabled":false}"#));
+    assert!(with_pane.contains("pane") && with_pane.contains("unknown field"), "{with_pane}");
+    assert!(error_text(&world.call("set_image_animation", "{}")).contains("missing field"));
+    assert!(matches!(world.call("set_image_animation", r#"{"enabled":"no"}"#), Outcome::Err(_)));
+}
+
+/// A picture of two frames that plays by itself: a new generation about every 30 ms (the id is 7).
+#[cfg(unix)]
+const PRINT_ANIMATION: &str = r"printf '\033_Ga=T,f=32,s=1,v=1,i=7,c=1,r=1,q=2;AAAA/w==\033\\'; \
+printf '\033_Ga=f,i=7,f=32,s=1,v=1,z=40,q=2;/wAA/w==\033\\'; \
+printf '\033_Ga=a,i=7,r=1,z=25,q=2\033\\'; \
+printf '\033_Ga=a,i=7,s=3,q=2\033\\'; sleep 30";
+
+#[cfg(unix)]
+#[test]
+fn the_switch_stops_the_pictures_of_a_running_pane_and_turning_it_on_goes_on() {
+    let world = World::running("animation-live", "/bin/sh", &["-c", PRINT_ANIMATION]);
+    let pane = world.focus();
+    world.core.start_pane(pane, 80, 24, 8, 16).expect("the shell starts");
+    eventually("a moving picture", || world.generations(7) >= 3);
+
+    assert_eq!(world.call("set_image_animation", r#"{"enabled":false}"#), Outcome::Ok("null".into()));
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let stopped = world.generations(7);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(world.generations(7), stopped, "paused: no new frame of the picture");
+
+    assert_eq!(world.call("set_image_animation", r#"{"enabled":true}"#), Outcome::Ok("null".into()));
+    eventually("the picture moving again", || world.generations(7) > stopped);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_pane_started_after_the_switch_was_turned_off_never_plays_a_frame() {
+    let world = World::running("animation-later", "/bin/sh", &["-c", PRINT_ANIMATION]);
+    // Before any pane runs: the switch is the core's, not a pane's.
+    assert_eq!(world.call("set_image_animation", r#"{"enabled":false}"#), Outcome::Ok("null".into()));
+    let pane = world.focus();
+    world.core.start_pane(pane, 80, 24, 8, 16).expect("the shell starts");
+    eventually("the first frame of the picture", || world.generations(7) >= 1);
+
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    assert_eq!(world.generations(7), 1, "a pane that began paused shows its first frame and stays there");
+}
+
 // ---- guards over every row of the table -----------------------------------------------------------------------------
 //
 // These read `COMMANDS`, so a row that a later change adds is held to them the moment it is in the table.
@@ -888,6 +1104,17 @@ fn range_args(token: &str, offset: u64, len: u64) -> String {
     format!(r#"{{"token":{},"offset":{offset},"len":{len}}}"#, json_string(token))
 }
 
+/// The only commands that answer raw bytes, in the order of the table. A third one is a decision, not an accident.
+const RAW_COMMANDS: [&str; 2] = ["image_data", "file_range"];
+
+/// One pixel (red 0, green 0, blue 0, alpha 255) shown in one cell with the id 5, as a shell prints it.
+#[cfg(unix)]
+const PRINT_ONE_PIXEL: &str = r"printf '\033_Ga=T,f=32,s=1,v=1,i=5,c=1,r=1;AAAA/w==\033\\'";
+
+fn image_args(pane: u64, image: u32, generation: u64, offset: u64) -> String {
+    format!(r#"{{"pane":{pane},"image":{image},"generation":{generation},"offset":{offset}}}"#)
+}
+
 #[test]
 fn tracer_a_grant_answers_the_address_of_the_browser_and_the_members_of_the_desktop_answer() {
     let world = World::new("tracer-grant");
@@ -1114,10 +1341,11 @@ fn tracer_the_address_of_a_grant_is_what_the_host_says_and_the_other_members_do_
 }
 
 #[test]
-fn tracer_only_file_range_answers_raw_bytes() {
+fn tracer_only_file_range_and_image_data_answer_raw_bytes() {
     let raw: Vec<&str> = COMMANDS.iter().filter(|row| row.raw).map(|row| row.name).collect();
 
-    assert_eq!(raw, ["file_range"]);
+    // The safeguard is a list of two, named here on purpose: a third raw row fails this test until a person adds it.
+    assert_eq!(raw, RAW_COMMANDS);
     let row = lookup("file_range").expect("file_range");
     assert_eq!(row.answer.replace(' ', ""), "tauri::ipc::Response");
     assert_eq!(row.error, Some("String"));
@@ -1786,18 +2014,25 @@ fn every_row_with_a_required_argument_names_it_when_it_is_missing() {
     assert!(required >= 100, "only {required} required arguments");
 }
 
+#[cfg(unix)]
 #[test]
-fn no_row_but_file_range_ever_answers_raw_bytes() {
-    let world = World::new("raw-once");
+fn no_row_but_file_range_and_image_data_ever_answers_raw_bytes() {
+    let world = World::running("raw-twice", "/bin/sh", &["-c", &format!("{PRINT_ONE_PIXEL}; sleep 30")]);
     let (path, _) = write_picture(&world, "a.bin", 4096);
     let token = grant_token(&world, &path);
+    let pane = world.focus();
+    world.core.start_pane(pane, 80, 24, 8, 16).expect("the shell starts");
+    eventually("the placement of the picture", || !world.placements().is_empty());
+    let generation = world.placements()[0].1;
     let mut raw = Vec::new();
 
     for row in COMMANDS.iter().filter(|row| row.web != Web::Unavailable) {
-        // Every row once with a valid sample of each argument; `file_range` with a real grant as well.
+        // Every row once with a valid sample of each argument; the two raw rows with real data as well.
         let mut outcomes = vec![world.call(row.name, &sample_args(row))];
-        if row.name == "file_range" {
-            outcomes.push(world.call(row.name, &range_args(&token, 0, 16)));
+        match row.name {
+            "file_range" => outcomes.push(world.call(row.name, &range_args(&token, 0, 16))),
+            "image_data" => outcomes.push(world.call(row.name, &image_args(pane, 5, generation, 0))),
+            _ => {}
         }
         for outcome in outcomes {
             if matches!(outcome, Outcome::Binary(_)) {
@@ -1806,8 +2041,8 @@ fn no_row_but_file_range_ever_answers_raw_bytes() {
         }
     }
 
-    assert!(raw.iter().all(|name| *name == "file_range"), "{raw:?}");
-    assert_eq!(raw, ["file_range"], "the one raw row answered raw bytes once");
+    assert!(raw.iter().all(|name| RAW_COMMANDS.contains(name)), "{raw:?}");
+    assert_eq!(raw, RAW_COMMANDS, "each of the two raw rows answered raw bytes once");
 }
 
 /// The problems of the split between the table and the wrappers that are written out in the app: a command that is not a
@@ -1946,7 +2181,7 @@ fn surface_file_lists_every_golden_command() {
     let lines = surface_lines();
     let surface_names: BTreeSet<&str> = lines.iter().map(|(name, _)| *name).collect();
 
-    assert_eq!(lines.len(), 120, "one line for each command that was declared");
+    assert_eq!(lines.len(), 122, "one line for each command that was declared");
     assert_eq!(surface_names.len(), lines.len(), "no command twice");
     assert_eq!(surface_names, golden_names);
     for (_, line) in &lines {

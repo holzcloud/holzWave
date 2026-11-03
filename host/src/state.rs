@@ -39,7 +39,7 @@ use holzwave_core::settings::{SETTINGS_FILE, Settings};
 use holzwave_core::ssh::{ExecCancel, ExecLimits, ExecResult, PromptLine, SshExec};
 use holzwave_core::wshinstall::Bundled;
 use holzwave_core::theme::{DEFAULT_THEME, THEMES_DIR, Theme, ThemeInfo, ThemeRegistry};
-use holzwave_core::wire::FrameMsg;
+use holzwave_core::wire::{FrameMsg, IMAGE_CHUNK_BYTES, image_data_bytes};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
@@ -937,6 +937,10 @@ pub struct AppCore {
     /// The app is ending (the last pane closed or ended, or `shutdown` ran): panes that end from now on stay in the
     /// layout, and windows that close from now on stay in it too, so that what is saved is what the user had.
     exiting: AtomicBool,
+    /// Whether animated pictures may move: the page's reduced-motion fact (`set_image_animation`), applied to every
+    /// running pane and given to each pane that starts. It is the person's window that asks for reduced motion, not a
+    /// pane, so there is one value for the whole core; it starts `true`.
+    image_animation: AtomicBool,
     /// The `rev` of the last view built. Counted under the windows lock, so the order of the revs is the order of the
     /// states of the layouts.
     view_rev: AtomicU64,
@@ -1220,6 +1224,7 @@ impl AppCore {
                 saver,
                 writes,
                 exiting: AtomicBool::new(false),
+                image_animation: AtomicBool::new(true),
                 view_rev: AtomicU64::new(0),
                 me: me.clone(),
             }
@@ -2959,6 +2964,7 @@ impl AppCore {
         if let Some(cap) = limits.max_image_bytes {
             spec.image_bytes = spec.image_bytes.min(u64::try_from(cap).unwrap_or(u64::MAX));
         }
+        spec.image_animation = self.image_animation.load(Ordering::SeqCst);
         spec.option_as_alt = cfg.settings.option_as_alt;
         spec.theme = Some(cfg.theme().engine_theme());
         spec
@@ -3259,6 +3265,7 @@ impl AppCore {
             }
         }
         lock(&self.starts).remove(&pane);
+        let started_animation = spec.image_animation;
         // What the shell is started with; a settings change while it starts is pushed once it runs.
         let started_with = PaneLook {
             theme: spec.theme.unwrap_or_default(),
@@ -3337,7 +3344,14 @@ impl AppCore {
         });
         match started {
             Ok(handle) => {
+                let animation = handle.clone();
                 self.promote(pane, handle, started_with);
+                // A switch that came in while the shell started missed this pane in the loop of `set_image_animation` (it
+                // was not running yet) and the spec was made before it: tell it now what is true now.
+                let now = self.image_animation.load(Ordering::SeqCst);
+                if now != started_animation {
+                    let _ = animation.set_image_animation(now);
+                }
                 Ok(())
             }
             // The sink was told, and `pane_gone` forgot the slot, before `spawn_ghostty` returned.
@@ -3560,6 +3574,33 @@ impl AppCore {
         match self.handle(pane) {
             Some(handle) => handle.request_full().map_err(|e| e.to_string()),
             None => Ok(()),
+        }
+    }
+
+    /// Whether pictures may animate (the page's reduced-motion fact). Applied to every running pane now and given to each
+    /// pane that starts later; `false` stops every animation on the frame it shows, `true` lets them go on. Takes no pane:
+    /// motion is a property of the person's window.
+    pub fn set_image_animation(&self, enabled: bool) {
+        self.image_animation.store(enabled, Ordering::SeqCst);
+        for handle in self.running() {
+            // A pane that is closing refuses, which is fine: there is nothing left to tell.
+            let _ = handle.set_image_animation(enabled);
+        }
+    }
+
+    /// One piece of an image's pixels, as the raw answer of the `image_data` command: a header of four big-endian numbers
+    /// (width, height, total length in bytes, offset) and then at most [`IMAGE_CHUNK_BYTES`] bytes of straight RGBA from
+    /// `offset` on. Every failure (no such pane, no such image, another generation, a pane that is closing or busy) is the
+    /// same constant text: it never carries a number or a byte that a program sent. Waits for the pane's own thread, so
+    /// the command is async.
+    pub fn image_data(&self, pane: PaneId, image: u32, generation: u64, offset: u64) -> Result<Vec<u8>, String> {
+        const NO_IMAGE: &str = "no such image";
+        let handle = self.handle(pane).ok_or(NO_IMAGE)?;
+        // An offset that does not fit `usize` is past every image; the engine brings it to the end.
+        let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+        match handle.image_chunk(image, generation, offset, IMAGE_CHUNK_BYTES) {
+            Ok(Some(chunk)) => image_data_bytes(&chunk).ok_or_else(|| NO_IMAGE.to_owned()),
+            _ => Err(NO_IMAGE.to_owned()),
         }
     }
 
@@ -5899,6 +5940,22 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn image_animation_the_spec_of_a_new_pane_follows_the_switch_of_the_core() {
+        let dir = Scratch::new("animation-spec");
+        let core = AppCore::new(dir.0.clone(), Arc::new(Recorder::default()), ShellSpec::default());
+        dir.attach(&core);
+        assert!(core.pane_spec(80, 24, (9, 18)).image_animation, "pictures may move until the page says otherwise");
+
+        core.set_image_animation(false);
+        let paused = core.pane_spec(80, 24, (9, 18));
+        core.set_image_animation(true);
+        let playing = core.pane_spec(80, 24, (9, 18));
+
+        assert!(!paused.image_animation, "a pane started while reduced motion is on starts paused");
+        assert!(playing.image_animation);
+    }
+
     #[test]
     fn pane_spec_follows_the_shell_setting_for_panes_started_afterwards() {
         let dir = Scratch::new("shell-setting");

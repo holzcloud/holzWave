@@ -110,7 +110,7 @@ pub struct Command {
     pub error: Option<&'static str>,
     pub web: Web,
     pub shell: Shell,
-    /// Whether the answer is raw bytes ([`Outcome::Binary`]) and not JSON text. Exactly one command is: `file_range`.
+    /// Whether the answer is raw bytes ([`Outcome::Binary`]) and not JSON text. Exactly two commands are, and the tests name them: `file_range` and `image_data`.
     pub raw: bool,
     call: fn(&AppCore, &str, &str) -> Outcome,
 }

@@ -181,3 +181,62 @@ fn deleting_the_picture_sends_an_empty_list_and_then_the_read_fails() {
     assert!(pane.image_chunk(5, placement.1, 0, 100).expect("answer").is_none(), "the pixels are gone");
     pane.close();
 }
+
+// ---- animation: the pane's own clock and the switch ------------------------------------------------------------------
+
+/// A picture of two frames (25 ms and 40 ms) that plays by itself: a new generation about every 30 ms.
+const PRINT_ANIMATION: &str = r"printf '\033_Ga=T,f=32,s=1,v=1,i=7,c=1,r=1,q=2;AAAA/w==\033\\'; \
+printf '\033_Ga=f,i=7,f=32,s=1,v=1,z=40,q=2;/wAA/w==\033\\'; \
+printf '\033_Ga=a,i=7,r=1,z=25,q=2\033\\'; \
+printf '\033_Ga=a,i=7,s=3,q=2\033\\'";
+
+impl Probe {
+    /// How many different generations of image 7 the frames have told about so far.
+    fn generations(&self) -> usize {
+        let mut seen: Vec<u64> = Vec::new();
+        for frame in self.frames() {
+            for placement in frame.images.iter().flatten() {
+                if placement.0 == 7 && !seen.contains(&placement.1) {
+                    seen.push(placement.1);
+                }
+            }
+        }
+        seen.len()
+    }
+}
+
+#[test]
+fn an_animated_picture_moves_by_itself_in_a_real_pane_with_a_new_generation_each_time() {
+    let probe = Probe::default();
+    let pane = spawn(&format!("{PRINT_ANIMATION}; sleep 10"), &probe);
+    assert!(wait_until(WAIT, || probe.generations() >= 4), "the picture never moved: {}", probe.generations());
+    pane.close();
+}
+
+#[test]
+fn a_pane_that_starts_with_animation_off_shows_the_first_frame_and_never_moves() {
+    let probe = Probe::default();
+    let mut spec = spec(&format!("{PRINT_ANIMATION}; sleep 10"));
+    spec.image_animation = false;
+    let pane = PaneHandle::spawn_ghostty(1, spec, probe.sink()).expect("the pane starts");
+    assert!(wait_until(WAIT, || probe.generations() >= 1), "the picture is shown");
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(probe.generations(), 1, "paused from the start: one frame, however long we wait");
+    pane.close();
+}
+
+#[test]
+fn the_switch_stops_a_running_animation_where_it_is_and_turning_it_on_goes_on() {
+    let probe = Probe::default();
+    let pane = spawn(&format!("{PRINT_ANIMATION}; sleep 10"), &probe);
+    assert!(wait_until(WAIT, || probe.generations() >= 3), "the picture moves");
+    pane.set_image_animation(false).expect("switch");
+    // Frames already on their way may still arrive; after that nothing moves.
+    std::thread::sleep(Duration::from_millis(300));
+    let stopped = probe.generations();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(probe.generations(), stopped, "paused: no new generation");
+    pane.set_image_animation(true).expect("switch");
+    assert!(wait_until(WAIT, || probe.generations() > stopped), "resumed: the picture moves again");
+    pane.close();
+}

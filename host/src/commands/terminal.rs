@@ -86,6 +86,18 @@ pub fn request_full(core: &AppCore, pane: PaneId) -> Result<(), String> {
     core.request_full(pane)
 }
 
+/// One piece of an image's pixels as raw bytes: four big-endian `u32` (width, height, total length in bytes, offset) and
+/// then at most 512 KiB of straight RGBA from `offset` on. Fails with `no such image` when the pane, the image or that
+/// generation is gone, so a page never draws the pixels of another picture than the one it asked for.
+pub fn image_data(core: &AppCore, pane: PaneId, image: u32, generation: u64, offset: u64) -> Result<Vec<u8>, String> {
+    core.image_data(pane, image, generation, offset)
+}
+
+/// Whether pictures may animate: the page's reduced-motion fact, for every pane now and the ones that start later.
+pub fn set_image_animation(core: &AppCore, enabled: bool) {
+    core.set_image_animation(enabled);
+}
+
 pub fn select(core: &AppCore, pane: PaneId, op: SelectOpMsg) -> Result<(), String> {
     core.select(pane, op.into())
 }

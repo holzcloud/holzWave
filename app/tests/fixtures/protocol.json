@@ -1173,6 +1173,12 @@
       "query",
       "limit"
     ],
+    "image_data": [
+      "pane",
+      "image",
+      "generation",
+      "offset"
+    ],
     "integration_binary_clear": [
       "tool"
     ],
@@ -1363,6 +1369,9 @@
     "send_edit": [
       "pane",
       "action"
+    ],
+    "set_image_animation": [
+      "enabled"
     ],
     "set_ratio": [
       "split",

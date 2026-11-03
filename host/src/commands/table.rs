@@ -110,6 +110,18 @@ macro_rules! host_commands {
                 run: terminal::request_full, web: same
             }
             {
+                name: image_data, shell: generated, group: terminal, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [pane: PaneId, image: u32, generation: u64, offset: u64],
+                answers: raw tauri::ipc::Response, fails: String,
+                run: terminal::image_data, web: same
+            }
+            {
+                name: set_image_animation, shell: generated, group: terminal, scope: none, mode: sync, cap: CAP_DEFAULT,
+                args: [enabled: bool],
+                answers: (),
+                run: terminal::set_image_animation, web: same
+            }
+            {
                 name: select, shell: generated, group: terminal, scope: none, mode: sync, cap: CAP_DEFAULT,
                 args: [pane: PaneId, op: SelectOpMsg],
                 answers: (), fails: String,

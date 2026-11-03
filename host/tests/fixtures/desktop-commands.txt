@@ -9,6 +9,8 @@ resize|none|sync|pane,cols,rows,cell_w,cell_h|()|String
 scroll|none|sync|pane,rows|()|String
 scroll_to_bottom|none|sync|pane|()|String
 request_full|none|sync|pane|()|String
+image_data|none|async|pane,image,generation,offset|tauri::ipc::Response|String
+set_image_animation|none|sync|enabled|()|-
 select|none|sync|pane,op|()|String
 selection_text|none|async|pane|Option<String>|String
 copy_selection|none|async|pane|bool|String
