@@ -92,8 +92,13 @@ they never publish):
 ```sh
 sh scripts/release-windows-cross.sh <version>      # holzWave_<version>_x64-setup.exe, GNU ABI, unsigned, per user
 sh scripts/release-linux-container.sh <version>    # holzWave_<version>_amd64.deb, _x86_64.rpm, _x86_64.AppImage, unsigned
+sh scripts/sign-linux.sh <version>                 # optional, the owner's key: minisign signatures for the three Linux packages
 gh release upload v<version> target/release-cross/holzWave_<version>_*     # by hand, to the release macOS created
 ```
+
+The upload command of the signing script lists the signature files too (`<file>.minisig`, `SHA256SUMS` and `SHA256SUMS.minisig`); use
+it instead of the line above when the packages were signed. The Windows installer is never signed; what is and is not signed,
+and what is untested, is in [signing.md](signing.md).
 
 Both leave the files and their `.sha256` files in `target/release-cross/`, need a clean working tree (not necessarily
 `main`) and Docker. The Windows installer is a GNU-ABI build (`brew install mingw-w64` once), not the MSVC build of a

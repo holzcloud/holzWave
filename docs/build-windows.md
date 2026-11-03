@@ -1,8 +1,8 @@
 # Building holzWave on Windows
 
 For the owner's own Windows machines. Everything here is built and run locally: no step uses GitHub to build, creates a
-tag or a release, or needs a CI file (Phase 2 D-04). The result is a per-user NSIS installer that is **not signed**
-(signing is Phase 10).
+tag or a release, or needs a CI file (Phase 2 D-04). The result is a per-user NSIS installer that is **not signed**: the
+author has no code-signing certificate (the reason is in [signing.md](signing.md)).
 
 > [!IMPORTANT]
 > **Status.** This guide was written on a Mac and has since been followed on Windows by the author, who installed and ran
@@ -148,7 +148,8 @@ chooses the name; look in the folder). The `target` folder is at the root of the
 ### 7. Install, start, uninstall
 
 1. Run the installer. It is **unsigned**, so SmartScreen shows "Windows protected your PC": choose **More info**, then
-   **Run anyway**. This is expected for every unsigned installer. Signing is Phase 10.
+   **Run anyway**. This is expected for every unsigned installer. There is no signed installer to compare it with; why it is
+   unsigned is in [signing.md](signing.md).
 2. Start holzWave from the Start menu. The app creates `%APPDATA%\ch.holzcloud.holzwave\` (settings, layout, session,
    themes) on first use; the files are described in [config.md](config.md).
 3. Uninstall from **Settings, Apps** (or with the `uninstall.exe` in the install folder). The program files should be
@@ -164,7 +165,8 @@ user has. When an installer is ever shared:
 Get-FileHash -Algorithm SHA256 .\target\release\bundle\nsis\holzWave_0.0.1-beta2_x64-setup.exe
 ```
 
-Publish the hash beside the file (on the release page when there is one). No release is made by this guide.
+Publish the hash beside the file (on the release page when there is one). It says the download is whole, not who made it.
+No release is made by this guide.
 
 ## The preview installer built from a Mac (GNU ABI, not the MSVC build)
 

@@ -10,7 +10,8 @@ do not depend on it. Everything here was written and checked from a Mac; nothing
 A manifest, an AppStream file and a desktop file under `packaging/flatpak/`, named by the application id
 `ch.holzcloud.holzwave` (the Tauri identifier), and the code path that makes a terminal inside a Flatpak useful: inside a
 Flatpak the pane's shell is started **on the host**, through `flatpak-spawn --host`. It is a local build from this
-repository, never a Flathub package; there is no signing, no repository and no automatic update.
+repository, never a Flathub package; there is no signing, no repository and no automatic update. The Linux signatures described in [signing.md](signing.md) cover the
+deb, the rpm and the AppImage only.
 
 | File | What |
 |---|---|

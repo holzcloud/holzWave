@@ -3,7 +3,9 @@
 For the owner's own Linux machines (a Debian family and a Fedora family distribution, X11 and Wayland). Everything here
 is built and run locally: no step here uses GitHub to build, creates a tag or a release (Phase 2 D-04). The one GitHub build is the manual
 `linux-packages.yml` workflow that made the `0.0.1-beta2` packages on an amd64 runner.
-The result is a `.deb`, an `.rpm` and an AppImage; the packages are not signed (signing is Phase 10).
+The result is a `.deb`, an `.rpm` and an AppImage. The container script leaves them unsigned; `scripts/sign-linux.sh` can add a
+minisign signature to each, but no release has been signed yet. What is signed, how to check it and what is untested is in
+[signing.md](signing.md).
 
 > [!IMPORTANT]
 > **Status.** The Linux half of the code and the packaging were run in a Linux container on a Mac (Ubuntu 26.04,
@@ -204,6 +206,9 @@ The result, in `target/release-cross/` (next to the Windows installer), is `holz
 `holzWave_<version>_x86_64.rpm` and `holzWave_<version>_x86_64.AppImage`, each with a `.sha256` file. The script only
 builds and inspects; it never publishes. To attach the files to the release that `scripts/release-macos.sh --publish`
 created: `gh release upload v<version> target/release-cross/holzWave_<version>_*`.
+
+Before the upload, `sh scripts/sign-linux.sh <version>` signs the three packages with minisign, writes and signs `SHA256SUMS`, and
+prints the upload command for all eight files. It needs the owner's key; the steps and what has not been tried are in [signing.md](signing.md).
 
 > [!WARNING]
 > **What these packages are not.** They were built in a container whose amd64 code is **emulated** on an Apple Silicon Mac
