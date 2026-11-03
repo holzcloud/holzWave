@@ -17,7 +17,9 @@ Nextcloud, and an AI chat that sees your terminal only after you share that pane
 **completely offline**, on the device, with no account and no key. Website: [holzcloud.ch/holzwave](https://holzcloud.ch/holzwave).
 
 > [!WARNING]
-> **Beta preview.** holzWave is at `0.0.1-beta2`: a preview build, unsigned (no Developer ID, no notarisation, no Authenticode).
+> **Beta preview.** holzWave is at `0.0.1-beta2`: a preview build. The Windows installer and the macOS app are unsigned (no Authenticode, no
+> Developer ID, no notarisation). The Linux packages can carry a minisign signature, but none of the releases made so far carries one
+> ([what is signed and what is not](docs/signing.md)).
 > The author has run it on macOS (Apple Silicon) and Windows. The Linux packages of `0.0.1-beta2` were built on a GitHub runner
 > and were not started on a Linux desktop by the author for this release (earlier alphas and betas were run on Linux). The window in the images below is the
 > design for the release; the table [What works today](#what-works-today) says what is built and what is tested.
@@ -45,6 +47,10 @@ Every [release](https://github.com/holzcloud/holzWave/releases) carries the pack
 - **Windows (x64):** `holzWave_<version>_x64-setup.exe`, per user, unsigned (SmartScreen: More info, Run anyway).
 - **Linux (x86_64):** `.deb`, `.rpm` and `.AppImage`; they need glibc 2.39 or newer and WebKitGTK 4.1 (Ubuntu 24.04+,
   Debian 13+, Fedora 40+).
+- **Check a Linux package:** a release that carries `.minisig` files can be checked with
+  `minisign -Vm <file> -p holzwave.pub` and `sha256sum -c SHA256SUMS --ignore-missing`, or with `sh scripts/verify-release.sh <directory>`;
+  the steps and the public key are in [docs/signing.md](docs/signing.md). No release has been signed with the real key yet, and nobody has
+  checked a signature on a real distribution; the scripts were tested with stand-ins and once with a throwaway key in a container.
 
 The Windows installer is built on a Mac as a GNU-ABI cross build (not the MSVC build) and was run by the author. The Linux packages of
 `0.0.1-beta2` were built once on a GitHub runner (Ubuntu 24.04, amd64, in the repository's build container; a manual workflow) because Zig 0.17

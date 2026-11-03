@@ -6,9 +6,10 @@
 #                                                                  release v0.0.1-alpha1 (it must exist: the macOS
 #                                                                  script creates it)
 #
-# -Version must equal the version of app/src-tauri/tauri.conf.json. The installer is NSIS, per user, unsigned (no
-# code signing yet, Phase 10), so Windows SmartScreen warns on the first start ("More info", "Run anyway"). Needs the
-# toolchain of docs/build-windows.md (. .\scripts\env.ps1 checks it) and, for -Upload, the gh CLI logged in.
+# -Version must equal the version of app/src-tauri/tauri.conf.json. The installer is NSIS, per user, unsigned (the
+# author has no code-signing certificate, see docs/signing.md), so Windows SmartScreen warns on the first start ("More
+# info", "Run anyway"). Needs the toolchain of docs/build-windows.md (. .\scripts\env.ps1 checks it) and, for -Upload, the
+# gh CLI logged in.
 #
 # wsh: the script builds wsh.exe for x86_64-pc-windows-msvc into app/src-tauri/binaries and passes the overlay
 # app/src-tauri/tauri.wsh.conf.json (only release scripts pass it, so cargo test needs no binary), which installs wsh.exe

@@ -11,8 +11,8 @@
 # version without one is a stable release and goes to `holzwave` and also to the preview cask, so the preview
 # channel never lags behind stable.
 #
-# The app is signed ad hoc only (no Developer ID, no notarisation: Phase 10). The cask removes the quarantine
-# attribute after the install and says so in its caveats.
+# The app is signed ad hoc only (no Developer ID, no notarisation: there is no Apple developer account, see
+# docs/signing.md). The cask removes the quarantine attribute after the install and says so in its caveats.
 #
 # Needs a clean checkout of main at the commit to release, the gh CLI logged in for --publish, and the build
 # environment of docs/building.md (scripts/env.sh puts Rust and Zig 0.17 on the PATH).

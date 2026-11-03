@@ -149,8 +149,9 @@ fn the_windows_file_builds_one_per_user_nsis_installer_and_nothing_else() {
 
 #[test]
 fn the_windows_file_configures_no_signing_and_no_msi() {
-    // Signing is Phase 10 (T-2.2-29): an installer that is half configured for signing fails at build time on a machine
-    // without the certificate, or worse, signs with the wrong one. Every key that would start it is refused here.
+    // The Windows configuration holds no signing key of any kind: an installer that is half configured for signing fails at
+    // build time on a machine without the certificate, or worse, signs with the wrong one. Every key that would start
+    // signing is refused here.
     let windows = windows_conf();
     let section = &windows["bundle"]["windows"];
     for key in ["certificateThumbprint", "signCommand", "timestampUrl", "tsp", "digestAlgorithm", "wix"] {
