@@ -167,7 +167,12 @@ fn serve(
                 if version != PROTOCOL_VERSION {
                     break fail(queue, log, "protocol version");
                 }
-                let limits = HostLimits { max_panes: cap(max_panes), max_scrollback_lines: cap(max_scrollback_lines) };
+                let limits = HostLimits {
+                    max_panes: cap(max_panes),
+                    max_scrollback_lines: cap(max_scrollback_lines),
+                    // The worker limit for pictures comes with the server limit plan; until then the host has none.
+                    max_image_bytes: None,
+                };
                 let Some(started) = start(env, queue, hooks, log, limits) else { break fail(queue, log, "setup") };
                 queue.push(Frame::Note(Note::Ready));
                 let state = started.secrets.state();

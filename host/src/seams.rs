@@ -61,6 +61,9 @@ pub struct HostLimits {
     pub max_panes: Option<usize>,
     /// The most lines of scrollback one pane keeps, whatever the setting says.
     pub max_scrollback_lines: Option<usize>,
+    /// The most bytes of pictures (Kitty graphics) one pane keeps, whatever the setting says. The desktop has none; a
+    /// server fills it from its worker limits.
+    pub max_image_bytes: Option<usize>,
 }
 
 /// Everything the shell decides for the core. Object safe; the core keeps an `Arc<dyn Host>`.
@@ -155,7 +158,7 @@ mod tests {
         let host = NeutralHost::new();
         assert_eq!(host.platform(), Platform::current());
         assert_eq!(host.text_scale(), 100);
-        assert_eq!(host.limits(), HostLimits { max_panes: None, max_scrollback_lines: None });
+        assert_eq!(host.limits(), HostLimits { max_panes: None, max_scrollback_lines: None, max_image_bytes: None });
         assert!(!host.local_network().applies());
         // One store, however often it is asked for.
         host.secrets().set("ssh:a", "one").expect("set");

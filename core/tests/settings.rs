@@ -28,6 +28,7 @@ fn defaults_match_the_decisions() {
     assert!(s.confirm_multiline_paste, "D-15: multi-line paste is confirmed by default");
     assert!(s.copy_on_select, "a mouse selection is copied by default");
     assert_eq!(s.scrollback_lines, 10_000);
+    assert_eq!(s.image_memory_mib, 64, "D-02: a pane keeps 64 MiB of pictures by default");
     assert_eq!(s.cursor_blink, Blink::System);
     assert_eq!(s.motion, Motion::System);
     assert_eq!(s.contrast, Contrast::System);
@@ -70,6 +71,7 @@ fn the_document_is_pretty_printed_with_a_trailing_newline_and_a_stable_key_order
         "\"motion\"",
         "\"contrast\"",
         "\"scrollback_lines\"",
+        "\"image_memory_mib\"",
         "\"confirm_multiline_paste\"",
         "\"copy_on_select\"",
         "\"smooth_scroll\"",
@@ -328,6 +330,75 @@ mod validation {
             assert!(s.sanitise().is_empty());
             assert_eq!((s.font_size, s.ui_scale, s.scrollback_lines), (font, scale, lines));
         }
+    }
+
+    #[test]
+    fn image_memory_is_a_whole_number_of_mib_from_0_to_512_and_defaults_to_64() {
+        let (s, status) = Settings::from_json(r#"{"image_memory_mib": 10}"#);
+        assert_eq!((s.image_memory_mib, status), (10, LoadStatus::Clean));
+        for (text, kept) in [("0", 0), ("1", 1), ("64", 64), ("512", 512)] {
+            let (s, status) = Settings::from_json(&format!(r#"{{"image_memory_mib": {text}}}"#));
+            assert_eq!((s.image_memory_mib, status), (kept, LoadStatus::Clean), "{text}");
+        }
+        // A file from before the key existed has the default and is clean.
+        let (old, status) = Settings::from_json(r#"{"font_size": 15}"#);
+        assert_eq!((old.image_memory_mib, status), (64, LoadStatus::Clean));
+        assert_eq!(Settings::default().image_memory_mib, 64);
+        // The key is in the document, so a save keeps it.
+        assert!(Settings::default().to_json().contains("\"image_memory_mib\": 64"));
+    }
+
+    #[test]
+    fn image_memory_beyond_the_range_is_clamped_and_reported() {
+        let (s, status) = Settings::from_json(r#"{"image_memory_mib": 513}"#);
+        assert_eq!(s.image_memory_mib, 512);
+        let LoadStatus::Repaired(notes) = status else { panic!("expected Repaired, got {status:?}") };
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("image_memory_mib") && notes[0].contains("0..=512"), "{notes:?}");
+
+        // A number past the field type still lands on the nearest bound; so does a negative one.
+        let (s, status) = Settings::from_json(r#"{"image_memory_mib": 99999999999999}"#);
+        assert_eq!(s.image_memory_mib, 512);
+        assert!(matches!(status, LoadStatus::Repaired(ref n) if n.len() == 1), "{status:?}");
+        let (s, status) = Settings::from_json(r#"{"image_memory_mib": -3}"#);
+        assert_eq!(s.image_memory_mib, 0, "a negative number is the lower bound, which is off");
+        assert!(matches!(status, LoadStatus::Repaired(ref n) if n.len() == 1), "{status:?}");
+
+        let mut s = Settings::default();
+        s.image_memory_mib = 4096;
+        let notes = s.sanitise();
+        assert_eq!(s.image_memory_mib, 512);
+        assert!(notes.len() == 1 && notes[0].contains("image_memory_mib"), "{notes:?}");
+    }
+
+    #[test]
+    fn image_memory_zero_is_kept_as_zero_and_says_nothing() {
+        let mut s = Settings::default();
+        s.image_memory_mib = 0;
+        assert!(s.sanitise().is_empty(), "0 is a choice: no picture is stored");
+        assert_eq!(s.image_memory_mib, 0);
+        s.set_value("image_memory_mib", json!(0)).unwrap();
+        assert_eq!(s.image_memory_mib, 0);
+        s.set_value("image_memory_mib", json!(200)).unwrap();
+        assert_eq!(s.image_memory_mib, 200);
+        s.set_value("image_memory_mib", json!(100_000)).unwrap();
+        assert_eq!(s.image_memory_mib, 512, "set_value clamps like the load");
+    }
+
+    #[test]
+    fn a_wrong_typed_image_memory_costs_only_that_key() {
+        for bad in [r#""big""#, "true", "1.5", "null", "[64]"] {
+            let text = format!(r#"{{"image_memory_mib": {bad}, "font_size": 16}}"#);
+            let (s, status) = Settings::from_json(&text);
+            assert_eq!(s.image_memory_mib, 64, "the default for the broken key: {bad}");
+            assert_eq!(s.font_size, 16, "the other keys are kept: {bad}");
+            let LoadStatus::Repaired(notes) = status else { panic!("expected Repaired for {bad}, got {status:?}") };
+            assert_eq!(notes.len(), 1, "{bad}: {notes:?}");
+            assert!(notes[0].contains("image_memory_mib"), "{notes:?}");
+        }
+        let mut s = Settings::default();
+        assert!(s.set_value("image_memory_mib", json!("many")).is_err());
+        assert_eq!(s.image_memory_mib, 64, "on error the settings are untouched");
     }
 
     #[test]

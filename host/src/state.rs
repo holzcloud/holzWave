@@ -69,6 +69,9 @@ const SESSION_DELAY: Duration = Duration::from_secs(2);
 /// The most time `shutdown` spends waiting for the shells to end.
 const SHUTDOWN_BOUND: Duration = Duration::from_secs(3);
 
+/// The bytes in one MiB of the `image_memory_mib` setting.
+const IMAGE_MIB_BYTES: u64 = 1024 * 1024;
+
 /// `path` with `bin` in front, when `wsh` is in `bin` and `bin` is not on `path` yet; otherwise `None`.
 fn path_with_wsh(bin: &Path, path: Option<&std::ffi::OsStr>) -> Option<std::ffi::OsString> {
     let name = if cfg!(windows) { "wsh.exe" } else { "wsh" };
@@ -2909,7 +2912,7 @@ impl AppCore {
         }
     }
 
-    /// How a new pane is started: the scrollback, the Option key and the theme palette come from the settings; the
+    /// How a new pane is started: the scrollback, the picture memory, the Option key and the theme palette come from the settings; the
     /// working directory is decided by the caller.
     fn pane_spec(&self, cols: u16, rows: u16, cell: (u32, u32)) -> PaneSpec {
         self.pane_spec_on(
@@ -2946,8 +2949,15 @@ impl AppCore {
         spec.notice = unusable.map(|note| format!("holzWave: {note}"));
         spec.cell_px = cell;
         spec.scrollback = cfg.settings.scrollback_lines as usize;
-        if let Some(cap) = self.host.limits().max_scrollback_lines {
+        let limits = self.host.limits();
+        if let Some(cap) = limits.max_scrollback_lines {
             spec.scrollback = spec.scrollback.min(cap);
+        }
+        // The setting is whole MiB (at most 512 after the load); the multiplication is checked all the same, and the
+        // host's cap is applied to the spec, so the setting itself is never rewritten by it.
+        spec.image_bytes = u64::from(cfg.settings.image_memory_mib).checked_mul(IMAGE_MIB_BYTES).unwrap_or(0);
+        if let Some(cap) = limits.max_image_bytes {
+            spec.image_bytes = spec.image_bytes.min(u64::try_from(cap).unwrap_or(u64::MAX));
         }
         spec.option_as_alt = cfg.settings.option_as_alt;
         spec.theme = Some(cfg.theme().engine_theme());
@@ -7417,7 +7427,7 @@ mod tests {
     }
 
     fn cap_of(max_panes: usize) -> crate::seams::HostLimits {
-        crate::seams::HostLimits { max_panes: Some(max_panes), max_scrollback_lines: None }
+        crate::seams::HostLimits { max_panes: Some(max_panes), max_scrollback_lines: None, max_image_bytes: None }
     }
 
     /// What a refused request must leave as it was: the layout, the routes of the panes and the panes that run.
@@ -7548,7 +7558,7 @@ mod tests {
         let spec_with = |setting: u32, cap: Option<usize>| {
             let dir = Scratch::new("cap-scrollback");
             std::fs::write(dir.0.join("settings.json"), format!(r#"{{"scrollback_lines": {setting}}}"#)).unwrap();
-            let limits = crate::seams::HostLimits { max_panes: None, max_scrollback_lines: cap };
+            let limits = crate::seams::HostLimits { max_panes: None, max_scrollback_lines: cap, max_image_bytes: None };
             let (core, _host) = core_capped(&dir, limits);
             let lines = core.pane_spec(80, 24, (9, 18)).scrollback;
             println!("scrollback setting {setting} | cap {cap:?} | pane {lines}");
@@ -7560,6 +7570,66 @@ mod tests {
         assert_eq!(spec_with(300, Some(500)), 300);
         assert_eq!(spec_with(500, Some(500)), 500);
         assert_eq!(spec_with(10_000, None), 10_000);
+    }
+
+    const MIB: u64 = 1024 * 1024;
+
+    /// The image memory of the spec of a new pane, from a settings document and a host cap, and what the setting says
+    /// afterwards (the cap never rewrites it).
+    #[cfg(unix)]
+    fn image_bytes_with(document: &str, cap: Option<usize>) -> (u64, u32) {
+        let dir = Scratch::new("cap-images");
+        if !document.is_empty() {
+            std::fs::write(dir.0.join("settings.json"), document).unwrap();
+        }
+        let limits = crate::seams::HostLimits { max_panes: None, max_scrollback_lines: None, max_image_bytes: cap };
+        let (core, _host) = core_capped(&dir, limits);
+        let bytes = core.pane_spec(80, 24, (9, 18)).image_bytes;
+        let setting = core.get_settings().settings.image_memory_mib;
+        println!("document {document:?} | cap {cap:?} | spec {bytes} | setting {setting}");
+        (bytes, setting)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn image_memory_the_setting_in_mib_is_the_image_bytes_of_a_new_pane() {
+        assert_eq!(image_bytes_with("", None), (64 * MIB, 64), "the default settings give 64 MiB");
+        assert_eq!(image_bytes_with(r#"{"image_memory_mib": 5}"#, None), (5 * MIB, 5));
+        assert_eq!(image_bytes_with(r#"{"image_memory_mib": 512}"#, None), (512 * MIB, 512));
+        // A value past the range is clamped by the load, so the spec never asks for more than 512 MiB.
+        assert_eq!(image_bytes_with(r#"{"image_memory_mib": 4000000000}"#, None), (512 * MIB, 512));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn image_memory_the_host_cap_cuts_the_spec_and_not_the_setting() {
+        let cap = Some(2 * MIB as usize);
+        assert_eq!(image_bytes_with(r#"{"image_memory_mib": 5}"#, cap), (2 * MIB, 5), "the cap is the smaller");
+        assert_eq!(image_bytes_with(r#"{"image_memory_mib": 1}"#, cap), (MIB, 1), "the setting is the smaller");
+        assert_eq!(image_bytes_with("", cap), (2 * MIB, 64));
+        // A cap of 0 keeps no picture whatever the person asks for.
+        assert_eq!(image_bytes_with(r#"{"image_memory_mib": 5}"#, Some(0)), (0, 5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn image_memory_zero_in_the_setting_is_zero_in_the_spec() {
+        assert_eq!(image_bytes_with(r#"{"image_memory_mib": 0}"#, None), (0, 0));
+        assert_eq!(image_bytes_with(r#"{"image_memory_mib": 0}"#, Some(MIB as usize)), (0, 0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn image_memory_a_running_pane_keeps_its_value_when_the_setting_changes() {
+        let dir = Scratch::new("image-running");
+        std::fs::write(dir.0.join("settings.json"), r#"{"image_memory_mib": 8}"#).unwrap();
+        let (core, _rec) = core_in(&dir, "/bin/cat", &[]);
+        let before = core.pane_spec(80, 24, (9, 18));
+        assert_eq!(before.image_bytes, 8 * MIB);
+        // The spec is a value: a later write changes the next spec and not the one a pane was started with.
+        core.set_setting("image_memory_mib", serde_json::json!(16)).expect("the setting is written");
+        assert_eq!(before.image_bytes, 8 * MIB);
+        assert_eq!(core.pane_spec(80, 24, (9, 18)).image_bytes, 16 * MIB);
     }
 
     #[test]

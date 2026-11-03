@@ -63,6 +63,14 @@ use crate::{Error, Result};
 /// The default number of scrollback lines of a pane.
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
 
+/// The default memory of a pane for pictures (the Kitty graphics protocol), 64 MiB. It is the default of the
+/// `image_memory_mib` setting and, with the `ghostty` feature, the same number as the engine's own default.
+pub const DEFAULT_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The most memory a pane may be given for pictures, 512 MiB: the top of the `image_memory_mib` range. A spec that asks
+/// for more is cut to it when the pane starts, so a caller that did not read the setting cannot ask for terabytes.
+pub const MAX_IMAGE_BYTES: u64 = 512 * 1024 * 1024;
+
 /// The default time between two frames of a pane.
 pub const DEFAULT_FRAME_INTERVAL: Duration = Duration::from_millis(8);
 
@@ -128,6 +136,9 @@ pub struct PaneSpec {
     /// The size of one cell in pixels, `(0, 0)` when unknown.
     pub cell_px: (u32, u32),
     pub scrollback: usize,
+    /// The bytes of pictures the engine keeps for this pane, per screen; `0` keeps none. The default is
+    /// [`DEFAULT_IMAGE_BYTES`].
+    pub image_bytes: u64,
     pub option_as_alt: bool,
     pub theme: Option<EngineTheme>,
     /// The least time between two frames.
@@ -188,6 +199,7 @@ impl PaneSpec {
             rows,
             cell_px: (0, 0),
             scrollback: DEFAULT_SCROLLBACK,
+            image_bytes: DEFAULT_IMAGE_BYTES,
             option_as_alt: false,
             theme: None,
             frame_interval: DEFAULT_FRAME_INTERVAL,
@@ -391,6 +403,7 @@ impl PaneHandle {
         spec.frame_interval = spec.frame_interval.max(Duration::from_millis(1));
         spec.exit_poll = spec.exit_poll.map(|poll| poll.max(Duration::from_millis(1)));
         spec.cell_px = (spec.cell_px.0.min(MAX_CELL_PX), spec.cell_px.1.min(MAX_CELL_PX));
+        spec.image_bytes = spec.image_bytes.min(MAX_IMAGE_BYTES);
 
         let queue: Arc<PaneQueue<Control>> = Arc::new(PaneQueue::new());
         let (started_tx, started_rx) = mpsc::channel::<Result<Option<u32>>>();
@@ -427,7 +440,7 @@ impl PaneHandle {
         Self::spawn(
             pane,
             spec,
-            |spec| crate::GhosttyEngine::new(spec.cols, spec.rows, spec.scrollback),
+            |spec| crate::GhosttyEngine::with_image_limit(spec.cols, spec.rows, spec.scrollback, spec.image_bytes),
             sink,
         )
     }
@@ -1489,6 +1502,40 @@ mod tests {
     }
 
     #[test]
+    fn a_new_spec_has_the_default_image_memory_and_it_is_the_engines_default() {
+        assert_eq!(PaneSpec::new("/bin/sh", 80, 24).image_bytes, DEFAULT_IMAGE_BYTES);
+        assert_eq!(DEFAULT_IMAGE_BYTES, 64 * 1024 * 1024);
+        assert_eq!(MAX_IMAGE_BYTES, 512 * 1024 * 1024, "the top of the image_memory_mib range");
+        #[cfg(feature = "ghostty")]
+        assert_eq!(DEFAULT_IMAGE_BYTES, crate::images::DEFAULT_IMAGE_BYTES);
+    }
+
+    /// What the engine factory of a pane is handed: the image memory of the spec, cut to [`MAX_IMAGE_BYTES`].
+    #[cfg(all(feature = "ghostty", unix))]
+    #[test]
+    fn the_engine_factory_gets_the_image_memory_of_the_spec_cut_to_the_top_of_the_range() {
+        for (asked, expected) in [(0, 0), (5 * 1024 * 1024, 5 * 1024 * 1024), (u64::MAX, MAX_IMAGE_BYTES)] {
+            let seen = Arc::new(Mutex::new(None));
+            let seen_in = seen.clone();
+            let mut spec = PaneSpec::new("/bin/sh", 80, 24).args(["-c", "sleep 30"]);
+            spec.image_bytes = asked;
+            let pane = PaneHandle::spawn(
+                1,
+                spec,
+                move |spec| {
+                    *seen_in.lock().unwrap() = Some(spec.image_bytes);
+                    crate::GhosttyEngine::with_image_limit(spec.cols, spec.rows, spec.scrollback, spec.image_bytes)
+                },
+                |_| {},
+            )
+            .expect("the pane starts");
+            assert_eq!(*seen.lock().unwrap(), Some(expected), "asked for {asked}");
+            pane.close();
+            assert!(pane.join(Duration::from_secs(5)));
+        }
+    }
+
+    #[test]
     fn a_spec_without_the_host_flag_is_started_as_it_says() {
         let spec = PaneSpec::new("/bin/zsh", 80, 24).args(["-l"]).cwd("/home/a");
         assert!(!spec.host_spawn && spec.cwd_lookup, "the defaults: nothing wrapped, the directory looked up");
@@ -1764,7 +1811,7 @@ mod exit_poll_tests {
         let pane = PaneHandle::spawn_wrapped(
             1,
             spec,
-            |spec| crate::GhosttyEngine::new(spec.cols, spec.rows, spec.scrollback),
+            |spec| crate::GhosttyEngine::with_image_limit(spec.cols, spec.rows, spec.scrollback, spec.image_bytes),
             log.sink(),
             Some(wrap),
         )

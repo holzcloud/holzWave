@@ -56,6 +56,9 @@ pub const UI_SCALE: (u16, u16) = (75, 200);
 /// The accepted range of `scrollback_lines`.
 pub const SCROLLBACK_LINES: (u32, u32) = (100, 100_000);
 
+/// The accepted range of `image_memory_mib`, in MiB. `0` keeps no image.
+pub const IMAGE_MEMORY_MIB: (u32, u32) = (0, 512);
+
 /// The most key binding overrides that are kept. With the length limit below, a saved document stays far below
 /// [`MAX_SETTINGS_BYTES`], so a save is always loadable again.
 pub const MAX_KEYBINDINGS: usize = 512;
@@ -133,6 +136,9 @@ pub struct Settings {
     pub contrast: Contrast,
     /// Lines of scrollback kept per pane.
     pub scrollback_lines: u32,
+    /// The memory in MiB that one pane may use for the pictures programs send it (the Kitty graphics protocol). `0`
+    /// keeps no picture. It applies to panes started afterwards, as `scrollback_lines` does.
+    pub image_memory_mib: u32,
     /// Ask before a multi-line paste when the program did not turn on bracketed paste (D-15).
     pub confirm_multiline_paste: bool,
     /// Copy the selection to the system clipboard when a mouse selection ends (a drag, a double click or a triple
@@ -169,6 +175,7 @@ impl Default for Settings {
             motion: Motion::System,
             contrast: Contrast::System,
             scrollback_lines: 10_000,
+            image_memory_mib: 64,
             confirm_multiline_paste: true,
             copy_on_select: true,
             smooth_scroll: false,
@@ -266,6 +273,7 @@ impl Settings {
         clamp("font_size", &mut self.font_size, FONT_SIZE, &mut notes);
         clamp("ui_scale", &mut self.ui_scale, UI_SCALE, &mut notes);
         clamp("scrollback_lines", &mut self.scrollback_lines, SCROLLBACK_LINES, &mut notes);
+        clamp("image_memory_mib", &mut self.image_memory_mib, IMAGE_MEMORY_MIB, &mut notes);
 
         // Blanks are no program: they mean the default and cost no note. A value that is too long or holds a control
         // character (NUL included) cannot be a program path a person typed; it is reset, and nothing else with it.
@@ -408,6 +416,7 @@ fn numeric_range(key: &str) -> Option<(u32, u32)> {
         "font_size" => Some((FONT_SIZE.0.into(), FONT_SIZE.1.into())),
         "ui_scale" => Some((UI_SCALE.0.into(), UI_SCALE.1.into())),
         "scrollback_lines" => Some(SCROLLBACK_LINES),
+        "image_memory_mib" => Some(IMAGE_MEMORY_MIB),
         _ => None,
     }
 }
