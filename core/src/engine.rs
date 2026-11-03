@@ -446,6 +446,74 @@ pub struct RowUpdate {
     pub cells: Vec<Cell>,
 }
 
+/// Where an image is drawn in relation to the cells. The variants are in drawing order: everything below the cell
+/// backgrounds first, then the backgrounds, then the images below the text, then the text, then the images above it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ImageLayer {
+    /// Below the cell background colours (a program's `z` below `i32::MIN / 2`).
+    BelowBg,
+    /// Above the backgrounds, below the text (a negative `z`; also every Unicode-placeholder image).
+    BelowText,
+    /// Above the text (`z` of 0 or more).
+    AboveText,
+}
+
+/// One image on the screen: where it is and how it is cut, never its pixels (those are read with
+/// [`TerminalEngine::image_chunk`], keyed by `image_id` and `generation`).
+///
+/// A Unicode-placeholder image is one entry per run of neighbouring placeholder cells on a row, each one row tall.
+/// The position is in viewport cells and is negative when the image starts above or left of the viewport; the page
+/// clips. Every number is at most `i32::MAX`, so a consumer may hold them in signed 32-bit values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImagePlacement {
+    /// The id the program gave the image (or the one the terminal assigned for an image number).
+    pub image_id: u32,
+    /// Changes whenever the pixels of the image may have changed (a new image under the same id, the next frame of an
+    /// animation). Never 0, never reused: a cache key together with `image_id`.
+    pub generation: u64,
+    pub layer: ImageLayer,
+    /// The program's z order; sort by `layer` and then by `z`, lowest first. The list is already in that order.
+    pub z: i32,
+    /// The column and row of the top left cell in the viewport.
+    pub col: i32,
+    pub row: i32,
+    /// The size in cells.
+    pub cols: u32,
+    pub rows: u32,
+    /// Where the image starts inside its first cell, in pixels.
+    pub offset_x: u32,
+    pub offset_y: u32,
+    /// The size on the screen in pixels (the cell size times the cells, or the image's own size).
+    pub width: u32,
+    pub height: u32,
+    /// The part of the image that is shown, in image pixels.
+    pub src_x: u32,
+    pub src_y: u32,
+    pub src_w: u32,
+    pub src_h: u32,
+}
+
+/// The most image placements one [`Update`] carries. A program can place images without end; the list is sorted for
+/// drawing and cut here, so a frame never grows with the program's patience.
+pub const MAX_PLACEMENTS: usize = 256;
+
+/// The most bytes one [`TerminalEngine::image_chunk`] answers with, whatever the caller asked for.
+pub const MAX_IMAGE_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+
+/// A piece of an image's pixels, as straight (non-premultiplied) 8-bit RGBA whatever format the program sent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageChunk {
+    pub width: u32,
+    pub height: u32,
+    /// The generation of the image that these bytes belong to; equal to the one asked for.
+    pub generation: u64,
+    /// The size of the whole image in bytes (`width * height * 4`).
+    pub total: u64,
+    /// Where in the image these bytes start; the offset that was asked for, brought to at most `total`.
+    pub offset: u64,
+    pub bytes: Vec<u8>,
+}
+
 /// What changed since the previous [`TerminalEngine::update`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Update {
@@ -469,6 +537,11 @@ pub struct Update {
     pub search: Option<SearchState>,
     /// Where the copy-mode cursor is, in viewport coordinates, when copy mode is active.
     pub copy_cursor: Option<(u16, u16)>,
+    /// The images on the viewport, in drawing order, at most [`MAX_PLACEMENTS`]. `Some` only when the list changed
+    /// since the previous update (an image was sent, placed, moved, deleted, scrolled or resized) or when `reset` is
+    /// set; `None` means the consumer keeps the list it has. It is empty, never missing, when no image is on the
+    /// screen and when the engine does not know the cell size yet.
+    pub images: Option<Vec<ImagePlacement>>,
 }
 
 /// The colours a theme gives the terminal. The palette entries 16 to 255 are derived from `bg`, `fg` and `ansi`.
@@ -801,6 +874,25 @@ pub trait TerminalEngine {
     fn copy_mode(&mut self, _op: CopyOp) -> Result<CopyState> {
         Err(Error::Unsupported("copy_mode".into()))
     }
+
+    /// Read at most `max` bytes of an image's pixels from `offset` on, as straight 8-bit RGBA, or `None` when the image
+    /// is gone, still being received, or no longer has the `generation` the caller knows (the caller then asks the
+    /// placement list again). `max` is cut to [`MAX_IMAGE_CHUNK_BYTES`]. Reads the images of the screen that is
+    /// showing. The call belongs to the engine's own thread; an engine without images answers `None`.
+    fn image_chunk(&mut self, _id: u32, _generation: u64, _offset: usize, _max: usize) -> Option<ImageChunk> {
+        None
+    }
+
+    /// Move the playing animations on to the frames that are due at `now_ms` (milliseconds on one clock that never
+    /// goes back) and return when the next frame is due on that clock, or `None` when nothing is animating or
+    /// animation is paused. The engine never calls this itself: the pane owns the clock.
+    fn tick_images(&mut self, _now_ms: u64) -> Option<u64> {
+        None
+    }
+
+    /// Pause (`false`) or resume (`true`) animations. While paused, [`TerminalEngine::tick_images`] moves no frame, so
+    /// the frame that is shown stays; resuming goes on from that frame.
+    fn set_image_animation(&mut self, _enabled: bool) {}
 }
 
 #[cfg(test)]

@@ -4,8 +4,10 @@ use std::rc::Rc;
 use libghostty_vt::key::{self, Action, Key, OptionAsAlt};
 use libghostty_vt::mouse::{self, EncoderSize};
 use libghostty_vt::paste::Options as PasteOptions;
+use libghostty_vt::kitty::graphics::ImageFormat;
 use libghostty_vt::render::{
-    CellIterator, Colors, CursorVisualStyle, Dirty, RowIteration, RowIterator, Snapshot,
+    CellIterator, Colors, CursorVisualStyle, Dirty, ImageIteration, ImageIterator, ImageLayer as VtLayer, ImageProtocol,
+    RowIteration, RowIterator, Snapshot,
 };
 use libghostty_vt::screen::{CellSemanticContent, CellWide, GridRef, RowSemanticPrompt, Screen as VtScreen};
 use libghostty_vt::search::{MatchBuffer, Scroll, Search};
@@ -18,11 +20,12 @@ use libghostty_vt::{Error as VtError, RenderState, Terminal};
 
 use crate::attention::CommandMarks;
 use crate::engine::{
-    Cell, Color, CopyMotion, CopyOp, CopyState, Cursor, CursorStyle, EngineEvent, EngineTheme, KeyAction, KeyEvent,
-    MAX_SEARCH_BYTES, MatchSpan, Modes, Mods, MouseAction, MouseButton, MouseEvent, PasteOutcome, RowUpdate, Screen,
-    Scrollbar, SearchOp, SearchState, SelectMode, SelectOp, Span, TerminalEngine, Update, WheelEvent, WheelOutcome,
-    Width, sanitize_program_bytes,
+    Cell, Color, CopyMotion, CopyOp, CopyState, Cursor, CursorStyle, EngineEvent, EngineTheme, ImageChunk, ImageLayer,
+    ImagePlacement, KeyAction, KeyEvent, MAX_IMAGE_CHUNK_BYTES, MAX_PLACEMENTS, MAX_SEARCH_BYTES, MatchSpan, Modes, Mods,
+    MouseAction, MouseButton, MouseEvent, PasteOutcome, RowUpdate, Screen, Scrollbar, SearchOp, SearchState, SelectMode,
+    SelectOp, Span, TerminalEngine, Update, WheelEvent, WheelOutcome, Width, sanitize_program_bytes,
 };
+use crate::images::{self, DEFAULT_IMAGE_BYTES, KITTY_APC_MAX_BYTES};
 use crate::textread::{
     Cut, MAX_READ_BYTES, MAX_READ_ROWS, TextBuilder, TextRead, TextRegion, cell_is_hidden, rows_within_budget,
 };
@@ -86,6 +89,14 @@ fn cap_tail(text: String, max_bytes: usize) -> String {
 /// The most code points of one cell's cluster that a read takes. A cell with more (a program can pile combining marks
 /// onto one cell without end) reads as its primary code point, so one hostile cell costs a few bytes, not kilobytes.
 const MAX_CLUSTER_CHARS: usize = 32;
+
+/// The code point of the Kitty graphics protocol's Unicode placeholders. A cell that starts with it is part of an image.
+const PLACEHOLDER: char = '\u{10EEEE}';
+
+/// The most entries of the library's image list one update reads before it stops. The list is bounded by what is on the
+/// viewport, but a program can put many placements on the same cells; the sorted list is cut to
+/// [`MAX_PLACEMENTS`] afterwards, so this only bounds the time of the walk.
+const MAX_PLACEMENT_WALK: usize = 4096;
 
 /// The most rows [`GhosttyEngine::last_output_row`] looks at before it gives up.
 const MAX_MARK_SCAN: u32 = 8192;
@@ -417,6 +428,108 @@ fn read_cursor(snapshot: &Snapshot<'static, '_>) -> Result<Option<Cursor>> {
     }))
 }
 
+/// The image list of a render-state snapshot as plain placements: only the Kitty protocol, in drawing order (layer,
+/// then z, the order the library gives is kept among equals) and cut to [`MAX_PLACEMENTS`].
+fn read_placements(iter: &mut ImageIterator<'static>, snapshot: &Snapshot<'static, '_>) -> Result<Vec<ImagePlacement>> {
+    let mut list = Vec::new();
+    let mut walk = iter.update(snapshot).map_err(eng)?;
+    let mut seen = 0usize;
+    while let Some(p) = walk.next() {
+        seen += 1;
+        if seen > MAX_PLACEMENT_WALK {
+            break;
+        }
+        // A protocol this build does not know gives an error: skipped, like every protocol but Kitty.
+        if !matches!(p.protocol(), Ok(ImageProtocol::Kitty)) {
+            continue;
+        }
+        list.push(placement_of(p)?);
+    }
+    list.sort_by_key(|p| (p.layer, p.z));
+    list.truncate(MAX_PLACEMENTS);
+    Ok(list)
+}
+
+/// A number the program influences, brought to at most `i32::MAX` so that a consumer can hold it signed.
+fn small(value: u32) -> u32 {
+    value.min(i32::MAX as u32)
+}
+
+/// One entry of the library's image list.
+fn placement_of(p: &ImageIteration<'static, '_>) -> Result<ImagePlacement> {
+    Ok(ImagePlacement {
+        image_id: p.image_id().map_err(eng)?,
+        generation: p.image_generation().map_err(eng)?,
+        layer: match p.layer().map_err(eng)? {
+            VtLayer::BelowBackground => ImageLayer::BelowBg,
+            VtLayer::BelowText => ImageLayer::BelowText,
+            VtLayer::AboveText => ImageLayer::AboveText,
+        },
+        z: p.z().map_err(eng)?,
+        col: p.viewport_col().map_err(eng)?,
+        row: p.viewport_row().map_err(eng)?,
+        cols: small(p.grid_cols().map_err(eng)?),
+        rows: small(p.grid_rows().map_err(eng)?),
+        offset_x: small(p.cell_offset_x().map_err(eng)?),
+        offset_y: small(p.cell_offset_y().map_err(eng)?),
+        width: small(p.pixel_width().map_err(eng)?),
+        height: small(p.pixel_height().map_err(eng)?),
+        src_x: small(p.source_x().map_err(eng)?),
+        src_y: small(p.source_y().map_err(eng)?),
+        src_w: small(p.source_width().map_err(eng)?),
+        src_h: small(p.source_height().map_err(eng)?),
+    })
+}
+
+/// A window of an image as straight 8-bit RGBA: `(total bytes, offset, bytes)`.
+///
+/// `data` is what the library stores, in `format` (an RGB image is stored as three bytes per pixel, gray as one or two,
+/// and only RGBA is copied as it is); the window is converted a piece at a time, so the whole image is never copied
+/// or widened. `None` when the format is not a pixel format or when `data` is not exactly `width * height` pixels, so a
+/// library that disagreed with itself would give an error and not a slice out of range. `offset` is brought to the
+/// size of the image and the window to `max` and [`MAX_IMAGE_CHUNK_BYTES`].
+fn rgba_window(
+    format: ImageFormat,
+    width: u32,
+    height: u32,
+    data: &[u8],
+    offset: usize,
+    max: usize,
+) -> Option<(u64, usize, Vec<u8>)> {
+    let bytes_per_pixel = match format {
+        ImageFormat::Rgba => 4,
+        ImageFormat::Rgb => 3,
+        ImageFormat::GrayAlpha => 2,
+        ImageFormat::Gray => 1,
+        _ => return None,
+    };
+    let pixels = (width as usize).checked_mul(height as usize)?;
+    if data.len() != pixels.checked_mul(bytes_per_pixel)? {
+        return None;
+    }
+    let total = pixels.checked_mul(4)?;
+    let offset = offset.min(total);
+    let len = max.min(MAX_IMAGE_CHUNK_BYTES).min(total - offset);
+    let end = offset + len;
+    if format == ImageFormat::Rgba {
+        return Some((total as u64, offset, data[offset..end].to_vec()));
+    }
+    let mut out = Vec::with_capacity(len);
+    for k in offset..end {
+        // Byte `k` of the RGBA form is channel `k % 4` of pixel `k / 4`; `base + channel` is inside `data` because the
+        // pixel is inside the image and `data` holds exactly `pixels * bytes_per_pixel` bytes.
+        let base = (k / 4) * bytes_per_pixel;
+        let channel = k % 4;
+        out.push(match (format, channel) {
+            (ImageFormat::Rgb, 0..=2) => data[base + channel],
+            (ImageFormat::Gray | ImageFormat::GrayAlpha, 0..=2) => data[base],
+            (ImageFormat::GrayAlpha, _) => data[base + 1],
+            _ => 255,
+        });
+    }
+    Some((total as u64, offset, out))
+}
+
 /// Read every cell of the row the iteration stands on, resolving colours against the snapshot's defaults.
 ///
 /// The one place where a libghostty cell becomes a neutral [`Cell`]: `screen` and `update` share it, so the two can
@@ -427,10 +540,17 @@ fn read_row(
     colors: &Colors,
     out: &mut Vec<Cell>,
 ) -> Result<()> {
+    // A cell of a Kitty Unicode-placeholder image holds U+10EEEE and the combining marks that name its row and column;
+    // its colour carries the image id. It is drawn as the picture and never reaches the consumer as text, so the cell
+    // reads as blank and keeps its colours. The row flag keeps the check off every other row.
+    let has_placeholders = row.raw_row().map_err(eng)?.has_kitty_virtual_placeholder().map_err(eng)?;
     let mut cell_iter = cells_iter.update(row).map_err(eng)?;
     while let Some(cell) = cell_iter.next() {
         let mut text = String::new();
         cell.graphemes_utf8(&mut text).map_err(eng)?;
+        if has_placeholders && text.starts_with(PLACEHOLDER) {
+            text.clear();
+        }
         let style = cell.style().map_err(eng)?;
         let width = match cell.raw_cell().map_err(eng)?.wide().map_err(eng)? {
             CellWide::Narrow => Width::Narrow,
@@ -636,11 +756,58 @@ pub struct GhosttyEngine {
     events: Rc<RefCell<Vec<EngineEvent>>>,
     /// Reads the `D` marks of OSC 133 with their status from the program's bytes: the library reports no status.
     command_marks: CommandMarks,
+    /// Reads the image list of the render state.
+    image_iter: ImageIterator<'static>,
+    /// The image-list generation and the cell size at the last time the list was read: the list is read again only when
+    /// one of them differs, so a frame without image changes costs one integer compare.
+    last_images: Option<(u64, (u32, u32))>,
+    /// Whether [`TerminalEngine::tick_images`] moves animations on; the page turns it off for people who asked for less
+    /// motion.
+    animation: bool,
+}
+
+/// What the engine lets a program's images use, as the terminal reports it back. The three media are how a program can
+/// name data outside the stream: a file, a temporary file and shared memory. All three are refused by every engine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageLimits {
+    /// The most bytes of decoded pixels one screen keeps; 0 means the protocol is off.
+    pub storage_bytes: u64,
+    /// A program may name a file (`t=f`).
+    pub from_file: bool,
+    /// A program may name a temporary file (`t=t`).
+    pub from_temp_file: bool,
+    /// A program may name shared memory (`t=s`).
+    pub from_shared_memory: bool,
 }
 
 impl GhosttyEngine {
+    /// An engine with the default image memory of 64 MiB ([`DEFAULT_IMAGE_BYTES`]).
     pub fn new(cols: u16, rows: u16, max_scrollback: usize) -> Result<Self> {
+        Self::with_image_limit(cols, rows, max_scrollback, DEFAULT_IMAGE_BYTES)
+    }
+
+    /// An engine whose Kitty graphics memory is `image_bytes` of decoded pixels per screen (the main and the alternate
+    /// screen each hold that much). 0 turns the protocol off: nothing is stored and the terminal does not answer, which
+    /// is how a program learns that there is no graphics support. When the limit is reached the library evicts the
+    /// oldest images that are not shown first; an image bigger than the limit is refused with an error reply.
+    ///
+    /// Whatever the limit, a program cannot make the engine read a file, a temporary file or shared memory (direct
+    /// transmission only), one escape sequence is bounded at [`KITTY_APC_MAX_BYTES`], and a PNG is decoded by the
+    /// bounded decoder of [`images`].
+    pub fn with_image_limit(cols: u16, rows: u16, max_scrollback: usize, image_bytes: u64) -> Result<Self> {
+        // Before the first terminal of the process exists (the decoder hook is process-global).
+        if !images::ensure_png_decoder() {
+            return Err(Error::Engine("the PNG decoder could not be installed".into()));
+        }
         let mut terminal = Terminal::new(cols, rows).map_err(eng)?;
+        // Kitty graphics: the limits are set before the first byte arrives and none of the results is ignored. The
+        // three media that name data outside the stream are refused (the library's defaults, said out loud so that a
+        // library bump cannot widen them), and the result is read back below.
+        terminal.set_kitty_image_storage_limit(image_bytes).map_err(eng)?;
+        terminal.set_kitty_image_from_file_allowed(false).map_err(eng)?;
+        terminal.set_kitty_image_temp_file_dir(None).map_err(eng)?;
+        terminal.set_kitty_image_from_shared_mem_allowed(false).map_err(eng)?;
+        terminal.set_apc_max_bytes_kitty(Some(KITTY_APC_MAX_BYTES)).map_err(eng)?;
         // libghostty-vt has two scrollback limits, lines and bytes, and the first one reached wins. A fresh terminal has
         // a byte limit of only 10 000 bytes (about 1 000 rows at 80 columns), which cut every pane to that whatever
         // `max_scrollback` said. The byte limit is removed, so the line limit is the bound: libghostty-vt prunes whole
@@ -713,7 +880,7 @@ impl GhosttyEngine {
             // callback would turn on Kitty paste events), and title reports stay disabled (a program could put text
             // into its own input with them).
         }
-        Ok(Self {
+        let engine = Self {
             terminal,
             render: RenderState::new().map_err(eng)?,
             rows_iter: RowIterator::new().map_err(eng)?,
@@ -737,7 +904,35 @@ impl GhosttyEngine {
             match_buf: MatchBuffer::new(),
             search_memo: None,
             copy: None,
+            image_iter: ImageIterator::new().map_err(eng)?,
+            last_images: None,
+            animation: true,
+        };
+        // Fail closed: an engine whose terminal still allows a medium is not handed out.
+        let limits = engine.image_limits()?;
+        if limits.from_file || limits.from_temp_file || limits.from_shared_memory || limits.storage_bytes != image_bytes {
+            return Err(Error::Engine(format!("the terminal did not take the image limits: {limits:?}")));
+        }
+        Ok(engine)
+    }
+
+    /// The image limits the terminal reports back (what is in force, not what was asked for).
+    pub fn image_limits(&self) -> Result<ImageLimits> {
+        Ok(ImageLimits {
+            storage_bytes: self.terminal.kitty_image_storage_limit().map_err(eng)?,
+            from_file: self.terminal.is_kitty_image_from_file_allowed().map_err(eng)?,
+            from_temp_file: self.terminal.kitty_image_temp_file_dir().map_err(eng)?.is_some(),
+            from_shared_memory: self.terminal.is_kitty_image_from_shared_mem_allowed().map_err(eng)?,
         })
+    }
+
+    /// The generation of the stored image `id` on the screen that is showing, `None` when there is no such image or
+    /// its pixels are still on the way.
+    pub fn image_generation(&self, id: u32) -> Option<u64> {
+        let graphics = self.terminal.kitty_graphics().ok()?;
+        let image = graphics.image(id)?;
+        image.data().ok()??;
+        image.generation().ok()
     }
 
     /// The selection the engine's command marks make of the command output that contains `screen_row`, as a snapshot
@@ -1607,6 +1802,20 @@ impl TerminalEngine for GhosttyEngine {
                 Some(Span { y: y as u16, x0: x0.min(x1), x1: x1.min(cols.saturating_sub(1)) })
             })
             .collect();
+        // The image list is read again only when the library says it changed (or the cell size, which the pixel
+        // sizes depend on, or the consumer starts over). Without a known cell size nothing can be placed.
+        let image_state = (snapshot.image_placements_generation().map_err(eng)?, self.cell_px);
+        let images = if reset || self.last_images != Some(image_state) {
+            self.last_images = Some(image_state);
+            let known = self.cell_px.0 > 0 && self.cell_px.1 > 0;
+            Some(if known {
+                degraded("images", read_placements(&mut self.image_iter, &snapshot), Vec::new)
+            } else {
+                Vec::new()
+            })
+        } else {
+            None
+        };
         // Only after the rows were consumed: clean() clears the global and the per-row flags.
         snapshot.clean().map_err(eng)?;
         self.force_full = false;
@@ -1627,6 +1836,7 @@ impl TerminalEngine for GhosttyEngine {
             matches,
             search,
             copy_cursor,
+            images,
         })
     }
 
@@ -1839,6 +2049,31 @@ impl TerminalEngine for GhosttyEngine {
             .map(|b| String::from_utf8_lossy(b.as_ref()).into_owned())
             .filter(|text| !text.is_empty()))
     }
+
+    fn image_chunk(&mut self, id: u32, generation: u64, offset: usize, max: usize) -> Option<ImageChunk> {
+        let graphics = self.terminal.kitty_graphics().ok()?;
+        let image = graphics.image(id)?;
+        // A generation is never reused: a mismatch means the pixels the caller knows about are gone.
+        if image.generation().ok()? != generation {
+            return None;
+        }
+        let (width, height) = (image.width().ok()?, image.height().ok()?);
+        // `None` while the pixels are still on the way.
+        let data = image.data().ok()??;
+        let (total, offset, bytes) = rgba_window(image.format().ok()?, width, height, data, offset, max)?;
+        Some(ImageChunk { width, height, generation, total, offset: offset as u64, bytes })
+    }
+
+    fn tick_images(&mut self, now_ms: u64) -> Option<u64> {
+        if !self.animation {
+            return None;
+        }
+        degraded("animation tick", self.terminal.kitty_graphics_animation_tick(now_ms).map_err(eng), || None)
+    }
+
+    fn set_image_animation(&mut self, enabled: bool) {
+        self.animation = enabled;
+    }
 }
 
 #[cfg(test)]
@@ -1905,6 +2140,8 @@ mod tests {
     fn the_pinned_library_has_alternate_scroll_on_by_default() {
         // The wheel policy relies on it: less and vim get arrow keys from the wheel without any setup by the program
         // (D-24). A library bump that changes the default fails here instead of silently breaking the wheel.
+        // The PNG hook is process-global and is set before the first terminal of the process: this test makes a raw one.
+        images::ensure_png_decoder();
         let mut term = Terminal::new(10, 3).expect("terminal");
         assert!(term.mode(Mode::ALT_SCROLL).expect("mode"), "alternate scroll is off in a new terminal");
         term.vt_write(b"\x1b[?1007l");

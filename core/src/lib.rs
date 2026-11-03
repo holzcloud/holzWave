@@ -9,6 +9,7 @@
 //! - [`attention`]: the flood gate of the events that mark a tab or a workspace (the bell).
 //! - [`ai`]: the AI chat core; [`ai::http`] builds the one HTTP client that reaches a provider.
 //! - [`engine`]: the [`TerminalEngine`] trait and the screen model it produces.
+//! - `images`: the limits of the Kitty graphics protocol and the bounded PNG decoder (with the `ghostty` feature).
 //! - [`layout`]: the pure tab and pane layout model.
 //! - [`platform`]: the per-OS decisions (default shell, locale, polling) as pure functions of an `Os`.
 //! - [`pty`]: spawning a shell on a pseudo terminal.
@@ -72,9 +73,11 @@ pub mod wshinstall;
 
 #[cfg(feature = "ghostty")]
 mod ghostty;
+#[cfg(feature = "ghostty")]
+pub mod images;
 
 pub use engine::{Cell, Color, Cursor, Screen, Scrollbar, TerminalEngine, Width};
 pub use error::{Error, Result};
 
 #[cfg(feature = "ghostty")]
-pub use ghostty::GhosttyEngine;
+pub use ghostty::{GhosttyEngine, ImageLimits};

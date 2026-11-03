@@ -10,7 +10,7 @@ repository.workspace = true
 default = ["ghostty"]
 # Terminal engine backed by libghostty-vt. Needs Zig 0.17.0 at build time: the pinned
 # Ghostty commit (521cf2c, build.zig.zon version 1.3.2-dev) says minimum_zig_version 0.17.0.
-ghostty = ["dep:libghostty-vt"]
+ghostty = ["dep:libghostty-vt", "libghostty-vt/png"]
 keyring = ["dep:keyring"]
 
 [dependencies]

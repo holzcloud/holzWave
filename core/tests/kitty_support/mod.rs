@@ -174,6 +174,62 @@ impl Bits {
     }
 }
 
+/// The CRC-32 of a PNG chunk (the IEEE polynomial, bit by bit: small and slow, and only test input goes through it).
+pub fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { crc >> 1 ^ 0xEDB8_8320 } else { crc >> 1 };
+        }
+    }
+    !crc
+}
+
+/// One PNG chunk: length, type, data and the CRC of type plus data.
+fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len() + 12);
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(kind);
+    out.extend_from_slice(data);
+    let mut checked = kind.to_vec();
+    checked.extend_from_slice(data);
+    out.extend_from_slice(&crc32(&checked).to_be_bytes());
+    out
+}
+
+/// A PNG file of `width` by `height` pixels, 8-bit RGBA, with no filtering and a zlib stream of stored blocks. It is
+/// made here so that a test never needs a PNG crate: the decoder under test is the engine's own.
+pub fn png_rgba(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+    assert_eq!(rgba.len(), width as usize * height as usize * 4, "one RGBA quadruple per pixel");
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8 bits, colour type 6 (RGBA), deflate, filter method 0, no interlace
+    let mut raw = Vec::with_capacity(rgba.len() + height as usize);
+    for row in rgba.chunks(width as usize * 4) {
+        raw.push(0); // filter type "none"
+        raw.extend_from_slice(row);
+    }
+    let mut out = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    out.extend_from_slice(&png_chunk(b"IHDR", &ihdr));
+    out.extend_from_slice(&png_chunk(b"IDAT", &zlib_stored(&raw)));
+    out.extend_from_slice(&png_chunk(b"IEND", &[]));
+    out
+}
+
+/// The first bytes of a PNG that declare `width` by `height` pixels and nothing else: the signature and an IHDR chunk
+/// with its CRC (so it looks valid to a parser that checks the chunk), and no pixel data at all.
+pub fn png_header_only(width: u32, height: u32) -> Vec<u8> {
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+    let mut out = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    out.extend_from_slice(&png_chunk(b"IHDR", &ihdr));
+    out
+}
+
 /// A real zlib stream that inflates to `n` zero bytes in about `n / 160` bytes (fixed Huffman, matches of 258 bytes at
 /// distance 1). This is the decompression bomb of the probes; nothing here allocates `n` bytes.
 pub fn zlib_zeros(n: u64) -> Vec<u8> {
