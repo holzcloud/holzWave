@@ -332,6 +332,8 @@ enum Control {
     RequestFull,
     SetTheme(EngineTheme),
     SetOptionAsAlt(bool),
+    /// Whether pictures may animate: the page's reduced-motion fact, handed to the engine.
+    SetImageAnimation(bool),
     Select(SelectOp),
     SelectionText(Sender<Result<Option<String>>>),
     /// Read a region of the text; the engine's answer travels back over `reply`.
@@ -588,6 +590,13 @@ impl PaneHandle {
         self.send(Control::SetOptionAsAlt(on))
     }
 
+    /// Whether animated pictures may move. `false` pauses every animation on its shown frame (the page's reduced-motion
+    /// fact) and the pane stops waking for them; `true` resumes them from that frame and makes the next frame ask the
+    /// engine's clock again. Ordered with the other controls of the pane.
+    pub fn set_image_animation(&self, enabled: bool) -> Result<()> {
+        self.send(Control::SetImageAnimation(enabled))
+    }
+
     /// Change the selection. The selection itself lives in the engine and arrives in the frame header.
     pub fn select(&self, op: SelectOp) -> Result<()> {
         self.send(Control::Select(op))
@@ -777,9 +786,15 @@ struct Actor<E: TerminalEngine, S: FnMut(PaneEvent)> {
     /// once when the pane starts; empty off Windows) that a Windows prompt names as the host of its report.
     os: Os,
     local_host: String,
-    /// [`PaneSpec::linger`] and when the pane started, for the rule of the held exit.
+    /// [`PaneSpec::linger`] and when the pane started, for the rule of the held exit. `started` is also the zero of the
+    /// clock that animated pictures run on ([`Actor::now_ms`]).
     linger: Option<Duration>,
     started: Instant,
+    /// When the engine wants the next frame of an animated picture, in milliseconds on the clock of `started`. `None`
+    /// when nothing animates (or animation is paused): the pane then never wakes for pictures.
+    image_due: Option<u64>,
+    /// The exited program is held (see [`Actor::hold`]): no picture animates any more.
+    holding: bool,
     /// Lets one bell through per [`crate::attention::GAP`], so a program that rings in a loop cannot flood the window.
     bell_gate: Gate,
     /// The same for the end of a command.
@@ -798,6 +813,11 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
             if let Some(deadline) = self.cwd.deadline() {
                 wait = wait.min(deadline.saturating_duration_since(Instant::now()));
             }
+            // An animation wakes the pane only for the time the engine named, and only when no frame is waiting anyway:
+            // a dirty pane already waits for its frame interval.
+            if let Some(due) = self.image_due.filter(|_| !self.dirty) {
+                wait = wait.min(Duration::from_millis(due.saturating_sub(self.now_ms())));
+            }
             if let Some(poll) = self.exit_poll {
                 wait = wait.min(poll.saturating_sub(self.last_exit_check.elapsed()));
             }
@@ -814,6 +834,10 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
                     return;
                 }
                 Popped::Timeout => {}
+            }
+            // The clock has passed the due time of an animation: a frame is due, built by the rule below.
+            if self.image_due.is_some_and(|due| self.now_ms() >= due) {
+                self.dirty = true;
             }
             if self.dirty && self.last_emit.is_none_or(|last| last.elapsed() >= self.interval) {
                 self.emit_frame();
@@ -871,6 +895,8 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
     /// program (keys, text, pastes, mouse reports) is dropped, because there is no program, and so is output. The caller
     /// ends the pane through [`Actor::finish`], which sends the one `Exited`.
     fn hold(&mut self, code: Option<u32>) {
+        self.holding = true;
+        self.image_due = None;
         let line = match code {
             Some(code) => format!("[holzWave] exited with status {code}. Press Enter to close."),
             None => "[holzWave] exited. Press Enter to close.".to_owned(),
@@ -1037,6 +1063,16 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
                 self.option_as_alt = on;
                 self.engine.set_option_as_alt(on);
             }
+            Control::SetImageAnimation(on) => {
+                self.engine.set_image_animation(on);
+                if on {
+                    // The next frame asks the clock again: an animation that was paused has a due time now.
+                    self.dirty = true;
+                } else {
+                    // Paused: the engine moves no frame, so there is nothing to wake for.
+                    self.image_due = None;
+                }
+            }
             Control::Select(op) => {
                 if self.engine.select(op).is_ok() {
                     self.selecting = !matches!(op, SelectOp::Clear);
@@ -1172,6 +1208,9 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
     /// use up the interval, or the echo of that key, arriving a fraction of a millisecond later, would wait for it.
     fn emit_frame(&mut self) {
         self.dirty = false;
+        // The engine's clock for animated pictures runs once per frame, never per chunk of output, and not at all in a
+        // held pane. What it returns is when the next frame is due.
+        self.image_due = if self.holding { None } else { self.engine.tick_images(self.now_ms()) };
         match self.engine.update() {
             Ok(update) => {
                 if let Some(frame) = self.encoder.encode(update) {
@@ -1182,6 +1221,12 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
             // No frame is the symptom of this; without a trace the pane just looks frozen.
             Err(e) => eprintln!("holzwave: pane update failed: {e}"),
         }
+    }
+
+    /// Milliseconds since the pane started, on a monotonic clock: the time that animated pictures are given and the
+    /// time their due moments are compared with.
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
     /// Close the child and report the end. The one place a pane ends.
@@ -1359,6 +1404,8 @@ fn engine_main<E, F, S>(
         },
         linger: spec.linger,
         started: Instant::now(),
+        image_due: None,
+        holding: false,
         bell_gate: Gate::new(),
         end_gate: Gate::new(),
     };
@@ -1913,5 +1960,286 @@ mod exit_poll_tests {
         assert_eq!(log.exits().len(), 1);
         assert!(pane.join(Duration::from_secs(3)));
         release.store(true, Ordering::Relaxed);
+    }
+}
+
+/// The animation clock of the pane against a stand-in engine that only counts: when the pane asks the engine for the
+/// time of the next frame of a picture, when it wakes up for it, and when it asks nothing. The shell and the PTY are
+/// real; the clock is the real monotonic one, so the timing bounds are generous and the counts are exact.
+#[cfg(all(test, unix))]
+mod image_clock_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    /// What the stand-in engine saw, shared with the test.
+    #[derive(Default)]
+    struct Seen {
+        /// The `now_ms` of every call of `tick_images`, in order.
+        ticks: Mutex<Vec<u64>>,
+        updates: AtomicUsize,
+        feeds: AtomicUsize,
+        /// Every call that matters for order, as text.
+        order: Mutex<Vec<String>>,
+    }
+
+    impl Seen {
+        fn ticks(&self) -> Vec<u64> {
+            self.ticks.lock().unwrap().clone()
+        }
+
+        fn order(&self) -> Vec<String> {
+            self.order.lock().unwrap().clone()
+        }
+    }
+
+    /// What the engine answers to `tick_images`.
+    #[derive(Clone, Copy)]
+    enum Mode {
+        /// Nothing animates.
+        Never,
+        /// The first call is answered with a due time 50 ms later, every other call with `None`.
+        Once50,
+        /// A picture animates for good: the next frame is always `ms` after the call, until it is paused.
+        Every(u64),
+    }
+
+    struct ClockEngine {
+        seen: Arc<Seen>,
+        mode: Mode,
+        paused: bool,
+        calls: usize,
+        size: (u16, u16),
+        reset: bool,
+    }
+
+    impl ClockEngine {
+        fn new(seen: Arc<Seen>, mode: Mode) -> Self {
+            Self { seen, mode, paused: false, calls: 0, size: (80, 24), reset: true }
+        }
+    }
+
+    impl TerminalEngine for ClockEngine {
+        fn feed(&mut self, _bytes: &[u8]) {
+            self.seen.feeds.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn resize(&mut self, cols: u16, rows: u16, _cell_px: (u32, u32)) -> Result<()> {
+            self.size = (cols, rows);
+            self.reset = true;
+            Ok(())
+        }
+
+        fn size(&self) -> Result<(u16, u16)> {
+            Ok(self.size)
+        }
+
+        fn scroll(&mut self, _rows: isize) {}
+
+        fn scroll_to_bottom(&mut self) {}
+
+        fn screen(&mut self) -> Result<crate::engine::Screen> {
+            Ok(crate::engine::Screen::default())
+        }
+
+        fn set_option_as_alt(&mut self, on: bool) {
+            self.seen.order.lock().unwrap().push(format!("option_as_alt {on}"));
+        }
+
+        fn encode_key(&mut self, _event: &KeyEvent) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        fn encode_text(&mut self, text: &str) -> Result<Vec<u8>> {
+            Ok(text.as_bytes().to_vec())
+        }
+
+        fn paste(&mut self, _text: &str, _allow_unsafe: bool) -> Result<PasteOutcome> {
+            Ok(PasteOutcome::Written)
+        }
+
+        fn take_replies(&mut self) -> Vec<u8> {
+            Vec::new()
+        }
+
+        fn update(&mut self) -> Result<crate::engine::Update> {
+            let n = self.seen.updates.fetch_add(1, Ordering::Relaxed) as u64;
+            let reset = std::mem::take(&mut self.reset);
+            // Every update differs from the one before (the scrollbar counts), so every one is a frame that is sent
+            // and that paces the next, as the updates of a real engine do while output changes the screen.
+            Ok(crate::engine::Update {
+                full: reset,
+                reset,
+                scrollbar: crate::engine::Scrollbar { total: n + 24, offset: 0, len: 24 },
+                cols: self.size.0,
+                rows: self.size.1,
+                ..crate::engine::Update::default()
+            })
+        }
+
+        fn request_full(&mut self) {
+            self.reset = true;
+        }
+
+        fn tick_images(&mut self, now_ms: u64) -> Option<u64> {
+            self.seen.ticks.lock().unwrap().push(now_ms);
+            let call = self.calls;
+            self.calls += 1;
+            if self.paused {
+                return None;
+            }
+            match self.mode {
+                Mode::Never => None,
+                Mode::Once50 => (call == 0).then_some(now_ms + 50),
+                Mode::Every(ms) => Some(now_ms + ms),
+            }
+        }
+
+        fn set_image_animation(&mut self, enabled: bool) {
+            self.paused = !enabled;
+            self.seen.order.lock().unwrap().push(format!("image_animation {enabled}"));
+        }
+    }
+
+    fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if condition() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        condition()
+    }
+
+    /// A pane on a silent child (`sleep`) with the stand-in engine, and what the sink saw.
+    fn start(mode: Mode, linger: Option<Duration>, script: &str) -> (PaneHandle, Arc<Seen>, Arc<Mutex<Vec<PaneEvent>>>) {
+        let seen = Arc::new(Seen::default());
+        let engine_seen = seen.clone();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink_events = events.clone();
+        let mut spec = PaneSpec::new("/bin/sh", 80, 24).args(["-c", script]);
+        spec.linger = linger;
+        let pane = PaneHandle::spawn(
+            1,
+            spec,
+            move |_| Ok(ClockEngine::new(engine_seen, mode)),
+            move |event| sink_events.lock().unwrap().push(event),
+        )
+        .expect("the pane starts");
+        (pane, seen, events)
+    }
+
+    fn end(pane: &PaneHandle) {
+        pane.close();
+        assert!(pane.join(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn a_due_time_wakes_a_silent_pane_once_and_then_nothing_more_is_asked() {
+        let (pane, seen, _events) = start(Mode::Once50, None, "sleep 30");
+        // The first frame goes out at once and asks the clock; the answer was 50 ms later; the pane wakes for it
+        // although no output arrives; the second answer is `None`.
+        assert!(wait_until(Duration::from_secs(3), || seen.ticks().len() >= 2), "the pane never woke up for the picture");
+        thread::sleep(Duration::from_millis(250));
+        let ticks = seen.ticks();
+        assert_eq!(ticks.len(), 2, "no more calls after `None`: {ticks:?}");
+        assert!(ticks[0] < 1000, "the first call is at the start of the pane: {ticks:?}");
+        assert!(ticks[1] >= ticks[0] + 50, "the second call is not before the due time: {ticks:?}");
+        assert!(ticks[1] < ticks[0] + 1500, "the second call is about at the due time: {ticks:?}");
+        assert_eq!(seen.updates.load(Ordering::Relaxed), 2, "one frame was built per call");
+        end(&pane);
+    }
+
+    #[test]
+    fn a_pane_whose_engine_never_animates_asks_once_for_its_first_frame_and_never_wakes_for_pictures() {
+        let (pane, seen, _events) = start(Mode::Never, None, "sleep 30");
+        assert!(wait_until(Duration::from_secs(3), || !seen.ticks().is_empty()));
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(seen.ticks().len(), 1, "no wake: {:?}", seen.ticks());
+        assert_eq!(seen.updates.load(Ordering::Relaxed), 1);
+        end(&pane);
+    }
+
+    #[test]
+    fn the_clock_is_asked_once_per_frame_before_the_update_with_milliseconds_since_the_start() {
+        let (pane, seen, _events) = start(Mode::Every(20), None, "sleep 30");
+        assert!(wait_until(Duration::from_secs(3), || seen.ticks().len() >= 5));
+        let ticks = seen.ticks();
+        assert!(ticks.windows(2).all(|pair| pair[0] <= pair[1]), "the clock goes forward: {ticks:?}");
+        assert!(ticks[0] < 1000, "milliseconds since the pane started, not since the epoch: {ticks:?}");
+        // One call per frame: the calls and the updates go together (the update follows the call at once).
+        end(&pane);
+        let (calls, updates) = (seen.ticks().len(), seen.updates.load(Ordering::Relaxed));
+        assert_eq!(calls, updates, "one `tick_images` per `update`");
+    }
+
+    #[test]
+    fn switching_the_animation_off_reaches_the_engine_in_order_and_stops_every_wake() {
+        let (pane, seen, _events) = start(Mode::Every(20), None, "sleep 30");
+        assert!(wait_until(Duration::from_secs(3), || seen.ticks().len() >= 3));
+        // The start itself told the engine the option setting of the spec; what follows is what the test sent.
+        seen.order.lock().unwrap().clear();
+        // Ordered with the other controls of the pane.
+        pane.set_option_as_alt(true).unwrap();
+        pane.set_image_animation(false).unwrap();
+        pane.set_option_as_alt(false).unwrap();
+        assert!(wait_until(Duration::from_secs(3), || seen.order().len() >= 3));
+        assert_eq!(seen.order(), ["option_as_alt true", "image_animation false", "option_as_alt false"]);
+        // The engine answers `None` while paused and the pane has dropped its due time: it asks nothing more.
+        thread::sleep(Duration::from_millis(100));
+        let calls = seen.ticks().len();
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(seen.ticks().len(), calls, "a paused animation costs no wake");
+        end(&pane);
+    }
+
+    #[test]
+    fn switching_the_animation_on_makes_the_next_frame_ask_the_clock_again() {
+        let (pane, seen, _events) = start(Mode::Never, None, "sleep 30");
+        assert!(wait_until(Duration::from_secs(3), || seen.ticks().len() == 1));
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(seen.ticks().len(), 1);
+        seen.order.lock().unwrap().clear();
+
+        pane.set_image_animation(true).unwrap();
+        assert!(wait_until(Duration::from_secs(3), || seen.ticks().len() == 2), "no frame after the switch");
+        assert_eq!(seen.order(), ["image_animation true"]);
+        end(&pane);
+    }
+
+    #[test]
+    fn a_burst_of_output_chunks_asks_the_clock_once_per_frame_and_not_once_per_chunk() {
+        let (pane, seen, _events) = start(Mode::Every(1000), None, "sleep 30");
+        assert!(wait_until(Duration::from_secs(3), || !seen.ticks().is_empty()));
+        let (ticks_before, updates_before) = (seen.ticks().len(), seen.updates.load(Ordering::Relaxed));
+        for _ in 0..10_000 {
+            assert!(pane.shared.queue.push_output(vec![b'x']), "the pane is gone");
+        }
+        assert!(wait_until(Duration::from_secs(10), || seen.feeds.load(Ordering::Relaxed) == 10_000), "not all fed");
+        thread::sleep(Duration::from_millis(100));
+        // Counted after the pane has ended: a frame in progress has asked the clock and not yet updated.
+        end(&pane);
+        let ticks = seen.ticks().len() - ticks_before;
+        let frames = seen.updates.load(Ordering::Relaxed) - updates_before;
+        assert!(ticks <= frames, "{ticks} calls for {frames} frames");
+        assert!(frames < 1000, "{frames} frames for 10000 chunks: frames are paced, not per chunk");
+    }
+
+    #[test]
+    fn a_held_pane_makes_no_tick_even_when_the_engine_would_animate_for_good() {
+        // The shell ends at once with a status that is not 0, so the pane is held with its notice line.
+        let (pane, seen, events) = start(Mode::Every(10), Some(Duration::from_secs(60)), "exit 3");
+        assert!(
+            wait_until(Duration::from_secs(5), || events.lock().unwrap().iter().any(|e| matches!(e, PaneEvent::Held { .. }))),
+            "the pane was never held"
+        );
+        let at_hold = seen.ticks().len();
+        // Controls of a held pane are still met, and the switch to `true` marks the pane dirty: still no tick.
+        pane.set_image_animation(true).unwrap();
+        pane.request_full().unwrap();
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(seen.ticks().len(), at_hold, "a held pane asked the clock");
+        assert!(seen.updates.load(Ordering::Relaxed) > at_hold, "the held pane still builds its frames");
+        end(&pane);
     }
 }
