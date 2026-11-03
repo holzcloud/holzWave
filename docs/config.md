@@ -86,6 +86,7 @@ setting is changed from the dialog, the palette or a shortcut, and then in full.
 | `motion` | string | `"system"`, `"reduce"`, `"full"` | `"system"` | at once |
 | `contrast` | string | `"system"`, `"normal"`, `"high"` | `"system"` | at once |
 | `scrollback_lines` | number | 100 to 100000 | 10000 | for panes started afterwards; a running pane keeps its own; it counts rows of the grid (a long line that wraps takes several), and the terminal engine drops whole pages of rows, so a pane keeps a few percent more or less than the number |
+| `image_memory_mib` | number | 0 to 512 (MiB) | 64 | for panes started afterwards; a running pane keeps its own; the memory that one pane may use for the pictures that programs send it (the Kitty graphics protocol); `0` turns pictures off, so none is stored; when it is full the oldest pictures are dropped; one decoded picture of more than 128 MiB is refused whatever the number is (below) |
 | `confirm_multiline_paste` | boolean | | `true` | at once |
 | `copy_on_select` | boolean | | `true` | at once; copies the selection to the system clipboard when a mouse selection ends (below) |
 | `smooth_scroll` | boolean | | `false` | at once; eases a scrollback jump over at most 120 ms (below) |
@@ -95,6 +96,15 @@ setting is changed from the dialog, the palette or a shortcut, and then in full.
 | `ai_local_context` | string | `"ask"`, `"auto"` | `"ask"` | at once; whether a model on this computer asks before shared terminal content goes to it (below) |
 | `ai_persist_context` | boolean | | `false` | for chats saved afterwards; keeps the terminal text and tool output of a chat in its file (below) |
 | `keybindings` | object | action id to chord text, at most 512 entries, each text at most 128 bytes | `{}` | at once |
+
+`image_memory_mib` is the most memory that one pane keeps for pictures, counted per screen: the normal screen and the
+alternate screen of a program keep up to that much each. It is whole MiB: a number above 512 is read as 512, a negative
+number as 0, and a value that is not a number is reported and costs only this key. While a program is still sending one
+picture the pane also holds the part that has arrived, and the terminal engine refuses a request that would take the
+pane past twice the setting plus 64 MiB. A single picture of more than 128 MiB when decoded, or of more than 10000
+pixels in width or height, is refused whatever the setting says; so is every request that names a file instead of
+carrying the bytes. A computer that shares terminals with other people may cap the memory of a pane for everyone; the
+smaller number then holds.
 
 `option_as_alt` is off by default so that a Swiss layout types `|`, `[` and `{` with Option (D-12).
 `confirm_multiline_paste` asks before a multi-line paste into a program that did not turn on bracketed paste (D-15).
@@ -154,6 +164,7 @@ settings dialog has no row for it; edit the file.
   "motion": "system",
   "contrast": "system",
   "scrollback_lines": 20000,
+  "image_memory_mib": 64,
   "confirm_multiline_paste": true,
   "copy_on_select": true,
   "smooth_scroll": false,

@@ -115,7 +115,7 @@ test("the settings view has exactly the documented keys at every level and the s
   assert.deepEqual(golden.events.settings, view, "the settings event payload is the settings view");
   assert.deepEqual(keys(view.settings), [
     "ai_local_context", "ai_local_only", "ai_persist_context", "confirm_multiline_paste", "contrast", "copy_on_select",
-    "cursor_blink", "cursor_trail", "font_size", "keybindings", "motion", "option_as_alt", "scrollback_lines", "shell", "smooth_scroll",
+    "cursor_blink", "cursor_trail", "font_size", "image_memory_mib", "keybindings", "motion", "option_as_alt", "scrollback_lines", "shell", "smooth_scroll",
     "theme", "ui_scale", "version",
   ]);
   assert.equal(typeof view.settings.theme, "string");
