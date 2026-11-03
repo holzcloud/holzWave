@@ -8,7 +8,7 @@
 #   core       the engine and the pane actor, no socket (core/tests/perf.rs)          scope core.
 #   server     a real socket to the real server: key to frame, reattach, memory      scope server.   (server/tests/perf.rs)
 #   web        a real browser against the real server: key to paint, reload          scope web.      (app/tests/web/perf.mjs)
-#   container  the core and server tests in the Linux container, the reference for the server (D-16)   scope core.,server.
+#   container  the core and server tests in the Linux container, the reference for the server (D-16)   scope core.,server.   (p99 metrics not judged here)
 #   all        core, server and web in turn; the exit status is the worst one
 #
 # A group is judged only on the metrics it measured (its scope), so a run of one group is never failed for lacking the metrics
@@ -69,6 +69,9 @@ case "$group" in
         # The container is another machine: its baseline is named by its own PERF-MACHINE line (perf/baseline-linux-aarch64.json
         # on an Apple Silicon Mac), so it can only be looked for after the measurement.
         scope="core.,server."
+        # The Docker VM moves its tail latency by a factor of 5 or more between sessions (10-04), so the container does not judge
+        # the p99 metrics; the Mac does. Everything else of the two groups is judged.
+        skip="_p99_"
         log=target/perf-container.log
         ;;
 esac
@@ -137,4 +140,4 @@ if [ "$group" = container ]; then
     fi
 fi
 
-node scripts/perf-compare.mjs "$baseline" target/perf-run.json --scope "$scope"
+node scripts/perf-compare.mjs "$baseline" target/perf-run.json --scope "$scope" ${skip:+--skip "$skip"}

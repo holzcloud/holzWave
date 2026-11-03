@@ -103,6 +103,21 @@ test("a time metric is ok up to 1.5 times the baseline plus 0.1 ms and worse abo
   assert.equal(at(1.7).results[0].limit, 1.6);
 });
 
+test("a skipped metric is not judged, and every other metric of the scope still is", () => {
+  const baseline = { metrics: { "core.k_p99_ms": metric("ms", 1.0), "core.k_p50_ms": metric("ms", 1.0) } };
+  const run = { metrics: { "core.k_p99_ms": metric("ms", 9.0), "core.k_p50_ms": metric("ms", 1.0) } };
+  assert.equal(compare(baseline, run, { scope: ["core."] }).ok, false);
+  const skipped = compare(baseline, run, { scope: ["core."], skip: ["_p99_"] });
+  assert.equal(skipped.ok, true);
+  assert.equal(verdictOf(skipped, "core.k_p99_ms"), "not-measured");
+  assert.equal(verdictOf(skipped, "core.k_p50_ms"), "ok");
+  const worse = { metrics: { "core.k_p99_ms": metric("ms", 9.0), "core.k_p50_ms": metric("ms", 5.0) } };
+  assert.equal(compare(baseline, worse, { scope: ["core."], skip: ["_p99_"] }).ok, false);
+  // Skipping everything in the scope leaves nothing to judge: that fails, a guard that cannot judge never passes.
+  assert.equal(compare(baseline, run, { scope: ["core."], skip: ["core."] }).ok, false);
+  assert.throws(() => compare(baseline, run, { skip: [""] }), TypeError);
+});
+
 test("a throughput metric is ok down to half the baseline and worse below", () => {
   const baseline = { metrics: { "core.p_mib_s": metric("mib_s", 300) } };
   const at = (median) => compare(baseline, { metrics: { "core.p_mib_s": metric("mib_s", median) } });

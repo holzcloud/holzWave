@@ -13,6 +13,8 @@
 // `--scope` is a comma separated list of name prefixes that says which metrics the run was meant to measure; a baseline
 // metric outside it is `not-measured` and does not fail. Inside the scope a metric that the run lacks, a unit that differs
 // and a baseline with nothing in the scope all fail: a guard that cannot judge never passes.
+// `--skip` is a comma separated list of name parts; a metric whose name contains one is `not-measured` as well (the container
+// does not judge the p99 metrics: the Docker VM moves its tail latency by a factor of 5 between sessions).
 //
 // Output: one line per metric (`<verdict> <name> <baseline> -> <current> (limit <limit>)`), then `PERF OK` or `PERF WORSE`.
 // Exit status: 0 pass, 1 a metric is worse or cannot be judged, 2 a file that cannot be read or wrong arguments. Node
@@ -57,11 +59,12 @@ function judge(unit, baseline, current) {
  * `{ ok, results: [{ name, verdict, baseline, current, limit }] }`. `scope` is an array of name prefixes (default: all).
  * `ok` is false for `worse`, `missing-in-run`, `unit-mismatch` and for a baseline with no metric in the scope.
  */
-export function compare(baseline, run, { scope = [""] } = {}) {
+export function compare(baseline, run, { scope = [""], skip = [] } = {}) {
   checkSet(baseline, "baseline");
   checkSet(run, "run");
   if (!Array.isArray(scope) || scope.some((p) => typeof p !== "string")) throw new TypeError("scope is a list of prefixes");
-  const inScope = (name) => scope.some((prefix) => name.startsWith(prefix));
+  if (!Array.isArray(skip) || skip.some((p) => typeof p !== "string" || p === "")) throw new TypeError("skip is a list of non-empty parts of a name");
+  const inScope = (name) => scope.some((prefix) => name.startsWith(prefix)) && !skip.some((part) => name.includes(part));
   const has = (set, name) => Object.hasOwn(set.metrics, name);
 
   const results = [];
@@ -100,7 +103,7 @@ export function compare(baseline, run, { scope = [""] } = {}) {
 
 // ---- the command line ----------------------------------------------------------------------------------------------
 
-const USAGE = "usage: node scripts/perf-compare.mjs <baseline.json> <run.json> [--scope core.,server.]\n";
+const USAGE = "usage: node scripts/perf-compare.mjs <baseline.json> <run.json> [--scope core.,server.] [--skip _p99_]\n";
 
 function readJson(path, what) {
   let text;
@@ -121,6 +124,7 @@ const show = (v) => (v === null ? "-" : String(Math.round(v * 1000) / 1000));
 function main(argv) {
   const files = [];
   let scope;
+  let skip;
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--scope") {
       i += 1;
@@ -129,6 +133,13 @@ function main(argv) {
         return 2;
       }
       scope = argv[i].split(",");
+    } else if (argv[i] === "--skip") {
+      i += 1;
+      if (i >= argv.length || argv[i] === "" || skip !== undefined) {
+        process.stderr.write(`perf-compare: --skip needs one list of name parts\n${USAGE}`);
+        return 2;
+      }
+      skip = argv[i].split(",");
     } else if (argv[i].startsWith("--")) {
       process.stderr.write(`perf-compare: unknown option ${argv[i]}\n${USAGE}`);
       return 2;
@@ -144,7 +155,7 @@ function main(argv) {
   try {
     const baseline = readJson(files[0], "baseline");
     const run = readJson(files[1], "run file");
-    result = compare(baseline, run, scope === undefined ? {} : { scope });
+    result = compare(baseline, run, { ...(scope === undefined ? {} : { scope }), ...(skip === undefined ? {} : { skip }) });
   } catch (e) {
     process.stderr.write(`perf-compare: ${e instanceof Error ? e.message : String(e)}\n`);
     return 2;
