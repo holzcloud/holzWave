@@ -3962,3 +3962,87 @@ fn the_hidden_character_predicate_allows_whitespace_and_flags_the_invisible_ones
         assert!(is_hidden_or_control(hidden), "U+{:04X} is hidden or a control", hidden as u32);
     }
 }
+
+// ---- signing is never promised ---------------------------------------------------------------------------------------
+
+/// The phrases of a text that promises signing for later or says that it belongs to a phase of the work. The repository says
+/// what is signed and what is not (`docs/signing.md`); it does not announce signing. Each phrase is built from two pieces so
+/// that this file does not hold the text it forbids.
+fn stale_signing_phrases() -> Vec<String> {
+    vec![
+        String::from("signing is ") + "phase",
+        String::from("signing: ") + "phase",
+        String::from("notarisation: ") + "phase",
+        String::from("code signing ") + "yet",
+        String::from("signing ") + "will",
+        String::from("signing ") + "comes",
+        String::from("signing is ") + "planned",
+    ]
+}
+
+/// The one-based numbers of the lines of `text` that hold a stale promise of signing, in any letter case.
+fn stale_signing_promises(text: &str) -> Vec<usize> {
+    let phrases = stale_signing_phrases();
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            let lowered = line.to_lowercase();
+            phrases.iter().any(|phrase| lowered.contains(phrase.as_str()))
+        })
+        .map(|(index, _)| index + 1)
+        .collect()
+}
+
+/// The files that must not promise signing: `README.md`, every Markdown file below `docs/`, every file below `scripts/`
+/// that is text, and the bundle test. Build output and vendored code are skipped by name.
+fn signing_promise_files() -> Vec<PathBuf> {
+    fn walk(dir: &Path, markdown_only: bool, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if !PLAN_LABEL_SKIPPED_DIRS.contains(&name.as_str()) {
+                    walk(&path, markdown_only, out);
+                }
+            } else if !markdown_only || path.extension().and_then(|e| e.to_str()) == Some("md") {
+                out.push(path);
+            }
+        }
+    }
+    let mut out = vec![root().join("README.md"), root().join("app/src-tauri/tests/bundle.rs")];
+    walk(&root().join("docs"), true, &mut out);
+    walk(&root().join("scripts"), false, &mut out);
+    out.sort();
+    out
+}
+
+#[test]
+fn signing_is_never_promised() {
+    // The matcher first, on strings: every phrase is found, in any letter case and inside a longer line, and a line that
+    // only says a thing is unsigned, or describes what signing is, is not.
+    for phrase in stale_signing_phrases() {
+        let upper = phrase.to_uppercase();
+        assert_eq!(stale_signing_promises(&format!("fine\nThe note says {phrase} for later.\n")), [2], "{phrase}");
+        assert_eq!(stale_signing_promises(&upper), [1], "{upper}");
+    }
+    assert_eq!(stale_signing_promises("The installer is unsigned.\nThe app is signed ad hoc only.\n"), Vec::<usize>::new());
+    assert_eq!(stale_signing_promises("what is signed and what is not\nsigning scripts\nA signed release carries a signature."), Vec::<usize>::new());
+    assert_eq!(stale_signing_promises("a\nb\nSigning Is Phase 99\nc\n#  code signing yet"), [3, 5]);
+
+    // Then the tree.
+    let files = signing_promise_files();
+    assert!(files.iter().any(|f| shown(f) == "README.md"), "the walk reads the README");
+    assert!(files.iter().any(|f| shown(f).starts_with("docs/") && shown(f).ends_with(".md")), "the walk reads docs/");
+    assert!(files.iter().any(|f| shown(f) == "scripts/sign-linux.sh"), "the walk reads scripts/");
+    assert!(files.iter().any(|f| shown(f) == "app/src-tauri/tests/bundle.rs"), "the walk reads the bundle test");
+    let mut problems = Vec::new();
+    for path in files {
+        // A file that is not UTF-8 is not text and is not scanned.
+        let Ok(text) = fs::read_to_string(&path) else { continue };
+        for line in stale_signing_promises(&text) {
+            problems.push(format!("{}:{line}: a promise or a phase label for signing", shown(&path)));
+        }
+    }
+    assert!(problems.is_empty(), "say what is signed (docs/signing.md), do not promise it:\n{}", problems.join("\n"));
+}
