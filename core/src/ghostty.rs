@@ -98,6 +98,47 @@ const PLACEHOLDER: char = '\u{10EEEE}';
 /// [`MAX_PLACEMENTS`] afterwards, so this only bounds the time of the walk.
 const MAX_PLACEMENT_WALK: usize = 4096;
 
+/// `text` with every cluster that starts with the placeholder code point (the character and the marks that name its row
+/// and column) replaced by one space, so that a copy holds what the screen shows: a blank per cell. A line that ends
+/// in such blanks loses them again, and the spaces before them, the way the library trims the end of a row.
+fn blank_placeholders(text: String) -> String {
+    if !text.contains(PLACEHOLDER) {
+        return text;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    // How many spaces at the end of `out` stand for placeholder cells.
+    let mut blanks = 0;
+    let mut at = 0;
+    while at < chars.len() {
+        let (consumed, _) = libghostty_vt::unicode::grapheme_width(&chars[at..]);
+        let consumed = consumed.clamp(1, chars.len() - at);
+        let c = chars[at];
+        if c == PLACEHOLDER {
+            out.push(' ');
+            blanks += 1;
+        } else {
+            if c == '\n' {
+                trim_blank_tail(&mut out, blanks);
+            }
+            blanks = 0;
+            out.extend(&chars[at..at + consumed]);
+        }
+        at += consumed;
+    }
+    trim_blank_tail(&mut out, blanks);
+    out
+}
+
+/// Drop the last `blanks` bytes of `out` (spaces that stood for placeholder cells) and the spaces before them, which
+/// are now at the end of the line: the library's own trim would have taken them, so a copy agrees with it.
+fn trim_blank_tail(out: &mut String, blanks: usize) {
+    if blanks > 0 {
+        out.truncate(out.len() - blanks);
+        out.truncate(out.trim_end_matches(' ').len());
+    }
+}
+
 /// The most rows [`GhosttyEngine::last_output_row`] looks at before it gives up.
 const MAX_MARK_SCAN: u32 = 8192;
 
@@ -137,7 +178,8 @@ fn cell_text(at: &GridRef<'_>) -> Result<CellText> {
         Err(VtError::OutOfSpace { .. }) => primary_char(&cell)?,
         Err(e) => return Err(eng(e)),
     };
-    if text.is_empty() {
+    // A placeholder cell is the picture of an image, not text (see `read_row`).
+    if text.is_empty() || text.starts_with(PLACEHOLDER) {
         return Ok(CellText::Blank);
     }
     Ok(CellText::Text { text, styled: cell.has_styling().map_err(eng)? })
@@ -2045,8 +2087,9 @@ impl TerminalEngine for GhosttyEngine {
         let options = FormatOptions::new().with_unwrap(true).with_trim(true);
         let bytes = self.terminal.format_selection_alloc(None, options).map_err(eng)?;
         // A selection of nothing but blanks has no text to copy: that is no text, like no selection.
+        // The cells of a placeholder image show as blanks on the screen, so a copy holds blanks too, not U+10EEEE.
         Ok(bytes
-            .map(|b| String::from_utf8_lossy(b.as_ref()).into_owned())
+            .map(|b| blank_placeholders(String::from_utf8_lossy(b.as_ref()).into_owned()))
             .filter(|text| !text.is_empty()))
     }
 
@@ -2102,6 +2145,25 @@ mod tests {
         engine.terminal.set_selection(Some(&reversed)).expect("select");
         let read = engine.read_text(TextRegion::Selection, 4096).expect("read").expect("text");
         assert_eq!(read.text, "bcd\nhij\nnop");
+    }
+
+    #[test]
+    fn placeholder_clusters_become_one_blank_each_and_trailing_blanks_go() {
+        let cell = |row: char, col: char| format!("\u{10EEEE}{row}{col}");
+        let (r0, c0, c1) = ('\u{0305}', '\u{0305}', '\u{030D}');
+        // Text around a run keeps its place: one blank for each cell of the run, marks and all.
+        let text = format!("ab{}{}cd", cell(r0, c0), cell(r0, c1));
+        assert_eq!(blank_placeholders(text), "ab  cd");
+        // A run at the end of a line or of the text leaves nothing behind, as the blank cells of a row do.
+        let text = format!("ab{}{}\n  {}\n{}", cell(r0, c0), cell(r0, c1), cell(r0, c0), cell(r0, c1));
+        assert_eq!(blank_placeholders(text), "ab\n\n");
+        // Text without a placeholder is returned as it was, combining marks included.
+        assert_eq!(blank_placeholders("e\u{0301} x \n y".to_owned()), "e\u{0301} x \n y");
+        assert_eq!(blank_placeholders(String::new()), "");
+        // A placeholder with no marks at all, and two in a row, are one blank each.
+        assert_eq!(blank_placeholders("a\u{10EEEE}\u{10EEEE}b".to_owned()), "a  b");
+        // Spaces the program typed before the run stay.
+        assert_eq!(blank_placeholders(format!("a {}", cell(r0, c0))), "a");
     }
 
     #[test]
