@@ -5,7 +5,18 @@
 //!
 //! One JSON object per pane and change: `pane`, `seq`, `full`, `cols`, `rows`, `fg`, `bg` (default colours as
 //! `0xRRGGBB`), `cursor` (`null` when hidden), `scrollbar` (`[offset, total, len]`), `selection`, `matches`,
-//! `search`, `copy_cursor`, `modes` and `changed`, the rows that differ from the previous frame.
+//! `search`, `copy_cursor`, `modes` and `changed`, the rows that differ from the previous frame, and, only when
+//! something changed, `images`.
+//!
+//! # Images
+//!
+//! `images` is the list of [`PlacementMsg`] (one array of sixteen numbers per image, never pixels) and is in a frame
+//! exactly when the list differs from the one the encoder last sent for this pane, and on a full frame that has any.
+//! An empty list in a frame that is not full means every image is gone; a full frame replaces everything, so the key
+//! missing from it means no images. A frame without the key leaves the page's list as it is, and is byte for byte
+//! what a frame was before images existed. A change of the list alone is a frame. At most
+//! [`crate::engine::MAX_PLACEMENTS`] entries. The pixels are pulled in pieces of at most [`IMAGE_CHUNK_BYTES`] by
+//! `(image id, generation)`, see [`image_data_bytes`].
 //!
 //! # Rows: one code point per cell
 //!
@@ -39,7 +50,9 @@
 
 use serde::Serialize;
 
-use crate::engine::{Cell, Color, CursorStyle, Update, Width};
+use crate::engine::{
+    Cell, Color, CursorStyle, ImageChunk, ImageLayer, ImagePlacement, MAX_IMAGE_CHUNK_BYTES, MAX_PLACEMENTS, Update, Width,
+};
 
 /// Style flag bits of a [`Run`].
 pub const BOLD: u8 = 1;
@@ -50,6 +63,88 @@ pub const INVERSE: u8 = 8;
 /// `[text, cols, fg, bg, flags]`: `cols` cells of one style. `text` holds one code point per cell.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Run(pub String, pub u16, pub u32, pub u32, pub u8);
+
+/// One image on the screen, as the page needs it: sixteen numbers in a fixed order, never the pixels (those are asked
+/// for by `(image id, generation)`, see [`image_data_bytes`]).
+///
+/// In order: image id, generation, layer (0 below the cell backgrounds, 1 below the text, 2 above the text), z, column,
+/// row, grid columns, grid rows, x offset, y offset (pixels inside the first cell), pixel width, pixel height, source x,
+/// source y, source width, source height (image pixels). Column and row are negative when the image starts above or
+/// left of the viewport; the page clips.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PlacementMsg(
+    pub u32,
+    pub u64,
+    pub u8,
+    pub i32,
+    pub i32,
+    pub i32,
+    pub u32,
+    pub u32,
+    pub u32,
+    pub u32,
+    pub u32,
+    pub u32,
+    pub u32,
+    pub u32,
+    pub u32,
+    pub u32,
+);
+
+impl PlacementMsg {
+    fn of(p: &ImagePlacement) -> PlacementMsg {
+        let layer = match p.layer {
+            ImageLayer::BelowBg => 0,
+            ImageLayer::BelowText => 1,
+            ImageLayer::AboveText => 2,
+        };
+        PlacementMsg(
+            p.image_id,
+            p.generation,
+            layer,
+            p.z,
+            p.col,
+            p.row,
+            p.cols,
+            p.rows,
+            p.offset_x,
+            p.offset_y,
+            p.width,
+            p.height,
+            p.src_x,
+            p.src_y,
+            p.src_w,
+            p.src_h,
+        )
+    }
+}
+
+/// The most bytes of pixels one answer of the image read carries: the page asks again with the next offset. Straight
+/// RGBA, so 512 KiB is 131072 pixels, and a 4000 by 4000 picture takes 122 reads.
+pub const IMAGE_CHUNK_BYTES: usize = 512 * 1024;
+const _: () = assert!(IMAGE_CHUNK_BYTES <= MAX_IMAGE_CHUNK_BYTES);
+
+/// The length of the header of an answer to the image read.
+pub const IMAGE_DATA_HEADER_BYTES: usize = 16;
+
+/// The raw answer to an image read: four big-endian `u32` (width, height, total length in bytes, offset of the first
+/// byte that follows) and then the bytes, straight RGBA. The chunk is cut to [`IMAGE_CHUNK_BYTES`] here again, so no
+/// caller can make an answer larger than that; a size that does not fit a `u32` is not representable on the wire and
+/// answers `None` (the engine's image limit makes that unreachable, the check is the proof).
+pub fn image_data_bytes(chunk: &ImageChunk) -> Option<Vec<u8>> {
+    let width = u32::try_from(chunk.width).ok()?;
+    let height = u32::try_from(chunk.height).ok()?;
+    let total = u32::try_from(chunk.total).ok()?;
+    let offset = u32::try_from(chunk.offset).ok()?;
+    let bytes = &chunk.bytes[..chunk.bytes.len().min(IMAGE_CHUNK_BYTES)];
+    let mut out = Vec::with_capacity(IMAGE_DATA_HEADER_BYTES + bytes.len());
+    out.extend_from_slice(&width.to_be_bytes());
+    out.extend_from_slice(&height.to_be_bytes());
+    out.extend_from_slice(&total.to_be_bytes());
+    out.extend_from_slice(&offset.to_be_bytes());
+    out.extend_from_slice(bytes);
+    Some(out)
+}
 
 /// One row of a frame.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -112,6 +207,11 @@ pub struct FrameMsg {
     pub search: Option<SearchMsg>,
     pub copy_cursor: Option<(u16, u16)>,
     pub modes: ModesMsg,
+    /// The images on the screen: `Some` only when the list changed since the last frame of this pane (an empty list
+    /// means they are all gone) and on a full frame that has images; absent from the JSON otherwise. A full frame
+    /// replaces everything, so absent on a full frame means no images.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<PlacementMsg>>,
     pub changed: Vec<RowMsg>,
 }
 
@@ -184,10 +284,12 @@ struct Header {
     search: Option<SearchMsg>,
     copy_cursor: Option<(u16, u16)>,
     modes: ModesMsg,
+    /// The images on the screen now (not only the change), so that the equality rule sees a change of the list.
+    images: Vec<PlacementMsg>,
 }
 
 impl Header {
-    fn of(update: &Update) -> Header {
+    fn of(update: &Update, images: Vec<PlacementMsg>) -> Header {
         Header {
             cols: update.cols,
             rows: update.rows,
@@ -215,10 +317,19 @@ impl Header {
                 bracketed_paste: update.modes.bracketed_paste,
                 mouse: update.modes.mouse_tracking,
             },
+            images,
         }
     }
 
-    fn into_frame(self, pane: u64, seq: u64, full: bool, changed: Vec<RowMsg>) -> FrameMsg {
+    /// `images` is the list to put in the frame, already decided by the encoder (`None`: the page keeps its own).
+    fn into_frame(
+        self,
+        pane: u64,
+        seq: u64,
+        full: bool,
+        images: Option<Vec<PlacementMsg>>,
+        changed: Vec<RowMsg>,
+    ) -> FrameMsg {
         FrameMsg {
             pane,
             seq,
@@ -234,6 +345,7 @@ impl Header {
             search: self.search,
             copy_cursor: self.copy_cursor,
             modes: self.modes,
+            images,
             changed,
         }
     }
@@ -263,11 +375,14 @@ pub struct FrameEncoder {
     header: Option<Header>,
     /// The rows of the last frame sent, by `y`.
     rows: Vec<RowMsg>,
+    /// The images the engine last reported, converted: what the screen shows now. The engine says `None` for "no
+    /// change", so the encoder is the one that remembers the list.
+    images: Vec<PlacementMsg>,
 }
 
 impl FrameEncoder {
     pub fn new(pane: u64) -> Self {
-        Self { pane, seq: 0, request: false, header: None, rows: Vec::new() }
+        Self { pane, seq: 0, request: false, header: None, rows: Vec::new(), images: Vec::new() }
     }
 
     /// Make the next frame full: every row, resent from what was sent before. The webview asks for this when it
@@ -279,7 +394,12 @@ impl FrameEncoder {
     /// Encode one engine update. `None` when there is nothing to tell the webview: no row differs from the last
     /// frame and the header is the same. A frame that is not emitted does not use up a sequence number.
     pub fn encode(&mut self, update: Update) -> Option<FrameMsg> {
-        let header = Header::of(&update);
+        if let Some(list) = &update.images {
+            // Converted only when the engine says the list changed; the engine already cuts at the same maximum.
+            self.images.clear();
+            self.images.extend(list.iter().take(MAX_PLACEMENTS).map(PlacementMsg::of));
+        }
+        let header = Header::of(&update, self.images.clone());
         let size_changed =
             self.header.as_ref().is_none_or(|h| h.cols != header.cols || h.rows != header.rows);
         let full = update.reset || self.request || size_changed;
@@ -315,9 +435,52 @@ impl FrameEncoder {
         if !full && changed.is_empty() && self.header.as_ref() == Some(&header) {
             return None;
         }
+        // What the page must be told: on a full frame it replaces everything, so a non-empty list is sent and an empty
+        // one is the absence of the key; otherwise the list goes out exactly when it differs from the last one sent.
+        let images = if full {
+            (!header.images.is_empty()).then(|| header.images.clone())
+        } else {
+            let sent = self.header.as_ref().map(|h| h.images.as_slice()).unwrap_or_default();
+            (sent != header.images.as_slice()).then(|| header.images.clone())
+        };
         self.request = false;
         self.header = Some(header.clone());
         self.seq += 1;
-        Some(header.into_frame(self.pane, self.seq, full, changed))
+        Some(header.into_frame(self.pane, self.seq, full, images, changed))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chunk(bytes: Vec<u8>, total: u64, offset: u64) -> ImageChunk {
+        ImageChunk { width: 3, height: 2, generation: 7, total, offset, bytes }
+    }
+
+    #[test]
+    fn the_raw_answer_is_four_big_endian_numbers_and_then_the_bytes() {
+        let raw = image_data_bytes(&chunk(vec![9, 8, 7], 24, 0x0102_0304)).expect("fits");
+        assert_eq!(&raw[..16], [0, 0, 0, 3, 0, 0, 0, 2, 0, 0, 0, 24, 1, 2, 3, 4]);
+        assert_eq!(&raw[16..], [9, 8, 7]);
+        assert_eq!(raw.len(), IMAGE_DATA_HEADER_BYTES + 3);
+    }
+
+    #[test]
+    fn an_offset_at_the_end_has_the_header_and_no_bytes() {
+        let raw = image_data_bytes(&chunk(Vec::new(), 24, 24)).expect("fits");
+        assert_eq!(raw.len(), IMAGE_DATA_HEADER_BYTES);
+    }
+
+    #[test]
+    fn the_answer_never_carries_more_than_one_chunk() {
+        let raw = image_data_bytes(&chunk(vec![1; IMAGE_CHUNK_BYTES + 100], 1 << 20, 0)).expect("fits");
+        assert_eq!(raw.len(), IMAGE_DATA_HEADER_BYTES + IMAGE_CHUNK_BYTES);
+    }
+
+    #[test]
+    fn a_number_that_does_not_fit_the_wire_is_no_answer() {
+        assert!(image_data_bytes(&chunk(Vec::new(), u64::from(u32::MAX) + 1, 0)).is_none());
+        assert!(image_data_bytes(&chunk(Vec::new(), 0, u64::from(u32::MAX) + 1)).is_none());
     }
 }

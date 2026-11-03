@@ -466,6 +466,7 @@ mod protocol {
             search: None,
             copy_cursor: None,
             modes: ModesMsg { alt: false, bracketed_paste: false, mouse: false },
+            images: None,
             changed: Vec::new(),
         };
         let view = sample_view();

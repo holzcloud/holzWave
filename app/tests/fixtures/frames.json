@@ -1792,6 +1792,186 @@
         "",
         ""
       ]
+    },
+    {
+      "name": "image placed",
+      "input": "\\x1b[H\\x1b[2J\\x1b_Ga=T,f=32,s=1,v=1,i=5,c=1,r=1;AAAA/w==\\x1b\\\\",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 20,
+        "full": false,
+        "cols": 24,
+        "rows": 6,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 1,
+          "y": 0,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          5,
+          11,
+          6
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "images": [
+          [
+            5,
+            1,
+            2,
+            0,
+            0,
+            0,
+            1,
+            1,
+            0,
+            0,
+            8,
+            16,
+            0,
+            0,
+            1,
+            1
+          ]
+        ],
+        "changed": [
+          {
+            "y": 0,
+            "runs": []
+          },
+          {
+            "y": 1,
+            "runs": []
+          },
+          {
+            "y": 2,
+            "runs": []
+          },
+          {
+            "y": 3,
+            "runs": []
+          }
+        ]
+      },
+      "grid": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "name": "text beside the image",
+      "input": "\\r\\nafter",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 21,
+        "full": false,
+        "cols": 24,
+        "rows": 6,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 5,
+          "y": 1,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          5,
+          11,
+          6
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": [
+          {
+            "y": 1,
+            "runs": [
+              [
+                "after                   ",
+                24,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          }
+        ]
+      },
+      "grid": [
+        "",
+        "after",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "name": "image deleted",
+      "input": "\\x1b_Ga=d,d=I,i=5\\x1b\\\\",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 22,
+        "full": false,
+        "cols": 24,
+        "rows": 6,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 5,
+          "y": 1,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          5,
+          11,
+          6
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "images": [],
+        "changed": []
+      },
+      "grid": [
+        "",
+        "after",
+        "",
+        "",
+        "",
+        ""
+      ]
     }
   ]
 }

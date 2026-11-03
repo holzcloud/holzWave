@@ -398,6 +398,8 @@ struct Fixture {
 fn scenario() -> Fixture {
     let (cols, rows) = (20, 5);
     let mut e = engine(cols, rows);
+    // The engine learns the size of a cell through a resize; without it a picture has no place on the screen.
+    e.resize(cols, rows, (8, 16)).expect("cell size");
     let mut enc = FrameEncoder::new(1);
     let mut steps = Vec::new();
 
@@ -409,7 +411,7 @@ fn scenario() -> Fixture {
                     e: &mut holzwave_core::GhosttyEngine| {
         e.feed(input);
         if let Some((c, r)) = resize {
-            e.resize(c, r, (0, 0)).expect("resize");
+            e.resize(c, r, (8, 16)).expect("resize");
         }
         for op in ops {
             e.select(*op).expect("select");
@@ -463,6 +465,11 @@ fn scenario() -> Fixture {
     step("search set", b"", None, &[], &[SearchOp::Set("find".to_string())], &mut e);
     step("search next wraps to the first", b"", None, &[], &[SearchOp::Next], &mut e);
     step("search clear", b"", None, &[], &[SearchOp::Clear], &mut e);
+    // Images: one pixel placed in one cell (a list arrives), text that changes no image (no list), the picture
+    // deleted (an empty list).
+    step("image placed", b"\x1b[H\x1b[2J\x1b_Ga=T,f=32,s=1,v=1,i=5,c=1,r=1;AAAA/w==\x1b\\", None, &[], &[], &mut e);
+    step("text beside the image", b"\r\nafter", None, &[], &[], &mut e);
+    step("image deleted", b"\x1b_Ga=d,d=I,i=5\x1b\\", None, &[], &[], &mut e);
 
     Fixture { version: 1, cols, rows, steps }
 }
@@ -488,4 +495,144 @@ fn fixtures_frames_json_is_the_golden_sequence_for_the_patcher() {
     let on_disk = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("{} is missing ({e}); run with UPDATE_FIXTURES=1", path.display()));
     assert!(on_disk == json, "frames.json differs from the regenerated sequence; run with UPDATE_FIXTURES=1 and review");
+}
+
+// ---- Images in frames (POL-01, D-03) -------------------------------------------------------------------------------
+
+use holzwave_core::engine::{ImageLayer, ImagePlacement, MAX_PLACEMENTS, Update};
+
+fn placement(id: u32, generation: u64) -> ImagePlacement {
+    ImagePlacement {
+        image_id: id,
+        generation,
+        layer: ImageLayer::AboveText,
+        z: 0,
+        col: 1,
+        row: 2,
+        cols: 3,
+        rows: 4,
+        offset_x: 5,
+        offset_y: 6,
+        width: 24,
+        height: 64,
+        src_x: 7,
+        src_y: 8,
+        src_w: 9,
+        src_h: 10,
+    }
+}
+
+/// The update of a 20 by 5 grid with nothing changed and the given list (`None`: the engine reports no change).
+fn update_with(images: Option<Vec<ImagePlacement>>) -> Update {
+    Update { cols: 20, rows: 5, images, ..Update::default() }
+}
+
+#[test]
+fn a_frame_without_an_image_change_serialises_to_the_bytes_it_had_before_images_existed() {
+    let mut e = engine(20, 5);
+    let mut enc = FrameEncoder::new(7);
+    next_frame(&mut e, &mut enc).expect("first");
+    let typed = feed_frame(&mut e, &mut enc, b"hi").expect("typed");
+    assert!(typed.images.is_none());
+    let json = serde_json::to_string(&typed).expect("json");
+    let expected = concat!(
+        r#"{"pane":7,"seq":2,"full":false,"cols":20,"rows":5,"fg":16777215,"bg":0,"#,
+        r#""cursor":{"x":2,"y":0,"style":"block","blink":false},"scrollbar":[0,5,5],"selection":[],"matches":[],"#,
+        r#""search":null,"copy_cursor":null,"modes":{"alt":false,"bracketed_paste":false,"mouse":false},"#,
+        r#""changed":[{"y":0,"runs":[["hi                  ",20,16777215,0,0]]}]}"#,
+    );
+    assert_eq!(json, expected);
+}
+
+#[test]
+fn the_first_full_frame_without_images_has_no_images_key_and_one_with_images_has_the_list() {
+    let mut enc = FrameEncoder::new(1);
+    let first = enc.encode(update_with(Some(Vec::new()))).expect("first");
+    assert!(first.full && first.images.is_none(), "an empty list on a full frame is the absence of the key");
+
+    let mut enc = FrameEncoder::new(1);
+    let first = enc.encode(update_with(Some(vec![placement(5, 9)]))).expect("first");
+    assert!(first.full);
+    let list = first.images.as_ref().expect("a full frame with images carries them");
+    assert_eq!(list.len(), 1);
+}
+
+#[test]
+fn the_placement_is_sixteen_numbers_in_the_documented_order() {
+    let mut enc = FrameEncoder::new(1);
+    let frame = enc.encode(update_with(Some(vec![placement(5, 9)]))).expect("frame");
+    let json = serde_json::to_value(&frame).expect("json");
+    // id, generation, layer, z, col, row, cols, rows, x offset, y offset, width, height, src x, y, w, h.
+    assert_eq!(json["images"], serde_json::json!([[5, 9, 2, 0, 1, 2, 3, 4, 5, 6, 24, 64, 7, 8, 9, 10]]));
+    let mut below = placement(1, 1);
+    below.layer = ImageLayer::BelowBg;
+    below.z = -2_000_000_000;
+    let mut mid = placement(2, 1);
+    mid.layer = ImageLayer::BelowText;
+    mid.z = -1;
+    let frame = enc.encode(update_with(Some(vec![below, mid]))).expect("frame");
+    let json = serde_json::to_value(&frame).expect("json");
+    assert_eq!(json["images"][0][2], 0, "below the backgrounds");
+    assert_eq!(json["images"][0][3], -2_000_000_000);
+    assert_eq!(json["images"][1][2], 1, "below the text");
+}
+
+#[test]
+fn a_change_of_the_list_alone_makes_a_frame_and_the_same_list_twice_makes_one() {
+    let mut enc = FrameEncoder::new(1);
+    enc.encode(update_with(Some(Vec::new()))).expect("first");
+    let placed = enc.encode(update_with(Some(vec![placement(5, 1)]))).expect("the list alone is a frame");
+    assert!(!placed.full && placed.changed.is_empty());
+    assert_eq!(placed.images.as_ref().map(Vec::len), Some(1));
+    assert!(enc.encode(update_with(Some(vec![placement(5, 1)]))).is_none(), "the same list again says nothing");
+    assert!(enc.encode(update_with(None)).is_none(), "no report says nothing either");
+    let next = enc.encode(update_with(Some(vec![placement(5, 2)]))).expect("a new generation is a change");
+    assert_eq!(next.images.as_ref().map(|l| l[0].1), Some(2));
+    let gone = enc.encode(update_with(Some(Vec::new()))).expect("an empty list is a change");
+    assert_eq!(gone.images, Some(Vec::new()), "an empty list that follows a list is sent as empty");
+    let json = serde_json::to_value(&gone).expect("json");
+    assert_eq!(json["images"], serde_json::json!([]));
+    assert!(enc.encode(update_with(Some(Vec::new()))).is_none());
+}
+
+#[test]
+fn a_frame_after_the_list_was_sent_carries_none_even_when_the_engine_reports_nothing() {
+    let mut enc = FrameEncoder::new(1);
+    enc.encode(update_with(Some(vec![placement(5, 1)]))).expect("first");
+    let mut text = update_with(None);
+    text.cursor = None;
+    text.scrollbar.offset = 1;
+    let frame = enc.encode(text).expect("a header change");
+    assert!(frame.images.is_none(), "the page already holds the list");
+}
+
+#[test]
+fn a_full_frame_requested_by_the_encoder_resends_the_list_it_holds() {
+    let mut enc = FrameEncoder::new(1);
+    enc.encode(update_with(Some(vec![placement(5, 1)]))).expect("first");
+    enc.request_full();
+    let full = enc.encode(update_with(None)).expect("full frame");
+    assert!(full.full);
+    assert_eq!(full.images.as_ref().map(Vec::len), Some(1));
+    // And one that follows is plain again.
+    assert!(enc.encode(update_with(None)).is_none());
+}
+
+#[test]
+fn a_size_change_resets_the_list_with_the_engines_new_one() {
+    let mut enc = FrameEncoder::new(1);
+    enc.encode(update_with(Some(vec![placement(5, 1)]))).expect("first");
+    let mut resized = update_with(Some(Vec::new()));
+    resized.cols = 30;
+    resized.reset = true;
+    let frame = enc.encode(resized).expect("full");
+    assert!(frame.full && frame.images.is_none(), "the page replaces everything: no list means none");
+}
+
+#[test]
+fn the_encoder_cuts_the_list_at_the_engines_maximum() {
+    let list: Vec<ImagePlacement> = (0..(MAX_PLACEMENTS as u32 + 40)).map(|i| placement(i + 1, 1)).collect();
+    let mut enc = FrameEncoder::new(1);
+    let frame = enc.encode(update_with(Some(list))).expect("frame");
+    assert_eq!(frame.images.as_ref().map(Vec::len), Some(MAX_PLACEMENTS));
 }

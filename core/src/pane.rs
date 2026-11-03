@@ -45,8 +45,8 @@ use std::time::{Duration, Instant};
 
 use crate::attention::Gate;
 use crate::engine::{
-    CopyOp, CopyState, DomKey, EngineEvent, EngineTheme, KeyEvent, Mods, MouseEvent, PasteOutcome, SearchOp, SearchState,
-    SelectOp, TerminalEngine, WheelEvent, WheelOutcome, parse_osc7,
+    CopyOp, CopyState, DomKey, EngineEvent, EngineTheme, ImageChunk, KeyEvent, MAX_IMAGE_CHUNK_BYTES, Mods, MouseEvent,
+    PasteOutcome, SearchOp, SearchState, SelectOp, TerminalEngine, WheelEvent, WheelOutcome, parse_osc7,
 };
 use crate::layout::PaneId;
 use crate::platform::{self, Os, ShellLaunch};
@@ -139,6 +139,10 @@ pub struct PaneSpec {
     /// The bytes of pictures the engine keeps for this pane, per screen; `0` keeps none. The default is
     /// [`DEFAULT_IMAGE_BYTES`].
     pub image_bytes: u64,
+    /// Whether animated pictures may move from the start. `true` (the default) leaves the engine as it is; `false` pauses
+    /// them before the shell is started, so a pane opened while the page asks for reduced motion never plays one frame.
+    /// [`PaneHandle::set_image_animation`] changes it later.
+    pub image_animation: bool,
     pub option_as_alt: bool,
     pub theme: Option<EngineTheme>,
     /// The least time between two frames.
@@ -200,6 +204,7 @@ impl PaneSpec {
             cell_px: (0, 0),
             scrollback: DEFAULT_SCROLLBACK,
             image_bytes: DEFAULT_IMAGE_BYTES,
+            image_animation: true,
             option_as_alt: false,
             theme: None,
             frame_interval: DEFAULT_FRAME_INTERVAL,
@@ -340,6 +345,8 @@ enum Control {
     ReadText { region: TextRegion, max_bytes: usize, reply: Sender<Result<Option<TextRead>>> },
     Search(SearchOp, Sender<Result<SearchState>>),
     CopyMode(CopyOp, Sender<Result<CopyState>>),
+    /// Read a piece of an image's pixels; `Ok(None)` when the image or its generation is gone.
+    ImageChunk { id: u32, generation: u64, offset: usize, max: usize, reply: Sender<Result<Option<ImageChunk>>> },
     /// The answer of a working-directory lookup, from the short-lived thread that ran it.
     CwdFound(Option<PathBuf>),
     Close,
@@ -639,6 +646,16 @@ impl PaneHandle {
     /// Run a copy-mode operation and return its state. Waits for the answer like [`PaneHandle::paste`] does.
     pub fn copy_mode(&self, op: CopyOp) -> Result<CopyState> {
         self.request(|reply| Control::CopyMode(op, reply))
+    }
+
+    /// A piece of the pixels of image `id` as straight RGBA, at most `max` bytes (and never more than
+    /// [`MAX_IMAGE_CHUNK_BYTES`]) from `offset` on. `Ok(None)` when the image is gone, still being received, or no
+    /// longer has `generation`: the caller then asks the placement list of the next frame again. Waits for the answer
+    /// like [`PaneHandle::paste`] does (at most two seconds), so it must not be called on the Tauri main thread. A read
+    /// marks nothing dirty and writes nothing to the PTY. `Err` when the pane is closed or busy.
+    pub fn image_chunk(&self, id: u32, generation: u64, offset: usize, max: usize) -> Result<Option<ImageChunk>> {
+        let max = max.min(MAX_IMAGE_CHUNK_BYTES);
+        self.request(|reply| Control::ImageChunk { id, generation, offset, max, reply })
     }
 
     /// End the pane: the shell is killed and reaped on the engine thread and one `Exited` event follows. Does not
@@ -1097,6 +1114,10 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
                 self.dirty = true;
                 let _ = reply.send(state);
             }
+            Control::ImageChunk { id, generation, offset, max, reply } => {
+                // A read marks nothing dirty and writes nothing to the PTY; a caller that is gone costs nothing.
+                let _ = reply.send(Ok(self.engine.image_chunk(id, generation, offset, max)));
+            }
             // `run` ends the loop on Close before it gets here.
             Control::Close => {}
         }
@@ -1267,6 +1288,10 @@ where
         let _ = engine.resize(spec.cols, spec.rows, spec.cell_px);
     }
     engine.set_option_as_alt(spec.option_as_alt);
+    if !spec.image_animation {
+        // Before the shell exists, so before the first picture it could send.
+        engine.set_image_animation(false);
+    }
     if let Some(theme) = &spec.theme {
         // A theme that cannot be applied is not a reason to have no terminal.
         let _ = engine.set_theme(theme);
@@ -2190,6 +2215,26 @@ mod image_clock_tests {
         let calls = seen.ticks().len();
         thread::sleep(Duration::from_millis(300));
         assert_eq!(seen.ticks().len(), calls, "a paused animation costs no wake");
+        end(&pane);
+    }
+
+    #[test]
+    fn a_spec_that_asks_for_no_animation_pauses_the_engine_before_the_shell_runs() {
+        let seen = Arc::new(Seen::default());
+        let engine_seen = seen.clone();
+        let mut spec = PaneSpec::new("/bin/sh", 80, 24).args(["-c", "sleep 30"]);
+        spec.image_animation = false;
+        let pane = PaneHandle::spawn(1, spec, move |_| Ok(ClockEngine::new(engine_seen, Mode::Every(20))), |_| {})
+            .expect("the pane starts");
+        // The engine heard it at the start, and the pane never wakes for a picture: the engine answers `None`.
+        assert_eq!(seen.order(), ["option_as_alt false", "image_animation false"]);
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(seen.ticks().len(), 1, "one call for the first frame and no wake: {:?}", seen.ticks());
+        end(&pane);
+
+        // The default leaves the engine alone.
+        let (pane, seen, _events) = start(Mode::Never, None, "sleep 30");
+        assert_eq!(seen.order(), ["option_as_alt false"]);
         end(&pane);
     }
 
