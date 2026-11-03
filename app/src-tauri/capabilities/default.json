@@ -20,6 +20,8 @@
     "allow-scroll",
     "allow-scroll-to-bottom",
     "allow-request-full",
+    "allow-image-data",
+    "allow-set-image-animation",
     "allow-select",
     "allow-selection-text",
     "allow-copy-selection",

@@ -1315,3 +1315,43 @@ async fn hostile_a_message_over_the_cap_of_its_command_is_refused_and_one_at_the
     assert!(line.call("get_layout", &json!({})).await.expect("an answer").get("ok").is_some(), "a normal command works afterwards");
     assert!(log_problems(&probed).is_empty());
 }
+
+/// One pixel (red 0, green 0, blue 0, alpha 255) shown in one cell with the id 5, typed into the shell of the pane.
+const TYPED_PICTURE: &str = "printf '\\033_Ga=T,f=32,s=1,v=1,i=5,c=1,r=1;AAAA/w==\\033\\\\'; echo hw-pic-done\r";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn images_a_picture_arrives_as_a_placement_and_its_pixels_arrive_as_raw_bytes_over_the_socket() {
+    let probed = Probed::start(WsOptions::default()).await;
+    let (_, mut line) = signed_in(&probed, "alice").await;
+    let pane = start_focused_pane(&mut line).await;
+    line.ok("text", &json!({"pane": pane, "text": TYPED_PICTURE})).await;
+    let shown = line
+        .until(Duration::from_secs(15), |events| {
+            events.iter().any(|e| e["event"] == "frame" && e["payload"]["images"].as_array().is_some_and(|list| !list.is_empty()))
+        })
+        .await;
+    assert!(shown, "no frame carried the placement");
+
+    // The placement is one array of sixteen numbers, the first is the id and the second the generation.
+    let frames = line.frames_of(pane);
+    let with = frames.iter().find(|f| f["images"].as_array().is_some_and(|list| !list.is_empty())).expect("a frame with images");
+    let placement = with["images"][0].as_array().expect("an array");
+    assert_eq!(placement.len(), 16);
+    assert!(placement.iter().all(Value::is_number));
+    assert_eq!(placement[0], json!(5));
+    let generation = placement[1].as_u64().expect("a generation");
+    // The pixels: a 16-byte header and the four bytes, as a binary message of the socket.
+    let args = json!({"pane": pane, "image": 5, "generation": generation, "offset": 0});
+    let bytes = line.raw_call("image_data", &args).await.expect("raw bytes");
+    assert_eq!(bytes, [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 255]);
+
+    // A picture that is not there is refused with the one text, over the same socket.
+    for (image, generation) in [(5, generation + 1), (6, generation), (5, 0)] {
+        let refused = line.raw_call("image_data", &json!({"pane": pane, "image": image, "generation": generation, "offset": 0})).await;
+        assert_eq!(refused.expect_err("refused")["err"], json!("no such image"));
+    }
+
+    // The switch has no pane and answers nothing.
+    assert_eq!(line.ok("set_image_animation", &json!({"enabled": false})).await, Value::Null);
+    assert!(log_problems(&probed).is_empty());
+}

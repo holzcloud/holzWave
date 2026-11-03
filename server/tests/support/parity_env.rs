@@ -450,6 +450,28 @@ impl Line {
         self.wait(id, ANSWER_WITHIN).await
     }
 
+    /// Sends a command whose answer is raw bytes and returns them (the eight bytes of the request id taken off), or the
+    /// text answer when the command was refused (`{"id":..,"err":..}`).
+    pub async fn raw_call(&mut self, name: &str, args: &Value) -> Result<Vec<u8>, Value> {
+        let id = self.send(name, args).await;
+        let deadline = Instant::now() + ANSWER_WITHIN;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.client.read(left).await {
+                Got::Message(Incoming::Binary(bytes)) if bytes.len() >= 8 && bytes[..8] == id.to_be_bytes() => return Ok(bytes[8..].to_vec()),
+                Got::Message(Incoming::Text(text)) => {
+                    let value: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("not JSON ({e}): {text}"));
+                    if value.get("id").and_then(Value::as_u64) == Some(id) && value.get("event").is_none() {
+                        return Err(value);
+                    }
+                    self.keep(value);
+                }
+                Got::Message(Incoming::Close(..)) | Got::Ended | Got::Quiet => panic!("no answer to {name}"),
+                Got::Message(_) => {}
+            }
+        }
+    }
+
     /// Sends a command that must be answered `ok` and returns the result.
     pub async fn ok(&mut self, name: &str, args: &Value) -> Value {
         match self.call(name, args).await {

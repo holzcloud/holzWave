@@ -48,6 +48,8 @@ fn main() {
     "scroll",
     "scroll_to_bottom",
     "request_full",
+    "image_data",
+    "set_image_animation",
     "select",
     "selection_text",
     "copy_selection",

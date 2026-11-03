@@ -999,3 +999,13 @@ test("the profile list names the secret variables and never their values", () =>
   assert.equal(fault.code, "profile");
   assert.equal(nothing, null);
 });
+
+test("the two image commands are pinned: a pixel read by pane, image, generation and offset, and a switch with no pane", () => {
+  // The page asks for the pixels of one picture in pieces; the generation is what keeps it from drawing another picture.
+  assert.deepEqual(golden.commands.image_data, ["pane", "image", "generation", "offset"]);
+  // Motion is a property of the person's window, not of one pane.
+  assert.deepEqual(golden.commands.set_image_animation, ["enabled"]);
+  assert.ok(!golden.commands.set_image_animation.includes("pane"));
+  // The golden has every command once: 122 with these two.
+  assert.equal(Object.keys(golden.commands).length, 122);
+});
