@@ -393,7 +393,7 @@ macro_rules! host_commands {
             }
             {
                 name: open_url, shell: generated, group: settings, scope: none, mode: async, cap: CAP_DEFAULT,
-                args: [url: String],
+                args: [url: String, pane: Option<PaneId>],
                 answers: (), fails: String,
                 run: settings::open_url, web: unavailable
             }

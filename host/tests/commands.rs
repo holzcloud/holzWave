@@ -1518,7 +1518,7 @@ impl holzwave_host::local_network::Source for CountingSource {
 }
 
 const UNAVAILABLE_BROWSER: [(&str, &str); 5] = [
-    ("open_url", r#"{"url":"ftp://example.test/x"}"#),
+    ("open_url", r#"{"url":"ftp://example.test/x","pane":null}"#),
     ("reveal_path", r#"{"path":"/no/such/holzwave/path","base":null}"#),
     ("local_network_status", "{}"),
     ("local_network_answer", r#"{"allow":true}"#),
@@ -1531,7 +1531,7 @@ fn the_commands_that_need_the_desktop_answer_one_sentence_and_run_nothing() {
     let world = World::hosted("needs-desktop", elsewhere_with(true, 100, source.clone()));
     // What the plain functions would have answered: the checks of the core run before it starts anything, so a link of
     // another scheme and a path that is not there are refused with their own sentences, and nothing is started.
-    let own_open = world.core.open_url("ftp://example.test/x").expect_err("the core refuses another scheme");
+    let own_open = world.core.open_url("ftp://example.test/x", None).expect_err("the core refuses another scheme");
     let own_reveal = world.core.reveal_path("/no/such/holzwave/path", None).expect_err("the core refuses a missing path");
     assert_ne!(own_open, NOT_IN_BROWSER);
     assert_ne!(own_reveal, NOT_IN_BROWSER);

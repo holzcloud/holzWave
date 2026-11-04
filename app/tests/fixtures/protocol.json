@@ -1295,7 +1295,8 @@
       "name"
     ],
     "open_url": [
-      "url"
+      "url",
+      "pane"
     ],
     "os_text_scale": [],
     "pane_blocks": [],

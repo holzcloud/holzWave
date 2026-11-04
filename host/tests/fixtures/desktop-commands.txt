@@ -47,7 +47,7 @@ get_settings|none|sync||SettingsView|-
 set_setting|none|async|key,value|SettingsView|String
 reset_setting|none|async|key|SettingsView|String
 reload_settings|none|async||SettingsView|-
-open_url|none|async|url|()|String
+open_url|none|async|url,pane|()|String
 reveal_path|none|async|path,base|()|String
 app_info|none|async||AppInfo|-
 os_text_scale|none|async||u32|-

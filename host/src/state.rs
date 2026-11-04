@@ -2747,14 +2747,36 @@ impl AppCore {
     }
 
     /// Open a link with the platform opener. Only a link whose scheme is in the `link_schemes` setting, read at this
-    /// call, is opened (never `javascript`, `data`, `vbscript`, `blob` or `about`, and `file` is not handed to the
-    /// opener); the length, the characters and the shape are checked first, and nothing is started for a link that
-    /// fails (T-02-52). The list is the person's, the page's own checks are a convenience.
+    /// call, is opened (never `javascript`, `data`, `vbscript`, `blob` or `about`); the length, the characters and the
+    /// shape are checked first, and nothing is started for a link that fails (T-02-52). The list is the person's, the
+    /// page's own checks are a convenience.
+    ///
+    /// A `file` link is not opened: with `file` in the list, in a pane that runs on this computer (`pane`, the pane that
+    /// shows the link) and with a path that [`file_link_path`] accepts, the file is shown in the file manager through
+    /// the code of [`AppCore::reveal_path`], which shows and never runs. Without a pane, for an unknown pane, for a pane
+    /// of a connection and for any other path it is refused. `pane` means nothing for any other link.
     ///
     /// Starts a process, so the command is async.
-    pub fn open_url(&self, url: &str) -> Result<(), String> {
+    pub fn open_url(&self, url: &str, pane: Option<PaneId>) -> Result<(), String> {
         let schemes = lock(&self.config).settings.link_schemes.clone();
-        let launch = open_launch(std::env::consts::OS, url, &schemes, &process_env)?;
+        let os = std::env::consts::OS;
+        if is_file_link(url) {
+            check_link_text(url)?;
+            if !schemes.iter().any(|listed| listed == "file") {
+                return Err("file links are not in the list of link schemes in the settings".into());
+            }
+            let pane = pane.ok_or("a file link is only shown from a pane, and none was named")?;
+            // A pane of a connection shows the files of another computer: its links never reach this one.
+            if self.connections.profile_of(pane).is_some() {
+                return Err("a file link in a pane of a connection names a file on another computer".into());
+            }
+            if self.handle(pane).is_none() {
+                return Err("a file link needs a running pane on this computer".into());
+            }
+            let path = file_link_path(os, url)?;
+            return self.reveal_path(&path, None);
+        }
+        let launch = open_launch(os, url, &schemes, &process_env)?;
         self.launch(&launch)
     }
 
@@ -3762,15 +3784,7 @@ fn process_env(name: &str) -> Option<String> {
 /// revealed through the pane path of [`AppCore::open_url`]. The text is never interpreted further, and a refusal is a
 /// fixed sentence that does not repeat the link.
 fn check_link(url: &str, schemes: &[String]) -> Result<(), String> {
-    if url.len() > MAX_URL_BYTES {
-        return Err(format!("the link is longer than {MAX_URL_BYTES} bytes"));
-    }
-    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        return Err("the link has a control or blank character".into());
-    }
-    let Some((scheme, rest)) = url.split_once(':') else {
-        return Err("the link has no scheme".into());
-    };
+    let (scheme, rest) = check_link_text(url)?;
     let scheme = scheme.to_ascii_lowercase();
     if holzwave_core::links::hard_denied(&scheme) {
         return Err("links of this kind are never opened".into());
@@ -3786,6 +3800,127 @@ fn check_link(url: &str, schemes: &[String]) -> Result<(), String> {
         _ => !rest.is_empty(),
     };
     if names_something { Ok(()) } else { Err("the link names nothing to open".into()) }
+}
+
+/// The checks that every link passes before its scheme is looked at: at most [`MAX_URL_BYTES`], no control or blank
+/// character, and a colon. Gives the scheme as written and the rest.
+fn check_link_text(url: &str) -> Result<(&str, &str), String> {
+    if url.len() > MAX_URL_BYTES {
+        return Err(format!("the link is longer than {MAX_URL_BYTES} bytes"));
+    }
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err("the link has a control or blank character".into());
+    }
+    url.split_once(':').ok_or_else(|| "the link has no scheme".to_owned())
+}
+
+/// Whether `url` has the scheme `file`, in any letter case.
+fn is_file_link(url: &str) -> bool {
+    url.split_once(':').is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("file"))
+}
+
+/// The path a `file:` link names on this machine, or why it is refused. `os` decides the forms: on `windows` a drive
+/// path (`file:///C:/dir/file`, giving `C:/dir/file`) and nothing else, elsewhere an absolute path.
+///
+/// The host has to be empty or `localhost`. The path is split at its slashes first and each segment is percent decoded
+/// once, so an escape can never make a separator: `%2f` and `%5c` inside a segment, a decoded `..`, NUL or any other
+/// control character, bytes that are not UTF-8, an empty segment inside the path, a query or a fragment, and on
+/// Windows a segment with a character that no name has, a segment of only dots and the network form (`file://///h/s`)
+/// are all refused. It does not look at the file system, and it does not rely on the engine's cleaning of the link.
+/// Every refusal is a fixed sentence that does not repeat the link.
+fn file_link_path(os: &str, url: &str) -> Result<String, String> {
+    let (scheme, rest) = url.split_once(':').ok_or("the link has no scheme")?;
+    if !scheme.eq_ignore_ascii_case("file") {
+        return Err("this is not a file link".into());
+    }
+    let Some(rest) = rest.strip_prefix("//") else {
+        return Err("a file link needs the form file:///path".into());
+    };
+    let (host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
+        return Err("a file link on another computer is not shown".into());
+    }
+    if path.is_empty() {
+        return Err("the file link has no path".into());
+    }
+    if path.contains(['?', '#']) {
+        return Err("a file link with a query or a fragment is not shown".into());
+    }
+    let windows = os == "windows";
+    if windows && path.starts_with("//") {
+        return Err("a network path is not shown".into());
+    }
+    let mut segments: Vec<String> = Vec::new();
+    for raw in path[1..].split('/') {
+        let segment = percent_decode(raw)?;
+        if segment.contains(['/', '\\']) {
+            return Err("the file link has an encoded separator".into());
+        }
+        if segment.chars().any(char::is_control) {
+            return Err("the file link has a control character".into());
+        }
+        if segment == ".." {
+            return Err("the file link goes up a folder".into());
+        }
+        if windows
+            && (segment.contains(['<', '>', ':', '"', '|', '?', '*']) && !(segments.is_empty() && is_drive_name(&segment))
+                || (!segment.is_empty() && segment.chars().all(|c| c == '.' || c == ' ')))
+        {
+            return Err("the file link has a name that Windows does not allow".into());
+        }
+        segments.push(segment);
+    }
+    // A folder may end in a slash; an empty segment anywhere else is a doubled slash.
+    if segments.len() > 1 && segments.last().is_some_and(String::is_empty) {
+        segments.pop();
+    }
+    if segments.len() > 1 && segments.iter().any(String::is_empty) {
+        return Err("the file link has an empty part in its path".into());
+    }
+    if windows {
+        if !segments.first().is_some_and(|first| is_drive_name(first)) {
+            return Err("a file link needs a drive on Windows".into());
+        }
+        let mut text = segments.join("/");
+        if segments.len() == 1 {
+            text.push('/');
+        }
+        Ok(text)
+    } else {
+        if segments.first().is_some_and(|first| is_drive_name(first)) {
+            return Err("a drive path is not a path on this system".into());
+        }
+        Ok(format!("/{}", segments.join("/")))
+    }
+}
+
+/// Whether `text` is a drive letter and a colon (`C:`).
+fn is_drive_name(text: &str) -> bool {
+    let b = text.as_bytes();
+    b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+}
+
+/// `text` with its `%XX` escapes decoded once, as UTF-8. A `%` without two hex digits and bytes that are not UTF-8 are
+/// refused. The input is a part of a link of at most [`MAX_URL_BYTES`] bytes, so nothing here is unbounded.
+fn percent_decode(text: &str) -> Result<String, String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' {
+            let digits = bytes.get(at + 1..at + 3).ok_or("the file link has a broken escape")?;
+            let hex = |d: u8| char::from(d).to_digit(16).map(|v| v as u8);
+            match (hex(digits[0]), hex(digits[1])) {
+                (Some(high), Some(low)) => out.push(high << 4 | low),
+                _ => return Err("the file link has a broken escape".into()),
+            }
+            at += 3;
+        } else {
+            out.push(bytes[at]);
+            at += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|_| "the file link is not valid text".into())
 }
 
 /// How the platform opens a link: validated against `schemes` first, then one fixed program with the link as its only argument.
@@ -6927,13 +7062,13 @@ mod tests {
             "HTTPS://EXAMPLE.ORG/open-4",
         ];
         for url in good {
-            assert_eq!(core.open_url(url), Ok(()), "{url}");
+            assert_eq!(core.open_url(url, None), Ok(()), "{url}");
             assert_eq!(launches_with(url).len(), 1, "{url} is opened exactly once");
         }
 
         let long_ok = format!("https://example.org/{}", "a".repeat(MAX_URL_BYTES - "https://example.org/".len()));
         assert_eq!(long_ok.len(), MAX_URL_BYTES);
-        assert_eq!(core.open_url(&long_ok), Ok(()), "2048 bytes are fine");
+        assert_eq!(core.open_url(&long_ok, None), Ok(()), "2048 bytes are fine");
 
         let too_long = format!("https://example.org/{}", "b".repeat(MAX_URL_BYTES));
         let bad = [
@@ -6958,7 +7093,7 @@ mod tests {
             too_long.as_str(),
         ];
         for url in bad {
-            assert!(core.open_url(url).is_err(), "{:?} must be refused", url.chars().take(40).collect::<String>());
+            assert!(core.open_url(url, None).is_err(), "{:?} must be refused", url.chars().take(40).collect::<String>());
             assert!(launches_with(url).is_empty(), "an opener was started for {:?}", url.chars().take(40).collect::<String>());
         }
     }
@@ -6982,7 +7117,7 @@ mod tests {
         set_schemes(&core, &["https", "ssh"]);
 
         let ssh = "ssh://host.example/path-lk-1";
-        assert_eq!(core.open_url(ssh), Ok(()));
+        assert_eq!(core.open_url(ssh, None), Ok(()));
         let launches = launches_with(ssh);
         assert_eq!(launches.len(), 1);
         assert_eq!(launches[0].args.iter().filter(|a| a.contains("path-lk-1")).count(), 1);
@@ -6991,19 +7126,19 @@ mod tests {
         }
 
         let https = "https://example.org/lk-2";
-        assert_eq!(core.open_url(https), Ok(()));
+        assert_eq!(core.open_url(https, None), Ok(()));
         assert_eq!(launches_with(https).len(), 1, "a scheme that stays in the list still opens");
 
         let mailto = "mailto:a@b.example?subject=lk-3";
-        assert!(core.open_url(mailto).is_err(), "mailto left the list");
+        assert!(core.open_url(mailto, None).is_err(), "mailto left the list");
         assert!(launches_with(mailto).is_empty());
 
         let upper = "HTTPS://EXAMPLE.ORG/lk-4";
-        assert_eq!(core.open_url(upper), Ok(()), "the comparison ignores case");
+        assert_eq!(core.open_url(upper, None), Ok(()), "the comparison ignores case");
         assert_eq!(launches_with(upper).len(), 1);
 
         let js = "javascript:alert(1)//lk-5";
-        assert!(core.open_url(js).is_err());
+        assert!(core.open_url(js, None).is_err());
         assert!(launches_with(js).is_empty());
     }
 
@@ -7012,14 +7147,14 @@ mod tests {
         let (core, _rec, _dir) = recording_core();
         set_schemes(&core, &[]);
         for url in ["https://example.org/lk-6", "http://example.org/lk-7", "mailto:a@b.example?lk=8"] {
-            assert!(core.open_url(url).is_err(), "{url}");
+            assert!(core.open_url(url, None).is_err(), "{url}");
             assert!(launches_with(url).is_empty(), "{url}");
         }
         // A change applies to the next call, without a restart, and a reset brings the default back.
         core.reset_setting("link_schemes").expect("reset");
         assert_eq!(core.get_settings().settings.link_schemes, web());
         let url = "https://example.org/lk-9";
-        assert_eq!(core.open_url(url), Ok(()));
+        assert_eq!(core.open_url(url, None), Ok(()));
         assert_eq!(launches_with(url).len(), 1);
     }
 
@@ -7036,10 +7171,10 @@ mod tests {
 
         assert_eq!(core.get_settings().settings.link_schemes, ["ssh", "https"]);
         for url in ["javascript:alert(1)//lk-10", "JavaScript:alert(1)//lk-11", "data:text/html,lk-12", "vbscript:x-lk-13", "blob:https://a/lk-14", "about:blank#lk-15"] {
-            assert!(core.open_url(url).is_err(), "{url}");
+            assert!(core.open_url(url, None).is_err(), "{url}");
             assert!(launches_with(url).is_empty(), "{url}");
         }
-        assert_eq!(core.open_url("ssh://h.example/lk-16"), Ok(()));
+        assert_eq!(core.open_url("ssh://h.example/lk-16", None), Ok(()));
         // Defence in depth: even a list that holds a denied scheme (it cannot come through the settings) opens none.
         let hostile = schemes(&["javascript", "data", "vbscript", "blob", "about", "JavaScript"]);
         for url in ["javascript:alert(1)", "JAVASCRIPT:alert(1)", "data:text/html,x", "vbscript:x", "blob:https://a/b", "about:blank"] {
@@ -7066,6 +7201,175 @@ mod tests {
         assert_eq!(two_thousand.len(), MAX_URL_BYTES);
         assert_eq!(check_link(&two_thousand, &list), Ok(()));
         assert!(check_link(&format!("{two_thousand}a"), &list).is_err(), "2049 bytes");
+    }
+
+    // ---- file links reveal, they never open (plan 10-14) ----
+
+    #[test]
+    fn file_link_path_decodes_once_and_accepts_the_forms_of_this_machine() {
+        let ok = |os: &str, url: &str| file_link_path(os, url);
+        assert_eq!(ok("macos", "file:///Users/x/a%20b.txt").as_deref(), Ok("/Users/x/a b.txt"));
+        assert_eq!(ok("linux", "file://localhost/tmp/a").as_deref(), Ok("/tmp/a"));
+        assert_eq!(ok("linux", "FILE://LocalHost/tmp/a").as_deref(), Ok("/tmp/a"), "scheme and host are not case sensitive");
+        assert_eq!(ok("linux", "file:///").as_deref(), Ok("/"), "the root is a path");
+        assert_eq!(ok("linux", "file:///tmp/dir/").as_deref(), Ok("/tmp/dir"), "a folder may end in a slash");
+        assert_eq!(ok("linux", "file:///tmp/%C3%A4%25.txt").as_deref(), Ok("/tmp/\u{e4}%.txt"));
+        assert_eq!(ok("linux", "file:///tmp/%2541").as_deref(), Ok("/tmp/%41"), "decoded once, never twice");
+        assert_eq!(ok("linux", "file:///tmp/./a").as_deref(), Ok("/tmp/./a"), "a single dot goes nowhere");
+        assert_eq!(ok("windows", "file:///C:/Users/x/a.txt").as_deref(), Ok("C:/Users/x/a.txt"));
+        assert_eq!(ok("windows", "file://localhost/d:/x%20y/z").as_deref(), Ok("d:/x y/z"));
+        assert_eq!(ok("windows", "file:///C:/").as_deref(), Ok("C:/"));
+    }
+
+    #[test]
+    fn file_link_path_refuses_every_form_that_could_leave_the_path_or_name_another_machine() {
+        // Every link holds `secret-flp` so that a refusal that echoes it is found.
+        let cases: [(&str, &str); 36] = [
+            ("linux", "file://server/secret-flp/a"),
+            ("linux", "file://127.0.0.1/secret-flp/a"),
+            ("linux", "file://"),
+            ("linux", "file://localhost"),
+            ("linux", "file:secret-flp"),
+            ("linux", "file:secret-flp/b"),
+            ("linux", "file:/secret-flp/b"),
+            ("linux", "file:///secret-flp/../b"),
+            ("linux", "file:///secret-flp/%2e%2e/b"),
+            ("linux", "file:///secret-flp/%2E%2e"),
+            ("linux", "file:///secret-flp/.."),
+            ("linux", "file:///secret-flp/%00"),
+            ("linux", "file:///secret-flp/a%00b"),
+            ("linux", "file:///secret-flp/%0a"),
+            ("linux", "file:///secret-flp/%1b%5b"),
+            ("linux", "file:///secret-flp/%7f"),
+            ("linux", "file:///secret-flp/%c2%85"),
+            ("linux", "file:///secret-flp/a%2fb"),
+            ("linux", "file:///secret-flp/a%2Fb"),
+            ("linux", "file:///secret-flp/a%5cb"),
+            ("linux", "file:///secret-flp/a%5Cb"),
+            ("linux", "file:///secret-flp/a\\b"),
+            ("linux", "file:///secret-flp/%ff"),
+            ("linux", "file:///secret-flp/%c3"),
+            ("linux", "file:///secret-flp/%zz"),
+            ("linux", "file:///secret-flp/%4"),
+            ("linux", "file:///secret-flp/%"),
+            ("linux", "file:///secret-flp//b"),
+            ("linux", "file:///secret-flp/a?b"),
+            ("linux", "file:///secret-flp/a#b"),
+            ("linux", "file:///C:/secret-flp/a"),
+            ("macos", "file:///c:/secret-flp"),
+            ("windows", "file://///server/secret-flp/share"),
+            ("windows", "file:///secret-flp/no-drive"),
+            ("windows", "file:///C:/secret-flp/a:b"),
+            ("windows", "file:///C:/secret-flp/..."),
+        ];
+        let mut texts = std::collections::BTreeSet::new();
+        for (os, url) in cases {
+            let err = file_link_path(os, url).expect_err(url);
+            assert!(!err.contains("secret-flp") && !err.contains(url) && !err.is_empty() && err.len() < 120, "{os} {url}: {err}");
+            texts.insert(err);
+        }
+        assert!(texts.len() >= 8, "the refusals say what is wrong in different words: {texts:?}");
+        for not_a_file_link in ["https://h/a", "file", "", "ssh:///a"] {
+            assert!(file_link_path("linux", not_a_file_link).is_err(), "{not_a_file_link:?}");
+        }
+    }
+
+    fn file_url(path: &Path) -> String {
+        let mut url = String::from("file://");
+        for b in path.to_str().expect("text").bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' => url.push(char::from(b)),
+                other => url.push_str(&format!("%{other:02X}")),
+            }
+        }
+        url
+    }
+
+    #[test]
+    fn a_file_link_in_a_local_pane_reveals_the_file_and_never_opens_it() {
+        let (core, _rec, dir) = recording_core();
+        let base = real_dir(&dir, "files");
+        let file = base.join("note flp-1.txt");
+        std::fs::write(&file, "x").unwrap();
+        let script = base.join("run-flp-2.sh");
+        std::fs::write(&script, "#!/bin/sh\necho run\n").unwrap();
+        let pane = only_pane(&core);
+        core.start_pane(pane, 80, 24, 0, 0).expect("starts");
+
+        let text = |p: &Path| p.to_str().unwrap().to_owned();
+        for (path, folder) in [(&file, false), (&script, false), (&base, true)] {
+            let url = file_url(path);
+            assert_eq!(core.open_url(&url, Some(pane)), Ok(()), "{url}");
+            let launches = launches_with(&text(path)).into_iter().chain(launches_with(&text(path.parent().unwrap()))).collect::<Vec<_>>();
+            assert!(!launches.is_empty(), "a reveal was recorded for {url}");
+            let last = launches.last().unwrap();
+            match OS {
+                "macos" => {
+                    assert_eq!((last.program.as_str(), last.args.as_slice()), ("/usr/bin/open", ["-R".to_owned(), text(path)].as_slice()));
+                }
+                "linux" => {
+                    let shown = if folder { path.clone() } else { path.parent().unwrap().to_path_buf() };
+                    assert_eq!((last.program.as_str(), last.args.as_slice()), ("xdg-open", [text(&shown)].as_slice()));
+                }
+                _ => assert!(last.program.ends_with("explorer.exe"), "{last:?}"),
+            }
+        }
+        // The file itself is never an argument that opens: macOS and Linux only ever get the path after -R or its folder.
+        let opened_plain = lock(&LAUNCHED).iter().any(|l| l.program == "/usr/bin/open" && l.args == [text(&script)]);
+        assert!(!opened_plain, "the script was handed to open without -R");
+    }
+
+    #[test]
+    fn a_file_link_is_refused_without_a_local_running_pane_or_the_scheme_in_the_list_each_with_its_own_words() {
+        let (core, _rec, dir) = recording_core();
+        let base = real_dir(&dir, "files");
+        let file = base.join("flp-3.txt");
+        std::fs::write(&file, "x").unwrap();
+        let url = file_url(&file);
+        let local = only_pane(&core);
+        core.start_pane(local, 80, 24, 0, 0).expect("starts");
+        saved_ssh(&core, "flp-ssh", "Server");
+        let remote = core.connect_in(MAIN_WINDOW, "flp-ssh").expect("a tab for the connection").focus;
+
+        let none = core.open_url(&url, None).expect_err("a missing pane");
+        let unknown = core.open_url(&url, Some(999_999)).expect_err("an unknown pane");
+        let ssh = core.open_url(&url, Some(remote)).expect_err("a pane of an ssh connection");
+        let missing = core.open_url(&file_url(&base.join("flp-4-missing.txt")), Some(local)).expect_err("a path that is not there");
+        set_schemes(&core, &["http", "https", "mailto"]);
+        let unlisted = core.open_url(&url, Some(local)).expect_err("file is not in the list");
+        let texts = [&none, &unknown, &ssh, &missing, &unlisted];
+        for (i, a) in texts.iter().enumerate() {
+            assert!(!a.contains("flp-") && !a.contains("file:") && a.len() < 160, "{a}");
+            for b in &texts[i + 1..] {
+                assert_ne!(a, b, "each refusal has its own words");
+            }
+        }
+        assert!(launches_with(&text_of(&file)).is_empty() && launches_with(&text_of(&base)).is_empty(), "nothing was started");
+
+        // The refusals of the link itself come first, whatever the pane is.
+        set_schemes(&core, &["file"]);
+        for bad in ["file:///tmp/a b", "file:///tmp/\u{7}a", "file://server/share/a", "file:///tmp/../etc/passwd-flp-5"] {
+            assert!(core.open_url(bad, Some(local)).is_err(), "{bad:?}");
+        }
+        let long = format!("file:///{}", "a".repeat(MAX_URL_BYTES));
+        assert!(core.open_url(&long, Some(local)).is_err(), "over {MAX_URL_BYTES} bytes");
+        assert!(launches_with(&text_of(&file)).is_empty());
+        assert_eq!(core.open_url(&url, Some(local)), Ok(()), "with file listed and a local pane it reveals");
+    }
+
+    fn text_of(p: &Path) -> String {
+        p.to_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn a_pane_given_for_another_kind_of_link_changes_nothing() {
+        let (core, _rec, _dir) = recording_core();
+        let pane = only_pane(&core);
+        for (url, pane) in [("https://example.org/flp-6", Some(pane)), ("https://example.org/flp-7", None), ("https://example.org/flp-8", Some(999_999))] {
+            assert_eq!(core.open_url(url, pane), Ok(()), "{url}");
+            assert_eq!(launches_with(url).len(), 1);
+        }
+        assert!(core.open_url("ftp://example.org/flp-9", Some(pane)).is_err());
     }
 
     /// A process environment that has nothing in it.

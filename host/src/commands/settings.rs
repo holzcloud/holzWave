@@ -2,6 +2,7 @@
 //! the links. The settings are the person's own (`settings.json` of the data directory of the core), so what one person
 //! sets never reaches another.
 
+use holzwave_core::layout::PaneId;
 use serde_json::Value;
 
 use crate::state::{AppCore, AppInfo, SettingsView};
@@ -45,10 +46,12 @@ pub fn markdown_render(_core: &AppCore, text: String) -> Option<String> {
     holzwave_core::preview::render_markdown(&text)
 }
 
-/// Open a link with the platform opener. Only http, https and mailto links up to 2048 bytes are opened. It starts a
-/// process on the machine that runs the core, so the browser build does not have it.
-pub fn open_url(core: &AppCore, url: String) -> Result<(), String> {
-    core.open_url(&url)
+/// Open a link with the platform opener. Only links up to 2048 bytes whose scheme is in the `link_schemes` setting are
+/// opened. A `file` link is shown in the file manager and never opened, and only when `pane` names a pane that runs on
+/// this computer; `pane` means nothing for other links, and the calls that omit it keep working. It starts a process on
+/// the machine that runs the core, so the browser build does not have it.
+pub fn open_url(core: &AppCore, url: String, pane: Option<PaneId>) -> Result<(), String> {
+    core.open_url(&url, pane)
 }
 
 /// Reveal a file or folder in the file manager and never run it. `path` is absolute, `~/...` or relative to `base` (the
