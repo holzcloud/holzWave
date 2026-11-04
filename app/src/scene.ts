@@ -13,6 +13,8 @@ import { RateMeter, applyFrame, decorationSignature, forgetPane, leavePane, toRe
 import type { FrameMsg, PaneMirror } from "./frames.js";
 import { Leaving } from "./dropzone.js";
 import { fitCells, gridRect, headerHeight } from "./geometry.js";
+import { images, onImageReady, wantedOf } from "./images.js";
+import type { PlaceGeometry } from "./images.js";
 import { renderOverlay } from "./overlay.js";
 import { renderPaneHeads } from "./panehead.js";
 import { Motion } from "./scroll.js";
@@ -56,6 +58,7 @@ export async function initScene(): Promise<void> {
     }
   }
   state.renderer = rendererName;
+  onImageReady(schedule); // a picture that arrived is drawn on the next animation frame
   await loadFonts();
   // The settings come before the first measurement: the font size and the UI scale decide the cell size.
   await initSettings({ setCursorColor: (rgb) => renderer?.setCursorColor(rgb), schedule, refit: fit });
@@ -205,6 +208,7 @@ function leave(pane: number): void {
   attention.forget(pane);
   waiting.delete(pane);
   motion.forget(pane);
+  images.forget(pane);
 }
 
 /**
@@ -279,6 +283,7 @@ function onFrame(msg: FrameMsg): void {
   const previous = state.frames.get(pane);
   const before = decorationSignature(previous);
   state.frames.set(pane, mirror);
+  wantImages(pane, mirror);
   // The effects only add drawing after this frame; they never hold it back (see scroll.ts).
   motion.frame(pane, previous, mirror, msg.full === true, Array.isArray(msg.changed) && msg.changed.length > 0);
   // The cache of the selection's text follows the spans; the overlay (selection, search matches and counter, copy
@@ -325,6 +330,7 @@ function onPaneExit(p: { pane: number; code: number | null }): void {
   attention.forget(p.pane);
   waiting.delete(p.pane);
   motion.forget(p.pane);
+  images.forget(p.pane);
   renderLabels();
   syncBlink();
   schedule();
@@ -444,6 +450,35 @@ function paneFx(id: number, mirror: PaneMirror, focused: boolean, frame: Frame):
   return fx;
 }
 
+// ---- pictures ------------------------------------------------------------------------------------
+
+/** Whether the renderer in use draws pictures: the canvas renderer does; the WebGL renderer follows in its own plan. */
+const drawsPictures = (): boolean => rendererName === "canvas2d";
+
+/** What a pane's placements are measured against: the cell size the core was told for it and the one now. */
+function placeGeometry(pane: number, mirror: PaneMirror): PlaceGeometry {
+  const m = state.metrics;
+  const told = state.sizes.get(pane);
+  return {
+    told: told ? { cellW: told.cellW, cellH: told.cellH } : undefined,
+    cellW: m.cellW,
+    cellH: m.cellH,
+    dpr: m.dpr,
+    cols: mirror.cols,
+    rows: mirror.rows,
+  };
+}
+
+/**
+ * Tell the picture store which pictures the pane's placements ask for. A pane with no placement and nothing in the
+ * store costs nothing here: the store is not even asked.
+ */
+function wantImages(pane: number, mirror: PaneMirror): void {
+  if (!drawsPictures()) return;
+  if (mirror.images.length === 0 && !images.has(pane)) return;
+  images.want(pane, wantedOf(mirror.images, placeGeometry(pane, mirror)));
+}
+
 // ---- drawing -------------------------------------------------------------------------------------
 
 /** Draw times since the last stats update. */
@@ -464,6 +499,10 @@ function draw(): void {
     const frame = toRenderFrame(mirror, focused);
     // The off phase of a blinking cursor: the focused pane is drawn without it.
     if (focused && blinkTimer !== null && !state.blink.on) frame.cursor = null;
+    if (mirror.images.length > 0 && drawsPictures()) {
+      const pictures = images.resolve(id, mirror.images, placeGeometry(id, mirror));
+      if (pictures.length > 0) frame.images = pictures;
+    }
     renderer.drawPane(frame, gridRect(state.metrics, r, state.headerPx), paneFx(id, mirror, focused, frame));
   }
   const now = performance.now();

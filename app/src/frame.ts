@@ -20,6 +20,29 @@ export interface CursorShape {
   blink: boolean;
 }
 
+/**
+ * One picture to draw in a pane (Kitty graphics): the decoded bitmap, where it goes and which part of it. Everything is
+ * already validated and mapped to the cell size now: `dx`, `dy`, `dw`, `dh` are CSS pixels relative to the grid's
+ * top-left corner (they may reach past the grid; the renderer clips to the grid's box), `sx`, `sy`, `sw`, `sh` are
+ * pixels of the bitmap and lie inside it.
+ */
+export interface ImageDraw<B = ImageBitmap> {
+  /** 0 below the cell backgrounds, 1 below the text, 2 above the text. */
+  layer: 0 | 1 | 2;
+  z: number;
+  /** The picture's id: the tie-break inside a layer and a `z`. */
+  id: number;
+  bitmap: B;
+  dx: number;
+  dy: number;
+  dw: number;
+  dh: number;
+  sx: number;
+  sy: number;
+  sw: number;
+  sh: number;
+}
+
 export interface Frame {
   cols: number;
   rows: number;
@@ -31,6 +54,8 @@ export interface Frame {
   lines: Run[][];
   /** Cluster tails per row, aligned with `lines`; absent means none. */
   extras?: Extra[][];
+  /** The pictures to draw, in drawing order inside each layer; absent means none and the draw path is the old one. */
+  images?: ImageDraw[];
 }
 
 /** The most cells a renderer builds buffers for: 1 Mi cells is a 1024 x 1024 grid, far past any window. */

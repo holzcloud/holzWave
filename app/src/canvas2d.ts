@@ -1,6 +1,6 @@
 import {
-  BOLD, CURSOR_COLOR, Frame, INVERSE, ITALIC, Metrics, PaneFx, PxRect, Renderer, UNDERLINE, css, font, gridCells,
-  rowExtras, visibleCursor,
+  BOLD, CURSOR_COLOR, Frame, INVERSE, ITALIC, ImageDraw, Metrics, PaneFx, PxRect, Renderer, UNDERLINE, css, font,
+  gridCells, rowExtras, visibleCursor,
 } from "./frame.js";
 
 /** The cursor bar and underline are this many device pixels thick, the hollow outline one. Same as the WebGL shader. */
@@ -110,8 +110,49 @@ export class Canvas2DRenderer implements Renderer {
   }
 
   /**
+   * The pictures of one layer, clipped to the grid's box (never over the pane's padding or header). The context is
+   * translated by `offset`, so the clip is moved back: a slide shifts the pictures with the text but not the box.
+   * The edges are whole device pixels, so a picture that ends at a cell edge ends on a pixel edge.
+   */
+  private paintImages(f: Frame, images: ImageDraw[], layer: number, offset: number) {
+    const { ctx, m } = this;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, -offset, f.cols * m.cellW, f.rows * m.cellH);
+    ctx.clip();
+    const snap = (v: number) => Math.round(v * m.dpr) / m.dpr;
+    for (const im of images) {
+      if (im.layer !== layer) continue;
+      const x0 = snap(im.dx), y0 = snap(im.dy);
+      ctx.drawImage(im.bitmap, im.sx, im.sy, im.sw, im.sh, x0, y0, snap(im.dx + im.dw) - x0, snap(im.dy + im.dh) - y0);
+    }
+    ctx.restore();
+  }
+
+  /** The cell backgrounds the program set, alone: the pass that lets a picture lie between them and the text. */
+  private paintBackgrounds(f: Frame) {
+    const { ctx, m } = this;
+    const lines = Math.min(f.rows, f.lines.length);
+    for (let y = 0; y < lines; y++) {
+      let col = 0;
+      for (const [, runCols, fg0, bg0, flags] of f.lines[y]!) {
+        if (col >= f.cols) break;
+        const end = Math.min(f.cols, col + runCols);
+        const bg = flags & INVERSE ? fg0 : bg0;
+        if (bg !== f.bg) {
+          ctx.fillStyle = css(bg);
+          ctx.fillRect(col * m.cellW, y * m.cellH, (end - col) * m.cellW, m.cellH);
+        }
+        col = end;
+      }
+    }
+  }
+
+  /**
    * One frame's grid and cursor on the pane the context is translated to, `offset` CSS pixels lower than its place.
-   * The pane's background is already painted; the context's clip is the caller's.
+   * The pane's background is already painted; the context's clip is the caller's. Pictures come in three layers
+   * (docs/design.md 6.31): below the cell backgrounds, between them and the text, above the text; a frame without
+   * pictures takes the one pass it always took.
    */
   private paintGrid(f: Frame, offset: number) {
     const { ctx, m } = this;
@@ -122,6 +163,14 @@ export class Canvas2DRenderer implements Renderer {
     const baseline = Math.round(cellH * 0.78);
     let lastFont = -1;
     const lines = Math.min(f.rows, f.lines.length);
+    const pictures = f.images !== undefined && f.images.length > 0 ? f.images : null;
+    // With a picture under the text the backgrounds are painted first, alone, so the picture can lie between them.
+    const split = pictures !== null && pictures.some((im) => im.layer < 2);
+    if (pictures && split) {
+      this.paintImages(f, pictures, 0, offset);
+      this.paintBackgrounds(f);
+      this.paintImages(f, pictures, 1, offset);
+    }
     for (let y = 0; y < lines; y++) {
       const line = f.lines[y]!;
       const extras = rowExtras(f, y);
@@ -133,7 +182,7 @@ export class Canvas2DRenderer implements Renderer {
         let fg = fg0, bg = bg0;
         if (flags & INVERSE) [fg, bg] = [bg, fg];
         const x = col * cellW;
-        if (bg !== f.bg) {
+        if (!split && bg !== f.bg) {
           ctx.fillStyle = css(bg);
           ctx.fillRect(x, y * cellH, (end - col) * cellW, cellH);
         }
@@ -169,6 +218,8 @@ export class Canvas2DRenderer implements Renderer {
         col = end;
       }
     }
+
+    if (pictures) this.paintImages(f, pictures, 2, offset);
 
     const cursor = visibleCursor(f);
     if (cursor) {

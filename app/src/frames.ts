@@ -24,6 +24,63 @@ export interface SearchMsg {
   current: number | null;
 }
 
+/**
+ * One picture placed in the pane's grid, as sixteen whole numbers (core/src/wire.rs `PlacementMsg`):
+ * `[image, generation, layer, z, col, row, gridCols, gridRows, dx, dy, pxW, pxH, sx, sy, sw, sh]`.
+ * `layer` is 0 below the cell backgrounds, 1 below the text, 2 above the text. `col` and `row` are signed (a picture
+ * can start above or left of the viewport); `dx` and `dy` are the pixel offsets inside that cell, `pxW` and `pxH`
+ * the size the picture covers, all in device pixels of the cell size the core was told; `sx`, `sy`, `sw`, `sh` is the
+ * part of the picture's own pixels that is shown.
+ */
+export type PlacementMsg = [
+  image: number, generation: number, layer: number, z: number, col: number, row: number, gridCols: number,
+  gridRows: number, dx: number, dy: number, pxW: number, pxH: number, sx: number, sy: number, sw: number, sh: number,
+];
+
+/** The most placements a frame is read for; the core cuts its list at the same number. */
+export const MAX_PLACEMENTS = 256;
+/** The longest side, in pixels, of a picture the page takes: the core refuses larger ones, and so does the page. */
+export const MAX_IMAGE_SIDE = 16384;
+/** The largest magnitude of a position, an offset or a size on the screen: far past any grid (1 Mi cells). */
+const MAX_SCREEN = 1 << 20;
+
+/**
+ * A placement the page may use, or null: sixteen safe whole numbers, a layer of 0 to 2, an image id that fits 32 bits,
+ * a generation of at least 1, a position, offsets and a size inside `MAX_SCREEN`, a shown part that starts inside
+ * the picture and is at most `MAX_IMAGE_SIDE` wide and tall. The numbers decide allocations and rectangles, so
+ * nothing else gets in.
+ */
+export function usablePlacement(p: unknown): PlacementMsg | null {
+  if (!Array.isArray(p) || p.length !== 16) return null;
+  for (const n of p) if (!Number.isSafeInteger(n)) return null;
+  const [image, generation, layer, z, col, row, gridCols, gridRows, dx, dy, pxW, pxH, sx, sy, sw, sh] = p as number[] as
+    PlacementMsg;
+  const within = (n: number, lo: number, hi: number) => n >= lo && n <= hi;
+  if (!within(image, 0, 0xffffffff) || generation < 1 || !within(layer, 0, 2) || !within(z, -0x80000000, 0x7fffffff)) return null;
+  if (!within(col, -MAX_SCREEN, MAX_SCREEN) || !within(row, -MAX_SCREEN, MAX_SCREEN)) return null;
+  if (!within(gridCols, 0, MAX_SCREEN) || !within(gridRows, 0, MAX_SCREEN)) return null;
+  if (!within(dx, -MAX_SCREEN, MAX_SCREEN) || !within(dy, -MAX_SCREEN, MAX_SCREEN)) return null;
+  if (!within(pxW, 1, MAX_SCREEN) || !within(pxH, 1, MAX_SCREEN)) return null;
+  if (!within(sx, 0, MAX_IMAGE_SIDE) || !within(sy, 0, MAX_IMAGE_SIDE)) return null;
+  if (!within(sw, 1, MAX_IMAGE_SIDE) || !within(sh, 1, MAX_IMAGE_SIDE)) return null;
+  return p as PlacementMsg;
+}
+
+/**
+ * The usable placements among the first `MAX_PLACEMENTS` entries of a list, in order; an entry that fails is skipped.
+ * Anything that is not a list gives an empty one. At most 256 entries are even looked at.
+ */
+export function usablePlacements(list: unknown): PlacementMsg[] {
+  if (!Array.isArray(list)) return [];
+  const out: PlacementMsg[] = [];
+  const n = Math.min(list.length, MAX_PLACEMENTS);
+  for (let i = 0; i < n; i++) {
+    const p = usablePlacement(list[i]);
+    if (p) out.push(p);
+  }
+  return out;
+}
+
 export interface ModesMsg {
   alt: boolean;
   bracketed_paste: boolean;
@@ -48,6 +105,11 @@ export interface FrameMsg {
   copy_cursor: [number, number] | null;
   modes: ModesMsg;
   changed: RowMsg[];
+  /**
+   * The pictures placed in the viewport. Present when the list changed (an empty list means every picture is gone) and
+   * on a full frame that has pictures; absent otherwise, and then the mirror keeps the list it has.
+   */
+  images?: PlacementMsg[];
 }
 
 // ---- the mirror -------------------------------------------------------------------------------------
@@ -69,6 +131,8 @@ export interface PaneMirror {
   search: SearchMsg | null;
   copyCursor: [number, number] | null;
   modes: ModesMsg;
+  /** The usable placements of the pictures in the viewport, at most `MAX_PLACEMENTS`; empty for a pane without any. */
+  images: PlacementMsg[];
 }
 
 const BLANK_MODES: ModesMsg = { alt: false, bracketed_paste: false, mouse: false };
@@ -81,8 +145,8 @@ function usableRow(row: unknown, rows: number): RowMsg | null {
   return Array.isArray(extras) && extras.length > 0 ? { y, runs, extras } : { y, runs };
 }
 
-/** The mirror of `msg` with `rows_` as its grid; the header fields come from the message. */
-function build(msg: FrameMsg, rows_: (RowMsg | null)[]): PaneMirror {
+/** The mirror of `msg` with `rows_` as its grid and `images` as its placements; the header fields come from the message. */
+function build(msg: FrameMsg, rows_: (RowMsg | null)[], images: PlacementMsg[]): PaneMirror {
   return {
     seq: msg.seq,
     cols: msg.cols,
@@ -97,6 +161,7 @@ function build(msg: FrameMsg, rows_: (RowMsg | null)[]): PaneMirror {
     search: msg.search ?? null,
     copyCursor: msg.copy_cursor ?? null,
     modes: msg.modes ?? BLANK_MODES,
+    images,
   };
 }
 
@@ -119,7 +184,8 @@ export function applyFrame(
       const usable = usableRow(row, msg.rows);
       if (usable) rows_[usable.y] = usable;
     }
-    return { mirror: build(msg, rows_), gap: false };
+    // A full frame replaces everything: no list means no pictures.
+    return { mirror: build(msg, rows_, usablePlacements(msg.images)), gap: false };
   }
   if (!mirror || msg.seq !== mirror.seq + 1 || msg.cols !== mirror.cols || msg.rows !== mirror.rows) {
     return { mirror, gap: true };
@@ -129,7 +195,9 @@ export function applyFrame(
     const usable = usableRow(row, mirror.rows);
     if (usable) rows_[usable.y] = usable;
   }
-  return { mirror: build(msg, rows_), gap: false };
+  // A frame without the field keeps the list; with it (also an empty one) the list is replaced.
+  const images = Array.isArray(msg.images) ? usablePlacements(msg.images) : mirror.images;
+  return { mirror: build(msg, rows_, images), gap: false };
 }
 
 /** The frame the renderers draw: rows never received are empty, cluster tails are aligned by row. */
