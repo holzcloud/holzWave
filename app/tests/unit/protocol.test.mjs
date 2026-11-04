@@ -115,7 +115,7 @@ test("the settings view has exactly the documented keys at every level and the s
   assert.deepEqual(golden.events.settings, view, "the settings event payload is the settings view");
   assert.deepEqual(keys(view.settings), [
     "ai_local_context", "ai_local_only", "ai_persist_context", "confirm_multiline_paste", "contrast", "copy_on_select",
-    "cursor_blink", "cursor_trail", "font_size", "image_memory_mib", "keybindings", "motion", "option_as_alt", "scrollback_lines", "shell", "smooth_scroll",
+    "cursor_blink", "cursor_trail", "font_size", "image_memory_mib", "keybindings", "link_schemes", "motion", "option_as_alt", "scrollback_lines", "shell", "smooth_scroll",
     "theme", "ui_scale", "version",
   ]);
   assert.equal(typeof view.settings.theme, "string");
@@ -155,7 +155,7 @@ test("the app info and the pointer commands are pinned", () => {
   assert.deepEqual(golden.mouse.actions, ["press", "release", "motion"]);
   assert.deepEqual(golden.mouse.buttons, ["left", "middle", "right", "none"]);
   assert.deepEqual(golden.commands.app_info, []);
-  assert.deepEqual(golden.commands.open_url, ["url"]);
+  assert.deepEqual(golden.commands.open_url, ["url", "pane"]);
   assert.deepEqual(golden.commands.reveal_path, ["path", "base"]);
   // The Local Network permission of macOS: the page asks the state, answers the notice with one boolean and opens the system
   // settings with nothing from the page (the shell has one fixed link).

@@ -1959,6 +1959,12 @@
         "font_size": 14,
         "image_memory_mib": 64,
         "keybindings": {},
+        "link_schemes": [
+          "http",
+          "https",
+          "mailto",
+          "file"
+        ],
         "motion": "system",
         "option_as_alt": false,
         "scrollback_lines": 10000,
@@ -2572,6 +2578,12 @@
       "font_size": 14,
       "image_memory_mib": 64,
       "keybindings": {},
+      "link_schemes": [
+        "http",
+        "https",
+        "mailto",
+        "file"
+      ],
       "motion": "system",
       "option_as_alt": false,
       "scrollback_lines": 10000,
