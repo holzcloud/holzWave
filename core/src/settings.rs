@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::layout::LoadStatus;
+use crate::links::{hard_denied, valid_scheme};
 use crate::persist::{backup_bad, bad_path, read_limited, write_atomic};
 use crate::theme::{DEFAULT_THEME, ThemeRegistry, valid_theme_name};
 
@@ -69,6 +70,13 @@ pub const MAX_KEYBINDING_TEXT: usize = 128;
 /// The longest `shell`, in bytes. A Windows path is at most about 32 000 characters in theory and a few hundred in
 /// practice; this is far above any real one and keeps a hostile file from filling the settings.
 pub const MAX_SHELL_BYTES: usize = 4096;
+
+/// The most entries `link_schemes` keeps. With the 32 characters of a scheme it keeps a saved document small.
+pub const MAX_LINK_SCHEMES: usize = 16;
+
+/// The longest entry of `link_schemes` that is looked at, in bytes. A longer text cannot be a scheme name, and it is not
+/// copied to be lowered in case.
+const MAX_LINK_SCHEME_BYTES: usize = 32;
 
 /// How much of a name from outside appears in a message.
 const SHOWN: usize = 40;
@@ -153,6 +161,11 @@ pub struct Settings {
     /// The program a new pane starts: one string, never split and never run through another shell. Empty means the
     /// platform default of [`crate::platform::shell_launch`]. It applies to panes started afterwards.
     pub shell: String,
+    /// The schemes of the links that may be opened (D-05): lower case, 1 to 32 characters (a letter, then letters, digits,
+    /// plus, dot or hyphen), at most [`MAX_LINK_SCHEMES`]. `javascript`, `data`, `vbscript`, `blob` and `about` are never
+    /// kept, from any route. An empty list means no link opens. `file` reveals the file and never opens it. Not in the
+    /// Settings dialog, like `shell`; the opener reads it at each click.
+    pub link_schemes: Vec<String>,
     /// Refuse every AI request whose destination leaves this computer, the local network included.
     pub ai_local_only: bool,
     /// Whether a model on this computer asks before shared terminal content goes to it ([`AiLocalContext`]).
@@ -181,6 +194,7 @@ impl Default for Settings {
             smooth_scroll: false,
             cursor_trail: false,
             shell: String::new(),
+            link_schemes: ["http", "https", "mailto", "file"].map(String::from).to_vec(),
             ai_local_only: false,
             ai_local_context: AiLocalContext::Ask,
             ai_persist_context: false,
@@ -256,8 +270,8 @@ impl Settings {
 
     /// Bring every value into its range and report one note per change.
     ///
-    /// Numbers are clamped, a theme name that cannot be a theme name becomes aubergine, `shell` is bounded, and the
-    /// key binding table is bounded. A well formed theme name that no theme has is kept: user themes are only known
+    /// Numbers are clamped, a theme name that cannot be a theme name becomes aubergine, `shell` is bounded, the list of
+    /// link schemes is normalised and bounded, and the key binding table is bounded. A well formed theme name that no theme has is kept: user themes are only known
     /// to the [`ThemeRegistry`], and a theme file that is missing for a moment should not rewrite the choice. Use
     /// [`Settings::sanitise_theme`] where the registry is at hand.
     pub fn sanitise(&mut self) -> Vec<String> {
@@ -287,6 +301,8 @@ impl Settings {
             self.shell.clear();
         }
 
+        notes.extend(self.sanitise_link_schemes());
+
         let before = self.keybindings.len();
         self.keybindings.retain(|action, chord| {
             !action.is_empty() && action.len() <= MAX_KEYBINDING_TEXT && chord.len() <= MAX_KEYBINDING_TEXT
@@ -304,6 +320,60 @@ impl Settings {
                 self.keybindings.pop_last();
             }
             notes.push(format!("{surplus} key binding entries beyond the first {MAX_KEYBINDINGS} were dropped"));
+        }
+        notes
+    }
+
+    /// Normalise `link_schemes`: trimmed and lower case, the five hard-denied schemes and everything that is not a scheme
+    /// name removed, duplicates dropped in order, at most [`MAX_LINK_SCHEMES`] kept. One note per kind of repair; the
+    /// notes never repeat an entry. A list that needed nothing costs no note (the case and the blanks around an entry
+    /// are a way of writing, not a damage).
+    fn sanitise_link_schemes(&mut self) -> Vec<String> {
+        let entries = |n: usize| if n == 1 { "1 entry".to_owned() } else { format!("{n} entries") };
+        let (mut denied, mut invalid, mut duplicate, mut surplus) = (0usize, 0usize, 0usize, 0usize);
+        let mut kept: Vec<String> = Vec::new();
+        for raw in std::mem::take(&mut self.link_schemes) {
+            let trimmed = raw.trim();
+            if trimmed.len() > MAX_LINK_SCHEME_BYTES {
+                invalid += 1;
+                continue;
+            }
+            let name = trimmed.to_ascii_lowercase();
+            if hard_denied(&name) {
+                denied += 1;
+            } else if !valid_scheme(&name) {
+                invalid += 1;
+            } else if kept.contains(&name) {
+                duplicate += 1;
+            } else if kept.len() >= MAX_LINK_SCHEMES {
+                surplus += 1;
+            } else {
+                kept.push(name);
+            }
+        }
+        self.link_schemes = kept;
+        let mut notes = Vec::new();
+        if denied > 0 {
+            notes.push(format!(
+                "link_schemes: {} dropped; javascript, data, vbscript, blob and about are never accepted",
+                entries(denied)
+            ));
+        }
+        if invalid > 0 {
+            notes.push(format!(
+                "link_schemes: {} not a scheme name (a letter, then letters, digits, plus, dot or hyphen; at most 32 \
+                 characters) and dropped",
+                entries(invalid)
+            ));
+        }
+        if duplicate > 0 {
+            notes.push(format!(
+                "link_schemes: {duplicate} duplicate {} dropped",
+                if duplicate == 1 { "entry" } else { "entries" }
+            ));
+        }
+        if surplus > 0 {
+            notes.push(format!("link_schemes: {} beyond the first {MAX_LINK_SCHEMES} dropped", entries(surplus)));
         }
         notes
     }

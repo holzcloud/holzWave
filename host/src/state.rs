@@ -2746,12 +2746,15 @@ impl AppCore {
         run(launch)
     }
 
-    /// Open a link with the platform opener. Only http, https and mailto links are opened; the length, the
-    /// characters and the shape are checked first, and nothing is started for a link that fails (T-02-52).
+    /// Open a link with the platform opener. Only a link whose scheme is in the `link_schemes` setting, read at this
+    /// call, is opened (never `javascript`, `data`, `vbscript`, `blob` or `about`, and `file` is not handed to the
+    /// opener); the length, the characters and the shape are checked first, and nothing is started for a link that
+    /// fails (T-02-52). The list is the person's, the page's own checks are a convenience.
     ///
     /// Starts a process, so the command is async.
     pub fn open_url(&self, url: &str) -> Result<(), String> {
-        let launch = open_launch(std::env::consts::OS, url, &process_env)?;
+        let schemes = lock(&self.config).settings.link_schemes.clone();
+        let launch = open_launch(std::env::consts::OS, url, &schemes, &process_env)?;
         self.launch(&launch)
     }
 
@@ -3747,19 +3750,18 @@ const MAX_POINTER_PX: f64 = 100_000.0;
 /// The most rows one wheel event moves, in either direction.
 const MAX_WHEEL_ROWS: i32 = 100;
 
-/// The first part of text that came from outside, for a message.
-fn short(text: &str) -> String {
-    text.chars().take(40).collect()
-}
-
 /// A variable of the process environment, for the pure functions that take a lookup.
 fn process_env(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
 
-/// Whether `url` is a link that may be opened: at most [`MAX_URL_BYTES`], no control or blank character, and the
-/// scheme http or https with a host, or mailto with an address. The text is never interpreted further.
-fn check_link(url: &str) -> Result<(), String> {
+/// Whether `url` is a link that may be opened under the list `schemes` (the `link_schemes` setting in force): at most
+/// [`MAX_URL_BYTES`], no control or blank character, a scheme that the list holds (compared without regard to case) and
+/// that is none of the five that are never opened, and the shape of that scheme: a host after `//` for http and https, an
+/// address for mailto, something after the colon for any other. `file` is never handed to the opener: a file link is
+/// revealed through the pane path of [`AppCore::open_url`]. The text is never interpreted further, and a refusal is a
+/// fixed sentence that does not repeat the link.
+fn check_link(url: &str, schemes: &[String]) -> Result<(), String> {
     if url.len() > MAX_URL_BYTES {
         return Err(format!("the link is longer than {MAX_URL_BYTES} bytes"));
     }
@@ -3769,28 +3771,37 @@ fn check_link(url: &str) -> Result<(), String> {
     let Some((scheme, rest)) = url.split_once(':') else {
         return Err("the link has no scheme".into());
     };
-    let names_something = match scheme.to_ascii_lowercase().as_str() {
+    let scheme = scheme.to_ascii_lowercase();
+    if holzwave_core::links::hard_denied(&scheme) {
+        return Err("links of this kind are never opened".into());
+    }
+    if scheme == "file" {
+        return Err("a file link is shown in the file manager from a pane on this computer, it is not opened".into());
+    }
+    if !schemes.iter().any(|listed| *listed == scheme) {
+        return Err("links of this kind are not in the list of link schemes in the settings".into());
+    }
+    let names_something = match scheme.as_str() {
         "http" | "https" => rest.strip_prefix("//").is_some_and(|host| !host.is_empty() && !host.starts_with('/')),
-        "mailto" => !rest.is_empty(),
-        _ => {
-            return Err(format!(
-                "links of the kind {:?} are not opened, only http, https and mailto",
-                short(scheme)
-            ));
-        }
+        _ => !rest.is_empty(),
     };
     if names_something { Ok(()) } else { Err("the link names nothing to open".into()) }
 }
 
-/// How the platform opens a link: validated first, then one fixed program with the link as its only argument.
+/// How the platform opens a link: validated against `schemes` first, then one fixed program with the link as its only argument.
 /// macOS uses `/usr/bin/open` by absolute path; Linux uses `xdg-open`, the one program that is looked up through
 /// PATH (there is no fixed place for it). Windows hands the link to the URL handler of `url.dll` through
 /// `rundll32.exe` under `%SystemRoot%\System32`: no `cmd`, no shell string, so `&` and `^` of a link are plain text.
 /// A double quote is refused there because the argument is rebuilt into a command line.
 ///
 /// `env` looks up a variable of the process; only the Windows launcher reads it.
-fn open_launch(os: &str, url: &str, env: &dyn Fn(&str) -> Option<String>) -> Result<Launch, String> {
-    check_link(url)?;
+fn open_launch(
+    os: &str,
+    url: &str,
+    schemes: &[String],
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Launch, String> {
+    check_link(url, schemes)?;
     match os {
         "macos" => Ok(Launch::plain("/usr/bin/open", vec![url.to_owned()])),
         "linux" => Ok(Launch::plain("xdg-open", vec![url.to_owned()])),
@@ -6952,6 +6963,111 @@ mod tests {
         }
     }
 
+    /// The list of schemes that a new settings file has.
+    fn web() -> Vec<String> {
+        holzwave_core::settings::Settings::default().link_schemes
+    }
+
+    fn schemes(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    fn set_schemes(core: &AppCore, list: &[&str]) {
+        core.set_setting("link_schemes", serde_json::json!(list)).expect("the list is accepted");
+    }
+
+    #[test]
+    fn a_listed_custom_scheme_opens_through_the_opener_with_the_link_as_the_only_argument() {
+        let (core, _rec, _dir) = recording_core();
+        set_schemes(&core, &["https", "ssh"]);
+
+        let ssh = "ssh://host.example/path-lk-1";
+        assert_eq!(core.open_url(ssh), Ok(()));
+        let launches = launches_with(ssh);
+        assert_eq!(launches.len(), 1);
+        assert_eq!(launches[0].args.iter().filter(|a| a.contains("path-lk-1")).count(), 1);
+        if OS != "windows" {
+            assert_eq!(launches[0].args, [ssh], "the link is the only argument");
+        }
+
+        let https = "https://example.org/lk-2";
+        assert_eq!(core.open_url(https), Ok(()));
+        assert_eq!(launches_with(https).len(), 1, "a scheme that stays in the list still opens");
+
+        let mailto = "mailto:a@b.example?subject=lk-3";
+        assert!(core.open_url(mailto).is_err(), "mailto left the list");
+        assert!(launches_with(mailto).is_empty());
+
+        let upper = "HTTPS://EXAMPLE.ORG/lk-4";
+        assert_eq!(core.open_url(upper), Ok(()), "the comparison ignores case");
+        assert_eq!(launches_with(upper).len(), 1);
+
+        let js = "javascript:alert(1)//lk-5";
+        assert!(core.open_url(js).is_err());
+        assert!(launches_with(js).is_empty());
+    }
+
+    #[test]
+    fn an_empty_list_opens_no_link_and_the_default_comes_back_with_a_reset() {
+        let (core, _rec, _dir) = recording_core();
+        set_schemes(&core, &[]);
+        for url in ["https://example.org/lk-6", "http://example.org/lk-7", "mailto:a@b.example?lk=8"] {
+            assert!(core.open_url(url).is_err(), "{url}");
+            assert!(launches_with(url).is_empty(), "{url}");
+        }
+        // A change applies to the next call, without a restart, and a reset brings the default back.
+        core.reset_setting("link_schemes").expect("reset");
+        assert_eq!(core.get_settings().settings.link_schemes, web());
+        let url = "https://example.org/lk-9";
+        assert_eq!(core.open_url(url), Ok(()));
+        assert_eq!(launches_with(url).len(), 1);
+    }
+
+    #[test]
+    fn a_list_in_the_file_is_in_force_and_a_hand_edit_cannot_enable_a_denied_scheme() {
+        let dir = Scratch::new("links-file");
+        std::fs::write(
+            dir.0.join("settings.json"),
+            r#"{"link_schemes": ["JavaScript", "data", "ssh", "https", "vbscript", "blob", "about"]}"#,
+        )
+        .unwrap();
+        let (core, _rec) = core_in(&dir, "/bin/cat", &[]);
+        *lock(&core.launcher) = record_launch;
+
+        assert_eq!(core.get_settings().settings.link_schemes, ["ssh", "https"]);
+        for url in ["javascript:alert(1)//lk-10", "JavaScript:alert(1)//lk-11", "data:text/html,lk-12", "vbscript:x-lk-13", "blob:https://a/lk-14", "about:blank#lk-15"] {
+            assert!(core.open_url(url).is_err(), "{url}");
+            assert!(launches_with(url).is_empty(), "{url}");
+        }
+        assert_eq!(core.open_url("ssh://h.example/lk-16"), Ok(()));
+        // Defence in depth: even a list that holds a denied scheme (it cannot come through the settings) opens none.
+        let hostile = schemes(&["javascript", "data", "vbscript", "blob", "about", "JavaScript"]);
+        for url in ["javascript:alert(1)", "JAVASCRIPT:alert(1)", "data:text/html,x", "vbscript:x", "blob:https://a/b", "about:blank"] {
+            assert!(check_link(url, &hostile).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn the_shape_of_a_link_is_checked_per_scheme_and_a_refusal_never_echoes_the_link() {
+        let list = schemes(&["http", "https", "mailto", "ssh", "x-man-page"]);
+        for ok in ["http://h", "https://example.org/a", "mailto:a@b", "ssh://h/p", "ssh:x", "x-man-page://ls", "SSH:x", "Https://h"] {
+            assert_eq!(check_link(ok, &list), Ok(()), "{ok}");
+        }
+        for bad in ["http:", "http:x", "http://", "http:///x", "https:/h", "mailto:", "ssh:", "x-man-page:", "nocolon", ":x", "1ssh:x", "ss_h:x", "file:///tmp/a", "ftp://h/secret-lk-20"] {
+            let err = check_link(bad, &list).expect_err(bad);
+            assert!(!err.contains("secret") && err.len() < 200, "{err}");
+        }
+        for bad in ["https://h/secret-lk-21 x", "https://h/\u{7}secret-lk-22", &format!("https://h/{}", "s".repeat(MAX_URL_BYTES))] {
+            let err = check_link(bad, &list).expect_err("refused");
+            assert!(!err.contains("secret") && err.len() < 200, "{err}");
+        }
+        assert!(check_link("file:///tmp/a", &schemes(&["file"])).is_err(), "file is revealed, never handed to the opener");
+        let two_thousand = format!("https://h/{}", "a".repeat(MAX_URL_BYTES - 10));
+        assert_eq!(two_thousand.len(), MAX_URL_BYTES);
+        assert_eq!(check_link(&two_thousand, &list), Ok(()));
+        assert!(check_link(&format!("{two_thousand}a"), &list).is_err(), "2049 bytes");
+    }
+
     /// A process environment that has nothing in it.
     fn no_env(_: &str) -> Option<String> {
         None
@@ -6961,10 +7077,10 @@ mod tests {
     fn the_opener_is_one_fixed_program_with_the_link_as_a_single_argument() {
         let url = "https://example.org/a?b=c&d=e";
 
-        assert_eq!(open_launch("macos", url, &no_env), Ok(Launch::plain("/usr/bin/open", vec![url.to_owned()])));
-        assert_eq!(open_launch("linux", url, &no_env), Ok(Launch::plain("xdg-open", vec![url.to_owned()])));
-        assert!(open_launch("macos", "file:///etc/passwd", &no_env).is_err());
-        assert!(open_launch("plan9", url, &no_env).is_err(), "a platform nobody wrote an opener for");
+        assert_eq!(open_launch("macos", url, &web(), &no_env), Ok(Launch::plain("/usr/bin/open", vec![url.to_owned()])));
+        assert_eq!(open_launch("linux", url, &web(), &no_env), Ok(Launch::plain("xdg-open", vec![url.to_owned()])));
+        assert!(open_launch("macos", "file:///etc/passwd", &web(), &no_env).is_err());
+        assert!(open_launch("plan9", url, &web(), &no_env).is_err(), "a platform nobody wrote an opener for");
     }
 
     #[test]
@@ -7005,20 +7121,20 @@ mod tests {
     fn windows_launch_of_a_link_is_rundll32_with_the_link_unchanged_as_the_second_argument() {
         let url = "https://example.org/a?b=1&c=2^d";
 
-        let launch = open_launch("windows", url, &no_env).expect("a link opens on Windows");
+        let launch = open_launch("windows", url, &web(), &no_env).expect("a link opens on Windows");
 
         assert_eq!(launch.program, r"C:\Windows\System32\rundll32.exe", r"SystemRoot defaults to C:\Windows");
         assert_eq!(launch.args, ["url.dll,FileProtocolHandler", url], "exactly two arguments, the link untouched");
         assert!(launch.raw_args.is_empty());
         let root = |name: &str| (name == "SystemRoot").then(|| r"D:\WinNT\".to_owned());
-        assert_eq!(open_launch("windows", url, &root).unwrap().program, r"D:\WinNT\System32\rundll32.exe");
+        assert_eq!(open_launch("windows", url, &web(), &root).unwrap().program, r"D:\WinNT\System32\rundll32.exe");
     }
 
     #[test]
     fn windows_launch_of_a_link_with_an_ampersand_or_a_caret_never_goes_through_a_shell() {
         // `&` and `^` are legal in a link and are metacharacters of cmd: no cmd, no command string, one argument.
         for url in ["https://example.org/?a=1&b=2", "https://example.org/a^b", "https://example.org/?a=1&calc.exe"] {
-            let launch = open_launch("windows", url, &no_env).expect(url);
+            let launch = open_launch("windows", url, &web(), &no_env).expect(url);
             assert!(launch.program.ends_with(r"\rundll32.exe"), "{launch:?}");
             assert!(!launch.program.to_ascii_lowercase().contains("cmd"), "{launch:?}");
             assert_eq!(launch.args.len(), 2, "{launch:?}");
@@ -7028,13 +7144,13 @@ mod tests {
 
     #[test]
     fn windows_launch_of_a_link_refuses_a_double_quote_and_what_every_platform_refuses() {
-        assert!(open_launch("windows", "https://example.org/a\"b", &no_env).is_err(), "a double quote");
-        assert!(open_launch("macos", "https://example.org/a\"b", &no_env).is_ok(), "only Windows rebuilds a command line");
-        assert!(open_launch("windows", "file:///C:/Windows/System32/calc.exe", &no_env).is_err(), "a scheme");
-        assert!(open_launch("windows", "https://example.org/a b", &no_env).is_err(), "a blank");
-        assert!(open_launch("windows", "https://example.org/a\u{1b}b", &no_env).is_err(), "a control character");
+        assert!(open_launch("windows", "https://example.org/a\"b", &web(), &no_env).is_err(), "a double quote");
+        assert!(open_launch("macos", "https://example.org/a\"b", &web(), &no_env).is_ok(), "only Windows rebuilds a command line");
+        assert!(open_launch("windows", "file:///C:/Windows/System32/calc.exe", &web(), &no_env).is_err(), "a scheme");
+        assert!(open_launch("windows", "https://example.org/a b", &web(), &no_env).is_err(), "a blank");
+        assert!(open_launch("windows", "https://example.org/a\u{1b}b", &web(), &no_env).is_err(), "a control character");
         let too_long = format!("https://example.org/{}", "b".repeat(MAX_URL_BYTES));
-        assert!(open_launch("windows", &too_long, &no_env).is_err(), "over {MAX_URL_BYTES} bytes");
+        assert!(open_launch("windows", &too_long, &web(), &no_env).is_err(), "over {MAX_URL_BYTES} bytes");
     }
 
     #[test]
@@ -7042,7 +7158,7 @@ mod tests {
         let url = "https://example.org/";
         for hostile in [r"\\evil\share", "//evil/share", "relative", "", r"\\?\C:\Windows"] {
             let env = |name: &str| (name == "SystemRoot").then(|| hostile.to_owned());
-            let program = open_launch("windows", url, &env).unwrap().program;
+            let program = open_launch("windows", url, &web(), &env).unwrap().program;
             assert_eq!(program, r"C:\Windows\System32\rundll32.exe", "SystemRoot {hostile:?}");
         }
     }
@@ -7711,8 +7827,8 @@ mod tests {
         // drive path to a program of that directory, whatever the environment says.
         let hostile = |_: &str| Some(r"\\evil\share".to_owned());
         let windows = [
-            open_launch("windows", "https://example.org/", &no_env),
-            open_launch("windows", "https://example.org/", &hostile),
+            open_launch("windows", "https://example.org/", &web(), &no_env),
+            open_launch("windows", "https://example.org/", &web(), &hostile),
             reveal_launch("windows", Path::new(r"C:\a\b.txt"), false, &no_env),
             reveal_launch("windows", Path::new(r"C:\a"), true, &hostile),
         ];

@@ -41,6 +41,28 @@ pub struct LinkSpan {
     pub uri: String,
 }
 
+/// Whether `name` is a scheme name as a setting may list it: 1 to 32 characters, a lower case letter first, then lower
+/// case letters, digits, plus, dot or hyphen. An upper-case letter is not valid here (a list is kept in lower case),
+/// while an address may carry its scheme in any case ([`clean_uri`]).
+pub fn valid_scheme(name: &str) -> bool {
+    !name.bytes().any(|b| b.is_ascii_uppercase()) && scheme_grammar(name.as_bytes())
+}
+
+/// Whether `name` is one of the schemes that are never delivered or opened: `javascript`, `data`, `vbscript`, `blob`
+/// and `about`, in any letter case. The engine's cleaning and the settings of the link policy use this one list.
+pub fn hard_denied(name: &str) -> bool {
+    DENIED_SCHEMES.iter().any(|denied| name.eq_ignore_ascii_case(denied))
+}
+
+/// The grammar of a scheme in either letter case: 1 to 32 characters, a letter, then letters, digits, plus, dot or
+/// hyphen.
+fn scheme_grammar(scheme: &[u8]) -> bool {
+    !scheme.is_empty()
+        && scheme.len() <= MAX_SCHEME_CHARS
+        && scheme[0].is_ascii_alphabetic()
+        && scheme.iter().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-'))
+}
+
 /// The address a program sent, when it may be delivered: 1 to [`MAX_URI_BYTES`] bytes of printable ASCII (0x21 to 0x7E,
 /// so no blank, no control character and no byte above 0x7E, which also keeps every bidirectional and other format
 /// character out), a scheme of 1 to 32 characters (a letter, then letters, digits, plus, dot or hyphen) followed by a
@@ -55,20 +77,15 @@ pub fn clean_uri(bytes: &[u8]) -> Option<String> {
     }
     let colon = bytes.iter().position(|&b| b == b':')?;
     let scheme = &bytes[..colon];
-    if scheme.is_empty() || scheme.len() > MAX_SCHEME_CHARS {
-        return None;
-    }
-    if !scheme[0].is_ascii_alphabetic() {
-        return None;
-    }
-    if !scheme.iter().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-')) {
-        return None;
-    }
-    if DENIED_SCHEMES.iter().any(|denied| scheme.eq_ignore_ascii_case(denied.as_bytes())) {
+    if !scheme_grammar(scheme) {
         return None;
     }
     // Printable ASCII only, checked above, so this is valid UTF-8.
-    String::from_utf8(bytes.to_vec()).ok()
+    let text = String::from_utf8(bytes.to_vec()).ok()?;
+    if hard_denied(&text[..colon]) {
+        return None;
+    }
+    Some(text)
 }
 
 /// Builds the spans of one row cell by cell and enforces the per-row budgets.
@@ -205,6 +222,26 @@ mod tests {
         // Only the whole scheme counts.
         assert!(ok("javascripts:x"));
         assert!(ok("xdata:x"));
+    }
+
+    #[test]
+    fn valid_scheme_is_the_lower_case_grammar_of_a_scheme_name() {
+        for good in ["https", "ssh", "x-man-page", "a1+b.c", "a", &"a".repeat(32)] {
+            assert!(valid_scheme(good), "{good}");
+        }
+        for bad in ["", "1http", "ht_tp", "-a", "+a", &"a".repeat(33), "HTTPS", "Ssh", "a b", "a:b", "a\tb", "h\u{e4}", "a/b"] {
+            assert!(!valid_scheme(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn hard_denied_names_the_five_schemes_in_any_letter_case() {
+        for denied in ["javascript", "data", "vbscript", "blob", "about", "JavaScript", "DATA", "VbScript", "Blob", "ABOUT"] {
+            assert!(hard_denied(denied), "{denied}");
+        }
+        for fine in ["http", "https", "mailto", "file", "ssh", "javascripts", "xdata", "", "abou"] {
+            assert!(!hard_denied(fine), "{fine}");
+        }
     }
 
     #[test]

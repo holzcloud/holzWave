@@ -36,6 +36,7 @@ fn defaults_match_the_decisions() {
     assert!(!s.cursor_trail, "DESK-28: the effects are opt-in");
     assert!(s.keybindings.is_empty());
     assert_eq!(s.shell, "", "DESK-30: empty means the platform default");
+    assert_eq!(s.link_schemes, ["http", "https", "mailto", "file"], "D-05: the web schemes and the file reveal");
     assert!(!s.ai_local_only, "the AI switch that blocks every destination off this computer starts off");
     assert_eq!(s.ai_local_context, AiLocalContext::Ask, "a local model asks like a cloud one");
     assert!(!s.ai_persist_context, "terminal text is not kept in a saved chat by default");
@@ -77,6 +78,7 @@ fn the_document_is_pretty_printed_with_a_trailing_newline_and_a_stable_key_order
         "\"smooth_scroll\"",
         "\"cursor_trail\"",
         "\"shell\"",
+        "\"link_schemes\"",
         "\"ai_local_only\"",
         "\"ai_local_context\"",
         "\"ai_persist_context\"",
@@ -771,5 +773,152 @@ mod validation {
         s.set_value("keybindings", serde_json::Value::Object(big)).unwrap();
         assert_eq!(s.keybindings.len(), 512);
         assert!(s.to_json().len() < 1024 * 1024, "a saved document always stays loadable");
+    }
+}
+
+// ---- the `link_schemes` setting (D-05) ----
+
+mod link_schemes {
+    use super::*;
+    use holzwave_core::settings::{MAX_LINK_SCHEMES, Settings};
+
+    fn list(items: &[&str]) -> serde_json::Value {
+        json!(items)
+    }
+
+    fn notes_of(text: &str) -> Vec<String> {
+        match Settings::from_json(text).1 {
+            LoadStatus::Repaired(notes) => notes,
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_default_is_the_three_web_schemes_and_the_file_reveal_and_the_document_names_it() {
+        assert_eq!(Settings::default().link_schemes, ["http", "https", "mailto", "file"]);
+        assert_eq!(MAX_LINK_SCHEMES, 16);
+        let text = Settings::default().to_json();
+        assert!(text.contains("\"link_schemes\""), "{text}");
+        let (back, status) = Settings::from_json(&text);
+        assert_eq!((back, status), (Settings::default(), LoadStatus::Clean));
+        // A file from before the key has none and loads clean.
+        let (old, status) = Settings::from_json(r#"{"font_size": 15}"#);
+        assert_eq!((old.link_schemes, status), (Settings::default().link_schemes, LoadStatus::Clean));
+    }
+
+    #[test]
+    fn set_value_lowers_the_case_drops_duplicates_the_denied_and_the_invalid_entries() {
+        let mut s = Settings::default();
+        s.set_value("link_schemes", list(&["HTTPS", "ssh", "https", "javascript", "ht_tp"])).unwrap();
+        assert_eq!(s.link_schemes, ["https", "ssh"]);
+    }
+
+    #[test]
+    fn each_kind_of_repair_has_one_note_and_a_clean_list_has_none() {
+        let text = r#"{"link_schemes": ["HTTPS", "ssh", "https", "ssh", "javascript", "Data", "ht_tp", "1x", ""]}"#;
+        let (s, status) = Settings::from_json(text);
+        assert_eq!(s.link_schemes, ["https", "ssh"]);
+        let LoadStatus::Repaired(notes) = status else { panic!("expected Repaired") };
+        assert_eq!(notes.len(), 3, "one note for the duplicates, one for the denied, one for the invalid: {notes:?}");
+        assert!(notes.iter().all(|n| n.contains("link_schemes")), "{notes:?}");
+        assert!(notes.iter().any(|n| n.contains("2 duplicate")), "{notes:?}");
+        assert!(notes.iter().any(|n| n.contains("2 ") && n.contains("never accepted")), "{notes:?}");
+        assert!(notes.iter().any(|n| n.contains("3 ") && n.contains("not a scheme name")), "{notes:?}");
+
+        // A clean list, a trimmed one and one in upper case need no note.
+        for clean in [r#"["https"]"#, r#"[" Https ", "SSH"]"#, "[]", r#"["a+b.c-d1"]"#] {
+            let (_, status) = Settings::from_json(&format!(r#"{{"link_schemes": {clean}}}"#));
+            assert_eq!(status, LoadStatus::Clean, "{clean}");
+        }
+    }
+
+    #[test]
+    fn the_five_denied_schemes_cannot_be_listed_by_any_route() {
+        let denied = ["javascript", "data", "vbscript", "blob", "about", "JAVASCRIPT", "Data", " vbscript "];
+        let mut s = Settings::default();
+        s.set_value("link_schemes", list(&denied)).unwrap();
+        assert!(s.link_schemes.is_empty(), "set_value: {:?}", s.link_schemes);
+
+        let (loaded, _) = Settings::from_json(&json!({ "link_schemes": denied }).to_string());
+        assert!(loaded.link_schemes.is_empty(), "a hand-edited file: {:?}", loaded.link_schemes);
+
+        let mut direct = Settings::default();
+        direct.link_schemes = denied.iter().map(|d| (*d).to_owned()).chain(["https".to_owned()]).collect();
+        let notes = direct.sanitise();
+        assert_eq!(direct.link_schemes, ["https"]);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+    }
+
+    #[test]
+    fn the_seventeenth_entry_is_dropped_with_a_note_and_sixteen_stay() {
+        let names: Vec<String> = (0..17).map(|i| format!("s{i}")).collect();
+        let mut s = Settings::default();
+        s.set_value("link_schemes", json!(names)).unwrap();
+        assert_eq!(s.link_schemes.len(), 16);
+        assert_eq!(s.link_schemes[15], "s15", "the first sixteen in order are kept");
+
+        let (loaded, status) = Settings::from_json(&json!({ "link_schemes": names }).to_string());
+        assert_eq!(loaded.link_schemes.len(), 16);
+        let LoadStatus::Repaired(notes) = status else { panic!("expected Repaired") };
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("link_schemes") && notes[0].contains("16"), "{notes:?}");
+
+        let exactly: Vec<String> = (0..16).map(|i| format!("s{i}")).collect();
+        let (loaded, status) = Settings::from_json(&json!({ "link_schemes": exactly }).to_string());
+        assert_eq!((loaded.link_schemes.len(), status), (16, LoadStatus::Clean));
+    }
+
+    #[test]
+    fn a_scheme_of_33_characters_or_with_an_underscore_is_invalid_and_32_is_fine() {
+        let ok32 = format!("a{}", "b".repeat(31));
+        let bad33 = format!("a{}", "b".repeat(32));
+        let mut s = Settings::default();
+        s.set_value("link_schemes", json!([ok32, bad33, "ht_tp", "a b", "a:b", "a/b", "\u{e4}x", "x\u{0}y"])).unwrap();
+        assert_eq!(s.link_schemes, [ok32]);
+        let notes = notes_of(&json!({ "link_schemes": [bad33, "ht_tp"] }).to_string());
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].len() < 300 && !notes[0].contains("ht_tp"), "the note does not echo an entry: {notes:?}");
+    }
+
+    #[test]
+    fn an_empty_list_is_valid_and_means_no_link_opens() {
+        let mut s = Settings::default();
+        s.set_value("link_schemes", json!([])).unwrap();
+        assert!(s.link_schemes.is_empty());
+        let (back, status) = Settings::from_json(&s.to_json());
+        assert_eq!((back.link_schemes.len(), status), (0, LoadStatus::Clean), "an empty list survives a save");
+    }
+
+    #[test]
+    fn a_value_that_is_not_a_list_of_strings_is_refused_and_changes_nothing() {
+        let mut s = Settings::default();
+        s.set_value("link_schemes", list(&["ssh"])).unwrap();
+        let before = s.clone();
+        for bad in [json!("https"), json!([1, 2]), json!(["https", 2]), json!(5), json!(null), json!({"a": 1}), json!(true)] {
+            assert!(s.set_value("link_schemes", bad.clone()).is_err(), "{bad}");
+            assert_eq!(s, before, "{bad} must not change anything");
+        }
+    }
+
+    #[test]
+    fn a_file_with_a_value_that_is_not_a_list_loads_repaired_with_the_default_and_costs_no_other_key() {
+        for bad in ["5", r#""https""#, "[1, 2]", r#"["https", null]"#, "null", r#"{"a": 1}"#] {
+            let text = format!(r#"{{"link_schemes": {bad}, "font_size": 16}}"#);
+            let (s, status) = Settings::from_json(&text);
+            assert_eq!(s.link_schemes, Settings::default().link_schemes, "{bad}");
+            assert_eq!(s.font_size, 16, "{bad}");
+            let LoadStatus::Repaired(notes) = status else { panic!("{bad}: expected Repaired") };
+            assert_eq!(notes.len(), 1, "{bad}: {notes:?}");
+            assert!(notes[0].contains("link_schemes"), "{bad}: {notes:?}");
+        }
+    }
+
+    #[test]
+    fn a_custom_scheme_is_kept_in_order_and_survives_a_save_and_a_load() {
+        let mut s = Settings::default();
+        s.set_value("link_schemes", list(&["https", "x-man-page", "SSH"])).unwrap();
+        assert_eq!(s.link_schemes, ["https", "x-man-page", "ssh"]);
+        let (back, status) = Settings::from_json(&s.to_json());
+        assert_eq!((back, status), (s, LoadStatus::Clean));
     }
 }
