@@ -15,6 +15,7 @@
 #![cfg(feature = "ghostty")]
 
 mod common;
+mod kitty_support;
 mod perf_report;
 
 use std::hint::black_box;
@@ -28,6 +29,7 @@ use holzwave_core::engine::{DomKey, Mods};
 use holzwave_core::pane::{DEFAULT_SCROLLBACK, PaneEvent, PaneHandle, PaneSpec};
 use holzwave_core::wire::FrameEncoder;
 use holzwave_core::{GhosttyEngine, TerminalEngine};
+use kitty_support::{CHUNK_CHARS, chunked, seeded_pixels};
 use perf_report::{percentile, report, rss_kib};
 
 const COLS: u16 = 160;
@@ -343,4 +345,90 @@ fn perf_memory() {
     }
     report("core.memory_pane_empty_mib", "mib", &empty);
     report("core.memory_pane_scrollback_mib", "mib", &full);
+}
+
+/// Engines held at once for the picture figure, fewer than for the text figure because every one is fed twice its cap.
+const IMAGE_ENGINES: usize = 4;
+/// Set in the environment of the child process that takes one picture figure.
+const IMAGES_CHILD: &str = "HOLZWAVE_PERF_IMAGES_CHILD";
+/// One picture: 512 x 512 raw RGBA pixels, 1 MiB.
+const PICTURE_SIDE: u32 = 512;
+
+/// The figure of one run, in a process of its own for the reason `perf_memory_child` gives. Every engine has the default
+/// picture memory (64 MiB, the setting's default) and is fed twice that in distinct pictures, one after the other, so the
+/// library has evicted by the end (asserted: what the engine's allocator holds is below what was sent). Prints one
+/// `RAWIMG <extra KiB per engine> <MiB held per engine at the end>` line: the delta of the resident set of the whole
+/// process from the moment every engine had drawn its first frame (an empty pane, which is the figure subtracted) to the
+/// moment the pictures were in, divided by the engine count.
+#[test]
+#[ignore = "run by perf_memory_images, in a process of its own"]
+fn perf_memory_images_child() {
+    if std::env::var_os(IMAGES_CHILD).is_none() {
+        return;
+    }
+    let mut engines: Vec<GhosttyEngine> = (0..IMAGE_ENGINES)
+        .map(|_| GhosttyEngine::new(COLS, ROWS, DEFAULT_SCROLLBACK).expect("engine"))
+        .collect();
+    for e in &mut engines {
+        black_box(e.update().expect("update"));
+    }
+    let empty = rss_kib().expect("resident memory is not readable on this OS");
+
+    let picture_bytes = (PICTURE_SIDE * PICTURE_SIDE * 4) as u64;
+    let sent_mib = 2 * holzwave_core::images::DEFAULT_IMAGE_BYTES / (1024 * 1024);
+    let count = 2 * holzwave_core::images::DEFAULT_IMAGE_BYTES / picture_bytes;
+    for e in &mut engines {
+        for id in 1..=count {
+            let pixels = seeded_pixels(id, (PICTURE_SIDE * PICTURE_SIDE) as usize, 4);
+            let control = format!("a=T,f=32,s={PICTURE_SIDE},v={PICTURE_SIDE},i={id},c=1,r=1,q=2");
+            for piece in chunked(&control, &pixels, CHUNK_CHARS) {
+                e.feed(&piece);
+            }
+        }
+        black_box(e.update().expect("update"));
+    }
+    let with_pictures = rss_kib().expect("resident memory");
+    let held = engines[0].image_memory();
+    assert!(
+        (held.live as u64) < sent_mib * 1024 * 1024,
+        "the engine has evicted: it holds {} bytes of the {} MiB it was sent",
+        held.live,
+        sent_mib
+    );
+    assert_eq!(held.refused, 0, "the bound never refused a picture: the default cap is what stopped it");
+    black_box(&engines);
+    println!(
+        "\nRAWIMG {} {}",
+        with_pictures.saturating_sub(empty) / IMAGE_ENGINES as u64,
+        held.live / (1024 * 1024)
+    );
+}
+
+/// `core.memory_pane_images_mib`: the memory a pane holds with pictures up to the default cap, beyond an empty pane
+/// (new in the polish phase, no value before it); five runs, each in a fresh process (`perf_memory_images_child`).
+#[test]
+#[ignore = "a measurement: sh scripts/perf-check.sh"]
+fn perf_memory_images() {
+    let _one = exclusive();
+    let exe = std::env::current_exe().expect("the path of the test binary");
+    let mut extra = Vec::new();
+    for _ in 0..MEMORY_RUNS {
+        let out = Command::new(&exe)
+            .args(["perf_memory_images_child", "--exact", "--ignored", "--nocapture", "--test-threads=1"])
+            .env(IMAGES_CHILD, "1")
+            .output()
+            .expect("the child process");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "the images child failed: {}{}", text, String::from_utf8_lossy(&out.stderr));
+        let figures: Vec<f64> = text
+            .lines()
+            .find_map(|l| l.strip_prefix("RAWIMG "))
+            .expect("the child printed no RAWIMG line")
+            .split_whitespace()
+            .map(|v| v.parse::<f64>().expect("a number"))
+            .collect();
+        assert_eq!(figures.len(), 2);
+        extra.push(figures[0] / 1024.0);
+    }
+    report("core.memory_pane_images_mib", "mib", &extra);
 }
