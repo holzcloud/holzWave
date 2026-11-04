@@ -1,10 +1,11 @@
 # Test plan
 
-Ten parts: how to run everything locally, the per-platform manual list for hardware the owner owns, the record of the
+Eleven parts: how to run everything locally, the per-platform manual list for hardware the owner owns, the record of the
 macOS acceptance of Phase 2, the Windows and Linux list of Phase 2.2 (Part 4), connections (Part 5), files and previews
 with the extras (Part 6), the AI chat with the Apple on-device model and the rest of the extras (Part 7), the local
 network notice of macOS (Part 8), the native integrations with Kubernetes, Talos, Azure CLI and GAM7 (Part 9), and the web
-build with its server, image and browser page (Part 10). All of it runs locally; nothing here needs GitHub (D-04).
+build with its server, image and browser page (Part 10), and the rows for pictures, hyperlinks, signed releases and the limits
+of the measurements (Part 11). All of it runs locally; nothing here needs GitHub (D-04).
 
 ## Part 1: run everything locally
 
@@ -17,7 +18,10 @@ cargo test --workspace --offline      # core, app shell (headless, real shells),
 npm test --prefix app                 # builds app/dist with tsc, then the node unit tests
 npm run test:browser --prefix app     # WebKit and Chromium against app/dist with an in-page Tauri stub
 
-cargo test --release -p holzwave-core --offline --test budget -- --ignored --nocapture   # the budgets
+cargo test --release -p holzwave-core --offline --test budget -- --ignored --nocapture   # the coarse budgets of an earlier stage
+sh scripts/perf-check.sh all          # the guard: core, server and the two browsers against perf/baseline-<os>-<arch>.json; prints PERF OK or PERF WORSE; about 15 minutes, the machine idle
+sh scripts/perf-check.sh core         # one group: core, server, web or container (the Linux container through Docker)
+sh scripts/perf-record.sh all --replace   # record the numbers of this machine again (only on purpose; the reason goes into the commit message)
 npm run bench:build --prefix app      # builds app/dist-bench/index.html, the renderer benchmark (open it in a browser)
 cargo run -p holzwave-app             # the app itself, for the lists below
 ```
@@ -161,8 +165,14 @@ Notes:
   [architecture.md](architecture.md) section 12. They are measured without the webview.
 - The dev profile builds `libghostty` in Zig debug mode and is slow on very large feeds; use `--release` for anything
   that moves megabytes.
-- `UPDATE_FIXTURES=1 cargo test --offline` rewrites the two golden files (`app/tests/fixtures/frames.json` and
-  `protocol.json`); review the diff before committing it.
+- `UPDATE_FIXTURES=1 cargo test --offline` makes the tests that own a golden file write it instead of comparing: the
+  frame sequence `app/tests/fixtures/frames.json` (`core/tests/wire.rs`), the command and payload table `protocol.json`
+  (the `protocol` tests of the app shell) and the other files in `app/tests/fixtures/` (the AI and integration goldens). Without the
+  variable the same tests compare and fail on a difference; review the diff before committing a rewritten file.
+- The performance guard (`scripts/perf-check.sh`) is not part of `cargo test` or `npm test`: a person runs it, on the machine
+  whose baseline it is. It judges by the recorded numbers and sets no fixed target; the files, the tolerances and the table
+  of before and after are in [architecture.md](architecture.md) section 12. The Linux container numbers come from
+  `sh scripts/linux-container-test.sh perf` (the group `container`), run with `CARGO_BUILD_JOBS=2` in a Docker VM of 8 GB.
 - `core/tests/project_policy.rs` is part of `cargo test --workspace`. It fails when a dependency, a network API, a remote
   origin or a CI workflow appears (DESK-26, D-03, D-04), and when [config.md](config.md) no longer matches the loaders.
 - `core/tests/project_policy.rs` also holds the documents: it fails when a row of Part 7 is missing or twice in this file,
@@ -291,8 +301,8 @@ Mac** (plan 02.2-10), attached to the GitHub release of the version (or found in
 
 | Platform | File | Built by | What it is not |
 |---|---|---|---|
-| Windows x64 | `holzWave_<version>_x64-setup.exe` | `scripts/release-windows-cross.sh` | A **GNU-ABI** build (mingw-w64), not the MSVC build; run by the owner on Windows (row W14); unsigned |
-| Linux x86_64 | `holzWave_<version>_amd64.deb`, `holzWave_<version>_x86_64.rpm`, `holzWave_<version>_x86_64.AppImage` | `scripts/release-linux-container.sh` | Built in an emulated amd64 container (Ubuntu 24.04), run by the owner on Linux desktops (row L11); needs glibc 2.39 or newer; unsigned |
+| Windows x64 | `holzWave_<version>_x64-setup.exe` | `scripts/release-windows-cross.sh` | A **GNU-ABI** build (mingw-w64), not the MSVC build; run by the owner on Windows (row W14); not signed with Authenticode (SmartScreen warns) |
+| Linux x86_64 | `holzWave_<version>_amd64.deb`, `holzWave_<version>_x86_64.rpm`, `holzWave_<version>_x86_64.AppImage` | `scripts/release-linux-container.sh` | Built in an emulated amd64 container (Ubuntu 24.04), run by the owner on Linux desktops (row L11); needs glibc 2.39 or newer; no signature file yet: when the owner signs a release it carries a minisign signature for each package and a signed `SHA256SUMS`, and [signing.md](signing.md) says how to check them |
 
 Rows W14 and L11 test these files. The other rows then apply to what was installed from them; a row that fails only
 with a preview package is reported as such, because the cause can be the ABI or the container and not the code.
@@ -526,6 +536,90 @@ Machines the rows need:
 A failing row becomes a task of its own: the owner writes `fail` and what was seen, and a gap plan fixes it before the
 web build is called done.
 
+## Part 11: pictures, hyperlinks, signed releases and the limits of the measurements
+
+Nothing in this part is verified until you run the row and write `pass`, or `fail` with a line of what was seen, in its
+Result column. Pictures (the Kitty graphics protocol) and hyperlinks (OSC 8) are built and tested against the terminal
+engine, against the real server in WebKit and Chromium, and against a page with a mock core. They were never shown a real
+program that sends them, and the desktop app has no automated test of its window. The rows below need exactly those things. A
+row that you do not run stays empty. A failing row becomes a task of its own.
+
+| # | Area | What to do | Expected | Result |
+|---|---|---|---|---|
+| GFX1 | A real image viewer | In a pane of the desktop app run an image viewer that speaks the Kitty protocol (for example `kitten icat <file>` or `chafa -f kitty <file>`) on a PNG, a JPEG and a picture with transparency. Scroll the pane, resize the window, run `clear`, then set `image_memory_mib` to `0` in `settings.json`, open a new pane and run the viewer again. | The picture sits in the cells the viewer asked for, moves with the text when the pane scrolls, keeps its place when the window is resized and is gone after `clear`. A semi-transparent pixel shows the pane colour through it. With `0` the pane shows no picture and the viewer's text stays readable. Record the viewer and its version: ____. | |
+| GFX2 | A file manager with previews | Run a file manager that draws previews with the Kitty protocol (for example `yazi` or `ranger` with its image preview set to Kitty) in a pane, walk through a folder of pictures and quit it. | The preview appears beside the list, changes with the selection, and is gone when the file manager quits. The pane's memory does not keep growing while you walk (watch the app in the activity monitor): ____. | |
+| GFX3 | An animation | Show an animated picture with a program that sends it as an animation by the protocol (not as a video). Then switch the operating system to reduced motion and show it again in a new pane. | The animation plays at the speed the picture asks for. With reduced motion it stays on one frame. Record the program: ____. | |
+| GFX4 | A multiplexer that draws pictures with placeholder characters | Start a terminal multiplexer that passes pictures through with the placeholder characters of the protocol, and show a picture inside it. Split its window and close the split. | The picture is drawn in the cells of its pane, moves with them and does not leak into a neighbour. Text copied from the area around it has no placeholder characters in it. Record the multiplexer and its version: ____. | |
+| GFX5 | A flood of pictures | Run a program that sends many large pictures in a row (for example the viewer in a loop over a folder of large photographs) in one pane while another pane keeps working. Watch the memory of the app. | The oldest pictures are dropped when the pane is over `image_memory_mib`; the other pane stays responsive; the memory of the app stays near what the setting allows and does not grow without end. Record the numbers: ____. | |
+| LNK1 | A directory lister that writes links | In a pane run `ls --hyperlink=always` (GNU coreutils) in a folder, move the pointer over a name, hold the link modifier and click. Then run it with a lister that writes `file:///path` with no machine name. | GNU `ls` writes `file://<machine name>/path`, which holzWave refuses because only an empty host and `localhost` are accepted: record what you see on the click. A link without a machine name shows the file in the file manager and never opens or runs it. ____. | |
+| LNK2 | A search tool that writes links | Run a search tool with a hyperlink format (for example `rg --hyperlink-format='file://{path}'`) and click a hit. | The hover shows the address in the status line; the click reveals the file. Record the tool and its version: ____. | |
+| LNK3 | A compiler with diagnostic links | Compile a file with an error using a compiler that links its diagnostics (for example `gcc -fdiagnostics-urls=always`) and click the link of a warning. | A link to a web page asks nothing if its text and address agree and opens in the default browser. Record the compiler and what the address was: ____. | |
+| LNK4 | Links in the desktop window on each platform | On macOS, Windows and a Linux desktop: print an `https` link, a `mailto` link, a `file` link and a link whose text names another address (`printf '\e]8;;https://example.org\e\\paypal.com\e]8;;\e\\\n'`). Hover each, click each with the link modifier, read the status line, choose Cancel once and Open once on the question. Add `ssh` to `link_schemes` and click an `ssh://` link. | The address under the pointer is in the status line; the first three open (the file is shown in Finder, Explorer or the file manager, never run); the last asks first and does nothing on Cancel; `ssh` opens with the system handler only after it is on the list. Record the platform and the handler: ____. | |
+| LNK5 | Links in real browsers | In Safari, Chrome, Firefox and Edge with their default popup blocker on, against a server of Part 10: click an `https` link and a `mailto` link; use a screen reader on the link and its question; switch the system to a high-contrast colour theme. | The tab opens from the click, with no access back to the page; the question can be read and answered by keyboard; the dotted underline and the status segment stay visible in high contrast. Record the browser, system and reader: ____. | |
+| SIG1 | The first signed Linux release | Create the key as [signing.md](signing.md) says, sign a release with `sh scripts/sign-linux.sh <version>`, publish it, then on a Debian family machine and a Fedora family machine download the files and check them (`sh scripts/verify-release.sh <directory>` and the `minisign -Vm` commands of the guide), then install the package. Change one byte of a downloaded file and check again. | The check passes on both machines for the untouched files and fails for the changed one; the package installs. Record the distributions and minisign versions: ____. | |
+| SIG2 | The Windows installer and a Windows run of pictures and links | Download the installer on a Windows machine, compare its SHA-256 with the `.sha256` file, run it (SmartScreen: More info, Run anyway), and in a pane run an image viewer and a link emitter as in GFX1 and LNK4. | The installer is not signed and SmartScreen warns, as [signing.md](signing.md) says. Pictures are drawn and links work, or the failure is recorded: ____. | |
+| SIG3 | A macOS first run of an unsigned build | Download the DMG on a Mac that never ran holzWave, open it as the README says (right-click, Open) and, separately, install the Homebrew cask. | The app starts after the one allowance; the signature is ad hoc and names no developer. Record the macOS version: ____. | |
+| SIG4 | The Azure signing service | Nobody has run it for this project: [signing.md](signing.md) says why the route is closed to the author. If an account that qualifies ever exists, create a profile, sign the installer, and look at the signature in the file properties and at SmartScreen on a clean machine. | Until then this row stays empty. Record what was done: ____. | |
+
+Machines the rows need:
+
+- GFX1 to GFX5: the desktop app on a Mac, a Windows machine and a Linux desktop (the same rows run on each), and the programs the rows name.
+- LNK1 to LNK3: a shell with GNU coreutils, ripgrep and a compiler that can write links, on the machine that runs the app.
+- LNK4: a Mac, a Windows machine and a Linux desktop with a file manager. LNK5: Safari, Chrome, Firefox and Edge, a screen reader and a high-contrast colour theme.
+- SIG1: the owner's signing key, a Debian family machine and a Fedora family machine. SIG2 and SIG3: a Windows machine and a Mac that never ran the app.
+
+### Not tried
+
+This is every claim of this part that no suite here supports. It is listed so that no reader assumes it was shown.
+
+- No real program that sends Kitty graphics was run against this version: no image viewer, no file manager with previews, no
+  animation player and no multiplexer that uses placeholder characters. The tests send the bytes such a program sends, made
+  by hand or by a shell's `printf`, and the engine's behaviour at the pinned library revision is what they pin.
+- No real program that writes hyperlinks was run against this version: no directory lister, no search tool, no compiler. GNU
+  `ls --hyperlink` writes `file://<machine name>/path`; this version refuses that host (only an empty host and `localhost` are
+  accepted), so the links of GNU `ls` do not work unless the shell is told to leave the machine name out. This was not tried
+  with a real `ls`.
+- The opener of a link on Linux and on Windows, and a custom scheme with a real handler, were not run. The file reveal was not
+  tried on any platform by a person.
+- The desktop app has no automated test of its window. Pictures and links were tested in WebKit and Chromium against the real
+  server and against a page with a mock core; the desktop's webview and the window itself were not driven.
+- Windows was not tested for pictures or links, and its performance was not measured.
+- The browsers were headless on one Mac. No real popup blocker (the test browsers have it off), no real screen reader, no real
+  Windows high-contrast theme (only the engines' forced-colours emulation), no touch input (a link has no gesture on touch),
+  and no real GPU compared with the headless one.
+- The dotted underline that marks a link is drawn from the core's link flag alone. In the browser build a `file` link, which the
+  page never opens, still shows the dots, so the dots mark something that does nothing; the same is expected for any scheme the
+  core keeps and the person's list does not name (`ssh` by default). The second case was not measured.
+- A wrapped link is two links with the same address, one for each row. A click on the second part asks first, because the text
+  on that row is only a part of the address; Open then opens it. The hover underline and the status line follow pointer and key events: when the output changes under a pointer that does not move,
+  they stay until the next event.
+- `contrast-high` and `motion-reduce` were not looked at by eye for the dialog of the link question and for the status segment.
+- A refused link, a missing path or a failed opener gives no visible answer.
+- An animation that replaces a frame (the form of the protocol that names a frame to replace) was not tested; the tests append frames. The
+  animation switch is one per person: two browser windows with different preferences share it, and the last page to report wins.
+- Memory with pictures was measured at the default limit with many pictures of 1 MiB each, on an Apple Silicon Mac. A single
+  picture of 64 MiB costs several times its size while it arrives (289 MiB measured at the default limit), and a flood of
+  endless transmissions was measured at a limit of 16 MiB only; the figure at the default limit is an extrapolation. Neither was
+  measured on Linux. A flood of hostile transmissions through a server, and a server under a container memory limit, were not run.
+- The memory measurement of 50 panes on the server sometimes ended with one pane that never stopped printing (a typed command
+  had lost its middle). More than forty other runs finished; the cause is not known, and whether text input to the pty can be
+  lost when the reader is slower than the sender was not looked at.
+- The numbers: the desktop's key to glass was not measured (only the core's path to the pane's sink); the browsers' numbers are
+  from headless engines on one Mac and include the wait for the next animation frame; the server's numbers are from the author's
+  Mac and from an aarch64 Linux container in a Docker VM on that Mac, a stand-in for x86_64 hardware; the container's tail
+  latency (p99) moves by a factor of five between sessions, so the guard does not judge it there; no browser runs in the container;
+  Windows was not measured. Every number is one machine at one time.
+- Signing: no release has been signed with the real key, because the key does not exist. No user has checked a signature on a real
+  distribution. The scripts were tested with stand-ins for the secret store and for minisign and once with a real minisign 0.12
+  and a throwaway key in a Linux container; the real macOS keychain lookup and the real `secret-tool` lookup were not called, the
+  round trip was not run on a Mac, and the packages that the container build makes were not signed. The Azure signing service
+  was never run and no Windows certificate of any kind was tried; how SmartScreen treats a signed installer and how Gatekeeper
+  treats a Developer ID were not seen.
+- On Linux, the host tests of the server ran in a container, but the suites that need the `in-process-workers` feature (the
+  whole server from a configuration file, the supervisor over real workers) ran on the Mac only. Two tests are known to fail now and
+  then without a change: one compares two reads whose time stamp is in whole seconds and fails when the clock ticks between
+  them, and one counts audit lines under the load of a long run.
+
 ## What to expect
 
 Known limits of this build, so they are not reported as defects:
@@ -543,7 +637,8 @@ Known limits of this build, so they are not reported as defects:
   native window frame; no directory tracking in `cmd.exe`; PowerShell's integration cannot be switched off; Kitty keyboard
   requests from a Windows program may not reach the engine; no middle-click paste on X11; no pointer tear-off and no
   window position restore under Wayland; the OS text size is read on Windows and GNOME only; emoji need a colour emoji font
-  on Linux; the installers and packages are unsigned and the Windows installer is NSIS only (the preview installer is a GNU-ABI build); AppImage portability is what
+  on Linux; the Windows installer and the macOS app are not signed (the macOS app only ad hoc), the Linux packages can carry the
+  owner's minisign signatures and none has been signed yet ([signing.md](signing.md)), and the Windows installer is NSIS only (the preview installer is a GNU-ABI build); AppImage portability is what
   the run shows; no Option-as-Alt setting off macOS; `Ctrl+V` pastes on Windows and is not rebindable.
 - The key binding overrides in `settings.json` do not travel between platforms ([config.md](config.md)).
 - The AI chat and the extras were run only against test servers, scripted providers and a page stub. The wire fixtures of the

@@ -272,11 +272,12 @@ sentences about whatever could not be used. The page decides nothing about valid
   scrollbar,                                      // [offset, total, len]
   selection, matches, search, copy_cursor, modes, // spans [y,x0,x1], matches [y,x0,x1,current], {total,current},
                                                   // [x,y], {alt, bracketed_paste, mouse}
-  changed }                                       // the rows that differ from the previous frame
+  changed,                                        // the rows that differ from the previous frame
+  images? }                                       // the pictures on the screen, only when the list changed (below)
 ```
 
-A row is `{y, runs, extras?}`. A run is `[text, cols, fg, bg, flags]` with flags bold 1, italic 2, underline 4,
-inverse 8. **Every cell contributes exactly one code point to its run's text**: the first code point of its grapheme
+A row is `{y, runs, extras?, links?}`. A run is `[text, cols, fg, bg, flags]` with flags bold 1, italic 2, underline 4,
+inverse 8, link 16. **Every cell contributes exactly one code point to its run's text**: the first code point of its grapheme
 cluster, a space for an empty cell, `\0` for the second column of a wide character. The rest of a cluster (a combining
 mark, the tail of a ZWJ sequence, a skin tone) travels in the row's `extras` as `[column, tail]`. So
 `text.chars().count() == cols` for every run and a renderer advances one cell per code point without measuring text.
@@ -293,6 +294,24 @@ Trailing blanks in the default style are not sent; the consumer pads to `cols`.
   whose `seq` is not the mirror's plus one or whose size differs. It then ignores the pane's non-full frames until the
   full one arrives, and never patches over a gap.
 - Frames are events; D-16 keeps that and measures it (section 12).
+- **Pictures.** `images` is a list of placements and is in a frame only when the list differs from the one last sent for
+  that pane, and on a full frame that has any. A placement is one array of sixteen numbers, in this order: image id,
+  generation, layer (0 below the cell backgrounds, 1 below the text, 2 above the text), z, column, row, grid columns, grid
+  rows, x offset, y offset, pixel width, pixel height, then the source rectangle (x, y, width, height). Column and row are
+  signed: they are negative when a picture starts above or to the left of the viewport. An empty list in a frame that is not
+  full means every picture is gone; a full frame replaces everything, so a full frame without the key means none. A frame
+  without the key leaves the page's list as it is, and serialises to the bytes a frame had before pictures existed (a test
+  compares it with a stored string). At most 256 placements are sent. No frame carries pixels: the page asks for them with
+  `image_data(pane, image, generation, offset)`, which answers raw bytes (a 16-byte header with width, height, the total and
+  the offset, then at most 512 KiB), and a request for an image or generation the pane does not hold, or a pane of another
+  person, is answered with one fixed error text and no pixels. A new generation of the same image id is a change of the list.
+- **Links.** A row that holds OSC 8 hyperlinks has a `links` key, a list of `[x0, x1, uri]` with the columns inclusive, and
+  the cells they cover carry the run flag 16 (`LINK`) beside the other flags. The core keeps at most 8 spans and 4096 address
+  bytes per row, an address of at most 2048 bytes, and 128 KiB of addresses per frame; rows past the frame budget are sent
+  without their links. Every address is cleaned before it is sent: printable ASCII only, a scheme, and no `javascript`,
+  `data`, `vbscript`, `blob` or `about` address; one that fails is plain text. A row without links has no key and encodes
+  as before. A link that wraps from the end of a row to the next is two spans with the same address, one for each row: the
+  page does not treat a wrapped link as one object. Whether an address may be opened is not decided here (section 8).
 
 The golden sequence `app/tests/fixtures/frames.json` is written by the `fixtures` test of `core/tests/wire.rs` and
 applied step by step by the TypeScript patcher, so both languages are proven against the same bytes.
@@ -383,6 +402,36 @@ The sync payload and its encryption are specified before any sync code exists: s
 alpha, one slot per glyph and style, two adjacent slots for wide glyphs) and one instanced draw per pane. Canvas 2D
 is the fallback when WebGL2 is missing. Both are covered by a pixel test that checks each pane stays inside its
 rectangle.
+
+**Pictures.** The terminal engine reads the Kitty graphics protocol at all three levels: still pictures (transmit, display,
+place, delete), animations (the engine never advances a frame by itself; the pane gives it a clock and it says when the next
+frame is due), and pictures that a program draws with placeholder characters (U+10EEEE with combining marks, which the core
+reads as blanks in text reads, copies and searches). Only a transmission that carries the bytes itself is accepted: a
+request that names a file, a temporary file or shared memory is refused with an error answer, nothing is read and nothing
+is stored. A PNG is decoded by one decoder that is put in front of the library's own and checks the header first, so a
+header that claims more than 128 MiB of decoded pixels, or more than 10000 pixels in either direction, is refused before
+anything is allocated. Every request is bounded: the memory that one pane keeps for pictures is the setting `image_memory_mib`
+(default 64, 0 to 512, counted for each of the two screens; `0` turns pictures off), a server caps it with
+`workers.max_image_mib` (default 64, 0 to 4096) and the smaller number holds, a single escape sequence over 8 MiB is refused,
+and the terminal's allocator refuses a request that would take a pane past twice the setting plus 64 MiB, which is what bounds
+a transmission that is never finished. An escape sequence the engine cannot use is answered as the protocol says and costs
+nothing else. The page draws the placements of `Frame.images` in both renderers in three layers (below the cell backgrounds,
+below the text, above the text), pulls the pixels of a placement in checked pieces with `image_data`, keeps the decoded bitmaps
+inside the same `image_memory_mib`, and releases a WebGL texture when its bitmap is closed or has not been drawn for 120
+frames. The page tells the core whether the person asked for reduced motion (`set_image_animation`); with it, an animation
+stays on one frame. The switch is one per person, not one per pane. These parts are described in
+[config.md](config.md) and [server.md](server.md#memory-for-pictures); what ran against what is in section 12.
+
+**Links.** The engine reads OSC 8 hyperlinks and the core sends them as spans in the row (section 6). The page underlines a
+link dotted at rest, shows its real address in a `LINK` segment of the status line while the pointer is on it, and opens it on
+a modified click (Cmd on macOS, Ctrl elsewhere, either in the browser) through `open_url(url, pane)`; when the text on the
+screen names another place than the address, it asks first. `open_url` checks the address again in the core: only the
+schemes of the person's list `link_schemes` (default `http`, `https`, `mailto`, `file`) are opened, `javascript`, `data`,
+`vbscript`, `blob` and `about` can never be on the list, and a `file` link only shows the file in the file manager and never
+opens or runs it, and only for a pane that runs on this computer with an empty host or `localhost`, an absolute path that
+exists, and no `..`, control character or encoded slash. A program that writes `file://<machine name>/path` (GNU `ls
+--hyperlink` does) is refused for that reason. The browser build opens `http`, `https` and `mailto` links only, in a tab
+without an opener.
 
 **Input.** The page sends facts, never bytes: `key` carries the physical key (`code`), the typed key (`key`), the
 modifier bits (shift 1, alt 2, ctrl 4, super 8) and `repeat`, `release` and `composing`. The core turns them into an
@@ -724,7 +773,9 @@ Windows and Linux are written and cross-checked from a Mac, and the author has r
 - **Packaging.** `tauri.windows.conf.json` (NSIS only, per user, unsigned), `tauri.linux.conf.json` (deb, rpm, AppImage)
   and the desktop template `app/src-tauri/linux/holzwave.desktop`; `app/src-tauri/tests/bundle.rs` pins them. The build
   guides are [build-windows.md](build-windows.md) and [build-linux.md](build-linux.md); the deviations from macOS are in
-  [design.md](design.md) section 7.
+  [design.md](design.md) section 7. The Windows installer and the macOS app are not signed (the macOS app only ad hoc); the
+  Linux packages can carry the owner's minisign signatures and a signed `SHA256SUMS`, and no release has been signed yet
+  ([signing.md](signing.md)).
 - **The cross-check ladder, from the Mac.** `scripts/cross-check.sh` compiles every test target of the core for
   `x86_64-pc-windows-gnu` and `x86_64-unknown-linux-gnu` and the app for Windows (GNU ABI: Zig cannot build the MSVC
   library on a Mac, so the MSVC build exists only on a Windows host). `scripts/linux-container-test.sh` runs the core and
@@ -775,7 +826,84 @@ All of it runs locally; GitHub builds only on request.
 
   Both are measured without the webview: the event path and the WebGL draw come on top, and are read from the status
   line (draw time and fps) during the human checklist in [test-plan.md](test-plan.md). The parse rate was not
-  measured again in Phase 2.
+  measured again in Phase 2. These two ceilings are coarse limits from that earlier stage; they stay as they are, and the guard below is
+  what judges a change.
+- **Baseline and guard.** The numbers of the machine are recorded in `perf/baseline-<os>-<arch>.json`, and
+  `sh scripts/perf-check.sh [core|server|web|container|all]` measures again in release mode and compares each metric with that
+  file. It prints `PERF OK`, or `PERF WORSE` and exits 1 when a metric is clearly worse, and exits 2 when it cannot judge (no
+  baseline, a measurement that failed, a metric the file lacks). It sets no fixed target: the judge is the number recorded on the
+  same machine. Four groups are measured. *Core* (`core/tests/perf.rs`): parse and pane throughput, update plus encode of a
+  160x50 frame, key to frame (median and 99th percentile at the pane's sink) and pane start, and the memory of a pane empty, with
+  a full scrollback and with pictures up to the default cap (`core.memory_pane_images_mib`: four engines fed twice the default
+  64 MiB in distinct 1 MiB pictures, the growth of the resident set beyond an empty pane, per pane). *Server*
+  (`server/tests/perf.rs`): key to frame on a real TLS WebSocket, reattach, and memory per pane with 50 panes in one process.
+  *Web* (`app/tests/web/perf.mjs`): key to paint and reload to first paint in Chromium and WebKit against the real server.
+  *Container*: the core and server groups in the Linux container (`sh scripts/linux-container-test.sh perf`), which does not judge
+  the 99th percentiles because a Docker VM moves them by a factor of five between sessions. Memory is the resident set of a fresh
+  process per run, so it is an upper bound that includes the test's own buffers. The tolerances are in `scripts/perf-compare.mjs`:
+  a time is worse above 1.5 times the recorded value plus 0.1 ms, a throughput below half of it, a memory above 1.5 times it plus
+  4 MiB. They are wide on purpose, because a single run moves by 10 to 20 percent on its own: in three sessions on the same Mac,
+  four metrics (key to frame p50 of the core, pane start, key to frame p99 of the server and key to paint p50 in Chromium) came out
+  10 to 19 percent above the numbers recorded before the work, and an alternating run of the code from before the work against the
+  current code on the same machine measured both the same (the engine's construction plus first update takes 0.053 ms in both),
+  so the difference is the machine's spread and not the code. To record again, on purpose and with the reason in the commit message:
+  `sh scripts/perf-record.sh all --replace` (and `container --replace`). The numbers before the pictures and links were built are
+  kept in `perf/before-<os>-<arch>.json`; the table is copied from those files and the files that the guard now compares with, one
+  recording each, on 2026-11-02 and 2026-11-04. The pictures cost nothing a frame without pictures pays: every metric of the
+  time and throughput kind is within 10 percent of its value before, and the one metric that is new, the memory of a pane that
+  holds pictures up to the default cap, is about 69 MiB on the Mac and 66 MiB in the container, beyond an empty pane. A single
+  picture of 64 MiB costs several times its size while it arrives (289 MiB measured at the default cap), which this figure does not show.
+
+  Apple M1 Max, 10 cores, macOS (`perf/before-darwin-arm64.json` and `perf/baseline-darwin-arm64.json`):
+
+  | Metric | Unit | Before | After | After / before |
+  |---|---|---|---|---|
+  | `core.key_to_frame_p50_ms` | ms | 0.134 | 0.135 | 1.00 |
+  | `core.key_to_frame_p99_ms` | ms | 0.949 | 0.667 | 0.70 |
+  | `core.memory_pane_empty_mib` | mib | 0.922 | 0.928 | 1.01 |
+  | `core.memory_pane_images_mib` | mib | none | 68.73 | new |
+  | `core.memory_pane_scrollback_mib` | mib | 13.80 | 13.80 | 1.00 |
+  | `core.pane_output_mib_s` | mib_s | 43.11 | 43.98 | 1.02 |
+  | `core.pane_start_ms` | ms | 7.409 | 7.587 | 1.02 |
+  | `core.parse_mib_s` | mib_s | 61.34 | 60.62 | 0.99 |
+  | `core.update_encode_ms` | ms | 0.445 | 0.457 | 1.03 |
+  | `server.key_to_frame_p50_ms` | ms | 0.598 | 0.537 | 0.90 |
+  | `server.key_to_frame_p99_ms` | ms | 1.204 | 1.128 | 0.94 |
+  | `server.memory_pane_empty_mib` | mib | 0.292 | 0.298 | 1.02 |
+  | `server.memory_pane_scrollback_mib` | mib | 4.424 | 4.424 | 1.00 |
+  | `server.reattach_ms` | ms | 2.929 | 2.827 | 0.97 |
+  | `web.chromium.key_to_paint_p50_ms` | ms | 2.800 | 2.900 | 1.04 |
+  | `web.chromium.key_to_paint_p99_ms` | ms | 15.70 | 16.70 | 1.06 |
+  | `web.chromium.reattach_paint_ms` | ms | 114.5 | 113.0 | 0.99 |
+  | `web.webkit.key_to_paint_p50_ms` | ms | 13.00 | 13.00 | 1.00 |
+  | `web.webkit.key_to_paint_p99_ms` | ms | 23.00 | 23.00 | 1.00 |
+  | `web.webkit.reattach_paint_ms` | ms | 158.5 | 156.5 | 0.99 |
+
+  Linux container (Ubuntu, aarch64, 10 CPUs of a Docker VM on that Mac; `perf/before-linux-aarch64.json` and
+  `perf/baseline-linux-aarch64.json`). It has no browser, so no `web.*` rows:
+
+  | Metric | Unit | Before | After | After / before |
+  |---|---|---|---|---|
+  | `core.key_to_frame_p50_ms` | ms | 0.399 | 0.364 | 0.91 |
+  | `core.key_to_frame_p99_ms` | ms | 1.100 | 0.948 | 0.86 |
+  | `core.memory_pane_empty_mib` | mib | 0.685 | 0.661 | 0.97 |
+  | `core.memory_pane_images_mib` | mib | none | 66.10 | new |
+  | `core.memory_pane_scrollback_mib` | mib | 12.27 | 12.26 | 1.00 |
+  | `core.pane_output_mib_s` | mib_s | 52.77 | 51.22 | 0.97 |
+  | `core.pane_start_ms` | ms | 3.361 | 3.209 | 0.95 |
+  | `core.parse_mib_s` | mib_s | 44.90 | 43.34 | 0.97 |
+  | `core.update_encode_ms` | ms | 0.521 | 0.557 | 1.07 |
+  | `server.key_to_frame_p50_ms` | ms | 1.432 | 1.275 | 0.89 |
+  | `server.key_to_frame_p99_ms` | ms | 2.913 | 2.675 | 0.92 |
+  | `server.memory_pane_empty_mib` | mib | 2.036 | 2.033 | 1.00 |
+  | `server.memory_pane_scrollback_mib` | mib | 4.041 | 4.013 | 0.99 |
+  | `server.reattach_ms` | ms | 2.266 | 2.241 | 0.99 |
+
+  What these numbers do not cover: Windows was not measured; the desktop window's key to glass was not measured (the core's
+  numbers end at the pane's sink, the web numbers end in a browser against the real server); the browsers ran headless on one Mac
+  and a key to paint includes the wait for the next animation frame; the server's numbers come from that Mac and from an aarch64
+  container, a stand-in for x86_64 hardware; and every number is one machine at one time. No metric is carried as a cost of the
+  pictures or links.
 - **AI chat:** three release gates and the corpora of the earlier steps. The Rust security corpora (egress, injection, the
   canary key, approval bypass and the wire corpus of the socket; 58 tests over a shared rig, driven from the outside of the
   service the way the shell builds it); the page and access-control gate (an XSS corpus of 66 cases in ten classes replayed
@@ -822,7 +950,8 @@ All of it runs locally; GitHub builds only on request.
   the framework (Xcode 26 or newer), and an older SDK builds the app without the model ([building.md](building.md)).
 - Versions `0.0.1-alpha1` to `0.0.1-alpha3`, `0.0.1-beta1`, `0.0.1-beta2` (now), then `0.0.1`. Alpha and beta are GitHub prereleases.
 - Local build and signing first; one GitHub build only when asked.
-- Windows builds an unsigned per-user NSIS installer, Linux a deb, an rpm and an AppImage, each on the owner's own machine
+- Windows builds an unsigned per-user NSIS installer, Linux a deb, an rpm and an AppImage (`scripts/sign-linux.sh` signs the
+  three with minisign and `scripts/verify-release.sh` checks them; see [signing.md](signing.md)), each on the owner's own machine
   ([build-windows.md](build-windows.md), [build-linux.md](build-linux.md)); Zig is exactly 0.17.0 and `scripts/env.sh` and
   `scripts/env.ps1` find it. No guide builds on GitHub, and no tag or release is made by them; the one GitHub build is the manual `linux-packages.yml` workflow for the Linux packages of `0.0.1-beta2`.
 - The server is one image built from `packaging/docker/Dockerfile` in three stages (the page with Node, the binaries with
