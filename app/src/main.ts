@@ -27,6 +27,7 @@ import { initSidebar } from "./sidebar.js";
 import { openConnections } from "./connections-ui.js";
 import { initCopyMode } from "./copymode.js";
 import { initHints } from "./hints.js";
+import { initImages } from "./images.js";
 import { initKeyboard } from "./keyboard.js";
 import { initLinks } from "./links.js";
 import { initOverlay, renderOverlay } from "./overlay.js";
@@ -51,6 +52,8 @@ window.addEventListener("unhandledrejection", (e) => {
 async function main() {
   await initChrome(); // its styles and app_info first: the first measurement needs the bar and the status line
   await initScene();
+  // The motion preference is resolved by now (initScene starts the settings): animated pictures play or pause by it.
+  await initImages();
   initOverlay(applyView);
   initKeyboard(applyView);
   initPointer(applyView);

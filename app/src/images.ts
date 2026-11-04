@@ -8,6 +8,7 @@
 // The store is a class that takes its transport and its bitmap maker as parameters, so node tests it with fakes (this
 // file has no DOM and no bridge at import). The page's one store is `images`, wired to `image_data` and
 // `createImageBitmap` below. Nothing here logs sizes or bytes, and no text of the core is ever shown.
+import { motionReduced, onPreferenceChange } from "./a11y.js";
 import type { ImageDraw } from "./frame.js";
 import type { PlacementMsg } from "./frames.js";
 import { MAX_IMAGE_SIDE } from "./frames.js";
@@ -458,3 +459,30 @@ export const images = new ImageStore<ImageBitmap>({
   ready: () => redraw(),
   budget: () => (state.settings?.settings.image_memory_mib ?? DEFAULT_IMAGE_MEMORY_MIB) * MIB,
 });
+
+// ---- the person's motion preference -----------------------------------------------------------------------
+
+/**
+ * Tell the core whether animated pictures may play: `enabled` is false exactly when motion is reduced (the setting, or
+ * the system preference when the setting is `system`). It is sent once at start, on every change of that fact (a change
+ * of a preference that leaves it as it was sends nothing) and after every reconnect to a server, whose worker may have
+ * been restarted with the default. The core pauses and the page keeps no timer for pictures: a picture that was never
+ * started shows its first frame, one that was running stays on the frame it shows. The switch is one per person in the
+ * core, so two windows with different preferences share it and the last to report wins. A core that refuses the call
+ * (an older build) leaves the page working. Call once, after the preferences were first resolved.
+ */
+export async function initImages(): Promise<void> {
+  const { call, onConnection } = await bridged();
+  let sent: boolean | null = null;
+  const report = (again: boolean): void => {
+    const enabled = !motionReduced();
+    if (!again && sent === enabled) return;
+    sent = enabled;
+    void call("set_image_animation", { enabled }).catch(() => {});
+  };
+  report(false);
+  onPreferenceChange(() => report(false));
+  onConnection((info) => {
+    if (info.state === "open" && info.resumed) report(true);
+  });
+}

@@ -3,7 +3,17 @@
 // the core: it answers `image_data` with the 16-byte header and straight RGBA, as the real core does (raw bytes on
 // the tauri backend, a binary message on the socket backend). The colours are read back from the canvas.
 import assert from "node:assert/strict";
-import { callsOf, emit } from "./lib.mjs";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { APP_DIR, callsOf, currentBackend, emit } from "./lib.mjs";
+
+const golden = JSON.parse(readFileSync(join(APP_DIR, "tests/fixtures/protocol.json"), "utf8"));
+/** The settings view of the core, with `over` laid over its settings. */
+const settingsView = (over = {}) => {
+  const view = structuredClone(golden.settings_view);
+  Object.assign(view.settings, over);
+  return view;
+};
 
 const PANE_1_BG = 0x6b2fa0;
 const PANE_2_BG = 0x2a6fdb;
@@ -129,6 +139,10 @@ export default async function ({ page, url, errors }) {
   await hostileCase(page, url);
   await alphaCase(page, url);
   await textOnlyCase(page, url);
+  await memoryCase(page, url);
+  await motionCase(page, url);
+  await refusedCase(page, url);
+  if (currentBackend() === "ws") await reconnectCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -318,4 +332,108 @@ async function textOnlyCase(page, url) {
   assert.equal(await page.evaluate(() => window.__DRAWS__), 0, "a text-only pane never calls drawImage");
   assert.equal((await callsOf(page, "image_data")).length, 0, "a text-only pane never asks for pixels");
   assert.deepEqual(await held(page, 1), { held: 0, bytes: 0, jobs: 0 });
+}
+
+/** `open` with the settings the core answers: the page reads `get_settings` at start and hears `settings` events. */
+async function openWith(page, url, view) {
+  await page.addInitScript((v) => {
+    window.__MOCK__.on("get_settings", () => structuredClone(v));
+    window.__MOCK__.on("reload_settings", () => structuredClone(v));
+  }, view);
+  return open(page, url);
+}
+
+/** The `enabled` of every `set_image_animation` call so far, oldest first. */
+const reports = async (page) => (await callsOf(page, "set_image_animation")).map((a) => a.enabled);
+
+/** Wait until `n` reports were made, then give a late extra one time to show itself, and answer them. */
+async function reportsAre(page, n) {
+  await page.waitForFunction((count) => window.__MOCK__.callsOf("set_image_animation").length >= count, n, { timeout: 5000 });
+  await page.waitForTimeout(150);
+  return reports(page);
+}
+
+/** The setting `image_memory_mib` 0 turns pictures off in the page; 64 turns them on with the next frame. */
+async function memoryCase(page, url) {
+  const c = await openWith(page, url, settingsView());
+  const cell = (col, row) => [PAD + (col + 0.5) * c.cw, HEADER + (row + 0.5) * c.ch];
+  await script(page, { "1:60:1": strip(c, [RED, GREEN]) });
+  const list = [placement(c, { image: 60, col: 2, row: 1, cols: 2, rows: 1, src: [0, 0, 2 * c.cw, c.ch] })];
+  const points = [cell(2, 1), cell(3, 1)];
+
+  await emit(page, "settings", settingsView({ image_memory_mib: 0 }));
+  let got = await settle(page, [["frame", fullFrame(1, { images: list })]], points, () => true);
+  await page.waitForTimeout(150);
+  colours(got, [PANE_1_BG, PANE_1_BG], "pictures are off: nothing is drawn");
+  assert.equal((await asked(page, 60)).length, 0, "pictures are off: nothing is requested");
+  assert.deepEqual(await held(page, 1), { held: 0, bytes: 0, jobs: 0 });
+
+  await emit(page, "settings", settingsView({ image_memory_mib: 64 }));
+  got = await settle(page, [["frame", frame(2)]], points, (g) => g[0] === RED && g[1] === GREEN);
+  colours(got, [RED, GREEN], "with the setting back the next frame fetches and draws");
+  assert.equal((await asked(page, 60)).length, 1);
+
+  // Turned off again, what was held is let go of and the screen shows no picture.
+  await emit(page, "settings", settingsView({ image_memory_mib: 0 }));
+  got = await settle(page, [["frame", frame(3)]], points, (g) => g[0] === PANE_1_BG);
+  colours(got, [PANE_1_BG, PANE_1_BG], "turned off while a picture is shown: it goes");
+  assert.deepEqual(await held(page, 1), { held: 0, bytes: 0, jobs: 0 });
+  await emit(page, "settings", settingsView());
+}
+
+/** The person's motion preference reaches the core once at start, on a change of the fact, and not for a change that leaves it. */
+async function motionCase(page, url) {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await openWith(page, url, settingsView());
+  assert.deepEqual(await reportsAre(page, 1), [false], "reduced motion at start: enabled is false, once");
+
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  assert.deepEqual(await reportsAre(page, 2), [false, true], "the OS preference changed while the page runs");
+
+  await emit(page, "settings", settingsView({ motion: "reduce" }));
+  assert.deepEqual(await reportsAre(page, 3), [false, true, false], "the setting motion = reduce");
+
+  await emit(page, "settings", settingsView({ motion: "reduce", contrast: "high" }));
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.waitForTimeout(250);
+  assert.deepEqual(await reports(page), [false, true, false], "a change that leaves the fact as it was sends nothing");
+
+  await emit(page, "settings", settingsView({ motion: "full" }));
+  assert.deepEqual(await reportsAre(page, 4), [false, true, false, true], "the setting motion = full beats the OS");
+
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.waitForTimeout(250);
+  assert.equal((await reports(page)).length, 4, "the OS changing under an explicit setting changes nothing");
+
+  // Not reduced at start.
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await openWith(page, url, settingsView());
+  assert.deepEqual(await reportsAre(page, 1), [true], "full motion at start: enabled is true");
+  await page.emulateMedia({ reducedMotion: null });
+}
+
+/** A core that refuses `set_image_animation` (an older build) leaves the page working. */
+async function refusedCase(page, url) {
+  await page.addInitScript(() => {
+    window.__MOCK__.on("set_image_animation", () => {
+      throw "unknown command";
+    });
+  });
+  const c = await open(page, url);
+  assert.equal((await reports(page)).length >= 1, true, "the page asked");
+  await script(page, { "1:61:1": strip(c, [RED]) });
+  const list = [placement(c, { image: 61, col: 2, row: 1, cols: 1, rows: 1, src: [0, 0, c.cw, c.ch] })];
+  const [got] = await settle(page, [["frame", fullFrame(1, { images: list })]], [[PAD + 2.5 * c.cw, HEADER + 1.5 * c.ch]], (g) => g[0] === RED);
+  assert.equal(hex(got), hex(RED), "pictures still work, and no page error was reported");
+  await page.addInitScript(() => window.__MOCK__.on("set_image_animation", null));
+}
+
+/** After a connection that was lost comes back, the page reports the fact again (a restarted worker has the default). */
+async function reconnectCase(page, url) {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await open(page, url);
+  assert.deepEqual(await reportsAre(page, 1), [false]);
+  await page.evaluate(() => window.__WS_MOCK__.drop(1006));
+  assert.deepEqual(await reportsAre(page, 2), [false, false], "after the reconnect the current fact is sent again");
+  await page.emulateMedia({ reducedMotion: null });
 }
