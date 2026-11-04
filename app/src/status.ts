@@ -19,7 +19,8 @@ strip.id = "status";
 strip.setAttribute("aria-label", "Status");
 
 const seg = (cls: string): HTMLElement => el("span", `seg label ${cls}`);
-// The target of the link under the pointer (docs/design.md 6.31): shown while there is one, empty (so not shown) otherwise.
+// The target of the link under the pointer (docs/design.md 6.31). Like the web marks, the segment is in the strip, first, only while there
+// is a target to show; the strip is what it always was otherwise.
 const linkSeg = seg("link");
 linkSeg.setAttribute("role", "status");
 const modeSeg = seg("mode");
@@ -34,7 +35,7 @@ const panes = seg("panes");
 const renderer = seg("renderer");
 const encoding = seg("encoding");
 const version = seg("version");
-strip.append(linkSeg, modeSeg, noticeSeg, conns, panes, renderer, encoding, version);
+strip.append(modeSeg, noticeSeg, conns, panes, renderer, encoding, version);
 
 /** The segments of the Kubernetes context and the Azure subscription, made when the core has a value and removed when it has not. */
 const ctxSegs = new Map<string, HTMLButtonElement>();
@@ -77,8 +78,10 @@ function renderLink(): void {
   if (linkTarget === "") {
     linkSeg.replaceChildren();
     linkSeg.removeAttribute("aria-label");
+    linkSeg.remove();
     return;
   }
+  if (linkSeg.parentElement !== strip) strip.prepend(linkSeg);
   const cut = cutMiddle(linkTarget, linkChars());
   const at = Math.min(hostPartLength(cut), cut.length);
   const label = el("span", "lk-l");

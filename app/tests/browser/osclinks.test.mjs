@@ -197,6 +197,7 @@ export default async function ({ page, url, errors }) {
   await step("mirror", () => mirrorCase(page, url));
   await step("hover", () => hoverCase(page, url));
   await step("gesture", () => gestureCase(page, url));
+  await step("wrapped", () => wrappedCase(page, url));
   await step("scheme", () => schemeCase(page, url));
   await step("text link", () => textLinkCase(page, url));
   await step("ask", () => askCase(page, url));
@@ -341,6 +342,35 @@ async function gestureCase(page, url) {
   await page.waitForTimeout(450);
   await modClick(page, "Control", l.pt(1, 8, 2));
   assert.deepEqual(await callsOf(page, "open_url"), [{ url: DOCS, pane: 1 }], "Ctrl opens on linux");
+}
+
+/** A link that wraps onto the next row is two links: each row has its own span, underline, target and question. */
+async function wrappedCase(page, url) {
+  const wrapped = "https://example.org/a/long/address";
+  const rows = [
+    rowOf(0, ["x".repeat(40), { link: "https://exa" }], [[40, 50, wrapped]], 51),
+    rowOf(1, [{ link: "mple.org/a/long/address" }, " end"], [[0, 22, wrapped]], 51),
+  ];
+  const g = await open(page, url, { rows, cols: 51 });
+  await page.mouse.move(...g.pt(1, 45, 0));
+  await page.waitForFunction(() => document.querySelector("#overlay .linkon") !== null);
+  near(await boxOf(page, "#overlay .linkon"), g.box(1, 0, 40, 50), "the first row's part is underlined, and only it");
+  await page.mouse.move(...g.pt(1, 5, 1));
+  await page.waitForFunction(() => document.querySelectorAll("#overlay .linkon").length === 1);
+  near(await boxOf(page, "#overlay .linkon"), g.box(1, 1, 0, 22), "the second row's part is underlined, and only it");
+  assert.equal((await linkSeg(page)).label, `Link target ${wrapped}`, "both parts go to the same address");
+  await gestureClick(page, g.pt(1, 45, 0));
+  await waitDialog(page, true);
+  assert.equal((await dialog(page)).shown, "https://exa", "the text of the part that was clicked");
+  await page.keyboard.press("Escape");
+  await waitDialog(page, false);
+  await gestureClick(page, g.pt(1, 5, 1));
+  await waitDialog(page, true);
+  assert.equal((await dialog(page)).shown, "mple.org/a/long/address");
+  assert.equal((await dialog(page)).target, wrapped);
+  await page.keyboard.press("Escape");
+  await waitDialog(page, false);
+  assert.equal((await callsOf(page, "open_url")).length, 0);
 }
 
 /** Only the schemes of the list are links: no underline, no segment, no click for the others. */
