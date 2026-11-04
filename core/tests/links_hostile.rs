@@ -1,4 +1,4 @@
-//! Hostile hyperlinks (POL-01, D-05, D-06, T-10-1102 to T-10-1105): bad addresses, floods, the budgets, wrapped and wide
+//! Hostile hyperlinks (POL-01, D-05, D-06): bad addresses, floods, the budgets, wrapped and wide
 //! links, the alternate screen, a resize, scrolling, the frame budget and the cost of a screen full of links.
 #![cfg(feature = "ghostty")]
 

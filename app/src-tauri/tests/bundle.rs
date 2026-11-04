@@ -290,7 +290,7 @@ fn the_linux_container_build_is_amd64_and_says_what_it_is_not() {
     assert!(BUILD_LINUX_DOC.contains("glibc 2.39") && BUILD_LINUX_DOC.contains("emulated"), "docs/build-linux.md lacks the limits");
 }
 
-// ---- the signing scripts (plan 10-05, POL-03, D-10, D-12) ----------------------------------------------------------------
+// ---- the signing scripts (POL-03, D-10, D-12) ----------------------------------------------------------------
 
 const SIGN_LINUX: &str = include_str!("../../../scripts/sign-linux.sh");
 const VERIFY_RELEASE: &str = include_str!("../../../scripts/verify-release.sh");

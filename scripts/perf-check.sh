@@ -69,7 +69,7 @@ case "$group" in
         # The container is another machine: its baseline is named by its own PERF-MACHINE line (perf/baseline-linux-aarch64.json
         # on an Apple Silicon Mac), so it can only be looked for after the measurement.
         scope="core.,server."
-        # The Docker VM moves its tail latency by a factor of 5 or more between sessions (10-04), so the container does not judge
+        # The Docker VM moves its tail latency by a factor of 5 or more between sessions, so the container does not judge
         # the p99 metrics; the Mac does. Everything else of the two groups is judged.
         skip="_p99_"
         log=target/perf-container.log

@@ -454,7 +454,7 @@ fn osc8_row_flag_follows_the_link_cells_in_the_swept_cases() {
 //
 // `peak_rss_mib` is the absolute peak of the process; `baseline_rss_mib` is the resident memory when the probe began,
 // so the cost of the stream is the difference. A probe makes no assertion about the peak: the decision on how the
-// engine is bounded is taken from the numbers (see the plan 10-01 summary).
+// engine is bounded is taken from these numbers.
 // ---------------------------------------------------------------------------------------------------------------
 
 /// The storage limit of the probes: the default of the setting `image_memory_mib` (D-02).

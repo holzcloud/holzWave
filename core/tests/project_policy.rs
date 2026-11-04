@@ -3244,6 +3244,7 @@ fn plan_label_phases() -> Vec<(String, String)> {
     vec![
         (String::from("0") + "7", String::from("0") + "7-extras"),
         (String::from("0") + "8", String::from("0") + "8-" + "native" + "-integrationen"),
+        (String::from("1") + "0", String::from("1") + "0-" + "politur"),
         (String::from("1") + "1", String::from("1") + "1-" + "web"),
     ]
 }
@@ -3294,11 +3295,12 @@ fn no_public_file_carries_a_plan_label() {
 #[test]
 fn the_plan_label_scan_sees_ids_threat_ids_phase_names_and_spike_names_and_skips_dates_and_longer_numbers() {
     // Every sample is built from pieces, so that this file holds no label itself. Each row runs for every phase.
-    assert_eq!(plan_label_phases().len(), 3, "the phases whose labels stay out of the public tree");
+    assert_eq!(plan_label_phases().len(), 4, "the phases whose labels stay out of the public tree");
     let second_name = String::from("native") + "-integrationen";
     for (phase, name) in [
         (String::from("0") + "7", "extras"),
         (String::from("0") + "8", second_name.as_str()),
+        (String::from("1") + "0", "politur"),
         (String::from("1") + "1", "web"),
     ] {
         let id = format!("{phase}-{}", 12);
@@ -3322,7 +3324,7 @@ fn the_plan_label_scan_sees_ids_threat_ids_phase_names_and_spike_names_and_skips
         assert_eq!(hit(&format!("the folder {directory}/")), [directory.clone()], "the phase directory ({phase})");
         assert_eq!(plan_label_hits(&format!("one\ntwo {id}\nthree")), [(2, id)], "the line number is one-based ({phase})");
     }
-    // The shapes of the first phase and the spike labels are unchanged: only these two phases, nothing in between.
+    // The shapes of the first phase and the spike labels are unchanged: only these four phases, nothing in between.
     let other = String::from("0") + "9";
     assert!(plan_label_hits(&format!("{other}-12 and T-{other}-1 and {other}-extras")).is_empty(), "a phase that is no label");
     let hit = |text: &str| plan_label_hits(text).into_iter().map(|(_, label)| label).collect::<Vec<_>>();
@@ -3339,8 +3341,8 @@ fn the_plan_label_scan_sees_ids_threat_ids_phase_names_and_spike_names_and_skips
     // A line that holds labels of both phases reports both.
     let both = format!("{}-01 and {}-02", String::from("0") + "7", String::from("0") + "8");
     assert_eq!(hit(&both).len(), 2, "two phases on one line");
-    let three = format!("{both} and {}-03", String::from("1") + "1");
-    assert_eq!(hit(&three).len(), 3, "all three phases on one line");
+    let four = format!("{both} and {}-03 and {}-04", String::from("1") + "1", String::from("1") + "0");
+    assert_eq!(hit(&four).len(), 4, "all four phases on one line");
 }
 
 // ---- the architecture and the golden of the protocol ----------------------------------------------------------

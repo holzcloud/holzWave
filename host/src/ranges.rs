@@ -44,7 +44,7 @@ mod tests {
     fn a_range_is_read_and_clamped_to_the_file() {
         assert_eq!(parse_range(None, 100), Range::Whole);
         assert_eq!(parse_range(Some("bytes=0-"), 100), Range::Bytes(0, 99));
-        assert_eq!(parse_range(Some("bytes=10-19"), 100), Range::Bytes(10, 19));
+        assert_eq!(parse_range(Some("bytes=12-19"), 100), Range::Bytes(12, 19));
         assert_eq!(parse_range(Some("bytes=90-500"), 100), Range::Bytes(90, 99));
         assert_eq!(parse_range(Some("bytes=-10"), 100), Range::Bytes(90, 99));
         assert_eq!(parse_range(Some("bytes=-500"), 100), Range::Bytes(0, 99));

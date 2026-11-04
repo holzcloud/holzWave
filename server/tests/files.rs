@@ -1264,7 +1264,7 @@ async fn a_range_header_that_is_not_one_plain_range_gets_the_whole_small_file() 
         assert_eq!(reply.body, png(3000), "{header:?}");
     }
     // Two Range headers are not one range.
-    let request = env.get_request(Some(&alice.signed), &grant.url, Some("bytes=0-9")).header("Range", "bytes=10-19");
+    let request = env.get_request(Some(&alice.signed), &grant.url, Some("bytes=0-9")).header("Range", "bytes=12-19");
     let reply = env.send(request).await;
     assert_eq!((reply.status, reply.body.len()), (200, 3000));
 }

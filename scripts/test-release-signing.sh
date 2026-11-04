@@ -1,5 +1,5 @@
 #!/bin/sh
-# Prove the contract of scripts/sign-linux.sh without a real key (plan 10-05, POL-03, D-10).
+# Prove the contract of scripts/sign-linux.sh without a real key (POL-03, D-10).
 #
 #   sh scripts/test-release-signing.sh --shims-only   the stand-in checks only (exit 0 or 1)
 #   sh scripts/test-release-signing.sh --container    the stand-in checks, then the real round trip in a throwaway container

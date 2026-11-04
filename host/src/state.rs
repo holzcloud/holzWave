@@ -7203,7 +7203,7 @@ mod tests {
         assert!(check_link(&format!("{two_thousand}a"), &list).is_err(), "2049 bytes");
     }
 
-    // ---- file links reveal, they never open (plan 10-14) ----
+    // ---- file links reveal, they never open ----
 
     #[test]
     fn file_link_path_decodes_once_and_accepts_the_forms_of_this_machine() {

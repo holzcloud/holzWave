@@ -68,7 +68,6 @@ Does not exist yet:
   the last plan of the phase and conditional: its manifest and the host-shell code path exist and are checked from the Mac
   ([flatpak.md](flatpak.md)), but it was never built or run, and it ships only if it builds on the owner's machine and row
   L10 passes. DESK-30 and DESK-31 are marked done only after the owner's rows pass.
-- **Phase 8:** the Kitty graphics protocol and OSC 8 hyperlinks (links in the text are detected and clickable today).
 
 - Local shell, scrollback, copy and paste, Unicode, resize, themes.
 - Block tiling with tabs and workspaces.
@@ -181,6 +180,19 @@ Status: built, rows open (test-plan Part 10). Built and tested against a test id
   there is one.
 
 ## Phase 8 — Polish
+
+Status: built, rows open (test-plan Part 11). **Built:** the Kitty graphics protocol at all three levels (still pictures, animations,
+pictures drawn with placeholder characters) and OSC 8 hyperlinks, in the core, the server, both renderers and the page, with the
+link target in the status line, a question when a link's text names another place, and a list of schemes that a click may open
+([architecture.md](architecture.md) sections 6 and 8). **Measured:** a baseline of the core, the server and the page in two browsers was
+recorded before this work and again after it, on the author's Mac and in a Linux container, and `sh scripts/perf-check.sh` judges by
+those numbers with no fixed target ([architecture.md](architecture.md) section 12); Windows and the desktop window's key to glass are
+not measured. **Signed:** the Linux packages can be signed by the owner with minisign and no release has been signed yet; the
+Windows installer and the macOS app stay unsigned ([signing.md](signing.md)). **Not tried:** a real program that sends pictures or
+links, the desktop window by an automated test, Windows, and a signed release on a real distribution; the list and the rows are in
+Part 11 of [test-plan.md](test-plan.md).
+
+The aims as first written, kept as the history they are:
 
 - Kitty graphics protocol, hyperlinks.
 - Performance tuning.

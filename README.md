@@ -126,6 +126,10 @@ still have to be run are in Part 10 of the [test plan](docs/test-plan.md).
 |---|---|
 | ![The window as a browser shows it: no window buttons, status line marks, the upload target and the Download row menu](docs/design/web-window.png) | ![The holzWave window inside a browser tab](docs/design/platforms/web.png) |
 
+| Links at rest and under the pointer | The question before a link opens | Pictures in a pane |
+|---|---|---|
+| ![Terminal text with two dotted links at rest, one solid under the pointer with its address in the status line, one in rose under the open gesture, one underlined by the program, and an address with a scheme that is not allowed left as plain text](docs/design/links.png) | ![The dialog Open this link? that shows the text of a link and the address it goes to, with Cancel focused and Open](docs/design/link-ask.png) | ![A pane with pictures below the cell backgrounds, between the backgrounds and the text and above the text, pictures drawn by placeholder characters, a cursor and a selection over a picture, and pictures clipped at the pane edges](docs/design/images.png) |
+
 The same window is drawn on every platform; only the OS window buttons and the keyboard shortcuts differ. All views and
 the design rules are in [docs/design.md](docs/design.md).
 
@@ -151,6 +155,8 @@ Built and tested by the author on macOS and Windows, and on Linux up to `0.0.1-b
 | **Fully offline AI on a Mac:** the Apple on-device model (macOS 26 or later with Apple Intelligence) answers on the Mac itself, with no account, no key and nothing leaving the computer | built |
 | Kubernetes, Talos, Azure CLI and GAM7 as blocks (your own `kubectl`, `talosctl`, `az` and GAM7 on this computer), a Context section with a status for each, a card with the exact command and a second press on a production context, a profiles dialog, palette entries | built, tested against fake tools and recorded fixtures, not yet against real clusters or accounts or on Windows and Linux hardware; the Flatpak build does not run them and the mobile apps do not have them |
 | **The web build:** holzWave in a browser from one container, with sign-in by passkey, password and authenticator code or single sign-on, one user of its own for every person, and the Compose and Helm files | built, tested against a test identity provider, virtual authenticators, the container tests and a Pebble certificate authority, not yet against a real cluster, a real identity provider, hardware authenticators or real networks; Linux container only, one replica, a restart ends every pane ([Server guide](docs/server.md), Part 10 of the test plan) |
+| Pictures (the Kitty graphics protocol, all three levels) and hyperlinks (OSC 8) in a pane: a link is dotted at rest, shows its address in the status line, asks first when its text names another place, and opens only the schemes on your list | built, tested against the terminal engine, a real server in WebKit and Chromium and a page with a mock core; not tried with a real program that sends pictures or links, not by an automated test of the desktop window, and not on Windows |
+| A recorded performance baseline and a guard (`sh scripts/perf-check.sh`) for the core, the server and the page in two browsers | built, recorded on the author's Mac and in a Linux container, judged by the recorded numbers and no fixed target; Windows is not measured and the desktop window's key to glass is not measured |
 | iOS, Android | planned |
 
 Per-phase detail: [docs/status.md](docs/status.md).
@@ -182,6 +188,7 @@ and the sidebar with widgets are built too, and so are the AI chat and the on-de
 real accounts and Macs (Part 7 of the [test plan](docs/test-plan.md)). The native integrations (Kubernetes, Talos, Azure
 CLI, GAM7) are built and tested against fake tools and recorded fixtures; their rows for real clusters and accounts and for
 Windows and Linux hardware are open (Part 9 of the test plan). The web build (a server in one container, with the same window in a browser) is built and tested in containers; its rows for a real cluster, identity provider, authenticators, certificate authority, proxy and browsers are open (Part 10 of the test plan). Mobile comes next.
+Pictures and hyperlinks in the terminal, a recorded performance baseline with a guard, and the signing of the Linux packages by minisign are built too: the first two are tested against the engine, a real server and two browsers and not against real programs, and no release has been signed yet (Windows and macOS stay unsigned); what nobody has tried is listed in Part 11 of the test plan.
 Versions go `0.0.1-alpha3`, `0.0.1-beta1`, `0.0.1-beta2` (now), `0.0.1`. `0.0.1-beta2` added the native integrations, the web build and
 libghostty on Ghostty 1.4 (Zig 0.17) with a fix for the scrollback limit.
 Full plan: [docs/roadmap.md](docs/roadmap.md).
