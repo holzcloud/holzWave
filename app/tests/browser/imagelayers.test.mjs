@@ -507,4 +507,133 @@ export default async function ({ page, url }) {
     assert.deepEqual(r.under.colours[4], BLACK, `${kind}: nothing in the padding`);
   }
   assert.deepEqual(slide.webgl, slide.canvas, "the slide cases differ between the renderers");
+
+  // ---- textures that cannot leak (WebGL only) ---------------------------------------------------------------
+  // The live picture textures are the textures made minus the ones deleted minus the glyph atlas.
+  const leaks = await page.evaluate(async () => {
+    const I = window.__I;
+    const h = I.make("webgl", 12, 4);
+    const live = () => h.count.textures - h.count.deleted - 1;
+    const pic = (bmp, over = {}) => I.layered([I.place(bmp, { layer: 2, col: 1, row: 1, cols: 4, rows: 1, ...over })]);
+    const out = {};
+
+    // 500 draws of an animation: a new bitmap of the same size each time, the one before closed by the "store"
+    let maxLive = 0, prev = null;
+    for (let i = 0; i < 500; i++) {
+      const bmp = await I.bitmap(8, 8, Array.from({ length: 256 }, (_, k) => [i & 255, 255 - (i & 255), 0, 255][k % 4]));
+      I.draw(h, pic(bmp));
+      prev?.close();
+      prev = bmp;
+      maxLive = Math.max(maxLive, live());
+    }
+    out.animation = { maxLive, liveAfter: live(), cache: h.r.pictureTextures, errors: I.glError(h), made: h.count.textures - 1 };
+    I.draw(h, I.layered(undefined)); // the last bitmap is still open; a text-only draw does not release it
+    out.afterText = { cache: h.r.pictureTextures };
+    prev.close();
+    I.draw(h, I.layered(undefined));
+    out.afterClose = { cache: h.r.pictureTextures, live: live(), bytes: h.r.pictureBytes };
+
+    // a picture not drawn for 120 draws loses its texture; drawn again it is uploaded again and looks the same
+    const keep = await I.bitmap(2, 2, [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255]);
+    const spot = I.mid(1, 1);
+    I.draw(h, pic(keep, { cols: 2, rows: 1 }));
+    const first = I.probes(h, I.pixels(h), [spot, [12, 20], [12, 27]]);
+    const madeBefore = h.count.textures;
+    const alive = [];
+    for (let i = 1; i <= 120; i++) {
+      I.draw(h, I.layered(undefined));
+      if (i === 119 || i === 120) alive.push(h.r.pictureTextures);
+    }
+    out.idle = { first, alive };
+    I.draw(h, pic(keep, { cols: 2, rows: 1 }));
+    out.again = { made: h.count.textures - madeBefore, colours: I.probes(h, I.pixels(h), [spot, [12, 20], [12, 27]]), err: I.glError(h) };
+
+    // the cache holds the sum of the live textures' sizes
+    keep.close();
+    I.draw(h, I.layered(undefined));
+    const a = await I.bitmap(4, 4, new Array(64).fill(255)), b = await I.bitmap(8, 2, new Array(64).fill(255));
+    I.draw(h, I.layered([I.place(a, { id: 1, col: 1, row: 1, cols: 1, rows: 1 }), I.place(b, { id: 2, col: 3, row: 1, cols: 1, rows: 1 })]));
+    out.bytes = { textures: h.r.pictureTextures, bytes: h.r.pictureBytes };
+    a.close();
+    // a closed bitmap in the frame is skipped without a GL error and its texture goes at the end of the draw
+    I.draw(h, I.layered([I.place(b, { id: 2, col: 3, row: 1, cols: 1, rows: 1 }), { ...I.place(a, { id: 1, col: 1, row: 1, cols: 1, rows: 1 }), sx: 0, sy: 0, sw: 1, sh: 1 }]));
+    out.closed = { textures: h.r.pictureTextures, bytes: h.r.pictureBytes, err: I.glError(h) };
+    I.dispose(h);
+    return out;
+  });
+  assert.ok(leaks.animation.maxLive <= 4, `500 draws of an animation left ${leaks.animation.maxLive} live picture textures at most`);
+  assert.equal(leaks.animation.errors, 0, "gl.getError() after 500 draws of an animation");
+  assert.ok(leaks.animation.made >= 500, `an animation of new bitmaps made ${leaks.animation.made} textures: one per bitmap`);
+  assert.ok(leaks.animation.liveAfter <= 4 && leaks.animation.cache <= 4, "live textures after the 500 draws");
+  assert.equal(leaks.afterText.cache, 1, "a draw without pictures keeps the texture of a bitmap that is still open");
+  assert.deepEqual(leaks.afterClose, { cache: 0, live: 0, bytes: 0 }, "a bitmap closed by its owner is released at the next draw");
+  assert.deepEqual(leaks.idle.alive, [1, 0], "a picture not drawn for 119 draws keeps its texture, for 120 loses it");
+  assert.equal(leaks.again.made, 1, "a picture drawn again after its texture went is uploaded once more");
+  assert.deepEqual(leaks.again.colours, leaks.idle.first, "and looks the same");
+  assert.equal(leaks.again.err, 0, "gl.getError() after the upload again");
+  assert.deepEqual(leaks.bytes, { textures: 2, bytes: 4 * 4 * 4 + 8 * 2 * 4 }, "the cache holds the sum of its textures' sizes");
+  assert.equal(leaks.closed.err, 0, "gl.getError() with a closed bitmap in the frame");
+  assert.deepEqual({ textures: leaks.closed.textures, bytes: leaks.closed.bytes }, { textures: 1, bytes: 8 * 2 * 4 }, "a closed bitmap holds no texture");
+
+  // ---- a lost context, a disposed renderer ---------------------------------------------------------------
+  const gone = await page.evaluate(async () => {
+    const I = window.__I;
+    const out = {};
+    // dispose frees every picture texture and the renderer still draws after it
+    {
+      const h = I.make("webgl", 12, 4);
+      const live = () => h.count.textures - h.count.deleted - 1;
+      const bmp = await I.bitmap(1, 1, [0, 255, 0, 255]);
+      const other = await I.bitmap(2, 2, new Array(16).fill(200));
+      I.draw(h, I.layered([I.place(bmp, { id: 1, col: 1, row: 1, cols: 1, rows: 1 }), I.place(other, { id: 2, col: 3, row: 1, cols: 1, rows: 1 })]));
+      const before = live();
+      h.r.dispose();
+      out.dispose = { before, live: live(), cache: h.r.pictureTextures, bytes: h.r.pictureBytes };
+      I.draw(h, I.layered([I.place(bmp, { id: 1, col: 1, row: 1, cols: 1, rows: 1 })]));
+      out.afterDispose = { colour: I.probes(h, I.pixels(h), [I.mid(1, 1)])[0], err: I.glError(h), live: live() };
+      I.dispose(h);
+    }
+    // a lost context: no exception, no deleteTexture on it, the cache is dropped, and after the restore pictures draw again
+    {
+      const h = I.make("webgl", 12, 4);
+      const bmp = await I.bitmap(1, 1, [0, 255, 0, 255]);
+      const frame = I.layered([I.place(bmp, { id: 1, col: 1, row: 1, cols: 2, rows: 1 })]);
+      I.draw(h, frame);
+      const ext = h.canvas.getContext("webgl2").getExtension("WEBGL_lose_context");
+      const deletedBefore = h.count.deleted;
+      let threw = null;
+      const lostEvent = new Promise((resolve) => h.canvas.addEventListener("webglcontextlost", resolve, { once: true }));
+      ext.loseContext();
+      try {
+        h.r.dispose(); // before the loss event: the cache still holds its texture, and the context is already gone
+        I.draw(h, frame);
+        I.draw(h, I.layered(undefined));
+      } catch (e) {
+        threw = String(e);
+      }
+      out.lost = { threw, deleted: h.count.deleted - deletedBefore, cache: h.r.pictureTextures, bytes: h.r.pictureBytes };
+      await lostEvent; // the browser allows restoreContext only after the loss event was dispatched, not in its microtask
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const restored = new Promise((resolve) => h.canvas.addEventListener("webglcontextrestored", resolve, { once: true }));
+      ext.restoreContext();
+      await restored; // the renderer's own listener was added first, so it has rebuilt by now
+      let again = null;
+      try {
+        I.draw(h, frame);
+        again = { colour: I.probes(h, I.pixels(h), [I.mid(1, 1)])[0], err: I.glError(h), cache: h.r.pictureTextures };
+      } catch (e) {
+        again = { threw: String(e) };
+      }
+      out.restored = again;
+      I.dispose(h);
+    }
+    return out;
+  });
+  assert.equal(gone.dispose.before, 2, "two pictures, two textures");
+  assert.deepEqual({ live: gone.dispose.live, cache: gone.dispose.cache, bytes: gone.dispose.bytes }, { live: 0, cache: 0, bytes: 0 }, "dispose frees every picture texture");
+  assert.deepEqual(gone.afterDispose, { colour: [0, 255, 0], err: 0, live: 1 }, "a renderer still draws pictures after dispose");
+  assert.equal(gone.lost.threw, null, "drawing on a lost context throws");
+  assert.equal(gone.lost.deleted, 0, "deleteTexture is not called on a lost context");
+  assert.deepEqual({ cache: gone.lost.cache, bytes: gone.lost.bytes }, { cache: 0, bytes: 0 }, "a lost context drops the cache");
+  assert.deepEqual(gone.restored, { colour: [0, 255, 0], err: 0, cache: 1 }, "after the context is back pictures draw again");
 }

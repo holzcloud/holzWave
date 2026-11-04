@@ -40,7 +40,7 @@ const F_CUR_LEFT = 128;
 const F_CUR_RIGHT = 256;
 const CUR_THICK = 2;
 
-/** A picture's texture is deleted when it was not drawn for this many draws (`begin` calls). */
+/** A picture's texture is deleted when this many draws (`begin` calls) have passed without it being drawn. */
 const IDLE_DRAWS = 120;
 
 const VERT = `#version 300 es
@@ -615,7 +615,7 @@ export class WebGLRenderer implements Renderer {
   private purgePictures() {
     const gl = this.gl;
     for (const [bmp, t] of this.pictures) {
-      if (bmp.width !== 0 && this.stamp - t.used <= IDLE_DRAWS) continue;
+      if (bmp.width !== 0 && this.stamp - t.used < IDLE_DRAWS) continue;
       gl.deleteTexture(t.tex);
       this.picBytes -= t.bytes;
       this.pictures.delete(bmp);

@@ -54,9 +54,14 @@ const strip = (c, colours) =>
 
 const hex = (n) => `#${n.toString(16).padStart(6, "0")}`;
 
+/** The renderer the page is opened with: `canvas` (the reference) or `webgl` (the colour cases are run with both). */
+let renderer = "canvas";
+
 async function open(page, url) {
-  await page.goto(`${url}index.html?renderer=canvas`);
+  await page.goto(`${url}index.html?renderer=${renderer}`);
   await page.waitForSelector(".divider");
+  const name = await page.evaluate(async () => (await import(new URL("state.js", location.href).href)).state.renderer);
+  assert.equal(name, renderer === "webgl" ? "webgl2" : "canvas2d", "the page uses the renderer that was asked for");
   await page.waitForFunction(() => window.__MOCK__.callsOf("start_pane").length >= 2);
   await page.waitForFunction(() => window.__MOCK__.callsOf("request_full").length >= 2);
   const start = (await callsOf(page, "start_pane"))[0];
@@ -89,13 +94,27 @@ function script(page, table) {
   }, table);
 }
 
-/** The colours (0xRRGGBB) of the canvas at `points` (CSS pixels), after the next draw. */
+/**
+ * The colours (0xRRGGBB) of the canvas at `points` (CSS pixels), after the next draw. A WebGL canvas is cleared once the
+ * browser has shown a frame, so the page is asked to draw again first: its draw is queued before this read in the same
+ * animation frame, and the read sees the pixels it just drew.
+ */
 const read = (page, points) =>
   page.evaluate(
     async (pts) => {
+      const { schedule } = await import(new URL("scene.js", location.href).href);
+      schedule();
       await new Promise((done) => requestAnimationFrame(() => done()));
       const c = document.getElementById("term");
       const k = c.width / c.clientWidth;
+      const gl = c.getContext("webgl2");
+      if (gl) {
+        const px = new Uint8Array(4);
+        return pts.map(([x, y]) => {
+          gl.readPixels(Math.floor(x * k), c.height - 1 - Math.floor(y * k), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+          return (px[0] << 16) | (px[1] << 8) | px[2];
+        });
+      }
       const ctx = c.getContext("2d");
       return pts.map(([x, y]) => {
         const [r, g, b] = ctx.getImageData(Math.floor(x * k), Math.floor(y * k), 1, 1).data;
@@ -133,11 +152,14 @@ const held = (page, pane) =>
   }, pane);
 
 export default async function ({ page, url, errors }) {
-  await tracerCase(page, url);
-  await layersCase(page, url);
-  await clipCase(page, url);
-  await hostileCase(page, url);
-  await alphaCase(page, url);
+  // The cases that read colours back run with the WebGL renderer too: the pictures must look the same in both.
+  for (renderer of ["webgl", "canvas"]) {
+    await tracerCase(page, url);
+    await layersCase(page, url);
+    await clipCase(page, url);
+    await hostileCase(page, url);
+    await alphaCase(page, url);
+  }
   await textOnlyCase(page, url);
   await memoryCase(page, url);
   await motionCase(page, url);
