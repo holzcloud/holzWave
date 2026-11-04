@@ -5,7 +5,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { applyFrame } from "../../dist/frames.js";
 import {
-  cellInk, cutMiddle, findTargets, isLinkModifier, linkAction, linkAllowed, mergeTargets, osc8Targets, targetAt,
+  cellInk, cutMiddle, cutShown, findTargets, isLinkModifier, linkAction, linkAllowed, linkTextDiffers, mergeTargets, osc8Targets,
+  targetAt,
 } from "../../dist/links.js";
 
 /** A row of narrow cells: one string per character. */
@@ -295,4 +296,60 @@ test("cellInk is the colour a cell is drawn in: the foreground, the background w
   assert.equal(cellInk(mirror, 0, 2), 0x00bb00);
   assert.equal(cellInk(mirror, 0, 5), 0x111111, "past the runs");
   assert.equal(cellInk(mirror, 1, 0), 0x111111, "a row nobody sent");
+});
+
+// ---- the question: does the text say what the link does? ------------------------------------------------
+
+test("linkTextDiffers: equal after the scheme, one trailing slash, blanks and the case of the host are ignored", () => {
+  const same = [
+    ["example.org", "https://Example.org/"],
+    ["https://example.org", "https://example.org"],
+    ["http://example.org", "https://example.org/"],
+    ["  example.org/docs  ", "https://example.org/docs"],
+    ["EXAMPLE.ORG/docs", "https://example.org/docs"],
+    ["example.org/docs/", "https://example.org/docs"],
+    ["me@example.org", "mailto:me@example.org"],
+    ["mailto:me@EXAMPLE.org", "mailto:me@example.org"],
+    ["ssh://host/x", "ssh://host/x"],
+    ["file:///home/u/a.txt", "file:///home/u/a.txt"],
+  ];
+  for (const [shown, target] of same) assert.equal(linkTextDiffers(shown, target), false, `${shown} == ${target}`);
+});
+
+test("linkTextDiffers: a different word, path, host, query or case in the path is a difference", () => {
+  const differ = [
+    ["docs", "https://example.org/docs"],
+    ["click here", "https://example.org/docs"],
+    ["https://example.org/a", "https://example.org/b"],
+    ["example.org/docs", "https://example.org/Docs"], // the path is case-sensitive
+    ["example.org", "https://example.org/docs"],
+    ["https://paypal.com", "https://evil.example"],
+    ["paypal.com", "https://paypal.com.evil.example/"],
+    ["https://paypal.com", "https://paypal.com@evil.example/"],
+    ["example.org/docs", "https://example.org/docs?next=https://evil.example"],
+    ["me@example.org", "mailto:you@example.org"],
+    ["Me@example.org", "mailto:me@example.org"], // the part before @ is case-sensitive
+    ["example.org", "https://example.org:8443/"],
+    ["example.org", "ssh://example.org/"], // not a web scheme: it is not ignored
+  ];
+  for (const [shown, target] of differ) assert.equal(linkTextDiffers(shown, target), true, `${shown} != ${target}`);
+});
+
+test("linkTextDiffers: a blank text differs from every target, so a hidden link asks", () => {
+  for (const shown of ["", " ", "   ", "\t", "\0", " \0 "]) assert.equal(linkTextDiffers(shown, "https://example.org/"), true, JSON.stringify(shown));
+  assert.equal(linkTextDiffers("", ""), true, "even against an empty target");
+});
+
+test("linkTextDiffers: the NUL that marks the second cell of a wide character is ignored", () => {
+  assert.equal(linkTextDiffers("exa\0mple.org", "https://example.org/"), false);
+  assert.equal(linkTextDiffers("中\0.example", "https://中.example/"), false);
+  assert.equal(linkTextDiffers("中\0.example", "https://xn--fiq.example/"), true, "a punycode host is not the same text");
+});
+
+test("cutShown cuts the visible text at 120 code points with an ellipsis and leaves a shorter one alone", () => {
+  assert.equal(cutShown("short"), "short");
+  assert.equal(cutShown("a".repeat(120)), "a".repeat(120));
+  assert.equal(cutShown("a".repeat(121)), `${"a".repeat(120)}…`);
+  assert.equal([...cutShown("\u{1F600}".repeat(130))].length, 121, "code points, not UTF-16 units: a pair is not split");
+  assert.equal(cutShown("abcdef", 3), "abc…");
 });

@@ -20,3 +20,19 @@
 .dlg button:hover { color: var(--hw-ink); background: var(--hw-rose-wash); }
 .dlg button.dlg-ok { color: var(--hw-ink); background: var(--hw-line); }
 .dlg button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+
+/* The question before a link opens (docs/design.md 6.31): the shape of the close confirmation. Two quiet labels, the text and the
+   address in mono boxes, Cancel (focused first, so it keeps its 2 px ring whatever opened the dialog) and Open, solid rose. */
+.dlg-link { width: min(420px, calc(100vw - 48px)); }
+.dlg-link .dlg-title { margin-bottom: 12px; }
+.dlg-lbl { margin: 10px 0 3px; color: var(--hw-dim); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+.dlg-val { box-sizing: border-box; min-height: 1.5em; padding: 6px 8px; background: var(--hw-ground); border: 1px solid var(--hw-line);
+           border-radius: 4px; color: var(--hw-ink); line-height: 1.5; overflow-wrap: anywhere; }
+.dlg-link .dlg-actions { margin-top: 14px; }
+.dlg-link button:focus { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.dlg button.dlg-open { color: var(--hw-on-accent); background: var(--hw-rose-deep); border-color: var(--hw-rose-deep); font-weight: 700; }
+.dlg button.dlg-open:hover { background: var(--hw-rose-deep); border-color: var(--hw-ink); }
+@media (forced-colors: active) {
+  :root .dlg-val { border-color: CanvasText; }
+  :root .dlg button.dlg-open { border-color: Highlight; }
+}

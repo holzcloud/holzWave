@@ -2623,7 +2623,7 @@ otherwise. A range with another scheme is text and gets no underline. The list a
 pane, and never opens or starts it; the question above applies to it when the text differs. In a pane of a server (an SSH pane, or any pane in a
 browser) a `file` link is not a link: no underline, no click, and hint mode skips it.
 
-**Hint mode** lists the marked links with the same labels as the printed ones, and choosing one does what the click does, including the question.
+**Hint mode** lists the marked links with the same labels as the printed ones, in reading order with the marked links ahead of the printed ones on their row (a printed address that lies over a marked link is not listed twice). Choosing one with `Shift` held does what the click does, including the question; choosing it without `Shift` copies its address, as for a printed one.
 
 **Pictures: layers.** A picture is drawn at its cells in one of three layers that the program chooses: below the cell backgrounds, between the
 backgrounds and the text, or above the text; within a layer the program's own order decides. It is clipped to the pane body, never over the pane

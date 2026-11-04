@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { APP_DIR, callsOf, emit } from "./lib.mjs";
+import { APP_DIR, callsOf, currentBackend, emit } from "./lib.mjs";
 
 const PAD = 6; // CSS px between a pane's edge and its grid (geometry.ts)
 const HEADER = 24; // CSS px of a pane's header strip at the base font size
@@ -24,7 +24,7 @@ const golden = JSON.parse(readFileSync(join(APP_DIR, "tests/fixtures/protocol.js
  * One row of `COLS` cells from parts: a string is plain text, `{ link: "text" }` is text with the flag LINK. `links` are the
  * spans the core would send for it, which the test writes out itself so that the page is tested against the wire.
  */
-const rowOf = (y, parts, links) => {
+const rowOf = (y, parts, links, cols = COLS) => {
   const runs = [];
   let used = 0;
   for (const part of parts) {
@@ -32,7 +32,7 @@ const rowOf = (y, parts, links) => {
     runs.push([text, text.length, FG, BG, typeof part === "string" ? 0 : (part.flags ?? LINK)]);
     used += text.length;
   }
-  if (used < COLS) runs.push([" ".repeat(COLS - used), COLS - used, FG, BG, 0]);
+  if (used < cols) runs.push([" ".repeat(cols - used), cols - used, FG, BG, 0]);
   return { y, runs, ...(links ? { links } : {}) };
 };
 
@@ -50,13 +50,21 @@ const ROWS = () => [
 ];
 
 const frame = (pane, seq, changed, over = {}) => ({
-  pane, seq, full: true, cols: COLS, rows: 8, fg: FG, bg: BG, cursor: null, scrollbar: [0, 8, 8],
+  pane, seq, full: true, cols: COLS, rows: 8, fg: FG, bg: BG, cursor: null, scrollbar: [0, over.rows ?? 8, over.rows ?? 8],
   selection: [], matches: [], search: null, copy_cursor: null, modes: MODES, changed, ...over,
 });
 
 /** Open the page as `os` with the rows in both panes; returns the geometry helpers. */
-async function open(page, url, { os = "macos", rows = ROWS(), schemes = null } = {}) {
+async function open(page, url, { os = "macos", rows = ROWS(), schemes = null, remote = false, cols = COLS, spy = false } = {}) {
   await page.addInitScript((o) => window.__MOCK__.on("app_info", () => ({ os: o, version: "t", hostname: "h" })), os);
+  if (remote) {
+    // `remote` is the pane that has a connection profile.
+    await page.addInitScript(
+      (pane) => window.__MOCK__.on("pane_connections", () => [{ pane, profile: "talos", name: "Talos", state: "connected", attempt: 0, of: 0, secs: 0 }]),
+      remote === true ? 1 : remote,
+    );
+  }
+  if (spy) await spyOpen(page);
   await page.goto(`${url}index.html?renderer=canvas`);
   await page.waitForSelector(".divider");
   await page.waitForFunction(() => window.__MOCK__.callsOf("start_pane").length >= 2);
@@ -70,9 +78,19 @@ async function open(page, url, { os = "macos", rows = ROWS(), schemes = null } =
   const ch = start.cell_h;
   const origin = (pane) => c.left + (pane === 1 ? 0 : c.width / 2) + PAD;
   if (schemes) await setSchemes(page, schemes);
-  await emit(page, "frame", frame(1, 1, rows));
-  await emit(page, "frame", frame(2, 1, rows));
+  if (remote) {
+    await page.waitForFunction(async () => (await import(new URL("connstate.js", location.href).href)).paneConns.size === 1);
+  }
+  await emit(page, "frame", frame(1, 1, rows, { cols, rows: rows.length }));
+  await emit(page, "frame", frame(2, 1, rows, { cols, rows: rows.length }));
   await page.evaluate(() => window.__MOCK__.reset());
+  if (remote) {
+    // `reset` drops the handlers; the page asks again when the focus moves.
+    await page.evaluate(
+      (pane) => window.__MOCK__.on("pane_connections", () => [{ pane, profile: "talos", name: "Talos", state: "connected", attempt: 0, of: 0, secs: 0 }]),
+      remote === true ? 1 : remote,
+    );
+  }
   return {
     cw, ch,
     pt: (pane, cx, cy) => [origin(pane) + (cx + 0.5) * cw, c.top + HEADER + (cy + 0.5) * ch],
@@ -93,6 +111,35 @@ async function setSchemes(page, schemes) {
     schemes,
   );
 }
+
+/**
+ * Record what the page opens in the browser build: `window.open` is replaced and every click on an anchor is recorded and
+ * stopped. Each record says whether the browser counted the call as inside a user gesture (`navigator.userActivation`), which is
+ * what lets a tab open.
+ */
+const spyOpen = (page) =>
+  page.addInitScript(() => {
+    if (window.__linkSpy) return;
+    window.__linkSpy = true;
+    window.__opened = [];
+    window.__anchors = [];
+    window.open = (...args) => {
+      window.__opened.push({ args: [...args], active: navigator.userActivation.isActive, event: window.event?.type ?? null });
+      return null;
+    };
+    document.addEventListener(
+      "click",
+      (e) => {
+        const a = e.target instanceof Element ? e.target.closest("a") : null;
+        if (!a) return;
+        window.__anchors.push({ href: a.href, target: a.getAttribute("target"), rel: a.getAttribute("rel"), active: navigator.userActivation.isActive });
+        e.preventDefault();
+      },
+      true,
+    );
+  });
+const opened = (page) => page.evaluate(() => structuredClone(window.__opened));
+const anchors = (page) => page.evaluate(() => structuredClone(window.__anchors));
 
 const frames = (page, n = 2) =>
   page.evaluate(async (count) => {
@@ -135,13 +182,30 @@ const waitSeg = (page, shown) =>
     return (n !== null && getComputedStyle(n).display !== "none") === want;
   }, shown);
 
+/** Run one case; a failure says which one. */
+async function step(name, fn) {
+  try {
+    await fn();
+  } catch (e) {
+    const at = [...String(e.stack ?? "").matchAll(/osclinks\.test\.mjs:(\d+)/g)].map((m) => m[1]);
+    e.message = `[${name}${at.length ? ` lines ${at.join(" < ")}` : ""}] ${e.message}`;
+    throw e;
+  }
+}
+
 export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(8000);
-  await mirrorCase(page, url);
-  await hoverCase(page, url);
-  await gestureCase(page, url);
-  await schemeCase(page, url);
-  await textLinkCase(page, url);
+  await step("mirror", () => mirrorCase(page, url));
+  await step("hover", () => hoverCase(page, url));
+  await step("gesture", () => gestureCase(page, url));
+  await step("scheme", () => schemeCase(page, url));
+  await step("text link", () => textLinkCase(page, url));
+  await step("ask", () => askCase(page, url));
+  await step("ask keys", () => askKeysCase(page, url));
+  await step("ask text", () => askTextCase(page, url));
+  await step("file", () => fileCase(page, url));
+  await step("hints", () => hintCase(page, url));
+  if (currentBackend() === "ws") await step("web", () => webCase(page, url));
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -332,4 +396,422 @@ async function textLinkCase(page, url) {
   assert.equal((await linkSeg(page)).label, "Link target https://example.com/z", "the span wins over the guessed address");
   near(await boxOf(page, "#overlay .linkhover"), g.box(1, 7, 0, 20), "the underline is the span's");
   await page.keyboard.up("Meta");
+}
+
+// ---- the question ------------------------------------------------------------------------------------------
+
+/** The dialog, or null: its title, labels, texts, buttons and which button has the focus. */
+const dialog = (page) =>
+  page.evaluate(() => {
+    const d = document.querySelector(".dlg-link");
+    if (!d) return null;
+    const active = document.activeElement;
+    return {
+      role: d.getAttribute("role"),
+      modal: d.getAttribute("aria-modal"),
+      title: d.querySelector(".dlg-title")?.textContent,
+      labels: [...d.querySelectorAll(".dlg-lbl")].map((n) => n.textContent),
+      shown: d.querySelector(".dlg-shown")?.textContent,
+      target: d.querySelector(".dlg-target")?.textContent,
+      buttons: [...d.querySelectorAll("button")].map((b) => b.textContent),
+      focused: active && d.contains(active) ? active.textContent : null,
+      foreign: d.querySelectorAll("img, a, script, [onerror]").length,
+    };
+  });
+const waitDialog = (page, shown) =>
+  page.waitForFunction((want) => (document.querySelector(".dlg-link") !== null) === want, shown);
+
+/** A click with the gesture on `pt`, which asks (or not). */
+async function gestureClick(page, pt) {
+  await page.waitForTimeout(450); // the double click window of the pointer
+  await modClick(page, "Meta", pt);
+}
+
+/** A link whose text differs from its target asks; Cancel is focused; Escape, Cancel and a click outside cancel; Open opens once. */
+async function askCase(page, url) {
+  const g = await open(page, url);
+  await gestureClick(page, g.pt(1, 5, 1));
+  await waitDialog(page, true);
+  const d = await dialog(page);
+  assert.deepEqual(
+    { role: d.role, modal: d.modal, title: d.title, labels: d.labels, shown: d.shown, target: d.target, buttons: d.buttons, focused: d.focused },
+    {
+      role: "alertdialog", modal: "true", title: "Open this link?", labels: ["The text says", "The link goes to"],
+      shown: "docs", target: DOCS, buttons: ["Cancel", "Open"], focused: "Cancel",
+    },
+  );
+  assert.equal((await callsOf(page, "open_url")).length, 0, "nothing opens before the answer");
+  const look = await page.evaluate(() => {
+    const css = (sel, prop) => getComputedStyle(document.querySelector(sel))[prop];
+    const probe = document.createElement("span");
+    probe.style.color = "var(--hw-rose-deep)";
+    document.body.append(probe);
+    const rose = getComputedStyle(probe).color;
+    probe.remove();
+    return {
+      openBg: css(".dlg-open", "backgroundColor"), rose, ring: css(".dlg-cancel", "outlineWidth"),
+      mono: css(".dlg-target", "fontFamily"), shadow: css(".dlg-link", "boxShadow") !== "none",
+    };
+  });
+  assert.equal(look.openBg, look.rose, "Open is the solid rose button");
+  assert.equal(look.ring, "2px", "Cancel, focused first, has the 2 px ring");
+  assert.ok(look.shadow, "the dialog is a floating layer");
+
+  // Escape cancels.
+  await page.keyboard.press("Escape");
+  await waitDialog(page, false);
+  assert.equal((await callsOf(page, "open_url")).length, 0, "Escape opens nothing");
+
+  // The Cancel button.
+  await gestureClick(page, g.pt(1, 5, 1));
+  await waitDialog(page, true);
+  await page.click(".dlg-cancel");
+  await waitDialog(page, false);
+  assert.equal((await callsOf(page, "open_url")).length, 0, "Cancel opens nothing");
+
+  // A click outside the dialog cancels, but not the tail of the click that asked.
+  await gestureClick(page, g.pt(1, 5, 1));
+  await waitDialog(page, true);
+  await page.mouse.click(5, 5);
+  assert.notEqual(await dialog(page), null, "the click that is part of the one that asked does not cancel");
+  await page.waitForTimeout(600);
+  await page.mouse.click(5, 5);
+  await waitDialog(page, false);
+  assert.equal((await callsOf(page, "open_url")).length, 0, "a click outside opens nothing");
+
+  // Open opens once, with the pane, and the dialog goes.
+  await gestureClick(page, g.pt(2, 5, 1));
+  await waitDialog(page, true);
+  await page.click(".dlg-open");
+  await waitDialog(page, false);
+  assert.deepEqual(await callsOf(page, "open_url"), [{ url: DOCS, pane: 2 }], "Open opens the address once, for the pane of the link");
+}
+
+/** Every key goes to the dialog; Enter answers with the focused button; Tab moves between the two. */
+async function askKeysCase(page, url) {
+  const g = await open(page, url);
+  await gestureClick(page, g.pt(1, 5, 1));
+  await waitDialog(page, true);
+  await page.keyboard.type("hello");
+  await page.keyboard.press("Meta+v");
+  assert.deepEqual(await names(page, "input", "text", "write", "paste", "key", "send_input"), [], "no key reaches the terminal");
+  assert.notEqual(await dialog(page), null, "other keys do not close it");
+
+  // Enter on the focused Cancel is Cancel.
+  await page.keyboard.press("Enter");
+  await waitDialog(page, false);
+  assert.equal((await callsOf(page, "open_url")).length, 0, "Enter on Cancel cancels");
+
+  // Tab to Open, then Enter opens; Shift+Tab and Space work as well.
+  await gestureClick(page, g.pt(1, 5, 1));
+  await waitDialog(page, true);
+  await page.keyboard.press("Tab");
+  assert.equal((await dialog(page)).focused, "Open");
+  await page.keyboard.press("Shift+Tab");
+  assert.equal((await dialog(page)).focused, "Cancel");
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Enter");
+  await waitDialog(page, false);
+  assert.deepEqual(await callsOf(page, "open_url"), [{ url: DOCS, pane: 1 }], "Enter on Open opens once");
+
+  await page.evaluate(() => window.__MOCK__.reset());
+  await gestureClick(page, g.pt(1, 5, 1));
+  await waitDialog(page, true);
+  await page.keyboard.press("Tab");
+  await page.keyboard.press(" ");
+  await waitDialog(page, false);
+  assert.equal((await callsOf(page, "open_url")).length, 1, "Space on Open opens");
+
+  // One question at a time: a second link asks nothing while the first is open.
+  await page.evaluate(() => window.__MOCK__.reset());
+  await gestureClick(page, g.pt(1, 5, 1));
+  await waitDialog(page, true);
+  assert.equal(await page.evaluate(() => document.querySelectorAll(".dlg-link").length), 1);
+  await page.keyboard.press("Escape");
+  await waitDialog(page, false);
+
+  // The terminal has its keys back.
+  await page.keyboard.type("x");
+  await page.waitForFunction(() => window.__MOCK__.calls.some(([c]) => c === "input" || c === "key" || c === "text" || c === "write" || c === "send_input"));
+}
+
+/** The text and the address are text: markup makes no element, the shown text is cut at 120, the address is not. */
+async function askTextCase(page, url) {
+  const hostileText = "<img src=x onerror=window.__owned=1>";
+  const hostileUri = "https://x.example/<img/src=x/onerror=window.__owned=2>";
+  const longUri = `https://example.org/${"a".repeat(600)}`;
+  const wide = 140;
+  const rows = [
+    rowOf(0, [{ link: hostileText }, " tail"], [[0, hostileText.length - 1, hostileUri]], wide),
+    rowOf(1, [{ link: "w".repeat(130) }], [[0, 129, longUri]], wide),
+    rowOf(2, ["x", { link: "    " }, "y"], [[1, 4, DOCS]], wide),
+    rowOf(3, [{ link: "example.org/docs" }], [[0, 15, DOCS.replace("https://example.org", "https://paypal.com.evil.example")]], wide),
+  ];
+  const g = await open(page, url, { rows, cols: wide });
+
+  await gestureClick(page, g.pt(1, 3, 0));
+  await waitDialog(page, true);
+  let d = await dialog(page);
+  assert.equal(d.shown, hostileText, "the markup is shown as text");
+  assert.equal(d.target, hostileUri);
+  assert.equal(d.foreign, 0, "no element was made from it");
+  assert.equal(await page.evaluate(() => window.__owned), undefined);
+  await page.keyboard.press("Escape");
+  await waitDialog(page, false);
+
+  await gestureClick(page, g.pt(1, 3, 1));
+  await waitDialog(page, true);
+  d = await dialog(page);
+  assert.equal(d.shown, `${"w".repeat(120)}…`, "the text is cut at 120 characters");
+  assert.equal(d.target, longUri, "the address is never cut");
+  const wrap = await page.evaluate(() => {
+    const t = document.querySelector(".dlg-target");
+    const box = document.querySelector(".dlg-link").getBoundingClientRect();
+    return { fits: t.scrollWidth <= t.clientWidth + 1, inside: t.getBoundingClientRect().right <= box.right, lines: t.getClientRects().length };
+  });
+  assert.ok(wrap.fits && wrap.inside, "the long address wraps inside the dialog");
+  await page.keyboard.press("Escape");
+  await waitDialog(page, false);
+
+  // A blank text asks (a hidden link), and so does a lookalike host.
+  await gestureClick(page, g.pt(1, 2, 2));
+  await waitDialog(page, true);
+  assert.equal((await dialog(page)).shown.trim(), "");
+  await page.keyboard.press("Escape");
+  await waitDialog(page, false);
+  await gestureClick(page, g.pt(1, 2, 3));
+  await waitDialog(page, true);
+  assert.equal((await dialog(page)).target, "https://paypal.com.evil.example/docs");
+  await page.keyboard.press("Escape");
+  await waitDialog(page, false);
+  assert.equal((await callsOf(page, "open_url")).length, 0);
+}
+
+// ---- file links -----------------------------------------------------------------------------------------------
+
+const FILE_ROWS = () => [
+  rowOf(0, ["open ", { link: "report.txt" }, " now"], [[5, 14, "file:///home/u/report.txt"]]),
+  rowOf(1, ["open ", { link: "file:///home/u/a.txt" }, " now"], [[5, 24, "file:///home/u/a.txt"]]),
+];
+
+/** A file link is a link in a local pane on the desktop and nothing in a pane with a connection; the opener decides again. */
+async function fileCase(page, url) {
+  const g = await open(page, url, { rows: FILE_ROWS() });
+  await page.mouse.move(...g.pt(1, 7, 0));
+  await page.waitForFunction(() => document.querySelector("#overlay .linkon") !== null);
+  assert.equal((await linkSeg(page)).label, "Link target file:///home/u/report.txt");
+  // The text differs: it asks, and Open reveals through the same command with the pane.
+  await gestureClick(page, g.pt(1, 7, 0));
+  await waitDialog(page, true);
+  await page.click(".dlg-open");
+  assert.deepEqual(await callsOf(page, "open_url"), [{ url: "file:///home/u/report.txt", pane: 1 }], "the click hands the file link and the pane to the opener");
+  // The text is the address: no question.
+  await page.evaluate(() => window.__MOCK__.reset());
+  await gestureClick(page, g.pt(1, 10, 1));
+  assert.deepEqual(await callsOf(page, "open_url"), [{ url: "file:///home/u/a.txt", pane: 1 }]);
+  assert.equal(await dialog(page), null, "equal text asks nothing");
+
+  // A pane with a connection profile: not a link, in the first pane; the second pane has none and still is.
+  const r = await open(page, url, { rows: FILE_ROWS(), remote: true });
+  await page.mouse.move(...r.pt(1, 7, 0));
+  await frames(page);
+  assert.equal(await boxOf(page, "#overlay .linkon"), null, "no underline in a pane of a server");
+  assert.equal(await linkSeg(page), null, "no target in the status line");
+  await gestureClick(page, r.pt(1, 7, 0));
+  await gestureClick(page, r.pt(1, 10, 1));
+  assert.deepEqual(await callsOf(page, "open_url"), [], "no click");
+  assert.equal(await dialog(page), null);
+  await page.mouse.move(...r.pt(2, 7, 0));
+  await page.waitForFunction(() => document.querySelector("#overlay .linkon") !== null);
+  await page.mouse.move(...r.pt(1, 0, 1));
+
+  // Not in the list: not a link, and a list with file but not https shows only the file link.
+  const l = await open(page, url, { rows: FILE_ROWS(), schemes: ["https"] });
+  await page.mouse.move(...l.pt(1, 7, 0));
+  await frames(page);
+  assert.equal(await boxOf(page, "#overlay .linkon"), null, "file is not in the list");
+}
+
+// ---- hint mode -----------------------------------------------------------------------------------------------
+
+const HINT_ROWS = () => [
+  rowOf(0, ["see ", { link: "docs" }, " here"], [[4, 7, DOCS]]),
+  rowOf(1, ["go ", { link: "example.org/docs" }, " now"], [[3, 18, DOCS]]),
+  rowOf(2, ["https://example.com/x and https://other.example/y"], [[0, 20, "https://example.com/z"]]),
+  rowOf(3, ["ssh ", { link: "ssh://host/x" }, " end ", { link: "report" }], [[4, 15, "ssh://host/x"], [21, 26, "file:///home/u/r.txt"]]),
+  rowOf(4, ["plain"]),
+];
+
+/** Record what the clipboard path is asked to copy. */
+const spyClipboard = (page) =>
+  page.evaluate(() => {
+    window.__exec = [];
+    window.__written = [];
+    document.execCommand = (cmd) => {
+      const a = document.activeElement;
+      window.__exec.push([cmd, a && a.tagName, a && a.value]);
+      return true;
+    };
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async (t) => { window.__written.push(t); } },
+    });
+  });
+const copied = (page) => page.evaluate(() => window.__exec.map((e) => e[2]).concat(window.__written));
+
+/** The hint labels and what they stand for, in the page's order. */
+const hintLabels = (page) =>
+  page.evaluate(() => [...document.querySelectorAll("#overlay [data-hint]")].map((n) => { const r = n.getBoundingClientRect(); return [n.dataset.hint, Math.round(r.top), Math.round(r.left)]; }));
+
+/** Hint mode lists the marked links ahead of the printed ones on their row, once each; Shift opens with the question, a letter copies. */
+async function hintCase(page, url) {
+  const g = await open(page, url, { rows: HINT_ROWS() });
+  await spyClipboard(page);
+  await page.keyboard.press("Meta+Shift+Space");
+  await page.waitForFunction(() => document.querySelector("#overlay [data-hint]") !== null);
+  let labels = await hintLabels(page);
+  // docs, example.org/docs, the span on row 2, the printed address beside it, the file link: five; the ssh span is not a link.
+  assert.deepEqual(labels.map((l) => l[0]), ["a", "b", "c", "d", "e"], "five targets, in reading order");
+  const tops = labels.map((l) => l[1]);
+  assert.ok(tops[0] < tops[1] && tops[1] < tops[2] && tops[2] === tops[3] && tops[3] < tops[4], "rows in reading order, the two of row 2 on one row");
+  assert.ok(labels[2][2] < labels[3][2], "the marked link of the row is ahead of the printed one");
+
+  // Shift+a: the text differs, so the question.
+  await page.keyboard.press("Shift+A");
+  await waitDialog(page, true);
+  assert.equal((await dialog(page)).target, DOCS);
+  assert.equal((await callsOf(page, "open_url")).length, 0);
+  await page.keyboard.press("Escape");
+  await waitDialog(page, false);
+
+  // Shift+b: the text is the address, so it opens at once, with the pane.
+  await page.keyboard.press("Meta+Shift+Space");
+  await page.waitForFunction(() => document.querySelector("#overlay [data-hint]") !== null);
+  await page.keyboard.press("Shift+B");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("open_url").length === 1);
+  assert.deepEqual(await callsOf(page, "open_url"), [{ url: DOCS, pane: 2 }]);
+  assert.equal(await dialog(page), null);
+
+  // Shift+d: the printed address beside the span opens as a printed address does.
+  await page.evaluate(() => window.__MOCK__.reset());
+  await page.keyboard.press("Meta+Shift+Space");
+  await page.waitForFunction(() => document.querySelector("#overlay [data-hint]") !== null);
+  await page.keyboard.press("Shift+D");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("open_url").length === 1);
+  assert.deepEqual(await callsOf(page, "open_url"), [{ url: "https://other.example/y" }]);
+
+  // Shift+e: the file link asks (its text differs) and Open reveals it through the opener.
+  await page.evaluate(() => window.__MOCK__.reset());
+  await page.keyboard.press("Meta+Shift+Space");
+  await page.waitForFunction(() => document.querySelector("#overlay [data-hint]") !== null);
+  await page.keyboard.press("Shift+E");
+  await waitDialog(page, true);
+  await page.click(".dlg-open");
+  assert.deepEqual(await callsOf(page, "open_url"), [{ url: "file:///home/u/r.txt", pane: 2 }]);
+
+  // A plain letter copies: the address of a marked link, never the visible text.
+  await page.evaluate(() => window.__MOCK__.reset());
+  await page.keyboard.press("Meta+Shift+Space");
+  await page.waitForFunction(() => document.querySelector("#overlay [data-hint]") !== null);
+  await page.keyboard.press("c");
+  assert.deepEqual(await copied(page), ["https://example.com/z"], "the address of the marked link was copied, not its text");
+  assert.equal((await callsOf(page, "open_url")).length, 0, "copying opens nothing");
+  assert.equal(await dialog(page), null);
+
+  // In a pane of a server the file link is not listed.
+  const r = await open(page, url, { rows: HINT_ROWS(), remote: 2 });
+  void r;
+  await page.keyboard.press("Meta+Shift+Space");
+  await page.waitForFunction(() => document.querySelector("#overlay [data-hint]") !== null);
+  labels = await hintLabels(page);
+  assert.deepEqual(labels.map((l) => l[0]), ["a", "b", "c", "d"], "four targets: the file link is not one in a pane of a server");
+  await page.keyboard.press("Escape");
+}
+
+// ---- the browser build ---------------------------------------------------------------------------------------
+
+const WEB_ROWS = () => [
+  rowOf(0, ["go ", { link: "example.org/docs" }, " now"], [[3, 18, DOCS]]),
+  rowOf(1, ["see ", { link: "docs" }, " here"], [[4, 7, DOCS]]),
+  rowOf(2, ["mail ", { link: "me@example.org" }, " please"], [[5, 18, "mailto:me@example.org"]]),
+  rowOf(3, ["open ", { link: "report.txt" }, " now"], [[5, 14, "file:///home/u/report.txt"]]),
+  rowOf(4, ["ssh ", { link: "ssh://host/x" }, " end"], [[4, 15, "ssh://host/x"]]),
+  rowOf(5, ["mail ", { link: "click here" }, " please"], [[5, 14, "mailto:me@example.org"]]),
+];
+const FEATURES = "noopener,noreferrer";
+
+/** In the browser a marked link opens a tab with `noopener,noreferrer` from the gesture, a mail address through an anchor, and file or other schemes are text. */
+async function webCase(page, url) {
+  const g = await open(page, url, { os: "web", rows: WEB_ROWS(), spy: true });
+  const here = page.url();
+
+  // Text equal to the address: the click opens at once, in a new tab, inside the click.
+  await modClick(page, "Control", g.pt(1, 8, 0));
+  let seen = await opened(page);
+  assert.deepEqual(seen.map((o) => o.args), [[DOCS, "_blank", FEATURES]], "a new tab, cut off from the page");
+  assert.ok(seen.every((o) => o.active), "opened from inside the gesture");
+  assert.deepEqual(seen.map((o) => o.event), ["pointerup"], "in the same task as the release of the click, nothing awaited between");
+  assert.equal(page.url(), here, "the page keeps its tab");
+  assert.equal((await callsOf(page, "open_url")).length, 0, "the shell's open_url is not used on the web");
+  await page.evaluate(() => { window.__opened.length = 0; });
+
+  // The text differs: the question; the tab opens from inside the click on Open (and from inside Enter on Open).
+  await gestureClick(page, g.pt(1, 5, 1));
+  await waitDialog(page, true);
+  assert.deepEqual(await opened(page), [], "nothing opens before the answer");
+  await page.click(".dlg-open");
+  await waitDialog(page, false);
+  seen = await opened(page);
+  assert.deepEqual(seen.map((o) => o.args), [[DOCS, "_blank", FEATURES]]);
+  assert.ok(seen.every((o) => o.active), "opened from inside the click on Open");
+  assert.deepEqual(seen.map((o) => o.event), ["click"], "in the task of the click on Open, nothing awaited between");
+  await page.evaluate(() => { window.__opened.length = 0; });
+  await gestureClick(page, g.pt(1, 5, 1));
+  await waitDialog(page, true);
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Enter");
+  await waitDialog(page, false);
+  seen = await opened(page);
+  assert.equal(seen.length, 1);
+  assert.ok(seen[0].active, "opened from inside the key on Open");
+  assert.equal(seen[0].event, "keydown", "in the task of the key, nothing awaited between");
+  assert.equal(page.url(), here);
+
+  // Cancel opens nothing.
+  await page.evaluate(() => { window.__opened.length = 0; });
+  await gestureClick(page, g.pt(1, 5, 1));
+  await waitDialog(page, true);
+  await page.keyboard.press("Escape");
+  await waitDialog(page, false);
+  assert.deepEqual(await opened(page), []);
+
+  // Mail: an anchor without a target, from inside the gesture; at once when the text is the address, after the question otherwise.
+  const anchored = async () => (await anchors(page)).map((a) => [a.href, a.target, a.rel, a.active]);
+  await gestureClick(page, g.pt(1, 8, 2));
+  assert.deepEqual(await anchored(), [["mailto:me@example.org", null, "noopener noreferrer", true]]);
+  await page.evaluate(() => { window.__anchors.length = 0; });
+  await gestureClick(page, g.pt(1, 8, 5));
+  await waitDialog(page, true);
+  assert.deepEqual(await anchored(), [], "the question comes first");
+  await page.click(".dlg-open");
+  assert.deepEqual(await anchored(), [["mailto:me@example.org", null, "noopener noreferrer", true]]);
+  assert.deepEqual(await opened(page), [], "a mail address opens no tab");
+
+  // File and other schemes: text.
+  for (const row of [3, 4]) {
+    await page.mouse.move(...g.pt(1, 0, 0));
+    await page.mouse.move(...g.pt(1, 7, row));
+    await frames(page);
+    assert.equal(await boxOf(page, "#overlay .linkon"), null, `row ${row} is plain text in the browser`);
+    await gestureClick(page, g.pt(1, 7, row));
+    assert.equal(await dialog(page), null);
+  }
+  assert.deepEqual(await opened(page), []);
+  assert.equal((await callsOf(page, "open_url")).length + (await callsOf(page, "reveal_path")).length, 0);
+
+  // Hint mode: no file link.
+  await page.evaluate(async () => (await import(new URL("actions.js", location.href).href)).runAction("hints.open"));
+  await page.waitForFunction(() => document.querySelector("#overlay [data-hint]") !== null);
+  assert.deepEqual((await hintLabels(page)).map((l) => l[0]), ["a", "b", "c", "d"], "docs, docs, mail, mail: no file link and no ssh");
+  await page.keyboard.press("Escape");
 }

@@ -266,13 +266,13 @@ export function osc8Targets(mirror: PaneMirror, y: number, allow: (uri: string) 
 }
 
 /**
- * The targets of row `y` with the marked links in front: a guessed target that overlaps a marked one is dropped, so a
- * stretch is one link, and the one the program marked wins. `cells` is the row as `rowCells` gives it.
+ * The targets of one row with the marked links ahead of the guessed ones, each group in column order: a guessed target
+ * that overlaps a marked one is dropped, so a stretch is one link, and the one the program marked wins.
  */
 export function mergeTargets(marked: readonly Target[], guessed: readonly Target[]): Target[] {
   if (marked.length === 0) return [...guessed];
   const kept = guessed.filter((g) => !marked.some((m) => g.startCol <= m.endCol && g.endCol >= m.startCol));
-  return [...marked, ...kept].sort((a, b) => a.startCol - b.startCol);
+  return [...marked, ...kept];
 }
 
 /**
@@ -313,9 +313,10 @@ function lowerHost(rest: string, mail: boolean): string {
 function comparable(text: string): string {
   let t = text.replace(/\0/g, "").trim();
   const lead = /^(?:https?:\/\/|mailto:)/i.exec(t);
-  const mail = lead !== null && lead[0].toLowerCase() === "mailto:";
   if (lead) t = t.slice(lead[0].length);
   if (t.endsWith("/")) t = t.slice(0, -1);
+  // A mail address: only the domain is lower-cased, the part before the @ is the person's.
+  const mail = lead !== null ? lead[0].toLowerCase() === "mailto:" : /^[^/?#:@\s]+@[^/?#@\s]+$/.test(t);
   return lowerHost(t, mail);
 }
 
@@ -418,8 +419,8 @@ let deps: LinkDeps | null = null;
 /** Load what opening a link needs (the bridge and the dialog) once; `activateLink` does nothing before this has run. */
 export async function linkDeps(): Promise<void> {
   if (deps) return;
-  const { call } = await import("./bridge.js");
-  deps = { call, ask: null };
+  const [{ call }, { askOpenLink }] = await Promise.all([import("./bridge.js"), import("./linkask.js")]);
+  deps = { call, ask: askOpenLink };
 }
 
 /** What decides whether a marked link in `pane` is a link: the person's list, the build and the pane's connection. */

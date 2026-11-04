@@ -9,7 +9,7 @@ import { registerAction } from "./actions.js";
 import { rowCells } from "./frames.js";
 import { isModifierKey } from "./keymap.js";
 import { pushKeyHandler } from "./keystack.js";
-import { canRevealPaths, findTargets, linkAction, openUrl } from "./links.js";
+import { activateLink, canRevealPaths, findTargets, linkAction, linkAllowed, linkDeps, mergeTargets, osc8Targets, pagePolicy } from "./links.js";
 import type { Target } from "./links.js";
 import { state } from "./state.js";
 
@@ -68,11 +68,11 @@ interface Item {
  * frame. Call once at start-up.
  */
 export async function initHints(): Promise<void> {
-  const [{ call }, { onOverlayRender, renderOverlay, setCellBoxes }, { writeClipboard }, { focusInput }] = await Promise.all([
-    import("./bridge.js"),
+  const [{ onOverlayRender, renderOverlay, setCellBoxes }, { writeClipboard }, { focusInput }] = await Promise.all([
     import("./overlay.js"),
     import("./selection.js"),
     import("./keyboard.js"),
+    linkDeps(),
   ]);
 
   let mode: { pane: number; items: Item[]; labels: string[]; typed: string; open: boolean } | null = null;
@@ -136,12 +136,12 @@ export async function initHints(): Promise<void> {
       const { pane, open } = m;
       end();
       if (item) {
-        const action = open && item.target.kind !== "hash" ? linkAction(item.target, state.cwds.get(pane) ?? null, canRevealPaths()) : null;
-        if (action?.command === "open_url") {
-          const { url } = action.args;
-          openUrl(url, () => void call("open_url", { url }).catch(() => {}));
-        } else if (action) void call(action.command, action.args).catch(() => {});
-        else if (!(open && item.target.kind === "path")) writeClipboard(item.target.text); // a path the browser cannot show is not copied by Shift
+        const t = item.target;
+        const cwd = state.cwds.get(pane) ?? null;
+        // Shift opens what opens (a marked link asks first when its text and address differ, as a click does) or reveals a
+        // path; the plain letter copies the text as printed, and for a marked link its address.
+        if (open && t.kind !== "hash" && (t.source === "osc8" || linkAction(t, cwd, canRevealPaths()) !== null)) activateLink(pane, t);
+        else if (!(open && t.kind === "path")) writeClipboard(t.text); // a path the browser cannot show is not copied by Shift
       }
     }
     return true;
@@ -161,7 +161,10 @@ export async function initHints(): Promise<void> {
     for (let y = 0; y < mirror.rows && items.length < MAX_HINTS; y++) {
       const cells = rowCells(mirror, y);
       if (cells.length === 0) continue;
-      for (const target of findTargets(cells)) {
+      const policy = pagePolicy(pane);
+      const marked = osc8Targets(mirror, y, (uri) => linkAllowed(uri, policy));
+      // The marked links of a row come first and a guessed address that overlaps one is not listed twice.
+      for (const target of mergeTargets(marked, findTargets(cells))) {
         if (items.length >= MAX_HINTS) break;
         items.push({ y, target, raw: cells.slice(target.startCol, target.endCol + 1).join("") });
       }
