@@ -511,3 +511,195 @@ export function socketOutcome(page, ms = 10_000) {
     ms,
   );
 }
+
+// ---- pictures and links in the page --------------------------------------------------------------------------------------
+
+/** The commands the page's own socket sent and the binary answers it received, from the browser's side (no code of the page is touched). */
+export function watchSocket(page) {
+  const sent = [];
+  const answers = [];
+  const generations = new Set();
+  page.on("websocket", (socket) => {
+    socket.on("framesent", ({ payload }) => {
+      if (typeof payload !== "string") return;
+      try {
+        const message = JSON.parse(payload);
+        if (typeof message.cmd === "string") sent.push({ cmd: message.cmd, args: message.args ?? {} });
+      } catch {
+        // not a command
+      }
+    });
+    socket.on("framereceived", ({ payload }) => {
+      if (typeof payload !== "string") return answers.push(payload.length);
+      // The generations of every picture that frames told about, to see a picture move or stand still.
+      if (!payload.includes('"images"')) return;
+      try {
+        const message = JSON.parse(payload);
+        for (const placement of message.event === "frame" ? (message.payload.images ?? []) : []) generations.add(`${placement[0]}:${placement[1]}`);
+      } catch {
+        // not a frame
+      }
+    });
+  });
+  return {
+    /** How many different generations of the picture `id` the frames told about so far. */
+    generations: (id) => [...generations].filter((g) => g.startsWith(`${id}:`)).length,
+    /** The arguments of every command with this name, oldest first. */
+    sent: (cmd) => sent.filter((m) => m.cmd === cmd).map((m) => m.args),
+    /** The lengths of the binary messages received (8 bytes of call id and the answer). */
+    binaryAnswers: () => answers.slice(),
+  };
+}
+
+/** The page's module `name` (`state`, `scene`, ...): the instance the page itself runs. */
+const moduleUrl = (name) => `${name}.js`;
+
+/**
+ * Where the grid of the focused pane is, from the page's own state and geometry: the origin and size in CSS pixels relative to
+ * the canvas, the cell size, the size in cells that the core was told, the canvas's place in the window, the renderer in use.
+ * Resolves with `undefined` until the page has laid out a pane.
+ */
+export function gridOf(page) {
+  return page.evaluate(async (urls) => {
+    const { state } = await import(new URL(urls.state, location.href).href);
+    const { gridRect } = await import(new URL(urls.geometry, location.href).href);
+    const view = state.view;
+    if (!view || !(state.metrics.cellW > 1)) return undefined;
+    const entry = view.panes.find(([id]) => id === view.focus) ?? view.panes[0];
+    if (!entry) return undefined;
+    const g = gridRect(state.metrics, entry[1], state.headerPx);
+    const size = state.sizes.get(entry[0]);
+    if (!size) return undefined;
+    const box = document.getElementById("term").getBoundingClientRect();
+    return {
+      pane: entry[0], x: g.x, y: g.y, w: g.w, h: g.h, cellW: state.metrics.cellW, cellH: state.metrics.cellH, dpr: state.metrics.dpr,
+      cols: size.cols, rows: size.rows, left: box.left, top: box.top, renderer: state.renderer, os: state.os,
+    };
+  }, { state: moduleUrl("state"), geometry: moduleUrl("geometry") });
+}
+
+/** The centre of a cell in CSS pixels relative to the canvas (what `readColours` takes) and in the window (what the mouse takes). */
+export const cellCentre = (grid, col, row) => ({
+  x: grid.x + (col + 0.5) * grid.cellW,
+  y: grid.y + (row + 0.5) * grid.cellH,
+  pageX: grid.left + grid.x + (col + 0.5) * grid.cellW,
+  pageY: grid.top + grid.y + (row + 0.5) * grid.cellH,
+});
+
+/**
+ * The colours (0xRRGGBB) of the canvas at `points` (`{x, y}` in CSS pixels relative to the canvas), after the next draw, for either
+ * renderer. A WebGL canvas is cleared once the browser has shown a frame, so the page is asked to draw again first: that draw is
+ * queued before this read in the same animation frame and the read sees the pixels it just drew (the way the page tests read it).
+ */
+export function readColours(page, points) {
+  return page.evaluate(
+    async ({ pts, scene }) => {
+      const { schedule } = await import(new URL(scene, location.href).href);
+      schedule();
+      await new Promise((done) => requestAnimationFrame(() => done()));
+      const c = document.getElementById("term");
+      const k = c.width / c.clientWidth;
+      const gl = c.getContext("webgl2");
+      if (gl) {
+        const px = new Uint8Array(4);
+        return pts.map(({ x, y }) => {
+          gl.readPixels(Math.floor(x * k), c.height - 1 - Math.floor(y * k), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+          return (px[0] << 16) | (px[1] << 8) | px[2];
+        });
+      }
+      const ctx = c.getContext("2d");
+      return pts.map(({ x, y }) => {
+        const [r, g, b] = ctx.getImageData(Math.floor(x * k), Math.floor(y * k), 1, 1).data;
+        return (r << 16) | (g << 8) | b;
+      });
+    },
+    { pts: points.map(({ x, y }) => ({ x, y })), scene: moduleUrl("scene") },
+  );
+}
+
+export const RED = 0xff0000;
+export const GREEN = 0x00ff00;
+export const BLUE = 0x0000ff;
+export const WHITE = 0xffffff;
+
+/** `0xRRGGBB` as `#rrggbb` for a message. */
+export const hex = (n) => `#${n.toString(16).padStart(6, "0")}`;
+
+/** Whether a colour is the wanted one, each channel within `tolerance` (a picture is scaled and sampled bilinearly: the centre of a cell can be a few percent off its colour, red reads #ef1000, while the other colours are far away). */
+export const isColour = (got, want, tolerance = 40) =>
+  [16, 8, 0].every((shift) => Math.abs(((got >> shift) & 255) - ((want >> shift) & 255)) <= tolerance);
+
+/** Type text into a pane through the oracle socket (the `text` command, the same input path as the keyboard's text). */
+export const typeInto = (socket, pane, text) => socket.ok("text", { pane, text });
+
+// The shell texts. Every escape byte is written as an octal escape of `printf`, so nothing but printable text is ever typed.
+
+/** Delete every picture and clear the screen. */
+export const RESET = "printf '\\033_Ga=d,d=A,q=2\\033\\\\\\033[2J\\033[H'";
+
+/** Move the cursor to the cell (`col`, `row`), both counted from 0. */
+export const cursorTo = (col, row) => `printf '\\033[${row + 1};${col + 1}H'`;
+
+/** A word printed from its two halves, so that the typed command never holds the word itself (a marker the screen can show only once the program ran). */
+export const marker = (word) => `printf 'hw-%s\\n' ${word}`;
+
+/**
+ * The shell text that prints a Kitty picture: transmit and display (`a=T`) 32 bit straight RGBA (`f=32`) of `width` by `height`
+ * pixels as image `id`, over `cols` by `rows` cells, with no reply to the program (`q=2`). The base64 of the bytes goes in chunks of
+ * 4096 characters, `m=1` on all but the last, as the protocol asks. `extra` is added to the first control data (`z=-1`, ...).
+ */
+export function kittyPicture({ id, width, height, rgba, cols, rows, extra = "" }) {
+  const bytes = Buffer.from(rgba);
+  if (bytes.length !== width * height * 4) throw new Error("the pixel bytes do not fit the size");
+  const text = bytes.toString("base64");
+  const pieces = [];
+  for (let at = 0; at < text.length; at += 4096) pieces.push(text.slice(at, at + 4096));
+  const format = pieces
+    .map((piece, i) => {
+      const more = i + 1 < pieces.length ? 1 : 0;
+      const keys = i === 0 ? `a=T,f=32,s=${width},v=${height},i=${id},c=${cols},r=${rows},q=2${extra ? `,${extra}` : ""},m=${more}` : `m=${more}`;
+      return `\\033_G${keys};${piece}\\033\\\\`;
+    })
+    .join("");
+  return `printf '${format}'`;
+}
+
+/**
+ * A picture of opaque white, `width` by `height` pixels, printed by the shell itself in chunks of 4096 characters (so the typed line
+ * stays short): all bytes are 0xFF, so a chunk of 3072 bytes is 4096 times "/" in base64.
+ */
+export function kittyWhite({ id, width, height, cols, rows }) {
+  const total = width * height * 4;
+  const full = Math.floor(total / 3072);
+  const rest = total - full * 3072;
+  const keys = `a=T,f=32,s=${width},v=${height},i=${id},c=${cols},r=${rows},q=2`;
+  const middle = rest === 0 ? full - 1 : full;
+  const last = rest === 0 ? '"$c"' : `'${Buffer.alloc(rest, 255).toString("base64")}'`;
+  return (
+    `c=$(head -c 4096 /dev/zero | tr '\\0' '/'); printf '\\033_G${keys},m=1;%s\\033\\\\' "$c"; n=1; ` +
+    `while [ $n -lt ${middle} ]; do printf '\\033_Gm=1;%s\\033\\\\' "$c"; n=$((n+1)); done; ` +
+    `printf '\\033_Gm=0;%s\\033\\\\' ${last}`
+  );
+}
+
+/** The Kitty animation of a picture of two one-pixel frames: `first` and `second` (RGBA, four bytes each), `gap` milliseconds apart, looping. */
+export function kittyAnimation({ id, cols, rows, first, second, gap }) {
+  const a = Buffer.from(first).toString("base64");
+  const b = Buffer.from(second).toString("base64");
+  return [
+    // a=T: the root frame, shown at the cursor.
+    `printf '\\033_Ga=T,f=32,s=1,v=1,i=${id},c=${cols},r=${rows},q=2;${a}\\033\\\\'`,
+    // a=f: a second frame, z is its gap in milliseconds.
+    `printf '\\033_Ga=f,i=${id},f=32,s=1,v=1,z=${gap},q=2;${b}\\033\\\\'`,
+    // a=a with r=1: the gap of the root frame.
+    `printf '\\033_Ga=a,i=${id},r=1,z=${gap},q=2\\033\\\\'`,
+    // a=a with s=3: run, looping (s=1 would stop, s=2 wait for frames).
+    `printf '\\033_Ga=a,i=${id},s=3,q=2\\033\\\\'`,
+  ].join("; ");
+}
+
+/** The shell text that prints `text` as a hyperlink to `uri` (OSC 8, closed again after the text); `uri` is printf text. */
+export const osc8 = (uri, text) => `printf '\\033]8;;${uri}\\033\\\\${text}\\033]8;;\\033\\\\'`;
+
+/** Several shell texts as one line for the shell, run with Enter. */
+export const line = (...parts) => `${parts.join("; ")}\r`;
