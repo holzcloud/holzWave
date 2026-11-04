@@ -1,104 +1,110 @@
 {
-  "date": "2026-11-02",
+  "date": "2026-11-04",
   "os": "darwin",
   "arch": "arm64",
   "cpu": "Apple M1 Max",
   "cores": 10,
-  "commit": "da9b46f6",
+  "commit": "1e0a9ac1",
   "metrics": {
     "core.key_to_frame_p50_ms": {
-      "median": 0.134458,
-      "p95": 0.140209,
+      "median": 0.135,
+      "p95": 0.16454100000000002,
       "unit": "ms",
       "runs": 5
     },
     "core.key_to_frame_p99_ms": {
-      "median": 0.949334,
-      "p95": 1.4445000000000001,
+      "median": 0.666708,
+      "p95": 2.658875,
       "unit": "ms",
       "runs": 5
     },
     "core.memory_pane_empty_mib": {
-      "median": 0.921875,
-      "p95": 0.921875,
+      "median": 0.927734375,
+      "p95": 0.9296875,
+      "unit": "mib",
+      "runs": 5
+    },
+    "core.memory_pane_images_mib": {
+      "median": 68.73046875,
+      "p95": 69.1484375,
       "unit": "mib",
       "runs": 5
     },
     "core.memory_pane_scrollback_mib": {
-      "median": 13.798828125,
+      "median": 13.802734375,
       "p95": 13.806640625,
       "unit": "mib",
       "runs": 5
     },
     "core.pane_output_mib_s": {
-      "median": 43.110165483044966,
-      "p95": 44.146264905480216,
+      "median": 43.983294370966824,
+      "p95": 45.55687789890537,
       "unit": "mib_s",
       "runs": 5
     },
     "core.pane_start_ms": {
-      "median": 7.409208,
-      "p95": 8.599375,
+      "median": 7.586875,
+      "p95": 8.29575,
       "unit": "ms",
       "runs": 10
     },
     "core.parse_mib_s": {
-      "median": 61.34346355093021,
-      "p95": 61.70692266285421,
+      "median": 60.62412211703769,
+      "p95": 60.797204696278385,
       "unit": "mib_s",
       "runs": 5
     },
     "core.update_encode_ms": {
-      "median": 0.44489291999999964,
-      "p95": 0.44518312499999974,
+      "median": 0.456870425,
+      "p95": 0.4580398000000001,
       "unit": "ms",
       "runs": 5
     },
     "server.key_to_frame_p50_ms": {
-      "median": 0.5975410000000001,
-      "p95": 0.647875,
+      "median": 0.536666,
+      "p95": 0.5459160000000001,
       "unit": "ms",
       "runs": 9
     },
     "server.key_to_frame_p99_ms": {
-      "median": 1.204167,
-      "p95": 1.9996250000000002,
+      "median": 1.1284999999999998,
+      "p95": 1.661708,
       "unit": "ms",
       "runs": 9
     },
     "server.memory_pane_empty_mib": {
-      "median": 0.2919921875,
-      "p95": 0.29296875,
+      "median": 0.2978515625,
+      "p95": 0.2978515625,
       "unit": "mib",
       "runs": 5
     },
     "server.memory_pane_scrollback_mib": {
       "median": 4.423828125,
-      "p95": 4.4404296875,
+      "p95": 4.4248046875,
       "unit": "mib",
       "runs": 5
     },
     "server.reattach_ms": {
-      "median": 2.929,
-      "p95": 3.366458,
+      "median": 2.826604,
+      "p95": 3.4723330000000003,
       "unit": "ms",
       "runs": 10
     },
     "web.chromium.key_to_paint_p50_ms": {
-      "median": 2.800000011920929,
-      "p95": 2.9000000059604645,
+      "median": 2.899999976158142,
+      "p95": 3,
       "unit": "ms",
       "runs": 5
     },
     "web.chromium.key_to_paint_p99_ms": {
-      "median": 15.699999988079071,
-      "p95": 22.30000001192093,
+      "median": 16.69999998807907,
+      "p95": 18.400000035762787,
       "unit": "ms",
       "runs": 5
     },
     "web.chromium.reattach_paint_ms": {
-      "median": 114.50000001490116,
-      "p95": 126.90000000596046,
+      "median": 112.9500000178814,
+      "p95": 120.89999997615814,
       "unit": "ms",
       "runs": 10
     },
@@ -110,13 +116,13 @@
     },
     "web.webkit.key_to_paint_p99_ms": {
       "median": 23,
-      "p95": 24,
+      "p95": 23,
       "unit": "ms",
       "runs": 5
     },
     "web.webkit.reattach_paint_ms": {
-      "median": 158.5,
-      "p95": 170,
+      "median": 156.5,
+      "p95": 166,
       "unit": "ms",
       "runs": 10
     }
