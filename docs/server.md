@@ -213,6 +213,37 @@ lift a lock. A person has at most eight sockets, 64 panes (the default), two upl
 rate and time of the server has a name, a default and a bound in the `limits` section of [config.md](config.md#the-server-configuration);
 the server refuses a value outside its bound at start.
 
+## Memory for pictures
+
+A program in a pane can send pictures (the Kitty graphics protocol), and the terminal keeps them for as long as the screen shows
+them. The key `workers.max_image_mib` is the most MiB of pictures that one pane keeps, on each of its two screens: the normal
+one and the one a full-screen program switches to. The default is 64, the range is 0 to 4096, and `0` turns pictures off on
+this server. The cap wins over the person's own setting `image_memory_mib`: a person who allows 512 MiB gets the cap, and a
+person who allows 2 MiB under a cap of 8 gets 2 MiB. The server reads the key when it starts and hands it to every worker in
+the first frame it sends, so a changed value applies after a restart, which ends every pane anyway.
+
+What the cap bounds is the pictures a pane keeps. It does not bound everything:
+
+- While one picture is still arriving, the pane also holds the part that has come. The terminal refuses any request that would
+  take a pane past twice the cap plus 64 MiB, which is 192 MiB at the default, and that is the worst case of one hostile
+  transmission in one pane. The engine tests measured it with a cap of 16 MiB on a release build on an Apple Silicon Mac: a
+  program that never ends a transmission held 88 MiB counted and 162 MiB resident. The resident number is larger because freed
+  memory stays mapped until the pane closes. At the default cap the resident number was not measured; the same ratio gives
+  about 350 MiB, which is also what one legitimate 64 MiB picture costs (289 MiB measured).
+- The sum over a server is bounded, but it is large: that number times the panes of everybody. A person may have 64 panes by
+  default, so one person whose every pane is hit at once is bounded by 64 times 192 MiB, about 12 GiB counted at the default
+  cap. Lower `workers.max_image_mib` and `workers.max_panes` for a server that many people share.
+- The cap says nothing about the memory of the shells and programs, the scrollback or the connections.
+- The spawn helper sets no memory limit on a worker, and this build adds none. An operator who needs a hard limit sets the
+  memory limit of the container or of the service (`--memory` of Docker, `resources.limits.memory` of Kubernetes, `MemoryMax=` of
+  a systemd unit); the cap and the limit work together, the cap keeps one pane from taking all of it.
+
+What ran: the tests start a worker, a supervisor over real workers and a whole server from a configuration file, make a real
+shell print pictures of 1 to 3 MiB, and check that a picture over the cap is not placed and not readable, that the same picture
+under a larger cap is, that the cap wins over the person's setting, and that `0` shows none. The worker tests also ran in the Linux container (Ubuntu on
+an arm64 host). What did not run: a flood of hostile transmissions through a server, a server under a container memory limit,
+and the engine's memory measurements on Linux or at the default cap.
+
 ## The audit log
 
 The server writes one JSON line per security event to `/data/server/audit/audit-YYYY-MM-DD.jsonl` (UTC days, mode 0600,

@@ -86,7 +86,7 @@ setting is changed from the dialog, the palette or a shortcut, and then in full.
 | `motion` | string | `"system"`, `"reduce"`, `"full"` | `"system"` | at once |
 | `contrast` | string | `"system"`, `"normal"`, `"high"` | `"system"` | at once |
 | `scrollback_lines` | number | 100 to 100000 | 10000 | for panes started afterwards; a running pane keeps its own; it counts rows of the grid (a long line that wraps takes several), and the terminal engine drops whole pages of rows, so a pane keeps a few percent more or less than the number |
-| `image_memory_mib` | number | 0 to 512 (MiB) | 64 | for panes started afterwards; a running pane keeps its own; the memory that one pane may use for the pictures that programs send it (the Kitty graphics protocol); `0` turns pictures off, so none is stored; when it is full the oldest pictures are dropped; one decoded picture of more than 128 MiB is refused whatever the number is (below) |
+| `image_memory_mib` | number | 0 to 512 (MiB) | 64 | for panes started afterwards; a running pane keeps its own; the memory that one pane may use for the pictures that programs send it (the Kitty graphics protocol); `0` turns pictures off, so none is stored; when it is full the oldest pictures are dropped; one decoded picture of more than 128 MiB is refused whatever the number is (below); a server caps it with `workers.max_image_mib`, and the smaller number holds |
 | `confirm_multiline_paste` | boolean | | `true` | at once |
 | `copy_on_select` | boolean | | `true` | at once; copies the selection to the system clipboard when a mouse selection ends (below) |
 | `smooth_scroll` | boolean | | `false` | at once; eases a scrollback jump over at most 120 ms (below) |
@@ -103,8 +103,9 @@ number as 0, and a value that is not a number is reported and costs only this ke
 picture the pane also holds the part that has arrived, and the terminal engine refuses a request that would take the
 pane past twice the setting plus 64 MiB. A single picture of more than 128 MiB when decoded, or of more than 10000
 pixels in width or height, is refused whatever the setting says; so is every request that names a file instead of
-carrying the bytes. A computer that shares terminals with other people may cap the memory of a pane for everyone; the
-smaller number then holds.
+carrying the bytes. A server that shares terminals with other people caps the memory of a pane for everyone with
+`workers.max_image_mib` (see [the server configuration](#the-server-configuration)); the smaller number then holds, and a server
+that sets it to 0 shows no pictures whatever the setting is.
 
 `option_as_alt` is off by default so that a Swiss layout types `|`, `[` and `{` with Option (D-12).
 `confirm_multiline_paste` asks before a multi-line paste into a program that did not turn on bracketed paste (D-15).
@@ -1135,7 +1136,7 @@ Rules for the whole file:
 | `workers.idle_timeout` | 1d | 1m to 90d | A worker, and with it every pane of the person, ends this long after the person's last socket closed. |
 | `workers.max_panes` | 64 | 1 to 1024 | The most panes one person holds. |
 | `workers.max_scrollback_lines` | 10000 | 100 to 1000000 | The scrollback lines of a pane. |
-| `workers.max_image_mib` | 64 | 0 to 4096 | The most MiB of pictures one pane of a person may keep on a screen, whatever the person's own `image_memory_mib` setting says; the setting is cut to it. `0` turns pictures off on this server. |
+| `workers.max_image_mib` | 64 | 0 to 4096 | The most MiB of pictures one pane of a person may keep, on each of its two screens, whatever the person's own `image_memory_mib` setting says: the setting is cut to it, and a smaller setting keeps its value. `0` turns pictures off on this server (unlike the pane and scrollback limits, where 0 is not an option). What the cap bounds and what it does not is in [Memory for pictures](server.md#memory-for-pictures). |
 | `workers.nproc` | 1024 | 8 to 4194304 | The process limit of a person's user id. |
 | `workers.nofile` | 4096 | 16 to 1048576 | The open-file limit of a worker. |
 | `workers.helper_path` | `/usr/local/bin/holzwave-spawn-helper` | an absolute path | The spawn helper. |
