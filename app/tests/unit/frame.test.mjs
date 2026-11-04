@@ -1,7 +1,9 @@
 // Unit tests run on the compiled output in dist/ with node:test: no test framework, no @types/node.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { BOLD, ITALIC, UNDERLINE, INVERSE, MAX_CELLS, MAX_TAIL, css, font, gridCells, rowExtras, visibleCursor } from "../../dist/frame.js";
+import {
+  BOLD, ITALIC, UNDERLINE, INVERSE, LINK, MAX_CELLS, MAX_TAIL, css, dotSpans, font, gridCells, linkDot, rowExtras, visibleCursor,
+} from "../../dist/frame.js";
 
 test("css pads a colour to six hex digits", () => {
   assert.equal(css(0xff8fb8), "#ff8fb8");
@@ -58,4 +60,25 @@ test("rowExtras maps columns to tails, ignores malformed entries and cuts absurd
   assert.equal(Array.from(m.get(5)).length, MAX_TAIL);
   assert.equal(rowExtras(f, 1), null);
   assert.equal(rowExtras(f, 7), null);
+});
+
+test("LINK is the wire flag 16 and shares no bit with the other run flags", () => {
+  assert.equal(LINK, 16);
+  for (const other of [BOLD, ITALIC, UNDERLINE, INVERSE]) assert.equal(LINK & other, 0);
+});
+
+test("linkDot is one CSS pixel in device pixels, at least 1", () => {
+  assert.deepEqual([0.5, 1, 1.25, 1.5, 2, 3, 4].map(linkDot), [1, 1, 1, 2, 2, 3, 4]);
+  for (const bad of [0, -1, Number.NaN, Infinity, undefined]) assert.equal(linkDot(bad), 1, String(bad));
+});
+
+test("dotSpans: dots on the even multiples of the dot, clipped to the stretch, counted from the grid's edge", () => {
+  assert.deepEqual(dotSpans(0, 8, 1), [[0, 1], [2, 3], [4, 5], [6, 7]]);
+  assert.deepEqual(dotSpans(9, 18, 1), [[10, 11], [12, 13], [14, 15], [16, 17]], "a stretch that starts on an odd pixel keeps the grid's phase");
+  assert.deepEqual(dotSpans(0, 16, 2), [[0, 2], [4, 6], [8, 10], [12, 14]]);
+  assert.deepEqual(dotSpans(1, 5, 2), [[1, 2], [4, 5]], "the first dot is cut at the start of the stretch, the last at its end");
+  assert.deepEqual(dotSpans(5, 5, 1), []);
+  assert.deepEqual(dotSpans(6, 2, 1), []);
+  assert.deepEqual(dotSpans(0, 8, 0), [], "a dot of no size draws nothing");
+  assert.deepEqual(dotSpans(0, 8, Number.NaN), []);
 });

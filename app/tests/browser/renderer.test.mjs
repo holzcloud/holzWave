@@ -12,11 +12,12 @@ async function installHarness(page) {
     const WHITE = 0xffffff;
 
     /** One renderer on its own canvas, sized to `cols` x `rows` cells. */
-    const make = (kind, cols, rows, options) => {
+    const make = (kind, cols, rows, options, geom = {}) => {
       const canvas = document.createElement("canvas");
-      const m = { cellW: CELL_W, cellH: CELL_H, dpr: DPR, width: cols * CELL_W, height: rows * CELL_H };
-      canvas.width = m.width;
-      canvas.height = m.height;
+      const cellW = geom.cellW ?? CELL_W, cellH = geom.cellH ?? CELL_H, dpr = geom.dpr ?? DPR;
+      const m = { cellW, cellH, dpr, width: cols * cellW, height: rows * cellH };
+      canvas.width = Math.round(m.width * dpr);
+      canvas.height = Math.round(m.height * dpr);
       document.body.append(canvas);
       const r = kind === "webgl" ? new WebGLRenderer(canvas, options) : new Canvas2DRenderer(canvas);
       r.configure(m);
@@ -729,4 +730,117 @@ export default async function ({ page, url }) {
     for (const key of ["err", "err2", "err3", "err4"]) assert.equal(r[key], 0, `${kind}: gl.getError() ${key}`);
   }
   assert.deepEqual(fx.webgl.underPixels, fx.canvas.underPixels, "the two renderers draw a slide with a frame under it alike");
+
+  await linkCase(page);
+}
+
+/**
+ * The resting cue of a link (the wire flag LINK, docs/design.md 6.31): a dotted underline, one CSS pixel thick, dots and gaps one
+ * CSS pixel long, in the place of the underline, in the cell's foreground colour (after the swap of an inverse cell), or in the link
+ * colour a renderer was given. Not on a cell that has the program's own underline. Both renderers draw the same device pixels, at dpr 1
+ * with a cell of an even and of an odd width and at dpr 2. The expected pixels are written out here, not taken from the renderers.
+ */
+async function linkCase(page) {
+  const results = await bothRenderers(page, (kind) => {
+    const R = window.__R;
+    const W = 0xffffff, RED = 0xaa2222, BLUE = 0x2222cc, GREEN = 0x00ff00, LINK = 16, UNDERLINE = 4, INVERSE = 8;
+    const COLS = 12;
+    const rowsOf = (flag) => [
+      [["ae", 2, W, 0, 0], ["oc", 2, W, 0, flag], ["ua", 2, W, 0, flag | UNDERLINE], ["ec", 2, W, 0, 0], ["    ", 4, W, 0, 0]],
+      [["    ", 4, W, 0, 0], ["    ", 4, W, 0, flag], ["    ", 4, W, 0, 0]],
+      [["oooo", 4, RED, BLUE, flag | INVERSE], ["        ", 8, W, 0, 0]],
+      [["ooo", 3, W, 0, flag], ["   ", 3, W, 0, flag], ["      ", 6, W, 0, 0]],
+    ];
+    const frameOf = (flag) => ({ cols: COLS, rows: 4, cursor: null, focused: true, fg: W, bg: 0, lines: rowsOf(flag) });
+    // [row, first column, last column (exclusive), foreground of the dots, background of the cells] of every linked stretch.
+    const linked = [[0, 2, 4, W, 0], [1, 4, 8, W, 0], [2, 0, 4, BLUE, RED], [3, 0, 6, W, 0]];
+    const out = {};
+    for (const geom of [{ dpr: 1, cellW: 8 }, { dpr: 1, cellW: 9 }, { dpr: 2, cellW: 8 }]) {
+      const key = `${geom.dpr}x${geom.cellW}`;
+      const h = R.make(kind, COLS, 4, undefined, geom);
+      const { dpr, cellW, cellH } = h.m;
+      const dot = dpr, cw = Math.round(cellW * dpr), ch = Math.round(cellH * dpr);
+      const px = (img, X, Y) => R.pack(R.at(h, img, X, Y));
+      const wrong = [];
+      let dots = 0;
+      const check = (img, linkColor, what) => {
+        for (const [y, c0, c1, fg, bg] of linked) {
+          const top = y * ch + ch - 2 * dot;
+          for (let Y = top - 1; Y < top + 2 * dot + 1 && Y < (y + 1) * ch; Y++) {
+            for (let X = c0 * cw; X < c1 * cw; X++) {
+              const onDot = Y >= top && Y < top + dot && Math.floor(X / dot) % 2 === 0;
+              const want = onDot ? (linkColor ?? fg) : bg;
+              if (onDot) dots++;
+              if (px(img, X, Y) !== want) wrong.push(`${what} ${y}:${X},${Y} ${px(img, X, Y).toString(16)} != ${want.toString(16)}`);
+            }
+          }
+        }
+      };
+      R.draw(h, frameOf(LINK));
+      check(R.pixels(h), null, "own colour");
+      // The program's own underline stays alone: a solid line, no dotted one.
+      const img = R.pixels(h);
+      let solid = false;
+      for (let Y = ch - 2 * dot; Y < ch; Y++) {
+        let all = true;
+        for (let X = 4 * cw; X < 6 * cw; X++) if (px(img, X, Y) !== W) all = false;
+        if (all) solid = true;
+      }
+      // A block cursor on a linked blank cell: the dots are in the pane colour over the cursor colour, in both renderers.
+      R.draw(h, { ...frameOf(LINK), cursor: R.block(5, 1) });
+      const onCursor = R.pixels(h);
+      const curBand = Array.from({ length: cw }, (_, i) => px(onCursor, 5 * cw + i, ch + ch - 2 * dot));
+      // The same frame in the link colour of forced colours, and then back to the cell's own.
+      h.r.setLinkColor(GREEN);
+      R.draw(h, frameOf(LINK));
+      const green = R.pixels(h);
+      check(green, GREEN, "link colour");
+      let ownUnderline = 0;
+      for (let Y = ch - 2 * dot; Y < ch; Y++) for (let X = 4 * cw; X < 6 * cw; X++) if (px(green, X, Y) === GREEN) ownUnderline++;
+      h.r.setLinkColor(null);
+      R.draw(h, frameOf(LINK));
+      const back = R.pixels(h);
+      // A frame with no linked cell draws no dots at all; the band holds what the cells hold.
+      R.draw(h, frameOf(0));
+      const plain = R.pixels(h);
+      let strays = 0;
+      for (let y = 0; y < 4; y++) {
+        for (let Y = y * ch + ch - 2 * dot; Y < y * ch + ch - dot; Y++) {
+          for (let X = 0; X < COLS * cw; X++) {
+            const cell = Math.floor(X / cw);
+            const underlined = y === 0 && (cell === 4 || cell === 5);
+            if (!underlined && px(plain, X, Y) !== (y === 2 && cell < 4 ? RED : 0)) strays++;
+          }
+        }
+      }
+      out[key] = {
+        wrong: wrong.slice(0, 5), wrongCount: wrong.length, dots, solid, ownUnderline, strays,
+        backSame: R.diff(img, back), err: R.glError(h), curBand: curBand.join(","), curColours: [...new Set(curBand)].sort().join(","),
+        // The rows of the dots over the linked cells only: the program's own underline lies in other rows in the two renderers.
+        band: linked
+          .map(([y, c0, c1]) => Array.from({ length: (c1 - c0) * cw }, (_, i) => px(img, c0 * cw + i, y * ch + ch - 2 * dot)))
+          .flat()
+          .join(","),
+      };
+      R.dispose(h);
+    }
+    return out;
+  });
+  for (const kind of ["webgl", "canvas"]) {
+    for (const [key, r] of Object.entries(results[kind])) {
+      const what = `${kind} at ${key}`;
+      assert.deepEqual(r.wrong, [], `${what}: ${r.wrongCount} pixels of the dotted line or its neighbours are wrong`);
+      assert.ok(r.dots > 100, `${what}: the dots were counted (${r.dots})`);
+      assert.ok(r.solid, `${what}: a cell with the program's underline keeps a solid line`);
+      assert.equal(r.ownUnderline, 0, `${what}: the program's underline is not in the link colour and gets no dots`);
+      assert.equal(r.strays, 0, `${what}: a frame with no linked cell draws no dots`);
+      assert.equal(r.backSame, 0, `${what}: with the link colour taken away the cell's own colour is back`);
+      assert.equal(r.err, 0, `${what}: gl.getError()`);
+      assert.equal(r.curColours, [0, 0xff8fb8].sort().join(","), `${what}: the dots on a block cursor are in the pane colour over the cursor colour`);
+    }
+  }
+  for (const key of Object.keys(results.webgl)) {
+    assert.equal(results.webgl[key].curBand, results.canvas[key].curBand, `the two renderers draw the dots on a block cursor alike at ${key}`);
+    assert.equal(results.webgl[key].band, results.canvas[key].band, `the two renderers draw the same dotted line at ${key}`);
+  }
 }

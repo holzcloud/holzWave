@@ -1,6 +1,6 @@
 import {
-  BOLD, CURSOR_COLOR, CursorShape, Frame, GhostCell, INVERSE, ITALIC, ImageDraw, Metrics, PaneFx, PxRect, Renderer, UNDERLINE, font,
-  getFontPx, gridCells, rowExtras, visibleCursor,
+  BOLD, CURSOR_COLOR, CursorShape, Frame, GhostCell, INVERSE, ITALIC, ImageDraw, LINK, Metrics, PaneFx, PxRect, Renderer, UNDERLINE, font,
+  getFontPx, gridCells, linkDot, rowExtras, visibleCursor,
 } from "./frame.js";
 
 // WebGL2 renderer: one instanced draw per frame. Every cell is an instance that carries its
@@ -38,6 +38,8 @@ const F_CUR_TOP = 32; // 1 device px lines of the hollow outline
 const F_CUR_BOTTOM = 64;
 const F_CUR_LEFT = 128;
 const F_CUR_RIGHT = 256;
+// The resting cue of a link (the wire flag LINK): a dotted underline. Its own bit, so no cursor part shares it.
+const F_LINK = 512;
 const CUR_THICK = 2;
 
 /** A picture's texture is deleted when this many draws (`begin` calls) have passed without it being drawn. */
@@ -61,6 +63,7 @@ out vec3 vBg;
 out vec2 vCorner;
 flat out uint vFlags;
 flat out uint vBgRaw;
+flat out vec2 vCell;
 vec3 rgb(uint c) { return vec3(float((c >> 16u) & 255u), float((c >> 8u) & 255u), float(c & 255u)) / 255.0; }
 void main() {
   vec2 corner = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));
@@ -73,6 +76,7 @@ void main() {
   vCorner = corner;
   vFlags = aFlags;
   vBgRaw = aBg;
+  vCell = aCell;
 }`;
 
 const FRAG = `#version 300 es
@@ -83,17 +87,25 @@ uniform vec3 uCursor;
 uniform float uAlpha;    // 1, except for a cursor ghost, which is blended
 uniform uint uPass;      // 0 the whole cell, 1 backgrounds only, 2 glyphs and underlines only, 3 cursor shapes only
 uniform uint uDefaultBg; // the frame's own background, packed like the instances: pass 1 leaves those cells bare
+uniform float uLinkT;    // the dot, the gap and the thickness of the dotted line of a link, in device px
+uniform vec4 uLinkColor; // the colour of that line when w is 1 (forced colours); otherwise the cell's own foreground
 in vec2 vUV;
 in vec3 vFg;
 in vec3 vBg;
 in vec2 vCorner;
 flat in uint vFlags;
 flat in uint vBgRaw;
+flat in vec2 vCell;
 out vec4 outColor;
 bool has(uint bit) { return (vFlags & bit) != 0u; }
 void main() {
   vec2 p = vCorner * uCell; // position inside the cell in device px; pixel centres are at n + 0.5
   bool underline = has(${F_UNDERLINE}u) && p.y > uCell.y - 2.0;
+  // The dotted line of a link: the two rows of height uLinkT that end uLinkT above the cell's bottom, dots on the even multiples of
+  // uLinkT counted from the grid's left edge (the canvas renderer lays out the same pixels).
+  bool dotted = has(${F_LINK}u) && p.y > uCell.y - 2.0 * uLinkT && p.y < uCell.y - uLinkT
+      && mod(floor((vCell.x * uCell.x + p.x) / uLinkT), 2.0) < 1.0;
+  vec3 dotColor = uLinkColor.w > 0.5 ? uLinkColor.rgb : vFg;
   // Cursor shapes other than the block, which swaps the cell's colours on the CPU.
   bool shape = (has(${F_CUR_BAR}u) && p.x < ${CUR_THICK}.0)
       || (has(${F_CUR_UNDER}u) && p.y > uCell.y - ${CUR_THICK}.0)
@@ -113,13 +125,14 @@ void main() {
   }
   float a = texture(uAtlas, vUV).a;
   if (uPass == 2u) {
-    float cover = underline ? 1.0 : a;
+    float cover = underline || dotted ? 1.0 : a;
     if (cover <= 0.0) discard;
-    outColor = vec4(vFg, cover);
+    outColor = vec4(dotted ? dotColor : vFg, cover);
     return;
   }
   vec3 c = mix(vBg, vFg, a);
   if (underline) c = vFg;
+  if (dotted) c = dotColor;
   if (shape) c = uCursor;
   outColor = vec4(c, uAlpha);
 }`;
@@ -232,6 +245,8 @@ export class WebGLRenderer implements Renderer {
   private u32 = new Uint32Array(0);
   private capacity = 0;
   private cursorColor = CURSOR_COLOR;
+  /** The colour of the dotted line of a link when it is not the cell's own (forced colours), or null. */
+  private linkColor: number | null = null;
   // The cursor's instances of a frame with pictures, kept out of the instance buffer so they can be drawn last.
   private curWords = new ArrayBuffer(2 * WORDS * 4);
   private curF32 = new Float32Array(this.curWords);
@@ -278,6 +293,7 @@ export class WebGLRenderer implements Renderer {
     this.prog = prog;
     for (const n of [
       "uCell", "uViewport", "uSlot", "uAtlasPx", "uAtlasCols", "uAtlas", "uCursor", "uOffsetY", "uAlpha", "uPass", "uDefaultBg",
+      "uLinkT", "uLinkColor",
     ]) {
       this.uniforms[n] = gl.getUniformLocation(prog, n);
     }
@@ -343,6 +359,10 @@ export class WebGLRenderer implements Renderer {
 
   setCursorColor(rgb: number) {
     this.cursorColor = rgb & 0xffffff;
+  }
+
+  setLinkColor(rgb: number | null) {
+    this.linkColor = rgb === null ? null : rgb & 0xffffff;
   }
 
   /**
@@ -680,6 +700,13 @@ export class WebGLRenderer implements Renderer {
     gl.uniform1f(this.uniforms.uAlpha!, 1);
     gl.uniform1ui(this.uniforms.uPass!, 0);
     gl.uniform1ui(this.uniforms.uDefaultBg!, f.bg >>> 0);
+    gl.uniform1f(this.uniforms.uLinkT!, linkDot(this.m.dpr));
+    const lc = this.linkColor;
+    gl.uniform4f(
+      this.uniforms.uLinkColor!,
+      lc === null ? 0 : ((lc >> 16) & 255) / 255, lc === null ? 0 : ((lc >> 8) & 255) / 255, lc === null ? 0 : (lc & 255) / 255,
+      lc === null ? 0 : 1,
+    );
     gl.uniform3f(
       this.uniforms.uCursor!,
       ((this.cursorColor >> 16) & 255) / 255, ((this.cursorColor >> 8) & 255) / 255, (this.cursorColor & 255) / 255,
@@ -789,7 +816,8 @@ export class WebGLRenderer implements Renderer {
         let fg = fg0, bg = bg0;
         if (flags & INVERSE) [fg, bg] = [bg, fg];
         const style = flags & (BOLD | ITALIC);
-        const underline = flags & UNDERLINE ? F_UNDERLINE : 0;
+        // The program's underline, or else the dotted resting cue of a link; never both on one cell.
+        const underline = flags & UNDERLINE ? F_UNDERLINE : flags & LINK ? F_LINK : 0;
         const chars = Array.from(text);
         const end = Math.min(cols, col + runCols);
         const next = line[ri + 1]?.[0];

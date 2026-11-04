@@ -1,6 +1,6 @@
 import {
-  BOLD, CURSOR_COLOR, Frame, INVERSE, ITALIC, ImageDraw, Metrics, PaneFx, PxRect, Renderer, UNDERLINE, css, font,
-  gridCells, rowExtras, visibleCursor,
+  BOLD, CURSOR_COLOR, Frame, INVERSE, ITALIC, ImageDraw, LINK, Metrics, PaneFx, PxRect, Renderer, UNDERLINE, css, dotSpans, font,
+  gridCells, linkDot, rowExtras, visibleCursor,
 } from "./frame.js";
 
 /** The cursor bar and underline are this many device pixels thick, the hollow outline one. Same as the WebGL shader. */
@@ -35,6 +35,8 @@ export class Canvas2DRenderer implements Renderer {
   private ctx: CanvasRenderingContext2D;
   private m: Metrics = { cellW: 8, cellH: 17, dpr: 1, width: 0, height: 0 };
   private cursorColor = CURSOR_COLOR;
+  /** The colour of the dotted line of a link when it is not the cell's own (forced colours), or null. */
+  private linkColor: number | null = null;
 
   constructor(private canvas: HTMLCanvasElement) {
     this.ctx = canvas.getContext("2d", { alpha: false })!;
@@ -46,6 +48,27 @@ export class Canvas2DRenderer implements Renderer {
 
   setCursorColor(rgb: number) {
     this.cursorColor = rgb & 0xffffff;
+  }
+
+  setLinkColor(rgb: number | null) {
+    this.linkColor = rgb === null ? null : rgb & 0xffffff;
+  }
+
+  /**
+   * The dotted line of a link over the cells `col` to `end` (exclusive) of row `y`, in `color` or the colour set for links: dots and
+   * gaps of one CSS pixel, the line one CSS pixel high, in the place of the underline. Everything is laid out in whole device pixels
+   * counted from the grid's corner, the same numbers the WebGL shader uses, so the two renderers draw the same dots.
+   */
+  private paintDots(y: number, col: number, end: number, color: number) {
+    const { ctx, m } = this;
+    const dot = linkDot(m.dpr);
+    const cw = Math.max(1, Math.round(m.cellW * m.dpr));
+    const ch = Math.max(1, Math.round(m.cellH * m.dpr));
+    const top = y * ch + ch - 2 * dot;
+    ctx.fillStyle = css(this.linkColor ?? color);
+    ctx.beginPath();
+    for (const [from, to] of dotSpans(col * cw, end * cw, dot)) ctx.rect(from / m.dpr, top / m.dpr, (to - from) / m.dpr, dot / m.dpr);
+    ctx.fill();
   }
 
   begin(bg: number) {
@@ -215,6 +238,8 @@ export class Canvas2DRenderer implements Renderer {
           }
           if (flags & UNDERLINE) ctx.fillRect(x, y * cellH + cellH - 2, (end - col) * cellW, 1);
         }
+        // The resting cue of a link, also over blank cells (a link that hides itself is marked too); the program's own underline stays alone.
+        if (flags & LINK && !(flags & UNDERLINE)) this.paintDots(y, col, end, fg);
         col = end;
       }
     }
@@ -238,6 +263,7 @@ export class Canvas2DRenderer implements Renderer {
             ctx.fillText(tail === undefined ? at.ch : at.ch + tail, x, y + baseline);
             if (at.flags & UNDERLINE) ctx.fillRect(x, y + cellH - 2, w, 1);
           }
+          if (at.flags & LINK && !(at.flags & UNDERLINE)) this.paintDots(cursor.y, at.first, at.first + at.span, f.bg);
           break;
         }
         case "bar":

@@ -69,6 +69,11 @@ async function open(page, url, { os = "macos", rows = ROWS(), schemes = null, re
   await page.waitForSelector(".divider");
   await page.waitForFunction(() => window.__MOCK__.callsOf("start_pane").length >= 2);
   await page.evaluate(() => document.getElementById("term").focus());
+  // The page's own modules, for predicates that must answer at once (`waitForFunction` does not wait for a promise).
+  await page.evaluate(async () => {
+    window.__state = (await import(new URL("state.js", location.href).href)).state;
+    window.__conns = (await import(new URL("connstate.js", location.href).href)).paneConns;
+  });
   const start = (await callsOf(page, "start_pane"))[0];
   const c = await page.evaluate(() => {
     const r = document.getElementById("term").getBoundingClientRect();
@@ -79,7 +84,7 @@ async function open(page, url, { os = "macos", rows = ROWS(), schemes = null, re
   const origin = (pane) => c.left + (pane === 1 ? 0 : c.width / 2) + PAD;
   if (schemes) await setSchemes(page, schemes);
   if (remote) {
-    await page.waitForFunction(async () => (await import(new URL("connstate.js", location.href).href)).paneConns.size === 1);
+    await page.waitForFunction(() => window.__conns.size === 1);
   }
   await emit(page, "frame", frame(1, 1, rows, { cols, rows: rows.length }));
   await emit(page, "frame", frame(2, 1, rows, { cols, rows: rows.length }));
@@ -103,13 +108,7 @@ async function setSchemes(page, schemes) {
   const view = structuredClone(golden.settings_view);
   view.settings.link_schemes = schemes;
   await emit(page, "settings", view);
-  await page.waitForFunction(
-    async (want) => {
-      const { state } = await import(new URL("state.js", location.href).href);
-      return JSON.stringify(state.settings?.settings.link_schemes) === JSON.stringify(want);
-    },
-    schemes,
-  );
+  await page.waitForFunction((want) => JSON.stringify(window.__state.settings?.settings.link_schemes) === JSON.stringify(want), schemes);
 }
 
 /**
@@ -205,6 +204,7 @@ export default async function ({ page, url, errors }) {
   await step("ask text", () => askTextCase(page, url));
   await step("file", () => fileCase(page, url));
   await step("hints", () => hintCase(page, url));
+  await step("dots", () => dotsCase(page, url));
   if (currentBackend() === "ws") await step("web", () => webCase(page, url));
   assert.deepEqual(errors, [], "the page reported errors");
 }
@@ -726,6 +726,78 @@ async function hintCase(page, url) {
   labels = await hintLabels(page);
   assert.deepEqual(labels.map((l) => l[0]), ["a", "b", "c", "d"], "four targets: the file link is not one in a pane of a server");
   await page.keyboard.press("Escape");
+}
+
+// ---- the resting cue in the page -----------------------------------------------------------------------------
+
+/** The colour of the pixel at client position (x, y) of the canvas of the page (the 2D renderer), as 0xRRGGBB. */
+const canvasPixel = (page, x, y) =>
+  page.evaluate(([cx, cy]) => {
+    const c = document.getElementById("term");
+    const r = c.getBoundingClientRect();
+    const d = c.getContext("2d").getImageData(Math.floor((cx - r.left) * devicePixelRatio), Math.floor((cy - r.top) * devicePixelRatio), 1, 1).data;
+    return (d[0] << 16) | (d[1] << 8) | d[2];
+  }, [x, y]);
+
+/**
+ * The cells of a marked link carry a dotted line in the cells' colour; under forced colours it is the system link colour, and
+ * back to the cells' colour when forced colours end. The 2D renderer is read back here, the colour logic of WebGL is in the
+ * renderer test; both go through `setLinkColor` of the scene.
+ */
+async function dotsCase(page, url) {
+  const g = await open(page, url);
+  // Row 1 holds the link at columns 4 to 7. At a device pixel ratio of 1 its dots are one pixel, on the even pixels of the grid, in the
+  // row two above the bottom of the cell.
+  const b = g.box(1, 1, 4, 7);
+  const dotRow = b.y + g.ch - 2;
+  const x0 = Math.round(b.x);
+  const cw = Math.round(g.cw);
+  const dotPixel = (i) => (4 * cw + i) % 2 === 0;
+  const first = [...Array(6).keys()].find((i) => dotPixel(i));
+  await frames(page, 3); // the frame is drawn on an animation frame
+  assert.equal(await canvasPixel(page, x0 + first + 0.5, dotRow + 0.5), FG, "a dot is in the colour of the cell");
+  const gap = [...Array(6).keys()].find((i) => !dotPixel(i));
+  assert.equal(await canvasPixel(page, x0 + gap + 0.5, dotRow + 0.5), BG, "between two dots the cell shows");
+  assert.equal(await canvasPixel(page, x0 + first + 0.5, dotRow - 1.5), BG, "one pixel above: nothing");
+  assert.equal(await canvasPixel(page, x0 + first + 0.5, dotRow + 1.5), BG, "one pixel below: nothing");
+  assert.equal(await canvasPixel(page, x0 + first + 0.5, g.box(1, 0, 0, 0).y + g.ch - 2 + 0.5), BG, "a row with no link has none");
+
+  await page.emulateMedia({ forcedColors: "active" });
+  const honoured = await page.evaluate(() => matchMedia("(forced-colors: active)").matches);
+  console.log(`osclinks: forced-colors emulation ${honoured ? "honoured" : "NOT honoured"} by this engine`);
+  // The system link colour while forced colours are active (it is another one when they are not).
+  const link = await page.evaluate(() => {
+    const p = document.createElement("span");
+    p.style.color = "LinkText";
+    document.body.append(p);
+    const m = /(\d+)\D+(\d+)\D+(\d+)/.exec(getComputedStyle(p).color);
+    p.remove();
+    return (Number(m[1]) << 16) | (Number(m[2]) << 8) | Number(m[3]);
+  });
+
+  if (honoured) {
+    await page.waitForFunction(
+      ([x, y, want]) => {
+        const c = document.getElementById("term");
+        const r = c.getBoundingClientRect();
+        const d = c.getContext("2d").getImageData(Math.floor(x - r.left), Math.floor(y - r.top), 1, 1).data;
+        return ((d[0] << 16) | (d[1] << 8) | d[2]) === want;
+      },
+      [x0 + first + 0.5, dotRow + 0.5, link],
+    );
+    assert.equal(await canvasPixel(page, x0 + first + 0.5, dotRow + 0.5), link, "under forced colours the dot is the system link colour");
+    assert.equal(await canvasPixel(page, x0 + gap + 0.5, dotRow + 0.5) === link, false, "and the gaps stay gaps");
+    await page.emulateMedia({ forcedColors: "none" });
+    await page.waitForFunction(
+      ([x, y, want]) => {
+        const c = document.getElementById("term");
+        const r = c.getBoundingClientRect();
+        const d = c.getContext("2d").getImageData(Math.floor(x - r.left), Math.floor(y - r.top), 1, 1).data;
+        return ((d[0] << 16) | (d[1] << 8) | d[2]) === want;
+      },
+      [x0 + first + 0.5, dotRow + 0.5, FG],
+    );
+  }
 }
 
 // ---- the browser build ---------------------------------------------------------------------------------------

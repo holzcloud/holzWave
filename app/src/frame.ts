@@ -100,6 +100,33 @@ export function rowExtras(f: Frame, y: number): Map<number, string> | null {
 }
 
 export const BOLD = 1, ITALIC = 2, UNDERLINE = 4, INVERSE = 8;
+/**
+ * The wire flag of a cell inside a link the program marked (core/src/wire.rs). A renderer draws the resting cue of it, a dotted
+ * underline (docs/design.md 6.31), unless the cell already has the program's own underline.
+ */
+export const LINK = 16;
+
+/**
+ * The size of one dot of the resting cue, and its thickness, in device pixels: one CSS pixel, so `round(dpr)`, at least 1. The
+ * dots and the gaps between them are this long, and the line lies in the two rows of this height that end one such height above
+ * the bottom of the cell. Both renderers use these numbers, so their dots land on the same device pixels.
+ */
+export const linkDot = (dpr: number): number => (Number.isFinite(dpr) && dpr > 1 ? Math.max(1, Math.round(dpr)) : 1);
+
+/**
+ * The device-pixel spans `[from, to)` of the dots of a dotted line over device pixels `[start, stop)`, counted from the grid's
+ * left edge: dots lie on the even multiples of `dot`. A pure function, so a test can compare what the renderers draw with it.
+ */
+export function dotSpans(start: number, stop: number, dot: number): [number, number][] {
+  const out: [number, number][] = [];
+  if (!(dot >= 1) || !(stop > start)) return out;
+  for (let b = Math.floor(start / (2 * dot)) * 2 * dot; b < stop; b += 2 * dot) {
+    const from = Math.max(b, start);
+    const to = Math.min(b + dot, stop);
+    if (to > from) out.push([from, to]);
+  }
+  return out;
+}
 /** The cursor colour of the built-in aubergine theme; a renderer draws another one after `setCursorColor`. */
 export const CURSOR_COLOR = 0xff8fb8;
 
@@ -156,6 +183,12 @@ export interface Renderer {
   drawPane(frame: Frame, rect: PxRect, fx?: PaneFx): void;
   /** Draw the cursor in this colour (0xRRGGBB) from the next frame on; the caller schedules that frame. */
   setCursorColor(rgb: number): void;
+  /**
+   * Draw the dotted line of a link in this colour (0xRRGGBB), the system link colour under forced colours, or in the cell's own
+   * foreground colour (null, the default) from the next frame on; the caller schedules that frame. A renderer that is never given
+   * one behaves as it always did.
+   */
+  setLinkColor?(rgb: number | null): void;
   /** Block until the GPU has finished, so timings are real. Only used by the benchmark. */
   sync(): void;
 }

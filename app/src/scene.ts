@@ -71,6 +71,30 @@ export async function initScene(): Promise<void> {
   // The two grid effects follow the settings and reduced motion, live.
   onPreferenceChange(syncMotion);
   syncMotion();
+  // The dotted line of a link takes the system link colour under forced colours, and follows the query live.
+  if (typeof window.matchMedia === "function") window.matchMedia("(forced-colors: active)").addEventListener("change", syncLinkColor);
+  syncLinkColor();
+}
+
+/**
+ * The system link colour (`LinkText`) as 0xRRGGBB, read from a probe element that is removed again, or null when the page cannot
+ * tell. Only meaningful under forced colours: elsewhere `LinkText` is the browser's own blue, which the page does not use.
+ */
+function systemLinkColor(): number | null {
+  const probe = document.createElement("span");
+  probe.hidden = true;
+  probe.style.color = "LinkText";
+  document.body.append(probe);
+  const m = /^rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/.exec(getComputedStyle(probe).color);
+  probe.remove();
+  return m ? ((Number(m[1]) & 255) << 16) | ((Number(m[2]) & 255) << 8) | (Number(m[3]) & 255) : null;
+}
+
+/** Tell the renderer which colour the dotted line of a link has: the system link colour while forced colours are active, else its own. */
+function syncLinkColor(): void {
+  const forced = typeof window.matchMedia === "function" && window.matchMedia("(forced-colors: active)").matches;
+  renderer?.setLinkColor?.(forced ? systemLinkColor() : null);
+  schedule();
 }
 
 /**
