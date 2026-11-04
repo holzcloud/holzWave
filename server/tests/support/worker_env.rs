@@ -31,17 +31,13 @@ pub const DEFAULT_IMAGE_MIB: u32 = 64;
 /// The shell command text that prints one picture of `bytes` bytes of RGBA (zeros, 256 pixels wide, so `bytes` must be a
 /// multiple of 1024) with the id `id` in one cell, in protocol chunks of 4096 base64 characters, and then sets the title
 /// `hw-pic-done`. The title comes after the last chunk in the byte stream, so a test that has seen it knows that the engine
-/// has taken or refused the whole picture. Std only: `head`, `base64`, `tr`, `fold` and `printf` of any POSIX system.
+/// has taken or refused the whole picture. One line of about 400 characters, so that it can also be typed into a shell.
+/// Std only: `head`, `base64`, `tr`, `fold` and `printf` of any POSIX system.
 pub fn picture_command(bytes: usize, id: u32) -> String {
     assert!(bytes % 1024 == 0 && bytes > 0, "a picture is a whole number of rows of 256 pixels");
     let height = bytes / 1024;
     format!(
-        r#"head -c {bytes} /dev/zero | base64 | tr -d '\n' | fold -w 4096 | {{
-            read -r first
-            printf '\033_Ga=T,f=32,s=256,v={height},i={id},c=1,r=1,m=1,q=2;%s\033\\' "$first"
-            while read -r line || [ -n "$line" ]; do printf '\033_Gm=1,q=2;%s\033\\' "$line"; done
-            printf '\033_Gm=0,q=2;\033\\'
-        }}; printf '\033]0;hw-pic-done\007'"#
+        r#"head -c {bytes} /dev/zero | base64 | tr -d '\n' | fold -w 4096 | {{ read -r first; printf '\033_Ga=T,f=32,s=256,v={height},i={id},c=1,r=1,m=1,q=2;%s\033\\' "$first"; while read -r line || [ -n "$line" ]; do printf '\033_Gm=1,q=2;%s\033\\' "$line"; done; printf '\033_Gm=0,q=2;\033\\'; }}; printf '\033]0;hw-pic-done\007'"#
     )
 }
 

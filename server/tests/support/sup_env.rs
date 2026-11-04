@@ -47,6 +47,8 @@ pub const PATIENCE: Duration = Duration::from_secs(10);
 pub struct SupOptions {
     /// Replaces the default settings (the pane cap of 64 and the default times).
     pub settings: Option<SupervisorSettings>,
+    /// Replaces the fixed shell of every pane (which writes its process id, prints `ready` and then echoes).
+    pub shell: Option<ShellSpec>,
 }
 
 /// A supervisor over real in-process workers.
@@ -75,7 +77,7 @@ impl SupEnv {
         let scratch = Scratch::new("sup");
         let pid_file = scratch.join("shells.pid");
         let script = format!("echo $$ >> '{}'; echo ready; exec cat", pid_file.display());
-        let shell = ShellSpec::new("/bin/sh", &["-c", &script]);
+        let shell = options.shell.unwrap_or_else(|| ShellSpec::new("/bin/sh", &["-c", &script]));
         let launcher = Arc::new(InProcessLauncher::new(scratch.path().to_path_buf(), shell));
         let clock = Arc::new(ManualClock::new(START));
         let settings = options.settings.unwrap_or_default();

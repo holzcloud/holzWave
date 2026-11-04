@@ -524,7 +524,7 @@ fn config_every_key_of_the_file_is_accepted() {
         },
         "workers": {
             "uid_min": 30000, "uid_max": 30999, "idle_timeout": "12h", "max_panes": 32, "max_scrollback_lines": 5000,
-            "nproc": 512, "nofile": 2048, "helper_path": "/opt/hw/helper", "worker_path": "/opt/hw/server"
+            "max_image_mib": 2, "nproc": 512, "nofile": 2048, "helper_path": "/opt/hw/helper", "worker_path": "/opt/hw/server"
         },
         "upload": {"dir": "incoming/files", "max_bytes": 1048576},
         "transport": {"compression": "off"}
@@ -536,6 +536,7 @@ fn config_every_key_of_the_file_is_accepted() {
     assert_eq!(p.limits.max_connections, 500);
     assert_eq!(p.limits.ping_interval, Duration::from_secs(20));
     assert_eq!(p.workers.uid_min, 30_000);
+    assert_eq!(p.workers.max_image_mib, 2, "the picture cap is read from the file");
     assert_eq!(p.upload.dir, PathBuf::from("incoming/files"));
     assert_eq!(p.transport.compression, Compression::Off);
     assert_eq!(p.auth.oidc[0].groups_claim.as_deref(), Some("roles"));
@@ -546,6 +547,28 @@ fn config_every_key_of_the_file_is_accepted() {
     set(&mut full, "data_dir", json!("/srv/data"));
     let p = prepare(&env, &probe_for(&full)).expect("with the data directory variable");
     assert_eq!(p.data_dir, PathBuf::from("/mnt/hw"));
+}
+
+#[test]
+fn config_the_picture_cap_accepts_both_ends_of_its_range_and_zero_means_no_pictures() {
+    let s = setup();
+    for mib in [0, 1, 64, 4096] {
+        let mut file = base();
+        set(&mut file, "workers.max_image_mib", json!(mib));
+        let p = prepare_json(&s, &file).unwrap_or_else(|e| panic!("{mib} is inside the range: {e}"));
+        assert_eq!(p.workers.max_image_mib, mib);
+    }
+    // One past the end is refused with the key, the value and the bounds.
+    let mut file = base();
+    set(&mut file, "workers.max_image_mib", json!(4097));
+    let error = prepare_json(&s, &file).expect_err("4097 is above the range");
+    assert_eq!(error.sentence(), "workers.max_image_mib is 4097 but must be between 0 and 4096");
+}
+
+#[test]
+fn config_the_picture_cap_has_its_row_in_the_list_of_limits_with_the_default_and_the_bounds() {
+    let row = limits::all_rows().into_iter().find(|r| r.key == "workers.max_image_mib").expect("a row for the key");
+    assert_eq!((row.default.as_str(), row.min.as_str(), row.max.as_str()), ("64", "0", "4096"));
 }
 
 #[test]

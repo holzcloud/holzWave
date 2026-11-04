@@ -13,6 +13,10 @@ mod edge;
 mod edge_tls;
 #[path = "support/oidc_provider.rs"]
 mod oidc_provider;
+#[path = "support/scratch.rs"]
+mod scratch;
+#[path = "support/worker_env.rs"]
+mod worker_env;
 #[path = "support/ws_env.rs"]
 mod ws_env;
 
@@ -234,6 +238,53 @@ async fn assemble_lets_a_person_open_the_socket_and_call_a_command() {
     let view = socket.ok("get_layout", "{}").await;
     assert!(view.get("focus").is_some(), "{view}");
     stop(running).await;
+}
+
+/// A server assembled from a configuration with `workers.max_image_mib` set to `cap`; a person's real worker runs `/bin/sh`
+/// in a pane and is typed a command that prints one picture of `bytes` bytes. True when a frame of the pane, the full one asked
+/// for after the picture was taken or refused included, carries a placement. The cap travels the whole way: the file, the
+/// checked configuration, the supervisor's settings, the first control frame of the worker and its host.
+async fn picture_placed_under_the_configured_cap(cap: u32, bytes: usize) -> bool {
+    let mut site = Site::new();
+    site.set("workers.max_image_mib", json!(cap));
+    let running = site.start().await;
+    let (_, cookie) = person(&running, "alice");
+    let mut socket = site.socket(running.addr, &cookie).await;
+    socket.read_json(PATIENCE).await.expect("the session message");
+    socket.ok("set_setting", r#"{"key":"shell","value":"/bin/sh"}"#).await;
+    let pane = focus(&socket.ok("get_layout", "{}").await);
+    socket.ok("start_pane", &json!({"pane": pane, "cols": 80, "rows": 24, "cell_w": 8, "cell_h": 16}).to_string()).await;
+    let typed = format!("{}\r", worker_env::picture_command(bytes, 7));
+    socket.ok("text", &json!({"pane": pane, "text": typed}).to_string()).await;
+    let title = socket.event_where("title", PATIENCE, |p| p["pane"] == json!(pane) && p["title"] == "hw-pic-done").await;
+    assert!(title.is_some(), "the title that follows the picture");
+    // Everything that is waiting, then a full frame that was asked for after the picture was taken or refused.
+    let mut frames = Vec::new();
+    while let Some(message) = socket.read_json(Duration::from_millis(300)).await {
+        if message["event"] == "frame" && message["payload"]["pane"] == json!(pane) {
+            frames.push(message["payload"].clone());
+        }
+    }
+    let seen = frames.iter().filter_map(|f| f["seq"].as_u64()).max().unwrap_or(0);
+    socket.ok("request_full", &json!({"pane": pane}).to_string()).await;
+    let full = socket
+        .event_where("frame", PATIENCE, |p| p["pane"] == json!(pane) && p["full"] == true && p["seq"].as_u64() > Some(seen))
+        .await
+        .expect("the full frame that was asked for");
+    frames.push(full["payload"].clone());
+    stop(running).await;
+    frames.iter().any(|f| f["images"].as_array().is_some_and(|list| !list.is_empty()))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn assemble_gives_the_workers_the_picture_cap_of_the_configuration() {
+    const MIB: usize = 1024 * 1024;
+    // Under a cap of 2 MiB: a picture of 1 MiB is placed, one of 3 MiB is not; the control is the same 3 MiB under a cap of 8.
+    assert!(picture_placed_under_the_configured_cap(2, MIB).await, "1 MiB is under the configured cap of 2 MiB");
+    assert!(picture_placed_under_the_configured_cap(8, 3 * MIB).await, "3 MiB is under the configured cap of 8 MiB");
+    assert!(!picture_placed_under_the_configured_cap(2, 3 * MIB).await, "3 MiB is over the configured cap of 2 MiB");
+    // 0 is no pictures at all.
+    assert!(!picture_placed_under_the_configured_cap(0, MIB).await, "a configured cap of 0 keeps no picture");
 }
 
 #[tokio::test(flavor = "multi_thread")]

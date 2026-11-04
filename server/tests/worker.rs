@@ -211,6 +211,83 @@ fn tracer_the_picture_cap_of_the_first_frame_reaches_the_pane_a_picture_of_2_mib
     rig.finish();
 }
 
+#[test]
+fn images_the_cap_wins_over_the_persons_setting_a_setting_of_64_does_not_lift_a_cap_of_1() {
+    // The person allows 64 MiB, so the setting alone admits a picture of 2 MiB: the same picture is placed under a cap of 8.
+    let (rig, pane) = picture_rig(8, Some(64), 2 * MIB);
+    assert!(first_placement(&rig, pane).is_some(), "the setting of 64 MiB and a cap of 8 MiB admit a picture of 2 MiB");
+    rig.finish();
+    // Under a cap of 1 MiB the person's setting of 64 MiB changes nothing: the cap is the smaller.
+    let (rig, pane) = picture_rig(1, Some(64), 2 * MIB);
+    assert_eq!(first_placement(&rig, pane), None, "the cap of 1 MiB wins over the setting of 64 MiB");
+    rig.finish();
+}
+
+#[test]
+fn images_a_setting_below_the_cap_keeps_its_value_2_mib_under_a_cap_of_8_places_1_and_refuses_3() {
+    let (rig, pane) = picture_rig(8, Some(2), MIB);
+    assert!(first_placement(&rig, pane).is_some(), "1 MiB is under the setting of 2 MiB");
+    rig.finish();
+    // The same cap with the default setting admits 3 MiB, so it is the person's 2 MiB that refuses it below.
+    let (rig, pane) = picture_rig(8, None, 3 * MIB);
+    assert!(first_placement(&rig, pane).is_some(), "the cap of 8 MiB alone admits 3 MiB");
+    rig.finish();
+    let (rig, pane) = picture_rig(8, Some(2), 3 * MIB);
+    assert_eq!(first_placement(&rig, pane), None, "the setting of 2 MiB is not raised to the cap of 8 MiB");
+    rig.finish();
+}
+
+#[test]
+fn images_a_cap_of_0_turns_pictures_off_whatever_the_setting_says() {
+    // The control: the same picture under a cap of 8 MiB is placed, so a missing placement below is the cap and not the picture.
+    let (rig, pane) = picture_rig(8, Some(64), MIB);
+    assert!(first_placement(&rig, pane).is_some());
+    rig.finish();
+    for setting in [None, Some(1), Some(64), Some(512)] {
+        let (rig, pane) = picture_rig(0, setting, MIB);
+        assert_eq!(first_placement(&rig, pane), None, "setting {setting:?} under a cap of 0");
+        assert_eq!(rig.frames_with_images(pane), 0);
+        rig.finish();
+    }
+    // The smallest picture the helper makes is 1 KiB: a cap of 0 refuses it too, it is not a matter of size.
+    let (rig, pane) = picture_rig(0, None, 1024);
+    assert_eq!(first_placement(&rig, pane), None);
+    rig.finish();
+}
+
+#[test]
+fn images_a_refused_picture_has_no_pixels_and_every_read_for_it_fails_with_the_fixed_text() {
+    let (mut rig, pane) = picture_rig(0, None, MIB);
+    for generation in [0, 1, 2, u64::MAX] {
+        let refused = rig.err(2, "image_data", json!({"pane": pane, "image": 7, "generation": generation, "offset": 0}));
+        assert_eq!(refused, json!("no such image"), "generation {generation}");
+    }
+    rig.finish();
+    // The same read for a picture that was placed answers its pixels, so the text above is the refusal and not a broken command.
+    let (mut rig, pane) = picture_rig(8, None, MIB);
+    let (image, generation) = first_placement(&rig, pane).expect("placed");
+    let answer = rig.call(2, "image_data", json!({"pane": pane, "image": image, "generation": generation, "offset": 0}));
+    assert!(matches!(answer.body, ResBody::Binary(ref bytes) if bytes.len() == 16 + MIB.min(512 * 1024)), "{answer:?}");
+    rig.finish();
+}
+
+#[test]
+fn init_a_first_frame_of_version_1_ends_the_worker_in_a_failure_and_so_does_the_old_twelve_byte_layout() {
+    // Version 1 with the four new bytes: it decodes, and the version is what the worker refuses.
+    let mut rig = Rig::start();
+    rig.send(Frame::Ctl(Ctl::Init { version: 1, max_panes: 3, max_scrollback_lines: 100, max_image_mib: 64 }));
+    rig.wait_for("the failure note", PATIENCE, |f| matches!(f, Frame::Note(Note::Exiting(ExitReason::Failure))));
+    assert!(!rig.seen().iter().any(|f| matches!(f, Frame::Note(Note::Ready))), "nothing was started");
+    assert_eq!(rig.finish(), RunEnd::Failed);
+
+    // The bytes a version 1 supervisor wrote, length prefix and twelve bytes: cut off before the cap, so a bad frame.
+    let mut rig = Rig::start();
+    rig.send_raw(&[0, 0, 0, 12, 0x04, 0x01, 0, 1, 0, 0, 0, 3, 0, 1, 0, 0]);
+    rig.wait_for("the failure note", PATIENCE, |f| matches!(f, Frame::Note(Note::Exiting(ExitReason::Failure))));
+    assert!(!rig.seen().iter().any(|f| matches!(f, Frame::Note(Note::Ready))), "nothing was started");
+    assert_eq!(rig.finish(), RunEnd::Failed);
+}
+
 // ---- helpers ------------------------------------------------------------------------------------------------------------
 
 fn rig_with(hooks: TestHooks) -> Rig {

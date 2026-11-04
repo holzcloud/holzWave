@@ -11,7 +11,7 @@ use std::io::{self, Cursor, Read};
 
 use holzwave_server::wire::{
     CmdFrame, Ctl, CtlOutcome, Evt, ExitReason, FILE_PIECE, FILE_SOCKET, FileWhat, Frame, Key, MAX_PAYLOAD, Note,
-    OpeningKey, Res, ResBody, SlotKey, StoreState, WireError, codec, read_frame, write_frame,
+    OpeningKey, PROTOCOL_VERSION, Res, ResBody, SlotKey, StoreState, WireError, codec, read_frame, write_frame,
 };
 use holzwave_server::worker::secretstore::SlotKind;
 use zeroize::{ZeroizeOnDrop, Zeroizing};
@@ -90,6 +90,50 @@ fn tracer_init_is_kind_4_operation_1_then_version_and_the_three_caps() {
     let expected = vec![0x04, 0x01, 0, 2, 0, 0, 0, 3, 0, 1, 0, 0, 0, 0, 0, 0x40];
     assert_eq!(payload(&frame), expected);
     assert_eq!(Frame::from_payload(&expected).expect("decodes"), frame);
+}
+
+/// The first control frame as the supervisor wrote it before the picture cap existed: version 1, two caps, twelve bytes.
+const OLD_INIT: [u8; 12] = [0x04, 0x01, 0, 1, 0, 0, 0, 3, 0, 1, 0, 0];
+
+#[test]
+fn init_the_picture_cap_is_the_last_four_bytes_in_big_endian_and_the_edges_are_pinned() {
+    // Written out by hand: kind, operation, version 2, max_panes 0, max_scrollback_lines 0, then 4096 = 0x00001000.
+    let frame = Frame::Ctl(Ctl::Init { version: 2, max_panes: 0, max_scrollback_lines: 0, max_image_mib: 4096 });
+    let expected = vec![0x04, 0x01, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0];
+    assert_eq!(payload(&frame), expected);
+    assert_eq!(on_the_wire(&frame), prefixed(&expected));
+    assert_eq!(Frame::from_payload(&expected).expect("decodes"), frame);
+
+    // Zero is a value, not an absence: the worker reads it as "no pictures".
+    let off = Frame::Ctl(Ctl::Init { version: 2, max_panes: 64, max_scrollback_lines: 10_000, max_image_mib: 0 });
+    let expected = vec![0x04, 0x01, 0, 2, 0, 0, 0, 64, 0, 0, 0x27, 0x10, 0, 0, 0, 0];
+    assert_eq!(payload(&off), expected);
+    assert_eq!(Frame::from_payload(&expected).expect("decodes"), off);
+
+    // The frame carries what it is given; the range of the key is the configuration's business.
+    let widest = Frame::Ctl(Ctl::Init { version: 2, max_panes: 1, max_scrollback_lines: 100, max_image_mib: u32::MAX });
+    let expected = vec![0x04, 0x01, 0, 2, 0, 0, 0, 1, 0, 0, 0, 100, 0xFF, 0xFF, 0xFF, 0xFF];
+    assert_eq!(payload(&widest), expected);
+    assert_eq!(Frame::from_payload(&expected).expect("decodes"), widest);
+}
+
+#[test]
+fn init_the_protocol_version_is_2() {
+    assert_eq!(PROTOCOL_VERSION, 2, "the first frame has a field that version 1 did not");
+}
+
+#[test]
+fn init_a_frame_of_the_old_length_is_cut_off_and_one_byte_more_than_the_new_length_is_trailing() {
+    // The twelve bytes of version 1 end four bytes before the picture cap: the decoder says so and does not guess a cap.
+    assert!(matches!(Frame::from_payload(&OLD_INIT), Err(WireError::Truncated)));
+    let mut longer = vec![0x04, 0x01, 0, 2, 0, 0, 0, 3, 0, 1, 0, 0, 0, 0, 0, 0x40];
+    assert!(Frame::from_payload(&longer).is_ok());
+    longer.push(0);
+    assert!(matches!(Frame::from_payload(&longer), Err(WireError::Trailing)));
+    // A frame cut anywhere inside the new four bytes is cut off as well.
+    for cut in 12..16 {
+        assert!(matches!(Frame::from_payload(&longer[..cut]), Err(WireError::Truncated)), "cut at {cut}");
+    }
 }
 
 #[test]

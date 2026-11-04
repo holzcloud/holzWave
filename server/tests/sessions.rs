@@ -8,6 +8,8 @@
 mod scratch;
 #[path = "support/sup_env.rs"]
 mod sup_env;
+#[path = "support/worker_env.rs"]
+mod worker_env;
 
 use std::time::{Duration, Instant};
 
@@ -112,6 +114,79 @@ async fn tracer_two_people_get_two_workers_and_nothing_crosses() {
         assert!(!text.contains(&format!("\"pane\":{first_one},")) || first_one == first_two, "{text}");
     }
     env.supervisor.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn init_the_frame_that_starts_a_worker_carries_the_picture_cap_of_the_settings() {
+    for mib in [0, 7, 4096] {
+        let settings = SupervisorSettings { max_image_mib: mib, ..SupervisorSettings::default() };
+        let env = ScriptEnv::start_with(settings.clone()).await;
+        let client = env.client(account(1, 20001)).await;
+        let mut script = env.launcher.script(PATIENCE);
+        script.wait_for("Attach", PATIENCE, |f| matches!(f, Frame::Ctl(Ctl::Attach { .. })));
+        assert_eq!(
+            script.ctls(),
+            vec![expected_init(settings.max_panes, settings.max_scrollback_lines, mib), Ctl::Attach { socket: client.id() }],
+            "the first frame has the cap {mib}"
+        );
+        // Written out too, so that the helper above cannot agree with a wrong frame: the last field of Init is the cap.
+        let Ctl::Init { max_image_mib, .. } = script.ctls()[0].clone() else { panic!("the first control is Init") };
+        assert_eq!(max_image_mib, mib);
+        env.supervisor.shutdown().await;
+    }
+    assert_eq!(SupervisorSettings::default().max_image_mib, 64, "a supervisor without a configuration allows 64 MiB");
+}
+
+/// A supervisor over a real worker whose panes run a shell that prints one picture of `bytes` bytes (the id 7). True when a
+/// frame, the full one asked for after the picture was taken or refused included, carries a placement.
+#[cfg(feature = "in-process-workers")]
+async fn picture_placed_through_the_supervisor(max_image_mib: u32, bytes: usize) -> bool {
+    let script = format!("{}; exec cat", worker_env::picture_command(bytes, 7));
+    let shell = holzwave_host::state::ShellSpec::new("/bin/sh", &["-c", &script]);
+    let settings = SupervisorSettings { max_image_mib, ..SupervisorSettings::default() };
+    let env = SupEnv::start_with(sup_env::SupOptions { settings: Some(settings), shell: Some(shell) }).await;
+    let mut client = env.client(env.account(1, 20001)).await;
+    let first = focus(&client.ok("get_layout", "{}").await);
+    client.ok("start_pane", &format!(r#"{{"pane":{first},"cols":80,"rows":24,"cell_w":8,"cell_h":16}}"#)).await;
+    client
+        .event_where("title", PATIENCE, |p| p["pane"] == serde_json::json!(first) && p["title"] == "hw-pic-done")
+        .await
+        .expect("the title that follows the picture");
+    let frames_of_pane = |texts: Vec<String>| -> Vec<Value> {
+        texts
+            .iter()
+            .filter_map(|text| serde_json::from_str::<Value>(text).ok())
+            .filter(|v| v["event"] == "frame" && v["payload"]["pane"] == serde_json::json!(first))
+            .map(|v| v["payload"].clone())
+            .collect()
+    };
+    let mut frames = frames_of_pane(client.drain_texts().await);
+    let seen = frames.iter().filter_map(|f| f["seq"].as_u64()).max().unwrap_or(0);
+    client.ok("request_full", &format!(r#"{{"pane":{first}}}"#)).await;
+    let full = client
+        .event_where("frame", PATIENCE, |p| p["pane"] == serde_json::json!(first) && p["full"] == true && p["seq"].as_u64() > Some(seen))
+        .await
+        .expect("the full frame that was asked for");
+    frames.push(full["payload"].clone());
+    env.supervisor.shutdown().await;
+    frames.iter().any(|f| f["images"].as_array().is_some_and(|list| !list.is_empty()))
+}
+
+#[cfg(feature = "in-process-workers")]
+#[tokio::test(flavor = "multi_thread")]
+async fn images_a_supervisor_with_a_cap_of_2_mib_starts_workers_that_refuse_a_picture_of_3_mib_and_place_one_of_1() {
+    const MIB: usize = 1024 * 1024;
+    assert!(picture_placed_through_the_supervisor(2, MIB).await, "1 MiB is under the cap of 2 MiB");
+    // The control for the refusal: a cap of 8 MiB places the same 3 MiB picture.
+    assert!(picture_placed_through_the_supervisor(8, 3 * MIB).await, "3 MiB is under the cap of 8 MiB");
+    assert!(!picture_placed_through_the_supervisor(2, 3 * MIB).await, "3 MiB is over the cap of 2 MiB");
+}
+
+#[cfg(feature = "in-process-workers")]
+#[tokio::test(flavor = "multi_thread")]
+async fn images_a_supervisor_with_a_cap_of_0_starts_workers_without_pictures() {
+    assert!(picture_placed_through_the_supervisor(8, 1024 * 1024).await, "the same picture is placed under a cap of 8 MiB");
+    assert!(!picture_placed_through_the_supervisor(0, 1024 * 1024).await, "a cap of 0 keeps no picture");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1390,7 +1465,7 @@ async fn limits_after_one_socket_leaves_a_ninth_is_accepted_and_the_others_keep_
 #[tokio::test(flavor = "multi_thread")]
 async fn limits_with_a_pane_cap_of_three_the_fourth_pane_is_refused_with_the_cores_sentence() {
     let settings = SupervisorSettings { max_panes: 3, ..SupervisorSettings::default() };
-    let env = SupEnv::start_with(sup_env::SupOptions { settings: Some(settings) }).await;
+    let env = SupEnv::start_with(sup_env::SupOptions { settings: Some(settings), ..Default::default() }).await;
     let mut client = env.client(env.account(1, 20001)).await;
     client.ok("split", r#"{"column":false}"#).await;
     client.ok("split", r#"{"column":true}"#).await;
@@ -1470,7 +1545,7 @@ async fn observer_disable_closes_the_sockets_with_4401_ends_the_worker_and_leave
 #[cfg(feature = "in-process-workers")]
 #[tokio::test(flavor = "multi_thread")]
 async fn observer_delete_does_the_same_and_a_real_worker_leaves_its_home_where_it_is() {
-    let env = SupEnv::start_with(sup_env::SupOptions { settings: Some(quick_settings()) }).await;
+    let env = SupEnv::start_with(sup_env::SupOptions { settings: Some(quick_settings()), ..Default::default() }).await;
     let people = people(Arc::new(env.supervisor.clone()));
     let (bob, carol) = (key_of(&people.first), key_of(&people.second));
     let mut bob_client = env.client(bob).await;
