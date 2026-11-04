@@ -452,9 +452,6 @@ function paneFx(id: number, mirror: PaneMirror, focused: boolean, frame: Frame):
 
 // ---- pictures ------------------------------------------------------------------------------------
 
-/** Whether the renderer in use draws pictures: the canvas renderer does; the WebGL renderer follows in its own plan. */
-const drawsPictures = (): boolean => rendererName === "canvas2d";
-
 /** What a pane's placements are measured against: the cell size the core was told for it and the one now. */
 function placeGeometry(pane: number, mirror: PaneMirror): PlaceGeometry {
   const m = state.metrics;
@@ -474,7 +471,6 @@ function placeGeometry(pane: number, mirror: PaneMirror): PlaceGeometry {
  * store costs nothing here: the store is not even asked.
  */
 function wantImages(pane: number, mirror: PaneMirror): void {
-  if (!drawsPictures()) return;
   if (mirror.images.length === 0 && !images.has(pane)) return;
   images.want(pane, wantedOf(mirror.images, placeGeometry(pane, mirror)));
 }
@@ -499,7 +495,7 @@ function draw(): void {
     const frame = toRenderFrame(mirror, focused);
     // The off phase of a blinking cursor: the focused pane is drawn without it.
     if (focused && blinkTimer !== null && !state.blink.on) frame.cursor = null;
-    if (mirror.images.length > 0 && drawsPictures()) {
+    if (mirror.images.length > 0) {
       const pictures = images.resolve(id, mirror.images, placeGeometry(id, mirror));
       if (pictures.length > 0) frame.images = pictures;
     }
