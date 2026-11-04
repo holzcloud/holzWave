@@ -1,0 +1,88 @@
+{
+  "date": "2026-11-02",
+  "os": "linux",
+  "arch": "aarch64",
+  "cpu": "aarch64",
+  "cores": 10,
+  "commit": "da9b46f6",
+  "metrics": {
+    "core.key_to_frame_p50_ms": {
+      "median": 0.39925,
+      "p95": 0.41570799999999997,
+      "unit": "ms",
+      "runs": 5
+    },
+    "core.key_to_frame_p99_ms": {
+      "median": 1.1002500000000002,
+      "p95": 1.664125,
+      "unit": "ms",
+      "runs": 5
+    },
+    "core.memory_pane_empty_mib": {
+      "median": 0.6845703125,
+      "p95": 0.6845703125,
+      "unit": "mib",
+      "runs": 5
+    },
+    "core.memory_pane_scrollback_mib": {
+      "median": 12.271484375,
+      "p95": 12.279296875,
+      "unit": "mib",
+      "runs": 5
+    },
+    "core.pane_output_mib_s": {
+      "median": 52.77461142478278,
+      "p95": 52.89888195716818,
+      "unit": "mib_s",
+      "runs": 5
+    },
+    "core.pane_start_ms": {
+      "median": 3.361354,
+      "p95": 5.7614160000000005,
+      "unit": "ms",
+      "runs": 10
+    },
+    "core.parse_mib_s": {
+      "median": 44.902625956968464,
+      "p95": 44.956917465385416,
+      "unit": "mib_s",
+      "runs": 5
+    },
+    "core.update_encode_ms": {
+      "median": 0.5208789649999999,
+      "p95": 0.52204754,
+      "unit": "ms",
+      "runs": 5
+    },
+    "server.key_to_frame_p50_ms": {
+      "median": 1.431625,
+      "p95": 1.513583,
+      "unit": "ms",
+      "runs": 9
+    },
+    "server.key_to_frame_p99_ms": {
+      "median": 2.913333,
+      "p95": 4.721292,
+      "unit": "ms",
+      "runs": 9
+    },
+    "server.memory_pane_empty_mib": {
+      "median": 2.0361328125,
+      "p95": 2.037109375,
+      "unit": "mib",
+      "runs": 5
+    },
+    "server.memory_pane_scrollback_mib": {
+      "median": 4.041015625,
+      "p95": 4.53125,
+      "unit": "mib",
+      "runs": 5
+    },
+    "server.reattach_ms": {
+      "median": 2.266333,
+      "p95": 2.602375,
+      "unit": "ms",
+      "runs": 10
+    }
+  }
+}
