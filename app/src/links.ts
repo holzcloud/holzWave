@@ -419,8 +419,9 @@ let deps: LinkDeps | null = null;
 /** Load what opening a link needs (the bridge and the dialog) once; `activateLink` does nothing before this has run. */
 export async function linkDeps(): Promise<void> {
   if (deps) return;
-  const [{ call }, { askOpenLink }] = await Promise.all([import("./bridge.js"), import("./linkask.js")]);
-  deps = { call, ask: askOpenLink };
+  const { call } = await import("./bridge.js");
+  // The dialog's module is fetched at the first question, not at start-up: nothing new is loaded while the page starts.
+  deps = { call, ask: (shown, target, onOpen) => void import("./linkask.js").then((m) => m.askOpenLink(shown, target, onOpen)).catch(() => {}) };
 }
 
 /** What decides whether a marked link in `pane` is a link: the person's list, the build and the pane's connection. */
