@@ -5,11 +5,21 @@ import type { CursorShape, Extra, Frame, Run } from "./frame.js";
 
 // ---- the wire ---------------------------------------------------------------------------------------
 
-/** One changed row: runs of one style each (one code point per cell) and the cluster tails by column. */
+/** `[x0, x1, uri]`: a stretch of one row that a program marked as a link (OSC 8), both ends inclusive columns. */
+export type LinkMsg = [x0: number, x1: number, uri: string];
+
+/** The most link spans the page keeps for one row; the core keeps at most eight as well. */
+export const MAX_ROW_LINKS = 8;
+/** The longest address a span may carry, in UTF-16 units: the core cleans to 2048 bytes, so more is not from the core. */
+const MAX_LINK_URI = 2048;
+
+/** One changed row: runs of one style each (one code point per cell), the cluster tails by column and the links. */
 export interface RowMsg {
   y: number;
   runs: Run[];
   extras?: Extra[];
+  /** The link spans of the row; absent means none. The row keeps them until it is sent again. */
+  links?: LinkMsg[];
 }
 
 /** `[y, x0, x1]`: the selected cells of viewport row `y`, both ends inclusive. */
@@ -137,12 +147,35 @@ export interface PaneMirror {
 
 const BLANK_MODES: ModesMsg = { alt: false, bracketed_paste: false, mouse: false };
 
+/**
+ * The link spans of a row that can be used: `[int, int, string]` with `0 <= x0 <= x1 < cols` and an address of at most
+ * 2048 units, in order, at most `MAX_ROW_LINKS`. A span that fails is dropped and does not count; anything that is not
+ * a list gives an empty one. The numbers decide a box and a lookup, so nothing else gets in.
+ */
+export function usableLinks(list: unknown, cols: number): LinkMsg[] {
+  if (!Array.isArray(list)) return [];
+  const out: LinkMsg[] = [];
+  for (const span of list) {
+    if (out.length >= MAX_ROW_LINKS) break;
+    if (!Array.isArray(span) || span.length !== 3) continue;
+    const [x0, x1, uri] = span as unknown[];
+    if (!Number.isSafeInteger(x0) || !Number.isSafeInteger(x1) || typeof uri !== "string") continue;
+    const a = x0 as number, b = x1 as number;
+    if (a < 0 || a > b || b >= cols || uri === "" || uri.length > MAX_LINK_URI) continue;
+    out.push([a, b, uri]);
+  }
+  return out;
+}
+
 /** A row message that can be stored: an integer `y` inside the grid and a list of runs. Anything else is dropped. */
-function usableRow(row: unknown, rows: number): RowMsg | null {
+function usableRow(row: unknown, rows: number, cols: number): RowMsg | null {
   if (typeof row !== "object" || row === null) return null;
-  const { y, runs, extras } = row as RowMsg;
+  const { y, runs, extras, links } = row as RowMsg;
   if (!Number.isInteger(y) || y < 0 || y >= rows || !Array.isArray(runs)) return null;
-  return Array.isArray(extras) && extras.length > 0 ? { y, runs, extras } : { y, runs };
+  const out: RowMsg = Array.isArray(extras) && extras.length > 0 ? { y, runs, extras } : { y, runs };
+  const spans = usableLinks(links, cols);
+  if (spans.length > 0) out.links = spans;
+  return out;
 }
 
 /** The mirror of `msg` with `rows_` as its grid and `images` as its placements; the header fields come from the message. */
@@ -181,7 +214,7 @@ export function applyFrame(
     if (gridCells(msg) === null || !Number.isSafeInteger(msg.seq)) return { mirror, gap: false };
     const rows_: (RowMsg | null)[] = Array.from({ length: msg.rows }, () => null);
     for (const row of Array.isArray(msg.changed) ? msg.changed : []) {
-      const usable = usableRow(row, msg.rows);
+      const usable = usableRow(row, msg.rows, msg.cols);
       if (usable) rows_[usable.y] = usable;
     }
     // A full frame replaces everything: no list means no pictures.
@@ -192,7 +225,7 @@ export function applyFrame(
   }
   const rows_ = mirror.rows_.slice();
   for (const row of Array.isArray(msg.changed) ? msg.changed : []) {
-    const usable = usableRow(row, mirror.rows);
+    const usable = usableRow(row, mirror.rows, mirror.cols);
     if (usable) rows_[usable.y] = usable;
   }
   // A frame without the field keeps the list; with it (also an empty one) the list is replaced.

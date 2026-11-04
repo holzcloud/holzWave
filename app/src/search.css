@@ -42,6 +42,14 @@
 .linkhover { border-bottom: 2px solid var(--hw-rose); }
 #term.link-hover { cursor: pointer; }
 
+/* A link the program marked, with the pointer over it and no modifier (docs/design.md 6.31): a solid line of 1 px at the place of
+   the dotted one it replaces, in the colour of the cells (the ink where that is not known); the target is in the status line. Under forced colours it is the system link colour. */
+.linkon::after { content: ""; position: absolute; left: 0; right: 0; bottom: 1px; height: 1px; background: var(--cell-fg, var(--hw-ink)); }
+@media (forced-colors: active) {
+  :root .linkon::after { background: LinkText; }
+  :root .linkhover { border-bottom-color: LinkText; }
+}
+
 /* A hint label: filled, bold, over the first cells of its target. */
 .hint {
   display: flex; align-items: center; justify-content: center; overflow: hidden; font-weight: 700; line-height: 1;

@@ -255,6 +255,8 @@ export interface CellBox {
   text?: string;
   /** Value of the `data-hint` attribute, for the hint labels. */
   hint?: string;
+  /** A colour (0xRRGGBB) the box's stylesheet may use as `--cell-fg`: the foreground of the cells it covers. */
+  fg?: number;
 }
 
 const owned = new Map<string, CellBox[]>();
@@ -297,6 +299,9 @@ function placeOwned(keep: Set<string>, view: View): void {
       });
       setText(node, b.text ?? "");
       setAttr(node, "data-hint", b.hint ?? null);
+      if (b.fg !== undefined && Number.isInteger(b.fg) && b.fg >= 0 && b.fg <= 0xffffff) {
+        node.style.setProperty("--cell-fg", `#${b.fg.toString(16).padStart(6, "0")}`);
+      } else node.style.removeProperty("--cell-fg");
     }
   }
 }

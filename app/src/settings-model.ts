@@ -49,6 +49,12 @@ export interface SettingsValues {
    * above 512 is 512, so a page and a core of different builds still talk.
    */
   image_memory_mib: number;
+  /**
+   * The schemes that are links in a pane (OSC 8), lower case, at most 16. Read leniently: a view that lacks it or sends
+   * something else gets the default `http`, `https`, `mailto`, `file`; an entry that is not a lower-case scheme name is
+   * dropped. The opener of the core decides again at every click.
+   */
+  link_schemes: string[];
   /** The overrides as the user typed them: action id to chord text, the empty text meaning unbound. */
   keybindings: Record<string, string>;
 }
@@ -182,6 +188,23 @@ export const DEFAULT_IMAGE_MEMORY_MIB = 64;
 /** The largest picture memory of one pane, in MiB: the top of the core's range. */
 export const MAX_IMAGE_MEMORY_MIB = 512;
 
+/** The schemes that are links until the core says another list: the core's default. */
+export const DEFAULT_LINK_SCHEMES: readonly string[] = ["http", "https", "mailto", "file"];
+/** The most schemes the page keeps: the core's own bound. */
+const MAX_LINK_SCHEMES = 16;
+const SCHEME_NAME = /^[a-z][a-z0-9+.-]{0,31}$/;
+
+/** `link_schemes` as the page uses it: a list of lower-case scheme names (at most 16), else the default. Never refuses a view. */
+export function linkSchemesOf(v: unknown): string[] {
+  if (!Array.isArray(v)) return [...DEFAULT_LINK_SCHEMES];
+  const out: string[] = [];
+  for (const entry of v) {
+    if (out.length >= MAX_LINK_SCHEMES) break;
+    if (typeof entry === "string" && SCHEME_NAME.test(entry) && !out.includes(entry)) out.push(entry);
+  }
+  return out;
+}
+
 /** `image_memory_mib` as the page uses it: a whole number from 0 to 512, else the default. Never refuses a view. */
 function imageMemoryOf(v: unknown): number {
   if (typeof v !== "number" || !Number.isInteger(v) || v < 0) return DEFAULT_IMAGE_MEMORY_MIB;
@@ -236,6 +259,7 @@ export function readSettingsView(raw: unknown): SettingsView | null {
       smooth_scroll: s.smooth_scroll,
       cursor_trail: s.cursor_trail,
       image_memory_mib: imageMemoryOf(s.image_memory_mib),
+      link_schemes: linkSchemesOf(s.link_schemes),
       ai_local_only: s.ai_local_only === true,
       ai_local_context: s.ai_local_context === "auto" ? "auto" : "ask",
       keybindings: overrides,

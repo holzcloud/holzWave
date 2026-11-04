@@ -9,13 +9,19 @@ import { el, setAttr, setText } from "./dom.js";
 import { contextSegments, followLayout, showContext } from "./integratecontext.js";
 import { NOTICE_MS, paneCountText, rendererText } from "./labels.js";
 import { state } from "./state.js";
+import { cutMiddle, hostPartLength } from "./links.js";
 import { renderWeb } from "./websession.js";
+
+export { cutMiddle } from "./links.js";
 
 const strip = el("div", "", document.getElementById("app") ?? document.body);
 strip.id = "status";
 strip.setAttribute("aria-label", "Status");
 
 const seg = (cls: string): HTMLElement => el("span", `seg label ${cls}`);
+// The target of the link under the pointer (docs/design.md 6.31): shown while there is one, empty (so not shown) otherwise.
+const linkSeg = seg("link");
+linkSeg.setAttribute("role", "status");
 const modeSeg = seg("mode");
 const noticeSeg = seg("notice");
 noticeSeg.setAttribute("role", "status");
@@ -28,12 +34,14 @@ const panes = seg("panes");
 const renderer = seg("renderer");
 const encoding = seg("encoding");
 const version = seg("version");
-strip.append(modeSeg, noticeSeg, conns, panes, renderer, encoding, version);
+strip.append(linkSeg, modeSeg, noticeSeg, conns, panes, renderer, encoding, version);
 
 /** The segments of the Kubernetes context and the Azure subscription, made when the core has a value and removed when it has not. */
 const ctxSegs = new Map<string, HTMLButtonElement>();
 
 let notice = "";
+/** The address of the link under the pointer, or "". */
+let linkTarget = "";
 let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 
 /** Say `text` in the status line for [`NOTICE_MS`]; a newer notice replaces it and restarts the time. */
@@ -45,6 +53,42 @@ export function showNotice(text: string): void {
     renderStatus();
   }, NOTICE_MS);
   renderStatus();
+}
+
+/** The characters of the strip a target may take before it is cut in the middle: about half the strip, at the terminal's cell width. */
+function linkChars(): number {
+  const cell = state.metrics.cellW > 0 ? state.metrics.cellW : 8;
+  return Math.max(24, Math.min(120, Math.floor(strip.clientWidth / cell / 2)));
+}
+
+/**
+ * Show `target`, the address of the link the pointer is over, in the `LINK` segment, or take the segment away (null). The
+ * scheme and host are in the strong ink and the rest in the quiet one; a long address is cut in the middle and the full one is
+ * the segment's accessible name. Every string is put in as text.
+ */
+export function setLinkTarget(target: string | null): void {
+  const next = target ?? "";
+  if (next === linkTarget) return;
+  linkTarget = next;
+  renderLink();
+}
+
+function renderLink(): void {
+  if (linkTarget === "") {
+    linkSeg.replaceChildren();
+    linkSeg.removeAttribute("aria-label");
+    return;
+  }
+  const cut = cutMiddle(linkTarget, linkChars());
+  const at = Math.min(hostPartLength(cut), cut.length);
+  const label = el("span", "lk-l");
+  label.textContent = "LINK";
+  const host = el("span", "lk-h");
+  host.textContent = cut.slice(0, at);
+  const rest = el("span", "lk-r");
+  rest.textContent = cut.slice(at);
+  linkSeg.replaceChildren(label, host, rest);
+  linkSeg.setAttribute("aria-label", `Link target ${linkTarget}`);
 }
 
 /** Bring the strip in line with the view, the renderer, the draw statistics and `app_info`. */

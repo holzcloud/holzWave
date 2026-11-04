@@ -127,6 +127,13 @@
   border-right: 1px solid var(--hw-line);
 }
 #status .seg:empty { display: none; }
+/* The target of the link under the pointer (docs/design.md 6.31): the label, then the scheme and host in the ink and the rest in the
+   quiet ink; the type is the mono of the chrome, not tracked, not upper case. */
+#status .seg.link { max-width: 50%; overflow: hidden; }
+#status .seg.link .lk-l { margin-right: .667rem; color: var(--hw-dim); }
+#status .seg.link .lk-h, #status .seg.link .lk-r { letter-spacing: normal; text-transform: none; }
+#status .seg.link .lk-h { color: var(--hw-ink); }
+#status .seg.link .lk-r { color: var(--hw-ink-2); }
 /* A notice: bold type is its cue, as for the mode. */
 #status .seg.notice { color: var(--hw-ink); font-weight: 700; }
 #status .seg.encoding { margin-left: auto; border-left: 1px solid var(--hw-line); }

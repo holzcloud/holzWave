@@ -248,3 +248,23 @@ test("a font size step is the current size plus the step, from the default when 
   assert.equal(fontStep(Infinity, -1), DEFAULT_FONT_SIZE - 1);
   assert.equal(DEFAULT_FONT_SIZE, 14);
 });
+
+test("link_schemes is a list of lower-case scheme names, at most 16; anything else is the default and never refuses the view", () => {
+  const DEFAULT = ["http", "https", "mailto", "file"];
+  const read = (value, drop = false) => {
+    const view = sample();
+    if (drop) delete view.settings.link_schemes;
+    else view.settings.link_schemes = value;
+    const out = readSettingsView(view);
+    assert.ok(out, `${JSON.stringify(value)} made the whole view be refused`);
+    return out.settings.link_schemes;
+  };
+  assert.deepEqual(readSettingsView(sample()).settings.link_schemes, DEFAULT, "the golden view");
+  assert.deepEqual(read(undefined, true), DEFAULT, "missing");
+  for (const odd of ["https", 3, null, true, {}, { 0: "https" }]) assert.deepEqual(read(odd), DEFAULT, `${JSON.stringify(odd)} is the default`);
+  assert.deepEqual(read(["https"]), ["https"]);
+  assert.deepEqual(read([]), [], "an empty list is a list: no link opens");
+  assert.deepEqual(read(["https", "SSH", "ssh", "ssh", "1x", "a_b", "", 7, null, "x-y.z+1"]), ["https", "ssh", "x-y.z+1"], "bad entries and repeats are dropped one by one");
+  assert.deepEqual(read(["a".repeat(33), "a".repeat(32)]), ["a".repeat(32)], "32 characters at most");
+  assert.equal(read(Array.from({ length: 30 }, (_, i) => `s${i}`)).length, 16, "sixteen at most");
+});

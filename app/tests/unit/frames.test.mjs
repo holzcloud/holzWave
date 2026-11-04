@@ -285,3 +285,38 @@ test("rowCells gives one string per column with the wide character's spacer empt
   assert.deepEqual(rowCells(mirror, -1), []);
   assert.equal(gridText(mirror)[0], "a\u4e2db\u0301", "gridText is the same row joined and trimmed");
 });
+
+test("the link spans of a row are kept with the row, malformed ones are dropped and at most eight stay", () => {
+  const spans = [
+    [4, 7, "https://example.org/docs"],
+    [-1, 3, "https://a.example"], // starts left of the grid
+    [5, 2, "https://b.example"], // backwards
+    [0, 10, "https://c.example"], // ends past the last column (cols = 10)
+    [1.5, 2, "https://d.example"],
+    ["1", 2, "https://e.example"],
+    [1, 2, 3], // not an address
+    [1, 2, ""], // blank address
+    [1, 2], // too short
+    [1, 2, "https://f.example", "extra"], // too long
+    "nope",
+    null,
+  ];
+  const mirror = applyFrame(undefined, full({ changed: [{ ...row(1, "see docs  "), links: spans }] })).mirror;
+  assert.deepEqual(mirror.rows_[1].links, [[4, 7, "https://example.org/docs"]]);
+  const many = Array.from({ length: 12 }, (_, i) => [i % 5, (i % 5) + 1, `https://h${i}.example`]);
+  const capped = applyFrame(undefined, full({ changed: [{ ...row(0, "x"), links: many }] })).mirror;
+  assert.equal(capped.rows_[0].links.length, 8, "eight spans at most");
+  assert.deepEqual(capped.rows_[0].links.map((s) => s[2]), many.slice(0, 8).map((s) => s[2]), "the first eight, in order");
+  const long = applyFrame(undefined, full({ changed: [{ ...row(0, "x"), links: [[0, 1, `https://x.example/${"a".repeat(2040)}`]] }] })).mirror;
+  assert.equal(long.rows_[0].links, undefined, "an address past 2048 units is not from the core");
+  const none = applyFrame(undefined, full({ changed: [{ ...row(0, "x"), links: "https://x.example" }] })).mirror;
+  assert.equal(none.rows_[0].links, undefined, "a value that is not a list is no links");
+});
+
+test("a row keeps its links over later frames until it is sent again", () => {
+  const first = applyFrame(undefined, full({ changed: [{ ...row(1, "see docs  "), links: [[4, 7, "https://example.org/docs"]] }, row(2, "other")] })).mirror;
+  const next = applyFrame(first, full({ seq: 2, full: false, changed: [row(2, "changed")] })).mirror;
+  assert.deepEqual(next.rows_[1].links, [[4, 7, "https://example.org/docs"]], "an untouched row keeps its links");
+  const again = applyFrame(next, full({ seq: 3, full: false, changed: [row(1, "see docs  ")] })).mirror;
+  assert.equal(again.rows_[1].links, undefined, "a row sent again without links has none");
+});

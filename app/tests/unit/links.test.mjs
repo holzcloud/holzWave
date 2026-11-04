@@ -3,7 +3,10 @@
 // back in column order with both ends inclusive.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { findTargets, isLinkModifier, linkAction, targetAt } from "../../dist/links.js";
+import { applyFrame } from "../../dist/frames.js";
+import {
+  cellInk, cutMiddle, findTargets, isLinkModifier, linkAction, linkAllowed, mergeTargets, osc8Targets, targetAt,
+} from "../../dist/links.js";
 
 /** A row of narrow cells: one string per character. */
 const row = (text) => Array.from(text);
@@ -197,4 +200,99 @@ test("the link modifier is Cmd on macOS and Ctrl elsewhere", () => {
   assert.equal(isLinkModifier({ metaKey: true }, "linux"), false);
   assert.equal(isLinkModifier({ ctrlKey: true }, ""), true, "an unknown platform uses Ctrl");
   assert.equal(isLinkModifier({}, "macos"), false);
+});
+
+// ---- links the program marked (OSC 8) --------------------------------------------------------------------
+
+const POLICY = { schemes: ["http", "https", "mailto", "file"], web: false, remote: false };
+
+/** A mirror whose row 1 holds `text` and the spans `links`, built the way the page builds it. */
+function mirrorOf(text, links, cols = 40) {
+  const msg = {
+    pane: 1, seq: 1, full: true, cols, rows: 3, fg: 1, bg: 0, cursor: null, scrollbar: [0, 3, 3], selection: [], matches: [],
+    search: null, copy_cursor: null, modes: { alt: false, bracketed_paste: false, mouse: false },
+    changed: [{ y: 1, runs: [[text.padEnd(cols), cols, 1, 0, 0]], links }],
+  };
+  return applyFrame(undefined, msg).mirror;
+}
+
+test("osc8Targets gives the spans of a row as targets with the text over their cells", () => {
+  const mirror = mirrorOf("see docs here and mail", [[4, 7, "https://example.org/docs"], [18, 21, "mailto:me@example.org"]]);
+  const found = osc8Targets(mirror, 1);
+  assert.deepEqual(
+    found.map((t) => [t.kind, t.source, t.startCol, t.endCol, t.text, t.shown]),
+    [["url", "osc8", 4, 7, "https://example.org/docs", "docs"], ["url", "osc8", 18, 21, "mailto:me@example.org", "mail"]],
+  );
+  assert.deepEqual(osc8Targets(mirror, 0), [], "a row without links");
+  assert.deepEqual(osc8Targets(mirror, 7), [], "a row outside the grid");
+  assert.deepEqual(osc8Targets(mirror, 1.5), []);
+  assert.deepEqual(osc8Targets(mirror, 1, (uri) => uri.startsWith("mailto:")).map((t) => t.startCol), [18], "the filter decides");
+});
+
+test("a wide character's spacer is not in the shown text", () => {
+  const wide = applyFrame(undefined, {
+    pane: 1, seq: 1, full: true, cols: 10, rows: 1, fg: 1, bg: 0, cursor: null, scrollbar: [0, 1, 1], selection: [], matches: [],
+    search: null, copy_cursor: null, modes: { alt: false, bracketed_paste: false, mouse: false },
+    changed: [{ y: 0, runs: [["a中\0b      ", 10, 1, 0, 16]], links: [[0, 3, "https://example.org/"]] }],
+  }).mirror;
+  assert.equal(osc8Targets(wide, 0)[0].shown, "a中b");
+});
+
+test("the scheme filter: the person's list, the five that no list can enable, the browser and the file rules", () => {
+  const ok = (uri, over = {}) => linkAllowed(uri, { ...POLICY, ...over });
+  assert.equal(ok("https://example.org/a"), true);
+  assert.equal(ok("HTTPS://example.org/a"), true, "a scheme in capitals is the same scheme");
+  assert.equal(ok("mailto:me@example.org"), true);
+  assert.equal(ok("file:///home/u/a.txt"), true);
+  assert.equal(ok("ssh://host/x"), false, "not in the list");
+  assert.equal(ok("ssh://host/x", { schemes: ["ssh"] }), true, "in the list");
+  assert.equal(ok("https://example.org/a", { schemes: ["https"] }), true);
+  assert.equal(ok("mailto:me@example.org", { schemes: ["https"] }), false);
+  assert.equal(ok("https://example.org/a", { schemes: [] }), false, "an empty list: nothing is a link");
+  for (const bad of ["javascript:alert(1)", "data:text/html,x", "vbscript:x", "blob:https://x/y", "about:blank", "JavaScript:alert(1)"]) {
+    assert.equal(ok(bad, { schemes: ["javascript", "data", "vbscript", "blob", "about"] }), false, `${bad} is never a link`);
+  }
+  assert.equal(ok("file:///a", { remote: true }), false, "a pane with a connection has no file link");
+  assert.equal(ok("https://example.org/", { remote: true }), true);
+  assert.equal(ok("file:///a", { web: true }), false, "the browser has no file link");
+  assert.equal(ok("ssh://host/x", { web: true, schemes: ["ssh", "https"] }), false, "the browser opens only the three web schemes");
+  assert.equal(ok("https://example.org/", { web: true }), true);
+  assert.equal(ok("mailto:me@example.org", { web: true }), true);
+  for (const bad of ["https://", "https:///x", "mailto:nobody", "mailto:@", "example.org", "", "https://exa mple.org", "https://x.org/\u0007", `https://x.org/${"a".repeat(2048)}`]) {
+    assert.equal(ok(bad), false, JSON.stringify(bad));
+  }
+});
+
+test("a marked link wins over a guessed target that overlaps it, and a guessed one beside it stays", () => {
+  const text = "https://example.org/x and https://other.example/y";
+  const guessed = findTargets(row(text));
+  assert.equal(guessed.length, 2);
+  const mirror = mirrorOf(text, [[0, 20, "https://example.org/z"]]);
+  const merged = mergeTargets(osc8Targets(mirror, 1), guessed);
+  assert.deepEqual(merged.map((t) => [t.source ?? "text", t.text]), [["osc8", "https://example.org/z"], ["text", "https://other.example/y"]]);
+  assert.deepEqual(mergeTargets([], guessed), guessed);
+});
+
+test("cutMiddle keeps the scheme, the host and the last 12 characters", () => {
+  const url = "https://example.com/downloads/archive/2026/08/holzwave-setup.dmg";
+  assert.equal(cutMiddle(url, 200), url, "a target that fits is whole");
+  assert.equal(cutMiddle(url, url.length), url);
+  assert.equal(cutMiddle(url, 40), "https://example.com/downloa…ve-setup.dmg", "the start of the path, the cut, the last 12");
+  assert.equal([...cutMiddle(url, 40)].length, 40);
+  assert.equal(cutMiddle(url, 10), "https://example.com…ve-setup.dmg", "never less than the scheme, the host and the tail");
+  assert.equal(cutMiddle("https://example.com/a", 5), "https://example.com/a", "when the cut would not be shorter the target stays whole");
+  assert.equal(cutMiddle("mailto:me@example.org", 10), "mailto:me@example.org");
+  assert.equal(cutMiddle("", 5), "");
+});
+
+test("cellInk is the colour a cell is drawn in: the foreground, the background where inverse, the pane's where unknown", () => {
+  const mirror = applyFrame(undefined, {
+    pane: 1, seq: 1, full: true, cols: 6, rows: 2, fg: 0x111111, bg: 0, cursor: null, scrollbar: [0, 2, 2], selection: [], matches: [],
+    search: null, copy_cursor: null, modes: { alt: false, bracketed_paste: false, mouse: false },
+    changed: [{ y: 0, runs: [["ab", 2, 0xaa0000, 0x00bb00, 0], ["cd", 2, 0xaa0000, 0x00bb00, 8]] }],
+  }).mirror;
+  assert.equal(cellInk(mirror, 0, 1), 0xaa0000);
+  assert.equal(cellInk(mirror, 0, 2), 0x00bb00);
+  assert.equal(cellInk(mirror, 0, 5), 0x111111, "past the runs");
+  assert.equal(cellInk(mirror, 1, 0), 0x111111, "a row nobody sent");
 });
