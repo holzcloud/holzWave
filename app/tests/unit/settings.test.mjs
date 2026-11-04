@@ -120,6 +120,25 @@ test("copy_on_select is read as it is, and a view without it or with another typ
   }
 });
 
+test("image_memory_mib is a whole number of MiB from 0 to 512; anything else is the default 64 and never refuses the view", () => {
+  const read = (value, drop = false) => {
+    const view = sample();
+    if (drop) delete view.settings.image_memory_mib;
+    else view.settings.image_memory_mib = value;
+    const out = readSettingsView(view);
+    assert.ok(out, `${JSON.stringify(value)} made the whole view be refused`);
+    return out.settings.image_memory_mib;
+  };
+  assert.equal(readSettingsView(sample()).settings.image_memory_mib, 64, "the golden view");
+  for (const [sent, kept] of [[0, 0], [1, 1], [64, 64], [200, 200], [512, 512], [513, 512], [100000, 512], [2 ** 53 - 1, 512]]) {
+    assert.equal(read(sent), kept, `${sent}`);
+  }
+  assert.equal(read(undefined, true), 64, "missing");
+  for (const odd of [-1, -0.5, 1.5, 63.9, "64", "", null, true, [], {}, Infinity, -Infinity, Number.NaN]) {
+    assert.equal(read(odd), 64, `${String(odd)} is the default`);
+  }
+});
+
 test("the AI settings are read with their defaults and a wrong type costs only that key", () => {
   const golden = readSettingsView(sample());
   assert.equal(golden.settings.ai_local_only, false);

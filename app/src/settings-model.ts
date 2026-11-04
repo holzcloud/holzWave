@@ -43,6 +43,12 @@ export interface SettingsValues {
   ai_local_only: boolean;
   /** AI providers: whether a model on this computer asks before it sees terminal text. Anything but `auto` is `ask`. */
   ai_local_context: "ask" | "auto";
+  /**
+   * The most MiB of decoded pictures the page keeps for one pane (0 to 512; 0 turns pictures off). Read leniently: a
+   * view that lacks it, or sends something that is not a whole number of at least 0, gets the default 64, and a number
+   * above 512 is 512, so a page and a core of different builds still talk.
+   */
+  image_memory_mib: number;
   /** The overrides as the user typed them: action id to chord text, the empty text meaning unbound. */
   keybindings: Record<string, string>;
 }
@@ -171,6 +177,17 @@ export function colorSchemeOf(theme: unknown): "dark" | "light" | null {
 const oneOf = <T extends string>(v: unknown, allowed: readonly T[]): v is T => allowed.includes(v as T);
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
+/** The picture memory the page assumes until the core says another: the core's default, in MiB. */
+export const DEFAULT_IMAGE_MEMORY_MIB = 64;
+/** The largest picture memory of one pane, in MiB: the top of the core's range. */
+export const MAX_IMAGE_MEMORY_MIB = 512;
+
+/** `image_memory_mib` as the page uses it: a whole number from 0 to 512, else the default. Never refuses a view. */
+function imageMemoryOf(v: unknown): number {
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 0) return DEFAULT_IMAGE_MEMORY_MIB;
+  return Math.min(v, MAX_IMAGE_MEMORY_MIB);
+}
+
 /**
  * The view as the page keeps it, or null when it is not one: every setting of the dialog must have the type and
  * the kind the core defines, else the whole view is refused and the page keeps the one it has. Entries of the theme
@@ -218,6 +235,7 @@ export function readSettingsView(raw: unknown): SettingsView | null {
       copy_on_select: s.copy_on_select !== false,
       smooth_scroll: s.smooth_scroll,
       cursor_trail: s.cursor_trail,
+      image_memory_mib: imageMemoryOf(s.image_memory_mib),
       ai_local_only: s.ai_local_only === true,
       ai_local_context: s.ai_local_context === "auto" ? "auto" : "ask",
       keybindings: overrides,

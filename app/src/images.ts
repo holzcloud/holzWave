@@ -11,6 +11,8 @@
 import type { ImageDraw } from "./frame.js";
 import type { PlacementMsg } from "./frames.js";
 import { MAX_IMAGE_SIDE } from "./frames.js";
+import { DEFAULT_IMAGE_MEMORY_MIB } from "./settings-model.js";
+import { state } from "./state.js";
 
 // ---- the numbers -----------------------------------------------------------------------------------
 
@@ -22,8 +24,6 @@ export const CHUNK_BYTES = 512 * 1024;
 export const MAX_IN_FLIGHT = 2;
 /** The bytes in one MiB of the `image_memory_mib` setting. */
 export const MIB = 1024 * 1024;
-/** The picture memory of a pane in MiB when the setting is missing or malformed: the core's default. */
-export const DEFAULT_MEMORY_MIB = 64;
 /** How many failed (image, generation) pairs a pane remembers, so that a failed one is not asked for again. */
 const MAX_FAILED = 256;
 
@@ -113,12 +113,16 @@ interface Job {
   next: number;
   /** Bytes received so far. */
   filled: number;
+  /** The bytes this job holds against the pane's budget from its header until it ends. */
+  reserved: number;
 }
 
 interface Held<B> {
   generation: number;
   bitmap: B;
   bytes: number;
+  /** When the bitmap was last drawn, on the store's own counter: the smaller, the longer ago. */
+  used: number;
 }
 
 interface PaneImages<B> {
@@ -130,6 +134,10 @@ interface PaneImages<B> {
   /** The generation of an image that failed, by image id: not asked for again. */
   failed: Map<number, number>;
   inFlight: number;
+  /** The bytes the jobs have reserved for pictures that are being assembled. */
+  reserved: number;
+  /** The budget the last `want` saw: a change gives the pictures that failed another try. */
+  budget: number;
 }
 
 /** What the store holds for a pane, for tests and the status line. */
@@ -149,6 +157,7 @@ function bytesOf(raw: unknown): Uint8Array | null {
 
 export class ImageStore<B extends PictureBitmap> {
   private readonly panes = new Map<number, PaneImages<B>>();
+  private tick = 0;
 
   constructor(private readonly deps: StoreDeps<B>) {}
 
@@ -178,8 +187,12 @@ export class ImageStore<B extends PictureBitmap> {
     let ps = this.panes.get(pane);
     if (!ps) {
       if (items.length === 0) return;
-      ps = { held: new Map(), jobs: new Map(), wanted: new Map(), failed: new Map(), inFlight: 0 };
+      ps = { held: new Map(), jobs: new Map(), wanted: new Map(), failed: new Map(), inFlight: 0, reserved: 0, budget };
       this.panes.set(pane, ps);
+    }
+    if (ps.budget !== budget) {
+      ps.budget = budget;
+      ps.failed.clear(); // a picture that did not fit may fit now
     }
     const wanted = new Map<number, number>();
     for (const { image, generation } of items) {
@@ -188,11 +201,13 @@ export class ImageStore<B extends PictureBitmap> {
     }
     ps.wanted = wanted;
     for (const [image, job] of ps.jobs) if (wanted.get(image) !== job.generation) this.drop(ps, image, job);
+    this.trim(ps, budget);
     for (const [image, generation] of wanted) {
       if (ps.held.get(image)?.generation === generation) continue;
       if (ps.jobs.has(image) || ps.failed.get(image) === generation) continue;
       ps.jobs.set(image, {
         image, generation, live: true, headAsked: false, width: 0, height: 0, total: 0, buf: null, next: 0, filled: 0,
+        reserved: 0,
       });
     }
     this.pump(pane, ps);
@@ -208,6 +223,7 @@ export class ImageStore<B extends PictureBitmap> {
     const ps = this.panes.get(pane);
     if (!ps || ps.held.size === 0 || !(this.deps.budget() > 0)) return [];
     const out: ImageDraw<B>[] = [];
+    const now = ++this.tick;
     for (const p of list) {
       const held = ps.held.get(p[0]);
       if (!held) continue;
@@ -215,6 +231,7 @@ export class ImageStore<B extends PictureBitmap> {
       if (!rect) continue;
       const [, , layer, z, , , , , , , , , sx, sy, sw, sh] = p;
       if (sx + sw > held.bitmap.width || sy + sh > held.bitmap.height) continue;
+      held.used = now;
       out.push({
         layer: layer as 0 | 1 | 2, z, id: p[0], bitmap: held.bitmap,
         dx: rect.x, dy: rect.y, dw: rect.w, dh: rect.h, sx, sy, sw, sh,
@@ -242,6 +259,8 @@ export class ImageStore<B extends PictureBitmap> {
   private drop(ps: PaneImages<B>, image: number, job: Job): void {
     job.live = false;
     job.buf = null;
+    ps.reserved -= job.reserved;
+    job.reserved = 0;
     if (ps.jobs.get(image) === job) ps.jobs.delete(image);
   }
 
@@ -252,9 +271,51 @@ export class ImageStore<B extends PictureBitmap> {
     while (ps.failed.size > MAX_FAILED) ps.failed.delete(ps.failed.keys().next().value as number);
   }
 
-  /** The pane's state is dropped when it holds nothing and waits for nothing. */
+  /** The pane's state is dropped when it holds nothing, waits for nothing and remembers no failure (`forget` clears those). */
   private tidy(pane: number, ps: PaneImages<B>): void {
-    if (ps.held.size === 0 && ps.jobs.size === 0 && ps.inFlight === 0 && this.panes.get(pane) === ps) this.panes.delete(pane);
+    const idle = ps.held.size === 0 && ps.jobs.size === 0 && ps.inFlight === 0 && ps.failed.size === 0;
+    if (idle && this.panes.get(pane) === ps) this.panes.delete(pane);
+  }
+
+  /** The bytes the pane holds against its budget: decoded bitmaps and the buffers being assembled. */
+  private bytesIn(ps: PaneImages<B>): number {
+    let n = ps.reserved;
+    for (const h of ps.held.values()) n += h.bytes;
+    return n;
+  }
+
+  /**
+   * Evict bitmaps until `need` more bytes fit in `budget`: those no placement uses first, the least recently drawn
+   * first. Every evicted bitmap is closed. False when it still does not fit.
+   */
+  private makeRoom(ps: PaneImages<B>, need: number, budget: number): boolean {
+    let used = this.bytesIn(ps);
+    if (used + need <= budget) return true;
+    const unused = [...ps.held].filter(([image]) => !ps.wanted.has(image)).sort((a, b) => a[1].used - b[1].used);
+    for (const [image, h] of unused) {
+      h.bitmap.close();
+      ps.held.delete(image);
+      used -= h.bytes;
+      if (used + need <= budget) return true;
+    }
+    return false;
+  }
+
+  /** A budget that shrank: bring the pane under it, unused bitmaps first, then the least recently drawn of the rest. */
+  private trim(ps: PaneImages<B>, budget: number): void {
+    if (this.bytesIn(ps) <= budget) return;
+    if (this.makeRoom(ps, 0, budget)) return;
+    const rest = [...ps.held].sort((a, b) => a[1].used - b[1].used);
+    for (const [image, h] of rest) {
+      h.bitmap.close();
+      ps.held.delete(image);
+      if (this.bytesIn(ps) <= budget) return;
+    }
+    // Only buffers still being assembled remain: they were reserved under the old budget.
+    for (const [image, job] of ps.jobs) {
+      this.drop(ps, image, job);
+      if (this.bytesIn(ps) <= budget) return;
+    }
   }
 
   /** Send requests while fewer than `MAX_IN_FLIGHT` are out. A request for a job that is no longer wanted is never sent. */
@@ -310,7 +371,7 @@ export class ImageStore<B extends PictureBitmap> {
     if (job.buf === null) {
       // The first answer: the sizes decide the allocation, so they are checked before it.
       if (width < 1 || height < 1 || width > MAX_IMAGE_SIDE || height > MAX_IMAGE_SIDE) return false;
-      if (total !== width * height * 4 || !this.reserve(ps, total)) return false;
+      if (total !== width * height * 4 || !this.reserve(ps, job, total)) return false;
       job.width = width;
       job.height = height;
       job.total = total;
@@ -329,9 +390,26 @@ export class ImageStore<B extends PictureBitmap> {
     return true;
   }
 
-  /** Make room for `total` bytes of a picture that is about to be allocated; false when it cannot fit. */
-  private reserve(_ps: PaneImages<B>, total: number): boolean {
-    return total <= this.deps.budget();
+  /**
+   * Make room for `total` bytes of a picture that is about to be allocated, and hold them against the budget; false
+   * when it cannot fit. This runs on the header, before the allocation: a picture over the whole budget is never
+   * fetched past its header, and one that does not fit next to the pictures in use is not fetched either (the ones
+   * in use stay). Unused bitmaps go first; the older generation of the same picture, which stands in until the new
+   * one arrives, goes last of all.
+   */
+  private reserve(ps: PaneImages<B>, job: Job, total: number): boolean {
+    const budget = this.deps.budget();
+    if (!(total <= budget)) return false;
+    if (!this.makeRoom(ps, total, budget)) {
+      const own = ps.held.get(job.image);
+      if (!own) return false;
+      own.bitmap.close();
+      ps.held.delete(job.image);
+      if (!this.makeRoom(ps, total, budget)) return false;
+    }
+    ps.reserved += total;
+    job.reserved = total;
+    return true;
   }
 
   /** All pieces are in: make the bitmap, and install it unless the job was dropped meanwhile. */
@@ -345,7 +423,7 @@ export class ImageStore<B extends PictureBitmap> {
         }
         this.drop(ps, job.image, job);
         ps.held.get(job.image)?.bitmap.close();
-        ps.held.set(job.image, { generation: job.generation, bitmap, bytes: job.total });
+        ps.held.set(job.image, { generation: job.generation, bitmap, bytes: job.total, used: ++this.tick });
         this.deps.ready();
       },
       () => {
@@ -378,5 +456,5 @@ export const images = new ImageStore<ImageBitmap>({
   makeBitmap: (width, height, rgba) =>
     createImageBitmap(new ImageData(rgba, width, height)),
   ready: () => redraw(),
-  budget: () => DEFAULT_MEMORY_MIB * MIB,
+  budget: () => (state.settings?.settings.image_memory_mib ?? DEFAULT_IMAGE_MEMORY_MIB) * MIB,
 });
