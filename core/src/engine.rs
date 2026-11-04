@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::links::LinkSpan;
 use crate::platform::Os;
 use crate::textread::{TextRead, TextRegion};
 use crate::{Error, Result};
@@ -444,6 +445,9 @@ pub struct MatchSpan {
 pub struct RowUpdate {
     pub y: u16,
     pub cells: Vec<Cell>,
+    /// The hyperlinks (OSC 8) on the row, by column, at most [`crate::links::MAX_SPANS_PER_ROW`], every address cleaned
+    /// by [`crate::links::clean_uri`]. Empty for a row without links.
+    pub links: Vec<LinkSpan>,
 }
 
 /// Where an image is drawn in relation to the cells. The variants are in drawing order: everything below the cell

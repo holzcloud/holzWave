@@ -11,6 +11,7 @@
 //! - [`engine`]: the [`TerminalEngine`] trait and the screen model it produces.
 //! - `images`: the limits of the Kitty graphics protocol and the bounded PNG decoder (with the `ghostty` feature).
 //! - [`layout`]: the pure tab and pane layout model.
+//! - [`links`]: hyperlinks (OSC 8) as bounded, cleaned spans, and the one function that decides what an address may be.
 //! - [`platform`]: the per-OS decisions (default shell, locale, polling) as pure functions of an `Os`.
 //! - [`pty`]: spawning a shell on a pseudo terminal.
 //! - [`blocks`]: panes that show a file browser or a preview instead of a terminal.
@@ -50,6 +51,7 @@ pub mod integrate;
 pub mod keybindings;
 pub mod monitor;
 pub mod layout;
+pub mod links;
 pub mod local_network;
 pub mod pane;
 pub mod persist;
@@ -78,6 +80,7 @@ pub mod images;
 
 pub use engine::{Cell, Color, Cursor, Screen, Scrollbar, TerminalEngine, Width};
 pub use error::{Error, Result};
+pub use links::LinkSpan;
 
 #[cfg(feature = "ghostty")]
 pub use ghostty::{GhosttyEngine, ImageLimits};

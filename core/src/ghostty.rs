@@ -26,6 +26,7 @@ use crate::engine::{
     MouseAction, MouseButton, MouseEvent, PasteOutcome, RowUpdate, Screen, Scrollbar, SearchOp, SearchState, SelectMode,
     SelectOp, Span, TerminalEngine, Update, WheelEvent, WheelOutcome, Width, sanitize_program_bytes,
 };
+use crate::links::{LinkSpan, MAX_URI_BYTES, SpanBuilder, clean_uri};
 use crate::images::{self, BoundedAlloc, DEFAULT_IMAGE_BYTES, ImageMemory, KITTY_APC_MAX_BYTES};
 use crate::textread::{
     Cut, MAX_READ_BYTES, MAX_READ_ROWS, TextBuilder, TextRead, TextRegion, cell_is_hidden, rows_within_budget,
@@ -582,12 +583,23 @@ fn read_row(
     row: &RowIteration<'static, '_>,
     colors: &Colors,
     out: &mut Vec<Cell>,
-) -> Result<()> {
+    links: Option<(&Terminal<'static, 'static>, u16)>,
+) -> Result<Vec<LinkSpan>> {
     // A cell of a Kitty Unicode-placeholder image holds U+10EEEE and the combining marks that name its row and column;
     // its colour carries the image id. It is drawn as the picture and never reaches the consumer as text, so the cell
     // reads as blank and keeps its colours. The row flag keeps the check off every other row.
-    let has_placeholders = row.raw_row().map_err(eng)?.has_kitty_virtual_placeholder().map_err(eng)?;
+    let raw_row = row.raw_row().map_err(eng)?;
+    let has_placeholders = raw_row.has_kitty_virtual_placeholder().map_err(eng)?;
+    // Hyperlinks: the row flag may have false positives, never false negatives (measured), so a row without it is not
+    // looked at again, and a failed read of the flag is no link. Only a caller that wants links gets a builder.
+    let mut spans = match links {
+        Some(_) if raw_row.has_hyperlink().unwrap_or(false) => Some(SpanBuilder::new()),
+        _ => None,
+    };
+    // One stack buffer per row that may hold links, one byte more than the longest address that is accepted.
+    let mut buf = spans.is_some().then_some([0u8; MAX_URI_BYTES + 1]);
     let mut cell_iter = cells_iter.update(row).map_err(eng)?;
+    let mut x: u16 = 0;
     while let Some(cell) = cell_iter.next() {
         let mut text = String::new();
         cell.graphemes_utf8(&mut text).map_err(eng)?;
@@ -595,11 +607,22 @@ fn read_row(
             text.clear();
         }
         let style = cell.style().map_err(eng)?;
-        let width = match cell.raw_cell().map_err(eng)?.wide().map_err(eng)? {
+        let raw = cell.raw_cell().map_err(eng)?;
+        let width = match raw.wide().map_err(eng)? {
             CellWide::Narrow => Width::Narrow,
             CellWide::Wide => Width::Wide,
             CellWide::SpacerTail | CellWide::SpacerHead => Width::Spacer,
         };
+        if let (Some(builder), Some(buf), Some((term, y))) = (spans.as_mut(), buf.as_mut(), links)
+            && !builder.is_done()
+        {
+            if raw.has_hyperlink().unwrap_or(false) {
+                read_link(term, x, y, buf, builder);
+            } else if width == Width::Spacer {
+                // The second half of a wide character belongs to the link of the first half.
+                builder.cover(x);
+            }
+        }
         out.push(Cell {
             text,
             width,
@@ -610,8 +633,35 @@ fn read_row(
             underline: style.underline != Underline::None,
             inverse: style.inverse,
         });
+        x = x.saturating_add(1);
     }
-    Ok(())
+    Ok(spans.map(SpanBuilder::finish).unwrap_or_default())
+}
+
+/// Reads the address of the cell at viewport column `x`, row `y` and offers it to `builder`.
+///
+/// Every address goes through [`clean_uri`] before it can be a span. A library error, an address that does not fit the
+/// buffer (one byte more than [`MAX_URI_BYTES`] is an over-long address), an empty one and one that fails the cleaning
+/// are all "no link", and none of them carries text: nothing the program sent is repeated in an error.
+fn read_link(term: &Terminal<'static, 'static>, x: u16, y: u16, buf: &mut [u8; MAX_URI_BYTES + 1], builder: &mut SpanBuilder) {
+    #[cfg(test)]
+    ADDRESS_READS.with(|n| n.set(n.get() + 1));
+    let Ok(at) = term.grid_ref(Point::Viewport(PointCoordinate { x, y: u32::from(y) })) else { return };
+    let Ok(n) = at.hyperlink_uri(buf) else { return };
+    let raw = &buf[..n.min(buf.len())];
+    if raw.is_empty() || builder.extend_if_same(x, raw) {
+        return;
+    }
+    if let Some(uri) = clean_uri(raw) {
+        builder.add(x, uri);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many addresses `read_link` asked the library for on this thread; the proof that a screen without links
+    /// pays for no address.
+    static ADDRESS_READS: StdCell<usize> = const { StdCell::new(0) };
 }
 
 /// Where a cell is in relation to the viewport.
@@ -1650,7 +1700,7 @@ impl TerminalEngine for GhosttyEngine {
         let mut cells = Vec::with_capacity(cols as usize * rows as usize);
         let mut row_iter = self.rows_iter.update(&snapshot).map_err(eng)?;
         while let Some(row) = row_iter.next() {
-            read_row(&mut self.cells_iter, row, &colors, &mut cells)?;
+            read_row(&mut self.cells_iter, row, &colors, &mut cells, None)?;
         }
 
         Ok(Screen {
@@ -1832,21 +1882,21 @@ impl TerminalEngine for GhosttyEngine {
                 let mut y: u16 = 0;
                 while let Some(row) = row_iter.next() {
                     let mut cells = Vec::with_capacity(cols as usize);
-                    read_row(&mut self.cells_iter, row, &colors, &mut cells)?;
+                    let links = read_row(&mut self.cells_iter, row, &colors, &mut cells, Some((&self.terminal, y)))?;
                     if let Some(slot) = self.sel_cache.get_mut(usize::from(y)) {
                         *slot = row.selection().map_err(eng)?.map(|s| (s.start_x, s.end_x));
                     }
-                    changed.push(RowUpdate { y, cells });
+                    changed.push(RowUpdate { y, cells, links });
                     y = y.saturating_add(1);
                 }
             } else {
                 while let Some((y, row)) = row_iter.next_dirty() {
                     let mut cells = Vec::with_capacity(cols as usize);
-                    read_row(&mut self.cells_iter, row, &colors, &mut cells)?;
+                    let links = read_row(&mut self.cells_iter, row, &colors, &mut cells, Some((&self.terminal, y)))?;
                     if let Some(slot) = self.sel_cache.get_mut(usize::from(y)) {
                         *slot = row.selection().map_err(eng)?.map(|s| (s.start_x, s.end_x));
                     }
-                    changed.push(RowUpdate { y, cells });
+                    changed.push(RowUpdate { y, cells, links });
                 }
             }
         }
@@ -2138,6 +2188,61 @@ impl TerminalEngine for GhosttyEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reads() -> usize {
+        ADDRESS_READS.with(StdCell::get)
+    }
+
+    #[test]
+    fn the_row_flag_keeps_the_address_reads_off_rows_without_links() {
+        let mut engine = GhosttyEngine::new(40, 40, 100).expect("engine");
+        engine.feed(b"plain\r\n");
+        for i in 0..38 {
+            engine.feed(format!("line {i} of text without any link\r\n").as_bytes());
+        }
+        let before = reads();
+        let update = engine.update().expect("update");
+        assert!(update.full && update.changed.len() == 40);
+        assert_eq!(reads() - before, 0, "40 rows without links ask for no address");
+        assert!(update.changed.iter().all(|r| r.links.is_empty()));
+
+        // One linked row among them: the reads are for its linked cells only (four), not for its other 36 cells and
+        // not for the 39 rows without a link.
+        engine.request_full();
+        engine.feed(b"\x1b[20;1Hxx\x1b]8;;https://example.org/a\x1b\\link\x1b]8;;\x1b\\ yy");
+        let before = reads();
+        let update = engine.update().expect("update");
+        assert!(update.full && update.changed.len() == 40);
+        assert_eq!(reads() - before, 4);
+        let linked: Vec<_> = update.changed.iter().filter(|r| !r.links.is_empty()).collect();
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0].y, 19);
+        assert_eq!(linked[0].links, vec![LinkSpan { x0: 2, x1: 5, uri: "https://example.org/a".to_string() }]);
+    }
+
+    #[test]
+    fn a_dirty_only_update_reads_addresses_only_for_the_dirty_linked_row() {
+        let mut engine = GhosttyEngine::new(40, 10, 100).expect("engine");
+        // The cursor leaves the linked row before the first update, so that only the text of the second feed is dirty.
+        engine.feed(b"\x1b]8;;https://example.org/a\x1b\\link\x1b]8;;\x1b\\\x1b[5;1H");
+        engine.update().expect("first");
+        // A change on another row: the linked row is not dirty, so nothing is read.
+        engine.feed(b"other");
+        let before = reads();
+        let update = engine.update().expect("update");
+        assert!(!update.full);
+        assert!(update.changed.iter().all(|r| r.y != 0), "{:?}", update.changed.iter().map(|r| r.y).collect::<Vec<_>>());
+        assert_eq!(reads() - before, 0);
+    }
+
+    #[test]
+    fn an_address_that_fails_the_cleaning_is_no_link_and_the_text_stays() {
+        let mut engine = GhosttyEngine::new(40, 3, 100).expect("engine");
+        engine.feed(b"\x1b]8;;javascript:alert(1)\x1b\\bad\x1b]8;;\x1b\\ ok");
+        let update = engine.update().expect("update");
+        assert!(update.changed[0].links.is_empty());
+        assert!(engine.screen().expect("screen").to_text().starts_with("bad ok"));
+    }
 
     #[test]
     fn a_rectangle_selection_reads_only_its_columns() {

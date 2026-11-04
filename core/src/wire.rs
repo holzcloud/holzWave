@@ -8,6 +8,14 @@
 //! `search`, `copy_cursor`, `modes` and `changed`, the rows that differ from the previous frame, and, only when
 //! something changed, `images`.
 //!
+//! # Links
+//!
+//! A row that holds hyperlinks (OSC 8) has a `links` key: `[x0, x1, uri]`, columns inclusive, at most eight, every
+//! address cleaned by [`crate::links::clean_uri`] (printable ASCII, a scheme, no denied scheme). The cells they cover
+//! carry the style flag [`LINK`] in their run. A row without links has no key and encodes byte for byte as it did
+//! before links existed. The row memory compares the whole row, so a row whose link changed is sent again and only
+//! then. Nothing here decides whether an address may be opened.
+//!
 //! # Images
 //!
 //! `images` is the list of [`PlacementMsg`] (one array of sixteen numbers per image, never pixels) and is in a frame
@@ -53,12 +61,15 @@ use serde::Serialize;
 use crate::engine::{
     Cell, Color, CursorStyle, ImageChunk, ImageLayer, ImagePlacement, MAX_IMAGE_CHUNK_BYTES, MAX_PLACEMENTS, Update, Width,
 };
+use crate::links::{LinkSpan, MAX_SPANS_PER_ROW};
 
 /// Style flag bits of a [`Run`].
 pub const BOLD: u8 = 1;
 pub const ITALIC: u8 = 2;
 pub const UNDERLINE: u8 = 4;
 pub const INVERSE: u8 = 8;
+/// The cell is part of a hyperlink (a span in the row's `links`); a renderer underlines it from this flag alone.
+pub const LINK: u8 = 16;
 
 /// `[text, cols, fg, bg, flags]`: `cols` cells of one style. `text` holds one code point per cell.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -154,6 +165,11 @@ pub struct RowMsg {
     /// `(column, tail)`: code points of a grapheme cluster after its first one.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extras: Vec<(u16, String)>,
+    /// `(x0, x1, uri)`: the hyperlinks of the row, columns inclusive, at most
+    /// [`crate::links::MAX_SPANS_PER_ROW`], every address cleaned by [`crate::links::clean_uri`]. The cells they cover
+    /// carry the [`LINK`] flag. Absent from the JSON for a row without links.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<(u16, u16, String)>,
 }
 
 /// The cursor shape on the wire.
@@ -223,14 +239,24 @@ fn rgb(c: Color) -> u32 {
 ///
 /// A cell contributes the first code point of its grapheme cluster (a space when empty, `\0` for the spacer half of
 /// a wide character); the code points after the first go to the row's `extras` as `(column, tail)`.
-fn encode_row(y: u16, cells: &[Cell], cols: usize, default_bg: u32) -> RowMsg {
+fn encode_row(y: u16, cells: &[Cell], links: &[LinkSpan], cols: usize, default_bg: u32) -> RowMsg {
     let mut runs: Vec<Run> = Vec::new();
     let mut extras: Vec<(u16, String)> = Vec::new();
+    // The spans, cut to the grid (a resize can leave an engine's span past the new width). A row without links takes
+    // no further step.
+    let links: Vec<(u16, u16, String)> = links
+        .iter()
+        .take(MAX_SPANS_PER_ROW)
+        .filter(|l| l.x0 <= l.x1 && usize::from(l.x0) < cols)
+        .map(|l| (l.x0, l.x1.min(cols.saturating_sub(1) as u16), l.uri.clone()))
+        .collect();
     for (x, cell) in cells.iter().take(cols).enumerate() {
+        let linked = !links.is_empty() && links.iter().any(|(x0, x1, _)| usize::from(*x0) <= x && x <= usize::from(*x1));
         let flags = (u8::from(cell.bold) * BOLD)
             | (u8::from(cell.italic) * ITALIC)
             | (u8::from(cell.underline) * UNDERLINE)
-            | (u8::from(cell.inverse) * INVERSE);
+            | (u8::from(cell.inverse) * INVERSE)
+            | (u8::from(linked) * LINK);
         let (fg, bg) = (rgb(cell.fg), rgb(cell.bg));
         let mut chars = cell.text.chars();
         let first = match cell.width {
@@ -266,7 +292,7 @@ fn encode_row(y: u16, cells: &[Cell], cols: usize, default_bg: u32) -> RowMsg {
         width = start;
         runs.pop();
     }
-    RowMsg { y, runs, extras }
+    RowMsg { y, runs, extras, links }
 }
 
 /// Everything in a frame except the rows. Two consecutive frames with the same header and no changed rows carry no
@@ -352,7 +378,7 @@ impl Header {
 }
 
 fn blank_row(y: u16) -> RowMsg {
-    RowMsg { y, runs: Vec::new(), extras: Vec::new() }
+    RowMsg { y, runs: Vec::new(), extras: Vec::new(), links: Vec::new() }
 }
 
 /// Turns the updates of one engine into the frames of one pane.
@@ -416,7 +442,7 @@ impl FrameEncoder {
             }
             for r in &update.changed {
                 if let Some(slot) = all.get_mut(usize::from(r.y)) {
-                    *slot = encode_row(r.y, &r.cells, cols, header.bg);
+                    *slot = encode_row(r.y, &r.cells, &r.links, cols, header.bg);
                 }
             }
             changed.clone_from(&all);
@@ -424,7 +450,7 @@ impl FrameEncoder {
         } else {
             for r in &update.changed {
                 let Some(held) = self.rows.get_mut(usize::from(r.y)) else { continue };
-                let row = encode_row(r.y, &r.cells, cols, header.bg);
+                let row = encode_row(r.y, &r.cells, &r.links, cols, header.bg);
                 if *held != row {
                     *held = row.clone();
                     changed.push(row);
@@ -456,6 +482,38 @@ mod tests {
 
     fn chunk(bytes: Vec<u8>, total: u64, offset: u64) -> ImageChunk {
         ImageChunk { width: 3, height: 2, generation: 7, total, offset, bytes }
+    }
+
+    fn blank_cells(n: usize) -> Vec<Cell> {
+        vec![Cell::default(); n]
+    }
+
+    fn span(x0: u16, x1: u16) -> LinkSpan {
+        LinkSpan { x0, x1, uri: "https://example.org/".to_string() }
+    }
+
+    #[test]
+    fn a_covered_blank_keeps_its_run_and_the_flag_and_is_not_trimmed() {
+        let row = encode_row(0, &blank_cells(10), &[span(2, 4)], 10, 0);
+        assert_eq!(row.links, vec![(2, 4, "https://example.org/".to_string())]);
+        // Two blanks, three flagged blanks and then nothing: the trailing blanks without a flag are trimmed.
+        let widths: Vec<(u16, u8)> = row.runs.iter().map(|r| (r.1, r.4)).collect();
+        assert_eq!(widths, vec![(2, 0), (3, LINK)]);
+    }
+
+    #[test]
+    fn a_row_with_and_without_a_link_encodes_differently() {
+        let cells = blank_cells(10);
+        assert_ne!(encode_row(0, &cells, &[span(0, 1)], 10, 0), encode_row(0, &cells, &[], 10, 0));
+        assert_eq!(encode_row(0, &cells, &[], 10, 0), RowMsg { y: 0, runs: Vec::new(), extras: Vec::new(), links: Vec::new() });
+    }
+
+    #[test]
+    fn spans_past_the_grid_are_cut_or_dropped_and_at_most_eight_travel() {
+        let row = encode_row(0, &blank_cells(6), &[span(4, 9), span(8, 9)], 6, 0);
+        assert_eq!(row.links.iter().map(|l| (l.0, l.1)).collect::<Vec<_>>(), vec![(4, 5)]);
+        let many: Vec<LinkSpan> = (0..12).map(|i| span(i, i)).collect();
+        assert_eq!(encode_row(0, &blank_cells(12), &many, 12, 0).links.len(), MAX_SPANS_PER_ROW);
     }
 
     #[test]

@@ -173,7 +173,7 @@ fn scrolling_output_sends_only_the_rows_that_differ_from_the_last_frame() {
     let mut enc = FrameEncoder::new(1);
     next_frame(&mut e, &mut enc).expect("first");
     // The screen as the webview has it, one encoded row per y.
-    let mut held: Vec<RowMsg> = (0..5u16).map(|y| RowMsg { y, runs: vec![], extras: vec![] }).collect();
+    let mut held: Vec<RowMsg> = (0..5u16).map(|y| RowMsg { y, runs: vec![], extras: vec![], links: vec![] }).collect();
 
     for i in 0..60 {
         let Some(f) = feed_frame(&mut e, &mut enc, format!("line {i}\r\n").as_bytes()) else { continue };
