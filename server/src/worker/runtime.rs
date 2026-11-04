@@ -111,6 +111,12 @@ fn cap(value: u32) -> Option<usize> {
     (value != 0).then(|| usize::try_from(value).unwrap_or(usize::MAX))
 }
 
+/// The picture cap of a pane in bytes. Unlike the other caps 0 is a cap: no pictures. `None` when the number of bytes does
+/// not fit (it cannot with the range of the key, but the worker does not assume what the supervisor checked).
+fn image_cap(mib: u32) -> Option<usize> {
+    usize::try_from(mib).ok()?.checked_mul(1024 * 1024)
+}
+
 /// Runs the worker on `link` until the link ends.
 pub fn run(link: UnixStream, env: WorkerEnv) -> RunEnd {
     run_with(link, env, TestHooks::default())
@@ -163,15 +169,16 @@ fn serve(
             Err(_) => break fail(queue, log, "bad frame"),
         };
         match (frame, running.as_mut()) {
-            (Frame::Ctl(Ctl::Init { version, max_panes, max_scrollback_lines }), None) => {
+            (Frame::Ctl(Ctl::Init { version, max_panes, max_scrollback_lines, max_image_mib }), None) => {
                 if version != PROTOCOL_VERSION {
                     break fail(queue, log, "protocol version");
                 }
+                let Some(max_image_bytes) = image_cap(max_image_mib) else { break fail(queue, log, "setup") };
                 let limits = HostLimits {
                     max_panes: cap(max_panes),
                     max_scrollback_lines: cap(max_scrollback_lines),
-                    // The worker limit for pictures comes with the server limit plan; until then the host has none.
-                    max_image_bytes: None,
+                    // 0 is not "no cap" here: it is a cap of no bytes, and the host keeps no picture under it.
+                    max_image_bytes: Some(max_image_bytes),
                 };
                 let Some(started) = start(env, queue, hooks, log, limits) else { break fail(queue, log, "setup") };
                 queue.push(Frame::Note(Note::Ready));

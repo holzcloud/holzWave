@@ -478,6 +478,7 @@ fn config_the_defaults_are_those_of_the_contract_and_sit_inside_their_bounds() {
     assert_eq!((p.workers.uid_min, p.workers.uid_max), (20_000, 29_999));
     assert_eq!(p.workers.idle_timeout, Duration::from_secs(24 * 3600));
     assert_eq!((p.workers.max_panes, p.workers.max_scrollback_lines), (64, 10_000));
+    assert_eq!(p.workers.max_image_mib, 64, "pictures are on by default, 64 MiB for one pane");
     assert_eq!(p.upload.max_bytes, 256 * 1024 * 1024);
     assert_eq!(p.upload.dir, PathBuf::from("uploads"));
     assert_eq!(p.transport.compression, Compression::Off);
@@ -920,6 +921,10 @@ fn matrix_a_duration_or_a_limit_outside_its_bounds() {
             ("no panes", vec![Edit::Set("workers.max_panes", json!(0))], "workers.max_panes"),
             ("too many panes", vec![Edit::Set("workers.max_panes", json!(100_000))], "workers.max_panes"),
             ("scrollback", vec![Edit::Set("workers.max_scrollback_lines", json!(1))], "workers.max_scrollback_lines"),
+            ("pictures above the range", vec![Edit::Set("workers.max_image_mib", json!(4097))], "workers.max_image_mib is 4097"),
+            // A negative number is not a u32: the parse refuses it, as it does for every other whole-number key (the serde
+            // sentence names the line and column, not the key).
+            ("pictures below zero", vec![Edit::Set("workers.max_image_mib", json!(-1))], "invalid value: integer `-1`, expected u32"),
             ("process limit", vec![Edit::Set("workers.nproc", json!(1))], "workers.nproc"),
             ("file limit", vec![Edit::Set("workers.nofile", json!(5))], "workers.nofile"),
             ("worker idle", vec![Edit::Set("workers.idle_timeout", json!("10s"))], "workers.idle_timeout"),

@@ -562,6 +562,8 @@ pub struct Workers {
     pub max_panes: u32,
     /// The scrollback lines of a pane.
     pub max_scrollback_lines: u32,
+    /// The most MiB of pictures one pane may keep, whatever the person's own setting says; 0 turns pictures off.
+    pub max_image_mib: u32,
     /// The `RLIMIT_NPROC` of a worker.
     pub nproc: u64,
     /// The `RLIMIT_NOFILE` of a worker.
@@ -582,6 +584,7 @@ impl Default for Workers {
             idle_timeout: limits::WORKER_IDLE_TIMEOUT,
             max_panes: limits::MAX_PANES,
             max_scrollback_lines: limits::MAX_SCROLLBACK_LINES,
+            max_image_mib: limits::MAX_IMAGE_MIB,
             nproc: limits::WORKER_NPROC,
             nofile: limits::WORKER_NOFILE,
             helper_path: PathBuf::from(DEFAULT_HELPER_PATH),
@@ -963,6 +966,7 @@ fn check_workers(workers: &Workers, own_uid: u32) -> Result<(), Refusal> {
     limits::WORKER_IDLE_SPEC.check(workers.idle_timeout)?;
     limits::MAX_PANES_SPEC.check(workers.max_panes)?;
     limits::SCROLLBACK_SPEC.check(workers.max_scrollback_lines)?;
+    limits::IMAGE_SPEC.check(workers.max_image_mib)?;
     limits::NPROC_SPEC.check(workers.nproc)?;
     limits::NOFILE_SPEC.check(workers.nofile)?;
     for (key, path) in [("helper_path", &workers.helper_path), ("worker_path", &workers.worker_path)] {

@@ -25,6 +25,26 @@ use crate::scratch::Scratch;
 /// How long a test waits for anything the worker should do.
 pub const PATIENCE: Duration = Duration::from_secs(10);
 
+/// The picture cap a server has when nothing is configured, in MiB.
+pub const DEFAULT_IMAGE_MIB: u32 = 64;
+
+/// The shell command text that prints one picture of `bytes` bytes of RGBA (zeros, 256 pixels wide, so `bytes` must be a
+/// multiple of 1024) with the id `id` in one cell, in protocol chunks of 4096 base64 characters, and then sets the title
+/// `hw-pic-done`. The title comes after the last chunk in the byte stream, so a test that has seen it knows that the engine
+/// has taken or refused the whole picture. Std only: `head`, `base64`, `tr`, `fold` and `printf` of any POSIX system.
+pub fn picture_command(bytes: usize, id: u32) -> String {
+    assert!(bytes % 1024 == 0 && bytes > 0, "a picture is a whole number of rows of 256 pixels");
+    let height = bytes / 1024;
+    format!(
+        r#"head -c {bytes} /dev/zero | base64 | tr -d '\n' | fold -w 4096 | {{
+            read -r first
+            printf '\033_Ga=T,f=32,s=256,v={height},i={id},c=1,r=1,m=1,q=2;%s\033\\' "$first"
+            while read -r line || [ -n "$line" ]; do printf '\033_Gm=1,q=2;%s\033\\' "$line"; done
+            printf '\033_Gm=0,q=2;\033\\'
+        }}; printf '\033]0;hw-pic-done\007'"#
+    )
+}
+
 /// What a rig is started with.
 #[derive(Default)]
 pub struct RigOptions {
@@ -159,9 +179,14 @@ impl Rig {
         self.init_with(0, 0);
     }
 
-    /// [`Rig::init`] with caps (0 is none).
+    /// [`Rig::init`] with caps (0 is none); the picture cap is the default of a server, 64 MiB.
     pub fn init_with(&mut self, max_panes: u32, max_scrollback_lines: u32) {
-        self.send(Frame::Ctl(Ctl::Init { version: PROTOCOL_VERSION, max_panes, max_scrollback_lines }));
+        self.init_with_images(max_panes, max_scrollback_lines, DEFAULT_IMAGE_MIB);
+    }
+
+    /// [`Rig::init_with`] and the picture cap in whole MiB (0 turns pictures off).
+    pub fn init_with_images(&mut self, max_panes: u32, max_scrollback_lines: u32, max_image_mib: u32) {
+        self.send(Frame::Ctl(Ctl::Init { version: PROTOCOL_VERSION, max_panes, max_scrollback_lines, max_image_mib }));
         self.wait_for("Ready", PATIENCE, |f| matches!(f, Frame::Note(Note::Ready)));
     }
 
@@ -265,6 +290,18 @@ impl Rig {
                 _ => None,
             })
             .collect()
+    }
+
+    /// How many frames of `pane` seen so far carry a placement list that is not empty.
+    pub fn frames_with_images(&self, pane: u64) -> usize {
+        self.seen
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Evt(e) if e.name == "frame" => serde_json::from_str::<Value>(&e.text).ok(),
+                _ => None,
+            })
+            .filter(|p| p["pane"] == json!(pane) && p["images"].as_array().is_some_and(|list| !list.is_empty()))
+            .count()
     }
 
     /// The text of an error answer, parsed as JSON.

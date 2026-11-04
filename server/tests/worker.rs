@@ -139,9 +139,76 @@ fn tracer_the_end_of_the_socket_ends_the_run_and_the_shell() {
 #[test]
 fn tracer_an_init_with_another_protocol_version_ends_the_worker() {
     let mut rig = Rig::start();
-    rig.send(Frame::Ctl(Ctl::Init { version: PROTOCOL_VERSION + 1, max_panes: 0, max_scrollback_lines: 0 }));
+    rig.send(Frame::Ctl(Ctl::Init { version: PROTOCOL_VERSION + 1, max_panes: 0, max_scrollback_lines: 0, max_image_mib: 64 }));
     let end = rig.finish();
     assert_eq!(end, RunEnd::Failed);
+}
+
+// ---- pictures: the worker cap for the image memory of a pane -------------------------------------------------------------
+
+const MIB: usize = 1024 * 1024;
+
+/// A worker whose shell prints one picture of `bytes` bytes (the id 7) and then sets a title; `cap_mib` is the picture cap of
+/// the first control frame and `setting_mib`, when given, is the person's own `image_memory_mib`, set before the pane starts.
+/// Returns after the engine has taken or refused the whole picture and a full frame that was asked for afterwards has come, so
+/// what the frames of the pane do not show is not there, not late.
+fn picture_rig(cap_mib: u32, setting_mib: Option<u32>, bytes: usize) -> (Rig, u64) {
+    let mut rig = rig_with_shell(&format!("{}; exec cat", worker_env::picture_command(bytes, 7)));
+    rig.init_with_images(0, 0, cap_mib);
+    if let Some(mib) = setting_mib {
+        rig.ok(2, "set_setting", json!({"key": "image_memory_mib", "value": mib}));
+    }
+    let first = first_pane(&rig.ok(2, "get_layout", json!({})));
+    rig.ok(2, "start_pane", json!({"pane": first, "cols": 80, "rows": 24, "cell_w": 8, "cell_h": 16}));
+    rig.wait_event("title", |_, payload| payload["pane"] == json!(first) && payload["title"] == json!("hw-pic-done"));
+    let seen = rig
+        .seen()
+        .iter()
+        .filter_map(|f| match f {
+            Frame::Evt(e) if e.name == "frame" => serde_json::from_str::<Value>(&e.text).ok(),
+            _ => None,
+        })
+        .filter(|p| p["pane"] == json!(first))
+        .filter_map(|p| p["seq"].as_u64())
+        .max()
+        .unwrap_or(0);
+    rig.ok(2, "request_full", json!({"pane": first}));
+    rig.wait_event("frame", |_, p| p["pane"] == json!(first) && p["full"] == json!(true) && p["seq"].as_u64() > Some(seen));
+    (rig, first)
+}
+
+/// The id and the generation of the first placement a frame of `pane` carried, if any frame carried one.
+fn first_placement(rig: &Rig, pane: u64) -> Option<(u64, u64)> {
+    rig.seen().iter().find_map(|f| match f {
+        Frame::Evt(e) if e.name == "frame" => {
+            let payload: Value = serde_json::from_str(&e.text).ok()?;
+            if payload["pane"] != json!(pane) {
+                return None;
+            }
+            let first = payload["images"].as_array()?.first()?.as_array()?.clone();
+            Some((first[0].as_u64()?, first[1].as_u64()?))
+        }
+        _ => None,
+    })
+}
+
+#[test]
+fn tracer_the_picture_cap_of_the_first_frame_reaches_the_pane_a_picture_of_2_mib_is_placed_under_8_and_not_under_1() {
+    // The same picture, first under a cap that holds it, then under one that does not.
+    let (mut rig, pane) = picture_rig(8, None, 2 * MIB);
+    let (image, generation) = first_placement(&rig, pane).expect("under a cap of 8 MiB the picture is placed");
+    assert_eq!(image, 7);
+    let answer = rig.call(2, "image_data", json!({"pane": pane, "image": image, "generation": generation, "offset": 0}));
+    let ResBody::Binary(bytes) = answer.body else { panic!("the pixels come back as raw bytes: {answer:?}") };
+    assert_eq!(bytes[..12], [0, 0, 1, 0, 0, 0, 8, 0, 0, 0x20, 0, 0], "256 by 2048 pixels, 2 MiB");
+    rig.finish();
+
+    let (mut rig, pane) = picture_rig(1, None, 2 * MIB);
+    assert_eq!(first_placement(&rig, pane), None, "under a cap of 1 MiB no frame shows a placement");
+    assert_eq!(rig.frames_with_images(pane), 0);
+    let refused = rig.err(2, "image_data", json!({"pane": pane, "image": 7, "generation": 1, "offset": 0}));
+    assert_eq!(refused, json!("no such image"));
+    rig.finish();
 }
 
 // ---- helpers ------------------------------------------------------------------------------------------------------------
@@ -877,7 +944,7 @@ fn end_a_link_that_closes_while_a_pane_is_still_writing_is_the_end_of_the_link_a
 #[test]
 fn end_a_second_init_a_frame_that_belongs_to_the_worker_and_a_bad_frame_end_it_with_a_failure_note() {
     let cases: Vec<Frame> = vec![
-        Frame::Ctl(Ctl::Init { version: PROTOCOL_VERSION, max_panes: 0, max_scrollback_lines: 0 }),
+        Frame::Ctl(Ctl::Init { version: PROTOCOL_VERSION, max_panes: 0, max_scrollback_lines: 0, max_image_mib: 64 }),
         Frame::Res(Res { socket: 1, request: 1, body: ResBody::Ok("1".into()) }),
         Frame::Evt(Evt { target: 1, name: "frame".into(), text: "{}".into() }),
         Frame::Note(Note::Ready),
@@ -1420,7 +1487,7 @@ fn hostile_a_control_before_init_an_attach_for_socket_zero_and_a_second_init_end
 
     let mut rig = Rig::start();
     rig.init();
-    rig.send(Frame::Ctl(Ctl::Init { version: PROTOCOL_VERSION, max_panes: 1, max_scrollback_lines: 1 }));
+    rig.send(Frame::Ctl(Ctl::Init { version: PROTOCOL_VERSION, max_panes: 1, max_scrollback_lines: 1, max_image_mib: 64 }));
     wait_failure(&mut rig);
     assert_eq!(rig.finish(), RunEnd::Failed);
 }
@@ -1692,7 +1759,7 @@ mod on_linux {
     fn handshake(started: &mut Started) {
         holzwave_server::wire::write_frame(
             &mut started.ours,
-            &Frame::Ctl(Ctl::Init { version: PROTOCOL_VERSION, max_panes: 0, max_scrollback_lines: 0 }),
+            &Frame::Ctl(Ctl::Init { version: PROTOCOL_VERSION, max_panes: 0, max_scrollback_lines: 0, max_image_mib: 64 }),
         )
         .expect("init");
         read_until(&mut started.ours, |f| matches!(f, Frame::Note(Note::Ready)));

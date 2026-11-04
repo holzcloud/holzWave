@@ -62,6 +62,9 @@ pub const MAX_PANES: u32 = 64;
 /// The scrollback lines of a pane in a worker.
 pub const MAX_SCROLLBACK_LINES: u32 = 10_000;
 
+/// The most MiB of pictures one pane of a worker keeps (0 turns pictures off).
+pub const MAX_IMAGE_MIB: u32 = 64;
+
 /// The `RLIMIT_NPROC` of a worker: the most processes one person may have.
 pub const WORKER_NPROC: u64 = 1024;
 
@@ -213,6 +216,8 @@ pub const WORKER_IDLE_SPEC: Spec<Duration> = Spec::new("workers.idle_timeout", W
 pub const MAX_PANES_SPEC: Spec<u32> = Spec::new("workers.max_panes", MAX_PANES, 1, 1024);
 /// The scrollback cap.
 pub const SCROLLBACK_SPEC: Spec<u32> = Spec::new("workers.max_scrollback_lines", MAX_SCROLLBACK_LINES, 100, 1_000_000);
+/// The picture cap of a pane, in whole MiB; 0 turns pictures off.
+pub const IMAGE_SPEC: Spec<u32> = Spec::new("workers.max_image_mib", MAX_IMAGE_MIB, 0, 4096);
 /// The process cap of a worker.
 pub const NPROC_SPEC: Spec<u64> = Spec::new("workers.nproc", WORKER_NPROC, 8, 4_194_304);
 /// The open-file cap of a worker.
@@ -470,6 +475,7 @@ pub fn all_rows() -> Vec<Row> {
         WORKER_IDLE_SPEC.row(),
         MAX_PANES_SPEC.row(),
         SCROLLBACK_SPEC.row(),
+        IMAGE_SPEC.row(),
         NPROC_SPEC.row(),
         NOFILE_SPEC.row(),
         UPLOAD_SPEC.row(),
@@ -512,6 +518,7 @@ mod tests {
         }
         MAX_PANES_SPEC.check(MAX_PANES).expect("max_panes");
         SCROLLBACK_SPEC.check(MAX_SCROLLBACK_LINES).expect("scrollback");
+        IMAGE_SPEC.check(MAX_IMAGE_MIB).expect("pictures");
         NPROC_SPEC.check(WORKER_NPROC).expect("nproc");
         NOFILE_SPEC.check(WORKER_NOFILE).expect("nofile");
         UPLOAD_SPEC.check(UPLOAD_BYTES).expect("upload");

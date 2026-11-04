@@ -84,9 +84,10 @@ fn tracer_an_event_is_kind_3_then_target_name_length_name_and_the_final_text() {
 }
 
 #[test]
-fn tracer_init_is_kind_4_operation_1_then_version_and_the_two_caps() {
-    let frame = Frame::Ctl(Ctl::Init { version: 1, max_panes: 3, max_scrollback_lines: 0x0001_0000 });
-    let expected = vec![0x04, 0x01, 0, 1, 0, 0, 0, 3, 0, 1, 0, 0];
+fn tracer_init_is_kind_4_operation_1_then_version_and_the_three_caps() {
+    // Version 2: the bytes of version 1 with the new version and four more bytes at the end, the picture cap in MiB.
+    let frame = Frame::Ctl(Ctl::Init { version: 2, max_panes: 3, max_scrollback_lines: 0x0001_0000, max_image_mib: 0x0000_0040 });
+    let expected = vec![0x04, 0x01, 0, 2, 0, 0, 0, 3, 0, 1, 0, 0, 0, 0, 0, 0x40];
     assert_eq!(payload(&frame), expected);
     assert_eq!(Frame::from_payload(&expected).expect("decodes"), frame);
 }
@@ -109,7 +110,7 @@ fn tracer_ready_is_kind_5_operation_1_and_nothing_else() {
 #[test]
 fn tracer_frames_read_back_one_after_another_and_the_end_between_two_is_none() {
     let frames = vec![
-        Frame::Ctl(Ctl::Init { version: 1, max_panes: 0, max_scrollback_lines: 0 }),
+        Frame::Ctl(Ctl::Init { version: 2, max_panes: 0, max_scrollback_lines: 0, max_image_mib: 0 }),
         Frame::Cmd(CmdFrame { socket: 1, request: 1, json: "{}".into() }),
         Frame::Res(Res { socket: 1, request: 1, body: ResBody::Ok("null".into()) }),
         Frame::Evt(Evt { target: 0, name: "frame".into(), text: "{}".into() }),
@@ -343,7 +344,7 @@ fn layout_pane_count_exiting_and_ctl_done() {
 /// One frame of every shape with a fixed length.
 fn fixed_frames() -> Vec<Frame> {
     vec![
-        Frame::Ctl(Ctl::Init { version: 1, max_panes: 3, max_scrollback_lines: 100 }),
+        Frame::Ctl(Ctl::Init { version: 2, max_panes: 3, max_scrollback_lines: 100, max_image_mib: 64 }),
         Frame::Ctl(Ctl::Attach { socket: 9 }),
         Frame::Ctl(Ctl::Detach { socket: 9 }),
         Frame::Ctl(Ctl::Unlock { ctl: 5, kind: SlotKind::Prf, key: key(1) }),

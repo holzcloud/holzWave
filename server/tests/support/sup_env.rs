@@ -625,8 +625,8 @@ impl ScriptEnv {
 }
 
 /// The `Init` the supervisor must send first.
-pub fn expected_init(max_panes: u32, max_scrollback_lines: u32) -> Ctl {
-    Ctl::Init { version: PROTOCOL_VERSION, max_panes, max_scrollback_lines }
+pub fn expected_init(max_panes: u32, max_scrollback_lines: u32, max_image_mib: u32) -> Ctl {
+    Ctl::Init { version: PROTOCOL_VERSION, max_panes, max_scrollback_lines, max_image_mib }
 }
 
 

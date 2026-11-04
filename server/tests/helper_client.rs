@@ -82,7 +82,7 @@ async fn spawn_in_serve_mode_gives_the_process_number_and_one_descriptor_to_a_wo
     // The descriptor is the supervisor's end of the link: what is written reaches the worker and its answer comes back.
     let mut link = StdStream::from(spawned.link);
     link.set_read_timeout(Some(PATIENCE)).expect("a timeout");
-    write_frame(&mut link, &Frame::Ctl(Ctl::Init { version: PROTOCOL_VERSION, max_panes: 0, max_scrollback_lines: 0 })).expect("write");
+    write_frame(&mut link, &Frame::Ctl(Ctl::Init { version: PROTOCOL_VERSION, max_panes: 0, max_scrollback_lines: 0, max_image_mib: 64 })).expect("write");
     assert_eq!(read_frame(&mut link).expect("read"), Some(Frame::Note(Note::Ready)));
     assert_eq!(fake.spawns(), vec![(20001, Mode::Serve)]);
 }

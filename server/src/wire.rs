@@ -150,7 +150,7 @@ pub const NOTE_EXITING: u8 = 4;
 pub const NOTE_CTL_DONE: u8 = 5;
 
 /// The protocol version of the `Init` control.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// The socket id on which a worker answers a file control. A browser connection never has this id.
 pub const FILE_SOCKET: u32 = u32::MAX;
@@ -357,8 +357,9 @@ pub fn valid_token(token: &str) -> bool {
 /// A control from the supervisor.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Ctl {
-    /// The first frame: the protocol version and the caps of this person (0 is no cap).
-    Init { version: u16, max_panes: u32, max_scrollback_lines: u32 },
+    /// The first frame: the protocol version and the caps of this person. 0 is no cap for the panes and the scrollback;
+    /// for `max_image_mib`, the most MiB of pictures one pane keeps, 0 means no pictures at all.
+    Init { version: u16, max_panes: u32, max_scrollback_lines: u32, max_image_mib: u32 },
     /// A browser connection is attached: it gets the replay of titles and working directories.
     Attach { socket: u32 },
     /// A browser connection is gone.
@@ -393,11 +394,12 @@ pub enum Ctl {
 impl fmt::Debug for Ctl {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Ctl::Init { version, max_panes, max_scrollback_lines } => f
+            Ctl::Init { version, max_panes, max_scrollback_lines, max_image_mib } => f
                 .debug_struct("Init")
                 .field("version", version)
                 .field("max_panes", max_panes)
                 .field("max_scrollback_lines", max_scrollback_lines)
+                .field("max_image_mib", max_image_mib)
                 .finish(),
             Ctl::Attach { socket } => f.debug_struct("Attach").field("socket", socket).finish(),
             Ctl::Detach { socket } => f.debug_struct("Detach").field("socket", socket).finish(),
@@ -626,11 +628,12 @@ impl Frame {
                 out.extend_from_slice(evt.name.as_bytes());
                 out.extend_from_slice(evt.text.as_bytes());
             }
-            Frame::Ctl(Ctl::Init { version, max_panes, max_scrollback_lines }) => {
+            Frame::Ctl(Ctl::Init { version, max_panes, max_scrollback_lines, max_image_mib }) => {
                 out.extend_from_slice(&[KIND_CTL, OP_INIT]);
                 out.extend_from_slice(&version.to_be_bytes());
                 out.extend_from_slice(&max_panes.to_be_bytes());
                 out.extend_from_slice(&max_scrollback_lines.to_be_bytes());
+                out.extend_from_slice(&max_image_mib.to_be_bytes());
             }
             Frame::Ctl(Ctl::Attach { socket }) => {
                 out.extend_from_slice(&[KIND_CTL, OP_ATTACH]);
@@ -807,7 +810,8 @@ impl Frame {
                         let version = fields.u16()?;
                         let max_panes = fields.u32()?;
                         let max_scrollback_lines = fields.u32()?;
-                        Frame::Ctl(Ctl::Init { version, max_panes, max_scrollback_lines })
+                        let max_image_mib = fields.u32()?;
+                        Frame::Ctl(Ctl::Init { version, max_panes, max_scrollback_lines, max_image_mib })
                     }
                     OP_ATTACH => Frame::Ctl(Ctl::Attach { socket: fields.socket()? }),
                     OP_DETACH => Frame::Ctl(Ctl::Detach { socket: fields.socket()? }),

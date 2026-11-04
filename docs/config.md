@@ -1135,6 +1135,7 @@ Rules for the whole file:
 | `workers.idle_timeout` | 1d | 1m to 90d | A worker, and with it every pane of the person, ends this long after the person's last socket closed. |
 | `workers.max_panes` | 64 | 1 to 1024 | The most panes one person holds. |
 | `workers.max_scrollback_lines` | 10000 | 100 to 1000000 | The scrollback lines of a pane. |
+| `workers.max_image_mib` | 64 | 0 to 4096 | The most MiB of pictures one pane of a person may keep on a screen, whatever the person's own `image_memory_mib` setting says; the setting is cut to it. `0` turns pictures off on this server. |
 | `workers.nproc` | 1024 | 8 to 4194304 | The process limit of a person's user id. |
 | `workers.nofile` | 4096 | 16 to 1048576 | The open-file limit of a worker. |
 | `workers.helper_path` | `/usr/local/bin/holzwave-spawn-helper` | an absolute path | The spawn helper. |
@@ -1235,7 +1236,8 @@ you do not want to change. The key is not here: it is the file that `HOLZWAVE_SE
     "uid_max": 29999,
     "idle_timeout": "1d",
     "max_panes": 64,
-    "max_scrollback_lines": 10000
+    "max_scrollback_lines": 10000,
+    "max_image_mib": 64
   },
   "upload": {
     "dir": "uploads",

@@ -58,6 +58,8 @@ pub struct SupervisorSettings {
     pub max_panes: u32,
     /// The most scrollback lines of a pane, sent to the worker.
     pub max_scrollback_lines: u32,
+    /// The most MiB of pictures one pane keeps, sent to the worker (0 is none).
+    pub max_image_mib: u32,
     /// The most sockets one person has attached at once.
     pub sockets_per_person: usize,
     /// The bytes one socket may have queued before it is dropped from or closed.
@@ -81,6 +83,7 @@ impl Default for SupervisorSettings {
         SupervisorSettings {
             max_panes: limits::MAX_PANES,
             max_scrollback_lines: limits::MAX_SCROLLBACK_LINES,
+            max_image_mib: limits::MAX_IMAGE_MIB,
             sockets_per_person: limits::SOCKETS_PER_PERSON as usize,
             socket_queue_bytes: limits::WS_QUEUE_BYTES as usize,
             idle_timeout: limits::WORKER_IDLE_TIMEOUT,
@@ -905,6 +908,7 @@ impl Supervisor {
             version: PROTOCOL_VERSION,
             max_panes: shared.settings.max_panes,
             max_scrollback_lines: shared.settings.max_scrollback_lines,
+            max_image_mib: shared.settings.max_image_mib,
         };
         worker.push_control(init).map_err(|_| AttachError::Launch("the worker could not be started".into()))?;
         let (ready_tx, ready_rx) = oneshot::channel();
