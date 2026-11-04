@@ -14,7 +14,9 @@
 //! address cleaned by [`crate::links::clean_uri`] (printable ASCII, a scheme, no denied scheme). The cells they cover
 //! carry the style flag [`LINK`] in their run. A row without links has no key and encodes byte for byte as it did
 //! before links existed. The row memory compares the whole row, so a row whose link changed is sent again and only
-//! then. Nothing here decides whether an address may be opened.
+//! then. A frame carries at most [`crate::links::MAX_URI_BYTES_PER_FRAME`] address bytes: the encoder drops the links
+//! of the rows after the budget (and remembers those rows as sent without them). Nothing here decides whether an
+//! address may be opened.
 //!
 //! # Images
 //!
@@ -61,7 +63,7 @@ use serde::Serialize;
 use crate::engine::{
     Cell, Color, CursorStyle, ImageChunk, ImageLayer, ImagePlacement, MAX_IMAGE_CHUNK_BYTES, MAX_PLACEMENTS, Update, Width,
 };
-use crate::links::{LinkSpan, MAX_SPANS_PER_ROW};
+use crate::links::{LinkSpan, MAX_SPANS_PER_ROW, MAX_URI_BYTES_PER_FRAME};
 
 /// Style flag bits of a [`Run`].
 pub const BOLD: u8 = 1;
@@ -377,6 +379,53 @@ impl Header {
     }
 }
 
+/// The frame budget of link addresses ([`MAX_URI_BYTES_PER_FRAME`]), applied row by row in order.
+///
+/// What counts is every address byte the page would hold after this frame: the rows this update does not carry keep
+/// the links they were sent with, and the rows it carries are visited in order, each one keeping its links only while
+/// the total stays inside the budget. A row that would go over loses its links (and so their flags) *before* it is
+/// compared with the row the encoder remembers, so the remembered row is the one without links: the same screen gives
+/// the same frame, and a row after the budget that is sent again does not drag the others with it.
+struct LinkBudget {
+    used: usize,
+}
+
+impl LinkBudget {
+    /// `held` are the rows the page holds now. The held rows are summed only when a row of the update has links, so a
+    /// screen without links pays nothing.
+    fn new(held: &[RowMsg], update: &Update) -> Self {
+        if update.changed.iter().all(|r| r.links.is_empty()) {
+            return Self { used: 0 };
+        }
+        let mut carried = vec![false; held.len()];
+        for r in &update.changed {
+            if let Some(slot) = carried.get_mut(usize::from(r.y)) {
+                *slot = true;
+            }
+        }
+        let used = held
+            .iter()
+            .zip(&carried)
+            .filter(|(_, carried)| !**carried)
+            .map(|(row, _)| row.links.iter().map(|l| l.2.len()).sum::<usize>())
+            .sum();
+        Self { used }
+    }
+
+    /// The links the next row may keep: all of them, or none when they would take the frame over its budget.
+    fn allow<'a>(&mut self, links: &'a [LinkSpan]) -> &'a [LinkSpan] {
+        let bytes: usize = links.iter().take(MAX_SPANS_PER_ROW).map(|l| l.uri.len()).sum();
+        if bytes == 0 {
+            return links;
+        }
+        if self.used + bytes > MAX_URI_BYTES_PER_FRAME {
+            return &[];
+        }
+        self.used += bytes;
+        links
+    }
+}
+
 fn blank_row(y: u16) -> RowMsg {
     RowMsg { y, runs: Vec::new(), extras: Vec::new(), links: Vec::new() }
 }
@@ -440,17 +489,19 @@ impl FrameEncoder {
             while all.len() < rows {
                 all.push(blank_row(all.len() as u16));
             }
+            let mut budget = LinkBudget::new(&all, &update);
             for r in &update.changed {
                 if let Some(slot) = all.get_mut(usize::from(r.y)) {
-                    *slot = encode_row(r.y, &r.cells, &r.links, cols, header.bg);
+                    *slot = encode_row(r.y, &r.cells, budget.allow(&r.links), cols, header.bg);
                 }
             }
             changed.clone_from(&all);
             self.rows = all;
         } else {
+            let mut budget = LinkBudget::new(&self.rows, &update);
             for r in &update.changed {
                 let Some(held) = self.rows.get_mut(usize::from(r.y)) else { continue };
-                let row = encode_row(r.y, &r.cells, &r.links, cols, header.bg);
+                let row = encode_row(r.y, &r.cells, budget.allow(&r.links), cols, header.bg);
                 if *held != row {
                     *held = row.clone();
                     changed.push(row);

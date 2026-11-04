@@ -470,6 +470,25 @@ fn scenario() -> Fixture {
     step("image placed", b"\x1b[H\x1b[2J\x1b_Ga=T,f=32,s=1,v=1,i=5,c=1,r=1;AAAA/w==\x1b\\", None, &[], &[], &mut e);
     step("text beside the image", b"\r\nafter", None, &[], &[], &mut e);
     step("image deleted", b"\x1b_Ga=d,d=I,i=5\x1b\\", None, &[], &[], &mut e);
+    // Hyperlinks: a link set (a `links` key and the LINK flag on its cells), the same row overwritten (no key, no flag),
+    // and a row with a denied scheme and an address with a blank, which are plain text, next to a good link.
+    step(
+        "link set",
+        b"\x1b[H\x1b[2J\x1b]8;;https://example.org/a\x1b\\link\x1b]8;;\x1b\\ plain",
+        None,
+        &[],
+        &[],
+        &mut e,
+    );
+    step("link cleared", b"\r\x1b[2Kgone", None, &[], &[], &mut e);
+    step(
+        "hostile address",
+        b"\r\n\x1b]8;;javascript:alert(1)\x1b\\bad\x1b]8;;\x1b\\ \x1b]8;;https://a b\x1b\\sp\x1b]8;;\x1b\\ \x1b]8;;mailto:holz@example.org\x1b\\ok\x1b]8;;\x1b\\",
+        None,
+        &[],
+        &[],
+        &mut e,
+    );
 
     Fixture { version: 1, cols, rows, steps }
 }

@@ -1972,6 +1972,206 @@
         "",
         ""
       ]
+    },
+    {
+      "name": "link set",
+      "input": "\\x1b[H\\x1b[2J\\x1b]8;;https://example.org/a\\x1b\\\\link\\x1b]8;;\\x1b\\\\ plain",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 23,
+        "full": false,
+        "cols": 24,
+        "rows": 6,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 10,
+          "y": 0,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          5,
+          11,
+          6
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": [
+          {
+            "y": 0,
+            "runs": [
+              [
+                "link",
+                4,
+                16777215,
+                0,
+                16
+              ],
+              [
+                " plain              ",
+                20,
+                16777215,
+                0,
+                0
+              ]
+            ],
+            "links": [
+              [
+                0,
+                3,
+                "https://example.org/a"
+              ]
+            ]
+          },
+          {
+            "y": 1,
+            "runs": []
+          }
+        ]
+      },
+      "grid": [
+        "link plain",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "name": "link cleared",
+      "input": "\\r\\x1b[2Kgone",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 24,
+        "full": false,
+        "cols": 24,
+        "rows": 6,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 4,
+          "y": 0,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          5,
+          11,
+          6
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": [
+          {
+            "y": 0,
+            "runs": [
+              [
+                "gone                    ",
+                24,
+                16777215,
+                0,
+                0
+              ]
+            ]
+          }
+        ]
+      },
+      "grid": [
+        "gone",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "name": "hostile address",
+      "input": "\\r\\n\\x1b]8;;javascript:alert(1)\\x1b\\\\bad\\x1b]8;;\\x1b\\\\ \\x1b]8;;https://a b\\x1b\\\\sp\\x1b]8;;\\x1b\\\\ \\x1b]8;;mailto:holz@example.org\\x1b\\\\ok\\x1b]8;;\\x1b\\\\",
+      "resize": null,
+      "frame": {
+        "pane": 1,
+        "seq": 25,
+        "full": false,
+        "cols": 24,
+        "rows": 6,
+        "fg": 16777215,
+        "bg": 0,
+        "cursor": {
+          "x": 9,
+          "y": 1,
+          "style": "block",
+          "blink": false
+        },
+        "scrollbar": [
+          5,
+          11,
+          6
+        ],
+        "selection": [],
+        "matches": [],
+        "search": null,
+        "copy_cursor": null,
+        "modes": {
+          "alt": false,
+          "bracketed_paste": false,
+          "mouse": false
+        },
+        "changed": [
+          {
+            "y": 1,
+            "runs": [
+              [
+                "bad sp ",
+                7,
+                16777215,
+                0,
+                0
+              ],
+              [
+                "ok",
+                2,
+                16777215,
+                0,
+                16
+              ]
+            ],
+            "links": [
+              [
+                7,
+                8,
+                "mailto:holz@example.org"
+              ]
+            ]
+          }
+        ]
+      },
+      "grid": [
+        "gone",
+        "bad sp ok",
+        "",
+        "",
+        "",
+        ""
+      ]
     }
   ]
 }
