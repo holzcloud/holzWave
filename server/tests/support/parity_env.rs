@@ -856,12 +856,134 @@ pub fn counting_program(lines: u64, pause: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Pictures and links a shell prints
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Standard base64 (RFC 4648, with padding) of `bytes`; std only, the Kitty protocol's payload alphabet.
+pub fn base64_std(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16) | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8) | u32::from(*chunk.get(2).unwrap_or(&0));
+        out.push(char::from(ALPHABET[(n >> 18) as usize & 63]));
+        out.push(char::from(ALPHABET[(n >> 12) as usize & 63]));
+        out.push(if chunk.len() > 1 { char::from(ALPHABET[(n >> 6) as usize & 63]) } else { '=' });
+        out.push(if chunk.len() > 2 { char::from(ALPHABET[n as usize & 63]) } else { '=' });
+    }
+    out
+}
+
+/// The shell text that prints a Kitty graphics picture: `printf` with octal escapes (`\033` for ESC, `\\` for the backslash of
+/// the string terminator), so no escape byte is typed and the line survives the terminal's line discipline. The picture is
+/// `width` by `height` pixels of straight RGBA (`rgba` holds exactly `width * height * 4` bytes), transmitted and displayed at
+/// the cursor (`a=T`, `f=32`) as image `id` over `cols` by `rows` cells. A payload longer than 4096 characters is sent in
+/// chunks of 4096 (`m=1` on all but the last), as the protocol asks. The text has no line end: append `; echo ...\r`.
+pub fn kitty_picture_command(id: u32, width: u32, height: u32, rgba: &[u8], cols: u32, rows: u32) -> String {
+    assert_eq!(rgba.len(), (width * height * 4) as usize, "the pixel bytes do not fit the size");
+    let payload = base64_std(rgba);
+    let pieces: Vec<&str> = payload.as_bytes().chunks(4096).map(|c| std::str::from_utf8(c).expect("base64 is ASCII")).collect();
+    let mut format = String::new();
+    for (i, piece) in pieces.iter().enumerate() {
+        let more = u8::from(i + 1 < pieces.len());
+        if i == 0 {
+            format.push_str(&format!("\\033_Ga=T,f=32,s={width},v={height},i={id},c={cols},r={rows},m={more};{piece}\\033\\\\"));
+        } else {
+            format.push_str(&format!("\\033_Gm={more};{piece}\\033\\\\"));
+        }
+    }
+    format!("printf '{format}'")
+}
+
+/// The shell text that prints `text` as a hyperlink to `uri` (OSC 8, closed again after the text). `uri` is printf text: a byte
+/// that must not be typed is written as an octal escape (`\001`). It must not hold a single quote.
+pub fn osc8_command(uri: &str, text: &str) -> String {
+    assert!(!uri.contains('\'') && !text.contains('\''), "a single quote would end the printf text");
+    format!("printf '\\033]8;;{uri}\\033\\\\{text}\\033]8;;\\033\\\\'")
+}
+
+/// Like [`osc8_command`] for an address of exactly `total` bytes: `prefix` and then as many `a` as are needed, made by the shell
+/// (so the typed line stays short, and no terminal line limit applies).
+pub fn osc8_command_of_length(prefix: &str, total: usize, text: &str) -> String {
+    assert!(total > prefix.len() && !prefix.contains(['\'', '"', '$', '`']) && !text.contains('\''), "the prefix and text must be plain");
+    format!("printf '\\033]8;;%s\\033\\\\{text}\\033]8;;\\033\\\\' \"{prefix}$(head -c {} /dev/zero | tr '\\0' a)\"", total - prefix.len())
+}
+
+/// The clear-the-screen-and-home text, as printf text.
+pub const CLEAR: &str = "printf '\\033[2J\\033[H'";
+
+/// The rows of a pane as the frames of a socket leave them, whole (`runs`, `links` and all), rebuilt the way the page does: a
+/// full frame replaces every row, a partial one the rows it names. A row never sent is `null`.
+pub fn rows_of(line: &Line, pane: u64) -> Vec<Value> {
+    let mut rows: Vec<Value> = Vec::new();
+    for frame in line.frames_of(pane) {
+        let count = usize::try_from(frame["rows"].as_u64().unwrap_or(0)).unwrap_or(0);
+        if frame["full"].as_bool().unwrap_or(false) || rows.len() != count {
+            rows = vec![Value::Null; count];
+        }
+        for changed in frame["changed"].as_array().map(Vec::as_slice).unwrap_or_default() {
+            if let Some(slot) = changed["y"].as_u64().and_then(|y| usize::try_from(y).ok()).and_then(|y| rows.get_mut(y)) {
+                *slot = changed.clone();
+            }
+        }
+    }
+    rows
+}
+
+/// The style flags of every cell of a row (the `flags` of its runs spread over the cells they cover); empty for a row never sent.
+pub fn cell_flags(row: &Value) -> Vec<u64> {
+    let mut flags = Vec::new();
+    for run in row["runs"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        let cols = usize::try_from(run[1].as_u64().unwrap_or(0)).unwrap_or(0);
+        flags.extend(std::iter::repeat_n(run[4].as_u64().unwrap_or(0), cols));
+    }
+    flags
+}
+
+/// The `images` list of the last frame of `pane` that carried the key (`None` when no frame did), as the page would hold it.
+pub fn last_images(line: &Line, pane: u64) -> Option<Vec<Value>> {
+    let mut held: Option<Vec<Value>> = None;
+    for frame in line.frames_of(pane) {
+        if frame["full"].as_bool().unwrap_or(false) {
+            held = None;
+        }
+        if let Some(list) = frame["images"].as_array() {
+            held = Some(list.clone());
+        }
+    }
+    held
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Pure tests
+// ---------------------------------------------------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Pure tests
 // ---------------------------------------------------------------------------------------------------------------------
 
 #[cfg(test)]
 mod pure {
     use super::*;
+
+    #[test]
+    fn pure_base64_matches_the_vectors_of_rfc_4648() {
+        for (plain, coded) in
+            [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foob", "Zm9vYg=="), ("fooba", "Zm9vYmE="), ("foobar", "Zm9vYmFy")]
+        {
+            assert_eq!(base64_std(plain.as_bytes()), coded);
+        }
+        assert_eq!(base64_std(&[0xfb, 0xff, 0xfe]), "+//+", "the two characters that differ from the URL alphabet");
+    }
+
+    #[test]
+    fn pure_a_long_picture_is_sent_in_chunks_of_4096_characters_and_the_last_one_ends_it() {
+        let text = kitty_picture_command(3, 64, 64, &vec![7u8; 64 * 64 * 4], 8, 4);
+        assert!(!text.contains('\u{1b}'), "no escape byte is typed");
+        assert_eq!(text.matches("\\033_G").count(), 6, "16384 bytes are 21848 characters, six chunks of at most 4096");
+        assert_eq!(text.matches("m=0;").count(), 1, "one chunk ends the picture");
+        assert!(text.find("m=0;").unwrap() > text.rfind("m=1;").unwrap(), "the ending chunk is the last");
+    }
+
 
     #[test]
     fn pure_shape_equal_objects_pass() {
