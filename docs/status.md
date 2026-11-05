@@ -34,10 +34,17 @@
   against fake tools and recorded fixtures, not yet against real clusters or accounts.
 - **Pictures and links in the terminal.** Kitty graphics at all three levels (still pictures, animations, pictures drawn with
   placeholder characters; a picture must carry its bytes, a request that names a file is refused) and OSC 8 hyperlinks, drawn by
-  both renderers. A link is dotted at rest, shows its real address in the status line under the pointer, asks first when its text
-  names another place, and opens only the schemes on the person's list; a `file` link only shows the file in the file manager.
-  Tested against the engine, a real server in WebKit and Chromium and a page with a mock core, not against a real program that
-  sends pictures or links, not by an automated test of the desktop window, and not on Windows.
+  both renderers. A link the page treats as one is dotted at rest and shows its real address in the status line under the
+  pointer; a link it refuses (a scheme that is not on the person's list, or a `file` link in a pane of a connection or in the
+  browser build) has no dots. A click on a link whose text names another place asks first, a click that the program refuses is
+  answered in words in the status line, and only the schemes on the person's list open; a `file` link only shows the file in the
+  file manager. The page holds one pane's pictures within that pane's memory setting and all panes together within four times it,
+  counts the decoded bytes only (a WebGL texture is a second copy that it does not count), and lets go of a picture that no
+  placement asks for any more after five seconds. Tested against the engine, a real server in WebKit and Chromium and a page
+  with a mock core. Not tried: a real program that sends pictures or links, the desktop window (no automated test drives it), a
+  real SSH pane, a real opener of Linux or Windows, a custom scheme with a real handler, a flood of pictures from a real program
+  or many panes at once with the memory of the app measured, a real screen reader or popup blocker, any GPU other than the
+  headless one, and Windows at all.
 - **Signing.** The Linux packages can be signed by the owner with minisign, together with a signed `SHA256SUMS`, and checked with
   `sh scripts/verify-release.sh`; no release has been signed yet. The Windows installer and the macOS app stay unsigned (the
   macOS app only ad hoc), as [signing.md](signing.md) says.
