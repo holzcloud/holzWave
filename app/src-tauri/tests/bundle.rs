@@ -359,8 +359,10 @@ fn the_secret_key_has_no_place_in_the_repository() {
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let out = std::process::Command::new("git").arg("-C").arg(&root).args(["ls-files", "-z"]).output().expect("git runs");
-    assert!(out.status.success(), "git ls-files failed");
+    assert!(out.status.success(), "git ls-files failed: {}", String::from_utf8_lossy(&out.stderr));
     let listing = String::from_utf8(out.stdout).expect("file names are UTF-8");
+    // A repository shell with an empty index lists nothing and must not pass: the workspace manifest is tracked.
+    assert!(listing.split('\0').any(|p| p == "Cargo.toml"), "git ls-files lists no Cargo.toml: an empty index checks nothing");
     for path in listing.split('\0').filter(|p| !p.is_empty()) {
         assert!(!path.ends_with(".key"), "a secret key file is tracked: {path}");
         assert!(!path.ends_with(".minisig"), "a signature file is tracked: {path}");

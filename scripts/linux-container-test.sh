@@ -23,8 +23,13 @@
 # a newer Rust. `image` only makes sure the image exists and runs no test: scripts/linux-container-bundle.sh builds on it. Named volumes keep the cargo registry, the git checkouts and the target directory between runs, so
 # a second run does not start from nothing: `docker volume rm holzwave-linux-target` forgets the build cache.
 #
-# The working tree is streamed into the container with tar (without target, .git, node_modules and .planning), so
-# the run sees the files as they are on disk, committed or not.
+# The working tree is streamed into the container with tar (without target, node_modules and .planning), so the run
+# sees the files as they are on disk, committed or not. `.git` goes in without its objects, config, hooks and logs: HEAD,
+# the index and the refs are enough for `git ls-files`, which one test asks for (no tracked secret key), and none of the
+# history, no remote URL, no hook script and no reflog identity enters a container that builds fetched dependencies.
+# An empty objects directory is made in the container, because git takes a directory for a repository only with one. In a
+# linked worktree `.git` is a file that points outside the tree: the listing test then fails with git's own message, and
+# it fails, never skips, when there is no repository at all.
 #
 # Exit status: 0 when the tests ran and passed, 1 when a test failed or no test ran, 2 when a tool is missing
 # (Docker, or npm for the app modes). A missing tool is a failed gate, never a skip.
@@ -119,9 +124,12 @@ WORKDIR /work
 DOCKERFILE
 }
 
-# The working tree as a tar stream. COPYFILE_DISABLE keeps macOS from adding ._ files.
+# The working tree as a tar stream. COPYFILE_DISABLE keeps macOS from adding ._ files. Of .git only HEAD, the index, the
+# refs and a few small marker files go in: not the objects (the history), not config (a remote URL, a token), not hooks
+# (scripts), not logs (reflog identities) and not FETCH_HEAD (the URL of the last fetch). That is what `git ls-files` needs.
 tree_stream() {
-    COPYFILE_DISABLE=1 tar -c -C "$root" --exclude target --exclude .git --exclude node_modules --exclude .planning .
+    COPYFILE_DISABLE=1 tar -c -C "$root" --exclude target --exclude .git/objects --exclude .git/config --exclude .git/hooks \
+        --exclude .git/logs --exclude .git/FETCH_HEAD --exclude node_modules --exclude .planning .
 }
 
 # Run `cargo test` with the given arguments in a container and check what it printed.
@@ -139,7 +147,7 @@ run_tests() {
             -e CARGO_TERM_COLOR=never \
             ${CARGO_BUILD_JOBS:+-e CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS"} \
             "$IMAGE" \
-            sh -c 'tar -x --no-same-owner -C /work && exec "$@"' sh cargo test --locked --no-fail-fast "$@"
+            sh -c 'tar -x --no-same-owner -C /work && { [ ! -d /work/.git ] || mkdir -p /work/.git/objects; } && exec "$@"' sh cargo test --locked --no-fail-fast "$@"
         echo $? >"$code"
     } 2>&1 | tee "$log"
 
