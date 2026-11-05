@@ -17,6 +17,8 @@
 //! enforced by [`SpanBuilder`], which also tells the reader to stop), and [`MAX_URI_BYTES_PER_FRAME`] address bytes in
 //! one frame (enforced by the frame encoder).
 
+use crate::ai::tools::is_hidden;
+
 /// The longest address that is accepted, in bytes. The engine itself keeps at most 2046 bytes of an address.
 pub const MAX_URI_BYTES: usize = 2048;
 /// The most spans one row carries.
@@ -46,6 +48,16 @@ pub struct LinkSpan {
 /// while an address may carry its scheme in any case ([`clean_uri`]).
 pub fn valid_scheme(name: &str) -> bool {
     !name.bytes().any(|b| b.is_ascii_uppercase()) && scheme_grammar(name.as_bytes())
+}
+
+/// Whether `text` carries a character that a link must never have: a control character, a blank (space, tab, no-break
+/// space, a line or paragraph separator, any other Unicode white space) or a format character (a direction mark or
+/// override, a zero-width character, a soft hyphen, a tag character and the other invisible ones). Such a character makes
+/// the text a person sees differ from the text that is opened. The invisible ones are decided by the one table the names
+/// of the AI integration use, so the core has a single list of them. Ordinary letters outside ASCII (an internationalised
+/// host, a name in any script) and emoji are not hidden. Empty text has none.
+pub fn has_hidden_char(text: &str) -> bool {
+    text.chars().any(|c| c.is_whitespace() || is_hidden(c))
 }
 
 /// Whether `name` is one of the schemes that are never delivered or opened: `javascript`, `data`, `vbscript`, `blob`
@@ -231,6 +243,24 @@ mod tests {
         }
         for bad in ["", "1http", "ht_tp", "-a", "+a", &"a".repeat(33), "HTTPS", "Ssh", "a b", "a:b", "a\tb", "h\u{e4}", "a/b"] {
             assert!(!valid_scheme(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn has_hidden_char_finds_every_control_blank_and_format_character_and_nothing_else() {
+        let mut hidden: Vec<char> = vec!['\u{ad}', '\u{61c}', '\u{feff}', '\u{e0001}', '\u{e0020}', '\u{0}', '\u{7}', '\u{1b}', '\u{7f}', '\u{9b}'];
+        hidden.extend([' ', '\t', '\n', '\r', '\u{a0}', '\u{2003}', '\u{3000}', '\u{85}']);
+        for range in [0x200B..=0x200F, 0x2028..=0x202E, 0x2060..=0x206F, 0xFFF9..=0xFFFB] {
+            hidden.extend(range.map(|c| char::from_u32(c).expect("a scalar value")));
+        }
+        for c in hidden {
+            for text in [format!("{c}"), format!("{c}https://a/"), format!("https://a/{c}b"), format!("https://a/{c}")] {
+                assert!(has_hidden_char(&text), "{text:?}");
+            }
+        }
+        let printable: String = (0x21u8..=0x7E).map(char::from).collect();
+        for fine in ["", "https://example.org/a?b=c%20d#e", printable.as_str(), "\u{e4}", "\u{e9}", "\u{fc}", "\u{65e5}", "\u{44f}", "\u{1f600}", "https://ex\u{e4}mple.org/\u{65e5}"] {
+            assert!(!has_hidden_char(fine), "{fine:?}");
         }
     }
 

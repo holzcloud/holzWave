@@ -2748,8 +2748,9 @@ impl AppCore {
 
     /// Open a link with the platform opener. Only a link whose scheme is in the `link_schemes` setting, read at this
     /// call, is opened (never `javascript`, `data`, `vbscript`, `blob` or `about`); the length, the characters and the
-    /// shape are checked first, and nothing is started for a link that fails (T-02-52). The list is the person's, the
-    /// page's own checks are a convenience.
+    /// shape are checked first (no control, blank or invisible character, whatever the scheme), and nothing is started for a
+    /// link that fails (T-02-52). The list is the person's, the page's own checks are a convenience: this command is the
+    /// boundary that decides.
     ///
     /// A `file` link is not opened: with `file` in the list, in a pane that runs on this computer (`pane`, the pane that
     /// shows the link) and with a path that [`file_link_path`] accepts, the file is shown in the file manager through
@@ -3778,7 +3779,7 @@ fn process_env(name: &str) -> Option<String> {
 }
 
 /// Whether `url` is a link that may be opened under the list `schemes` (the `link_schemes` setting in force): at most
-/// [`MAX_URL_BYTES`], no control or blank character, a scheme that the list holds (compared without regard to case) and
+/// [`MAX_URL_BYTES`], no control, blank or invisible character, a scheme that the list holds (compared without regard to case) and
 /// that is none of the five that are never opened, and the shape of that scheme: a host after `//` for http and https, an
 /// address for mailto, something after the colon for any other. `file` is never handed to the opener: a file link is
 /// revealed through the pane path of [`AppCore::open_url`]. The text is never interpreted further, and a refusal is a
@@ -3802,14 +3803,16 @@ fn check_link(url: &str, schemes: &[String]) -> Result<(), String> {
     if names_something { Ok(()) } else { Err("the link names nothing to open".into()) }
 }
 
-/// The checks that every link passes before its scheme is looked at: at most [`MAX_URL_BYTES`], no control or blank
-/// character, and a colon. Gives the scheme as written and the rest.
+/// The checks that every link passes before its scheme is looked at: at most [`MAX_URL_BYTES`], no control, blank or
+/// invisible character (a direction mark or override, a zero-width character, a soft hyphen: the rule is
+/// [`holzwave_core::links::has_hidden_char`], the same one for every scheme and for `file` links), and a colon. Gives
+/// the scheme as written and the rest. The page checks the same things, but only this check counts.
 fn check_link_text(url: &str) -> Result<(&str, &str), String> {
     if url.len() > MAX_URL_BYTES {
         return Err(format!("the link is longer than {MAX_URL_BYTES} bytes"));
     }
-    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        return Err("the link has a control or blank character".into());
+    if holzwave_core::links::has_hidden_char(url) {
+        return Err("the link has a control, blank or invisible character".into());
     }
     url.split_once(':').ok_or_else(|| "the link has no scheme".to_owned())
 }
@@ -7095,6 +7098,63 @@ mod tests {
         for url in bad {
             assert!(core.open_url(url, None).is_err(), "{:?} must be refused", url.chars().take(40).collect::<String>());
             assert!(launches_with(url).is_empty(), "an opener was started for {:?}", url.chars().take(40).collect::<String>());
+        }
+    }
+
+    /// Every character that a link must never carry, one example or the whole range each: the controls, the blanks,
+    /// the soft hyphen, the Arabic letter mark, the zero-width and direction characters, the line and paragraph
+    /// separators, the embedding and isolate controls, the byte order mark, the annotation marks and the tag characters.
+    fn invisible_chars() -> Vec<char> {
+        let mut all = vec!['\u{7}', '\u{7f}', '\u{9b}', ' ', '\t', '\u{a0}', '\u{3000}', '\u{ad}', '\u{61c}', '\u{feff}', '\u{e0001}', '\u{e0020}'];
+        for range in [0x200B..=0x200F, 0x2028..=0x202E, 0x2060..=0x206F, 0xFFF9..=0xFFFB] {
+            all.extend(range.map(|c| char::from_u32(c).expect("a scalar value")));
+        }
+        all
+    }
+
+    #[test]
+    fn open_url_refuses_a_link_with_a_control_blank_or_invisible_character_in_every_position_and_for_every_scheme() {
+        let (core, _rec, dir) = recording_core();
+        set_schemes(&core, &["http", "https", "mailto", "ssh", "file"]);
+        let base = real_dir(&dir, "hidden-files");
+        let file = base.join("hid-file.txt");
+        std::fs::write(&file, "x").unwrap();
+        let pane = only_pane(&core);
+        core.start_pane(pane, 80, 24, 0, 0).expect("starts");
+
+        let links = [
+            "https://example.org/a-hid-1",
+            "http://localhost:8080/b-hid-1",
+            "mailto:holz@example.org?subject=hid-1",
+            "ssh://host.example/c-hid-1",
+            "ftp://example.org/not-listed-hid-1",
+            "javascript:alert(1)//hid-1",
+        ];
+        for c in invisible_chars() {
+            for link in links {
+                let (scheme, tail) = link.split_once(':').unwrap();
+                let variants = [format!("{c}{link}"), format!("{scheme}:{c}{tail}"), format!("{link}{c}")];
+                for url in variants {
+                    let err = core.open_url(&url, None).expect_err("refused");
+                    assert!(err.contains("invisible"), "{:?} {c:?}: the sentence says what is wrong: {err}", &url);
+                    assert!(!err.contains("example") && !err.contains("hid-") && err.len() < 160, "{err}");
+                    assert!(launches_with(&url).is_empty(), "an opener was started for {url:?}");
+                }
+            }
+            // A file link is refused before its path is looked at, with a pane that would show the file.
+            let good = file_url(&file);
+            for url in [format!("{c}{good}"), format!("{good}{c}"), format!("{}{c}{}", &good[..good.len() - 4], &good[good.len() - 4..])] {
+                let err = core.open_url(&url, Some(pane)).expect_err("a file link with a hidden character");
+                assert!(err.contains("invisible"), "{c:?}: {err}");
+                assert!(!err.contains("hid-file"), "{err}");
+            }
+        }
+        assert!(launches_with(&text_of(&file)).is_empty() && launches_with(&text_of(&base)).is_empty(), "no file was revealed");
+
+        // The controls: an escaped override is plain ASCII, and a host with ordinary non-ASCII letters is no hidden character.
+        for url in ["https://example.org/a%E2%80%AEb-hid-2", "https://ex\u{e4}mple.org/path-hid-3", "https://\u{65e5}\u{672c}.example/hid-4", "https://example.org/\u{1f600}-hid-5"] {
+            assert_eq!(core.open_url(url, None), Ok(()), "{url}");
+            assert_eq!(launches_with(url).len(), 1, "{url} is opened exactly once");
         }
     }
 
