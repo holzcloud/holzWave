@@ -593,8 +593,7 @@ This is every claim of this part that no suite here supports. It is listed so th
   off or put on the person's list, were tested only in a page with a mock core. The desktop's webview and a real SSH pane were
   not looked at.
 - A wrapped link is two links with the same address, one for each row. A click on the second part asks first, because the text
-  on that row is only a part of the address; Open then opens it. The hover underline and the status line follow pointer and key events: when the output changes under a pointer that does not move,
-  they stay until the next event.
+  on that row is only a part of the address; Open then opens it.
 - `contrast-high` and `motion-reduce` were not looked at by eye for the dialog of the link question and for the status segment.
 - A refused link, a missing path or a failed opener is answered in the notice segment of the status line with the host's sentence. This was tested with a mock host in the browser tests (a click, a printed address, a path, a link chosen in hint mode with `Shift` and the `Open` button of the question, in both engines) and, for the host's own sentences, in the unit tests of the host. The real openers of Linux (`xdg-open`) and of Windows (`rundll32` and Explorer) were not run, so what they say when they fail was not seen.
 - An animation that replaces a frame (the form of the protocol that names a frame to replace) was not tested; the tests append frames. The

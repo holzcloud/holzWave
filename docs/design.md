@@ -2607,7 +2607,8 @@ gesture held the link under the pointer gets a solid underline in `--hw-rose` an
 **The target in the status line.** A segment at the left of the status line holds the label `LINK` (uppercase, tracked, `.label`) and the target in
 mono, with the scheme and the host in `--hw-ink` and the rest in `--hw-ink-2`. A target longer than the segment is cut in the middle with `…` so that
 the scheme, the host and the last 12 characters stay. It is there while the pointer is over a link and gone when it leaves. It does not use the
-segment of the notice. The full target is also the accessible name of the segment.
+segment of the notice. The full target is also the accessible name of the segment. It follows the cells under a pointer that does not move: when the program
+changes the link there, the segment shows the new address, and it goes when the link goes.
 
 **A link that cannot be opened.** A click, or a link chosen in hint mode with `Shift` held, that the host refuses or cannot carry out (a scheme taken off the list since, a `file` link whose file is gone, no program to open it) is answered in the notice segment of the status line (section 2 rule 5) for the usual time. The words are the host's own fixed sentence, which never repeats the address; any other failure is the one sentence `The link could not be opened.` There is no dialog and no mark on the text, and the `LINK` segment may stay beside the notice while the pointer stays on the link. A click that succeeds says nothing. The browser build opens a tab itself and never asks the host, so it has no such notice.
 

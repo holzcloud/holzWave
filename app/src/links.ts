@@ -514,7 +514,7 @@ export function activateLink(pane: number, target: Target): void {
  * frame. Call once at start-up, after `initPointer`.
  */
 export async function initLinks(): Promise<void> {
-  const [{ pushPointerHandler }, { setCellBoxes }, { canvas }, { setLinkTarget }] = await Promise.all([
+  const [{ pushPointerHandler }, { setCellBoxes }, { canvas, onPaneFrame }, { setLinkTarget }] = await Promise.all([
     import("./pointer.js"),
     import("./overlay.js"),
     import("./scene.js"),
@@ -555,7 +555,8 @@ export async function initLinks(): Promise<void> {
   const show = (found: Found | null, gesture: boolean): void => {
     const marked = found?.target.source === "osc8";
     const on = found !== null && (gesture || marked);
-    const sig = on ? `${found.hit.pane}:${found.hit.cell[1]}:${found.target.startCol}:${found.target.endCol}:${gesture}` : "";
+    // The address is part of what is shown: a program that changes it under the same cells changes the status line.
+    const sig = on ? `${found.hit.pane}:${found.hit.cell[1]}:${found.target.startCol}:${found.target.endCol}:${gesture}:${found.target.text}` : "";
     if (sig === shown) return;
     shown = sig;
     canvas().classList.toggle("link-hover", on && gesture);
@@ -575,11 +576,24 @@ export async function initLinks(): Promise<void> {
   /** The last pointer event over the canvas, so the underline follows the modifier without a pointer move. */
   let lastEvent: PointerEvent | null = null;
   let lastHit: Hit | null = null;
+  let lastGesture = false;
+  /** The pointer is over the canvas as far as the last event told: only then does a frame make the page look again. */
+  let over = false;
+  /** The row object of the mirror at the cells that `look` last looked at: a frame replaces a row it touches and never changes one. */
+  let lookedRow: unknown;
   let armed: { pointer: number; pane: number; row: number; target: Target } | null = null;
+
+  /** Look at what is under the pointer and show it; remembers which row object it looked at. */
+  const look = (e: PointerEvent | null, hit: Hit | null, gesture: boolean): void => {
+    lastGesture = gesture;
+    lookedRow = hit ? state.frames.get(hit.pane)?.rows_[hit.cell[1]] : undefined;
+    show(e ? under(e, hit, gesture) : null, gesture);
+  };
 
   pushPointerHandler((e, hit) => {
     lastEvent = e;
     lastHit = hit;
+    over = true;
     if (e.type === "pointerdown") {
       armed = null;
       if (e.button !== 0 || !isLinkModifier(e, state.os)) return false;
@@ -602,21 +616,34 @@ export async function initLinks(): Promise<void> {
       return false;
     }
     const gesture = isLinkModifier(e, state.os);
-    show(under(e, hit, gesture), gesture);
+    look(e, hit, gesture);
     return false;
   });
 
   const follow = (e: KeyboardEvent): void => {
     if (e.key !== "Meta" && e.key !== "Control") return;
     const gesture = isLinkModifier(e, state.os);
-    show(lastEvent ? under(lastEvent, lastHit, gesture) : null, gesture);
+    over = lastEvent !== null;
+    look(lastEvent, lastHit, gesture);
   };
+
+  // A frame that replaces the row under a pointer that does not move: the address, or whether there is a link at all, may have
+  // changed. Nothing is done unless the pointer is over this pane and its row is another object than the one last looked at.
+  onPaneFrame((pane) => {
+    if (!over || lastHit === null || lastHit.pane !== pane) return;
+    if (state.frames.get(pane)?.rows_[lastHit.cell[1]] === lookedRow) return;
+    look(lastEvent, lastHit, lastGesture);
+  });
   window.addEventListener("keydown", follow);
   window.addEventListener("keyup", follow);
-  window.addEventListener("blur", () => show(null, false));
+  window.addEventListener("blur", () => {
+    over = false;
+    show(null, false);
+  });
   canvas().addEventListener("pointerleave", () => {
     lastEvent = null;
     lastHit = null;
+    over = false;
     show(null, false);
   });
 }

@@ -290,6 +290,22 @@ const arrivals = new RateMeter(1000);
 /** A pane id as the core sends it: a whole number (layout ids stay below 2^53). */
 const isPane = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v);
 
+/** The functions that want to hear that a pane's frame was stored. */
+const paneFrameHooks: ((pane: number) => void)[] = [];
+
+/**
+ * Call `fn(pane)` after a frame of `pane` was stored in its mirror and before the next draw is asked for, for modules that follow
+ * what lies under the pointer (the link hover). The function runs once per frame that was applied, so it has to return at once
+ * unless something it watches changed. The returned function removes the hook.
+ */
+export function onPaneFrame(fn: (pane: number) => void): () => void {
+  paneFrameHooks.push(fn);
+  return () => {
+    const at = paneFrameHooks.indexOf(fn);
+    if (at >= 0) paneFrameHooks.splice(at, 1);
+  };
+}
+
 /** One `frame` event: patch the pane's mirror, or on a gap ask for a full frame (once) and wait for it. */
 function onFrame(msg: FrameMsg): void {
   arrivals.note(performance.now());
@@ -319,6 +335,7 @@ function onFrame(msg: FrameMsg): void {
     syncBlink(); // the program may have changed the cursor's blink with DECSCUSR
     restartBlink(); // output shows the cursor: a cursor does not vanish while the program writes
   }
+  for (const hook of [...paneFrameHooks]) hook(pane);
   schedule();
 }
 
