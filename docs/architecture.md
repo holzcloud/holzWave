@@ -13,7 +13,7 @@ or on Windows and Linux hardware, and the rows of Part 9 are the owner's run.
 
 **Goals**
 
-- One terminal core for macOS, Windows, Linux, iOS and Android. Platform shells stay thin.
+- One terminal core for macOS, Windows, Linux and Android. Platform shells stay thin.
 - Fast and small: one draw call per pane and frame, a few MiB of RAM per pane, input latency below one frame.
 - Replaceable parts: the VT engine, the connection type, the renderer, the AI provider and the sync backend each sit
   behind a narrow interface.
@@ -24,7 +24,7 @@ or on Windows and Linux hardware, and the rows of Part 9 are the owner's run.
 **Non-goals**
 
 - A web browser block.
-- A local shell on iOS (the sandbox forbids it).
+- iOS (no Apple developer account; the sandbox would also forbid a local shell).
 - Being a general plugin host. Integrations are a fixed, reviewed set (section 9), not arbitrary third-party code.
 
 ## 2. System context
@@ -136,7 +136,7 @@ Each boundary is a trait in `holzwave-core` with at least one real implementatio
 |---|---|---|---|
 | `TerminalEngine` ✅ | `feed`, `resize`, `scroll`, `update` (dirty rows), `take_replies`, `encode_key`, `encode_text`, `paste`, `mouse`, `wheel`, `select`, `search`, `copy_mode`, `set_theme` | `GhosttyEngine` ✅, `AlacrittyEngine` | `libghostty-vt` is young and its API moved already between 0.2.2 and master |
 | `Connection` (`core/src/pool.rs`) | `session(open)`, the shell channel (`SshLink::attach`), `sftp()`, exec channels through `SshExec::on`, `lease()` | SSH, through the pool: one login per saved profile. WSL and Docker are local commands that run in a pane (`wsl.exe -d`, `docker exec -it`) and have no file access yet (open) | the terminal, the files and the commands of a saved SSH connection share one login |
-| `SecretStore` | `get`, `set`, `delete` | macOS Keychain, Windows Credential Manager, Secret Service, iOS/Android keystores | secrets never reach a file |
+| `SecretStore` | `get`, `set`, `delete` | macOS Keychain, Windows Credential Manager, Secret Service, the Android keystore | secrets never reach a file |
 | `SyncBackend` | `list`, `get`, `put`, `delete` with ETag | WebDAV (`opendal` or `reqwest_dav`) | Nextcloud today, others later |
 | `Provider` ✅ | `id`, `capabilities(model)`, `stream(request, callback, cancel) → completion` (blocking, with a cancel token) | `HttpProvider` ✅ over five wire adapters (local servers, cloud APIs, gateways), `AppleProvider` ✅ (Foundation Models), `ScriptedProvider` (the test double) | consent and context rules live above it: a provider accepts only context the gate approved |
 | `Integration` ✅ | `spec`, `argv`, `view` (section 9) | `Kube`, `Talos`, `Azure`, `Gam`, each built and tested against fake tools and recorded fixtures | one engine and a closed verb catalogue for four tools |
@@ -1019,7 +1019,7 @@ All of it runs locally; GitHub builds only on request.
 
 ## 15. Open questions
 
-1. Tauri 3 stability for iOS and Android, to be checked when phase 9 starts.
+1. Tauri 3 stability for Android, to be checked when phase 9 starts.
 2. `opendal` against `reqwest_dav` for sync (size and TLS stack).
 3. ~~Whether the frame diff needs per-cell damage or per-row is enough.~~ Answered in Phase 2: per row, compared
    against the rows last sent (section 6); a full-frame encode costs 0.47 ms on 160x50.

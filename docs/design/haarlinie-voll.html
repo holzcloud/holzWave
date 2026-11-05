@@ -646,7 +646,7 @@ td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
   </div>
   <div id="fit"><div id="stage"></div></div>
 
-  <h2>Mobile (iOS, Android)</h2>
+  <h2>Mobile (Android)</h2>
   <p class="lead">One pane per screen. Workspaces and tabs move into a sheet from the bottom, the key row sits above the system keyboard. Same tokens, targets at least 44 px.</p>
   <div class="phones" id="phones"></div>
 
@@ -1578,7 +1578,7 @@ const rows=[
 ['Nextcloud sync, end-to-end','Title bar ☁, sync popover, settings',pl('3b')],
 ['File previews (Markdown, image, video, PDF)','Previews view and Daily',pl(4)],['Editor with SFTP','Editor block',pl(4)],
 ['wsh CLI','Open blocks and set titles from the shell',pl(5)],['Widgets sidebar','Right, collapsible',pl(6)],['History with fuzzy search','Sidebar, ⌃R',pl(6)],['System monitor','System block',pl(6)],['System monitor over SSH','Palette › System monitor: host (ssh)',B],['AI chat in a pane','Title bar ✦ AI, palette, a pane beside the focused one',B],['Explain error, command from description','Palette and chat, ⇧⌘Y, ⇧⌘G',B],['wsh ai','Terminal, request card in the window',B],['AI providers and keys','Chat bar › Providers…, palette, Settings',B],['Apple on-device model','Chat picker, Providers › On device (macOS 26 or later)',B],['Sharing a pane with the chat','Chat › Auto',B],['Approving a tool call','Chat › approval card',B],['Changing a file','Chat › approval card › diff',B],['Running a command','Chat › approval card',B],['AI chat in the sidebar','Palette, title bar ✦ AI, replaces the sidebar',B],
-['Kubernetes, Talos, Azure, GAM7','Context in sidebar and status line, blocks',pl('6b')],['iOS and Android','One pane per screen, sheet, key row',pl(7)]
+['Kubernetes, Talos, Azure, GAM7','Context in sidebar and status line, blocks',pl('6b')],['Android','One pane per screen, sheet, key row',pl(7)]
 ];
 $('#cov').innerHTML='<tr><th>Feature</th><th>Where</th><th>Status</th></tr>'+rows.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td></tr>`).join('');
 render();fit();

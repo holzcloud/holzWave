@@ -71,7 +71,7 @@
 | Core | One Rust crate shared by every platform |
 | Terminal engine | `libghostty-vt` behind a `TerminalEngine` trait, `alacritty_terminal` as fallback |
 | PTY / SSH | `portable-pty` / `russh` |
-| App shell | Tauri 3 (alpha) for desktop, iOS and Android |
+| App shell | Tauri 3 (alpha) for desktop and Android |
 | UI | TypeScript, no framework, no bundler |
 | Rendering | WebGL2 glyph atlas, one instanced draw per pane, Canvas 2D fallback |
 | Persistence | JSON today, SQLite for settings and history |
@@ -99,7 +99,7 @@ of [test-plan.md](test-plan.md); the suites that need Linux ran in a container o
 
 | Phase | Planned |
 |---|---|
-| 9 | iOS (SSH) and Android (local shell and SSH), widgets on mobile, AI provider keys on mobile (they need a mobile secret store) |
+| 9 | Android (local shell and SSH; iOS is out, no Apple developer account), widgets on mobile, AI provider keys on mobile (they need a mobile secret store) |
 | Web build, left out | shared panes between people; an installable web app; a mobile layout of the web page; a long-lived token for scripts; an operator for Kubernetes; compression of the WebSocket (measured, not adopted). As the browser answers them: the two tear-off controls and the local network list say `Not available in the browser.`, the Apple on-device model is not offered, and updating is the operator's job (build and run the new image). Upload takes a file dropped on a shell pane only, and download covers images, video, audio and PDF files |
 
 Deliberately not included: a web browser block. Kitty graphics, hyperlinks, the baseline and the guard, and the signing of the Linux packages are built and are described in the list at the top, together with what nobody has tried; the rows for those are Part 11 of [test-plan.md](test-plan.md). Phase numbers here follow the project plan summary; the detailed

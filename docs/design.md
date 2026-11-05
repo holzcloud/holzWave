@@ -156,7 +156,7 @@ AI chat, AI chat states, AI sidebar, attention marks, drag) and a platform switc
 **Rules**
 
 1. **One look everywhere.** The window chrome is drawn by holzWave, with no native title bar or tab control, so
-   macOS, Windows, Linux, iOS and Android show the same thing. Only the OS window buttons and the system keyboard
+   macOS, Windows, Linux and Android show the same thing. Only the OS window buttons and the system keyboard
    differ.
 2. **Mono everywhere in the chrome.** Labels, tabs and the status line are JetBrains Mono; Manrope only appears in
    previews. Labels are uppercase and tracked, as in the holzcloud family.
@@ -324,7 +324,7 @@ and the path chip switches between local and an SSH host.
 
 ### 6.6 Mobile
 
-On iOS and Android a pane fills the screen. Tabs and workspaces move into a sheet from the bottom: workspace pills on
+On Android a pane fills the screen. Tabs and workspaces move into a sheet from the bottom: workspace pills on
 top, the tabs of the active workspace as a list. The key row (`esc tab ctrl alt ↑ ↓`) sits above the system keyboard and
 the bottom bar holds the tabs of the shown workspace. Tokens are the ones above; touch targets are at least 44 px.
 

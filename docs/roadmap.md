@@ -1,6 +1,6 @@
 # Roadmap
 
-holzWave is a terminal emulator for macOS, Windows, Linux, iOS and Android, written from scratch around one shared
+holzWave is a terminal emulator for macOS, Windows, Linux and Android, written from scratch around one shared
 Rust core. [Wave Terminal](https://github.com/wavetermdev/waveterm) is the UX reference, not the code base. If code is
 ever taken over, its Apache-2.0 licence is checked first and the notices are kept.
 
@@ -11,20 +11,20 @@ ever taken over, its Apache-2.0 licence is checked first and the notices are kep
 
 ## Platforms
 
-| | macOS | Windows | Linux | iOS | Android |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Local shell | ✅ | ✅ | ✅ | ❌ sandbox | ✅ |
-| SSH | ✅ | ✅ | ✅ | ✅ | ✅ |
-| WSL / Docker | – | ✅ | ✅ Docker | ❌ | ❌ |
-| `wsh`, K8s, Talos, Azure, GAM7 | ✅ | ✅ | ✅ | ❌ | ❌ |
-| Sync, secret store | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Apple on-device AI | ✅ macOS 26+, Apple Silicon | – | – | ❓ | – |
+| | macOS | Windows | Linux | Android |
+|---|:---:|:---:|:---:|:---:|
+| Local shell | ✅ | ✅ | ✅ | ✅ |
+| SSH | ✅ | ✅ | ✅ | ✅ |
+| WSL / Docker | – | ✅ | ✅ Docker | ❌ |
+| `wsh`, K8s, Talos, Azure, GAM7 | ✅ | ✅ | ✅ | ❌ |
+| Sync, secret store | ✅ | ✅ | ✅ | ✅ |
+| Apple on-device AI | ✅ macOS 26+, Apple Silicon | – | – | – |
 
 The `wsh`, K8s, Talos, Azure and GAM7 row means built and tested against fake tools and recorded fixtures. The integrations
 did not run on Windows or Linux hardware, the Flatpak build does not run them, and a real cluster or account is open on
 macOS too (Part 9 of [test-plan.md](test-plan.md)).
 
-Not included on any platform: a web browser block.
+Not included on any platform: a web browser block. iOS is not planned (no Apple developer account).
 
 ## Phase 1 — Spike (one week)
 
@@ -172,7 +172,7 @@ Status: built, rows open (test-plan Part 10). Built and tested against a test id
 
 ## Phase 7 — Mobile
 
-- iOS: SSH only. Android: local shell plus SSH.
+- Android: local shell plus SSH. iOS is out of scope (no Apple developer account).
 - Touch UI, a soft keyboard with special keys, a simplified layout (one block per screen).
 - Dropped on mobile: Docker/WSL, a local `wsh`, and the K8s/Talos/Azure/GAM7 wrappers (only where it makes sense).
 - Sync and the secret store work on mobile too.
@@ -203,7 +203,6 @@ The aims as first written, kept as the history they are:
 | Risk | Answer |
 |---|---|
 | The `libghostty` API is young and may change | Everything sits behind the `TerminalEngine` trait; `alacritty_terminal` is the fallback |
-| The iOS sandbox allows no local shell | iOS is SSH-only by design |
 | Apple AI is reachable only from Swift | A small Swift package behind a C interface in a crate of its own (macOS only, linked weakly), and the provider is optional |
 | The sync encryption format cannot change later without a migration | Decide it before any sync code is written |
 | AI and secrets | Context is never sent without consent, and the page never sees the text of a chip; secrets live only in the OS keychain |
