@@ -586,11 +586,20 @@ This is every claim of this part that no suite here supports. It is listed so th
   (`-`, `%2d` and `%2D`, with and without a user name) for a custom scheme, and a one-letter scheme even when it is in the
   list. No real handler (an SSH client, for one) was given a link with a dashed host or an invisible character, so what such
   a program does with the links that are let through is not known.
-- The Linux container run (`scripts/linux-container-test.sh all`) is not green: `core/tests/scrollback.rs::a_smaller_limit_still_prunes`
-  keeps 697 rows for a limit of 1 000 lines there (it passes on the Mac and fails the same way before this phase's last
-  plans), and `app/src-tauri/tests/bundle.rs::the_secret_key_has_no_place_in_the_repository` fails because the script sends
-  the tree without `.git`. Neither is explained or fixed yet. One run of `h2_a_flood_of_settings_frames_ends_in_a_disconnect`
-  failed once and passed on every rerun; its cause is not known.
+- The Linux container run: `CARGO_BUILD_JOBS=2 sh scripts/linux-container-test.sh all` ended with the line
+  `linux-container-test: ok`, 208 test binaries, 4 579 tests passed, 0 failed, 103 ignored. Two tests had failed in the run before it.
+  `core/tests/scrollback.rs::a_smaller_limit_still_prunes` kept 697 rows for a limit of 1 000 lines: the library drops whole
+  pages, so what is kept lies within one page of the limit plus the screen, and a page holds 591 rows at 80 columns on the
+  Mac and 578 in the container (its size is rounded up to the memory page of the target), which puts the same 40 000 lines
+  at 995 rows on the Mac and at 697 in the container; the old lower bound of 900 was one Mac's number. The test now measures
+  the page of the engine under test and checks the kept rows against it, with the upper bound as it was; a limit cut to a
+  quarter or doubled still fails it on the Mac.
+  `app/src-tauri/tests/bundle.rs::the_secret_key_has_no_place_in_the_repository` failed because the container had no
+  repository for `git ls-files`; the container now gets HEAD, the index and the refs of `.git` (no objects, config, hooks,
+  logs or last-fetch URL), and the test fails, not skips, on an empty or missing listing. What this does not show: the run
+  was done once, on one aarch64 container in a Docker VM on one Mac, which stands in for x86_64 hardware, with two build
+  jobs; no x86_64 machine ran it. One run of `h2_a_flood_of_settings_frames_ends_in_a_disconnect` failed once and passed on
+  every rerun; its cause is not known, and it did not fail in this run.
 - The desktop app has no automated test of its window. Pictures and links were tested in WebKit and Chromium against the real
   server and against a page with a mock core; the desktop's webview and the window itself were not driven.
 - Windows was not tested for pictures or links, and its performance was not measured.
