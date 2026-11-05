@@ -92,7 +92,7 @@ setting is changed from the dialog, the palette or a shortcut, and then in full.
 | `smooth_scroll` | boolean | | `false` | at once; eases a scrollback jump over at most 120 ms (below) |
 | `cursor_trail` | boolean | | `false` | at once; fades a short trail behind a cursor that jumps (below) |
 | `shell` | string | one program: an absolute path or a bare name, at most 4096 bytes, no control characters; empty means the platform default; a value that cannot be started falls back to the platform default with a warning | `""` | for panes started afterwards; a running pane keeps its shell (below) |
-| `link_schemes` | list of strings | at most 16 entries; each 1 to 32 characters (a letter, then letters, digits, plus, dot or hyphen), kept in lower case; `javascript`, `data`, `vbscript`, `blob` and `about` are never accepted; an empty list turns links off | `["http", "https", "mailto", "file"]` | at once, at the next click; set in `settings.json` only: the settings dialog has no row for it (below) |
+| `link_schemes` | list of strings | at most 16 entries; each 2 to 32 characters (a letter, then letters, digits, plus, dot or hyphen; a single letter is not a scheme name), kept in lower case; `javascript`, `data`, `vbscript`, `blob` and `about` are never accepted; an empty list turns links off | `["http", "https", "mailto", "file"]` | at once, at the next click; set in `settings.json` only: the settings dialog has no row for it (below) |
 | `ai_local_only` | boolean | | `false` | at once; refuses every AI request whose destination leaves this computer (below) |
 | `ai_local_context` | string | `"ask"`, `"auto"` | `"ask"` | at once; whether a model on this computer asks before shared terminal content goes to it (below) |
 | `ai_persist_context` | boolean | | `false` | for chats saved afterwards; keeps the terminal text and tool output of a chat in its file (below) |
@@ -166,8 +166,13 @@ the list is refused, and with an empty list no link does anything. Entries are l
 not a scheme name, and any of `javascript`, `data`, `vbscript`, `blob` and `about` are dropped when the file is read, each
 kind of drop with one warning in the settings dialog, so none of these can be turned on from the file or by hand. A
 link may be written in any letter case. Every scheme that you add is handed to the operating system's handler for that
-scheme, with the link as the only argument, so add a scheme only when you trust the program that handles it. `file` is
-different: a `file:` link shows the file in the file manager and never opens or runs it, and only when it is in a pane
+scheme, with the link text as written and as the only argument, so add a scheme only when you trust the program that
+handles it. Before that the program refuses, for every link, any control, blank or invisible character (a direction mark
+or override, a zero-width character, a soft hyphen), and, for every scheme other than `http`, `https` and `mailto`, a link
+whose host or first part starts with a hyphen (also written `%2d`), because a handler may read that as an option
+(`ssh://-oProxyCommand=...@host/`); a hyphen inside a host or a name, or later in the path, is fine. A one-letter scheme
+is never opened, because on Windows it is a drive letter. None of these refusals can be turned off, and a refused link
+shows the reason in the status line. `file` is different: a `file:` link shows the file in the file manager and never opens or runs it, and only when it is in a pane
 that runs on this computer (a pane of an SSH or other connection never reveals a file), the host is empty or
 `localhost`, and the path is absolute, exists, and has no `..`, no control character and no encoded slash. The browser
 build never has file links, and opens links of `http`, `https` and `mailto` only. A program that writes its links with

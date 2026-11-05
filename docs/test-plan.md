@@ -580,7 +580,12 @@ This is every claim of this part that no suite here supports. It is listed so th
   accepted), so the links of GNU `ls` do not work unless the shell is told to leave the machine name out. This was not tried
   with a real `ls`.
 - The opener of a link on Linux and on Windows, and a custom scheme with a real handler, were not run. The file reveal was not
-  tried on any platform by a person.
+  tried on any platform by a person. The unit tests of the program cover what it refuses before a handler is started, with an
+  opener that only records: a link with a control, blank or invisible character at the start, in the middle and at the end for
+  `http`, `https`, `mailto`, a custom scheme and a `file` link, the forms of a host or first part that starts with a hyphen
+  (`-`, `%2d` and `%2D`, with and without a user name) for a custom scheme, and a one-letter scheme even when it is in the
+  list. No real handler (an SSH client, for one) was given a link with a dashed host or an invisible character, so what such
+  a program does with the links that are let through is not known.
 - The desktop app has no automated test of its window. Pictures and links were tested in WebKit and Chromium against the real
   server and against a page with a mock core; the desktop's webview and the window itself were not driven.
 - Windows was not tested for pictures or links, and its performance was not measured.
