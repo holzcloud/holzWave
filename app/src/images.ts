@@ -28,6 +28,20 @@ export const MIB = 1024 * 1024;
 /** How many failed (image, generation) pairs a pane remembers, so that a failed one is not asked for again. */
 const MAX_FAILED = 256;
 
+/**
+ * Why a picture failed, which decides what asks for it again. `refused`: the picture itself is not usable (a header that
+ * lies, sizes that do not add up, a piece of the wrong length, no bitmap could be made, larger than the whole budget):
+ * never asked for again for that generation, only a change of the budget gives it another try. `fit`: it does not fit
+ * next to the pictures in use. `transport`: the pull itself failed. The last two can go away.
+ */
+type FailKind = "refused" | "fit" | "transport";
+
+/** A failed (image, generation) pair and why. */
+interface Failure {
+  generation: number;
+  kind: FailKind;
+}
+
 // ---- placements to rectangles -------------------------------------------------------------------------
 
 /** What the rectangle of a placement is measured against: the cell size the core was told and the one now. */
@@ -127,13 +141,15 @@ interface Held<B> {
 }
 
 interface PaneImages<B> {
+  /** The pane's id. */
+  pane: number;
   /** The decoded pictures by image id. */
   held: Map<number, Held<B>>;
   jobs: Map<number, Job>;
   /** The generation each placed picture should have now. */
   wanted: Map<number, number>;
-  /** The generation of an image that failed, by image id: not asked for again. */
-  failed: Map<number, number>;
+  /** The image that failed, by image id: its generation is not asked for again until an event clears the mark. */
+  failed: Map<number, Failure>;
   inFlight: number;
   /** The bytes the jobs have reserved for pictures that are being assembled. */
   reserved: number;
@@ -159,6 +175,8 @@ function bytesOf(raw: unknown): Uint8Array | null {
 export class ImageStore<B extends PictureBitmap> {
   private readonly panes = new Map<number, PaneImages<B>>();
   private tick = 0;
+  /** The panes in which a bitmap was closed to make room since the marks were last looked at. */
+  private readonly freed = new Set<number>();
 
   constructor(private readonly deps: StoreDeps<B>) {}
 
@@ -188,7 +206,7 @@ export class ImageStore<B extends PictureBitmap> {
     let ps = this.panes.get(pane);
     if (!ps) {
       if (items.length === 0) return;
-      ps = { held: new Map(), jobs: new Map(), wanted: new Map(), failed: new Map(), inFlight: 0, reserved: 0, budget };
+      ps = { pane, held: new Map(), jobs: new Map(), wanted: new Map(), failed: new Map(), inFlight: 0, reserved: 0, budget };
       this.panes.set(pane, ps);
     }
     if (ps.budget !== budget) {
@@ -203,16 +221,20 @@ export class ImageStore<B extends PictureBitmap> {
     ps.wanted = wanted;
     for (const [image, job] of ps.jobs) if (wanted.get(image) !== job.generation) this.drop(ps, image, job);
     this.trim(ps, budget);
-    for (const [image, generation] of wanted) {
-      if (ps.held.get(image)?.generation === generation) continue;
-      if (ps.jobs.has(image) || ps.failed.get(image) === generation) continue;
-      ps.jobs.set(image, {
-        image, generation, live: true, headAsked: false, width: 0, height: 0, total: 0, buf: null, next: 0, filled: 0,
-        reserved: 0,
-      });
+    const others = this.clearFreed();
+    this.plan(pane, ps);
+    for (const o of others) if (o !== ps) this.plan(o.pane, o);
+  }
+
+  /**
+   * Something that can make a failed pull succeed happened (a connection that opened, a reconnect): every mark that is
+   * not a refusal is cleared in every pane and the pulls restart at once for the pictures the placements still ask for.
+   * A picture the core refused for a property of its own is not asked for again.
+   */
+  retry(): void {
+    for (const ps of [...this.panes.values()]) {
+      if (this.clearMarks(ps) > 0) this.plan(ps.pane, ps);
     }
-    this.pump(pane, ps);
-    this.tidy(pane, ps);
   }
 
   /**
@@ -251,6 +273,7 @@ export class ImageStore<B extends PictureBitmap> {
     ps.held.clear();
     ps.wanted.clear();
     ps.failed.clear();
+    this.freed.delete(pane);
     this.tidy(pane, ps);
   }
 
@@ -265,11 +288,58 @@ export class ImageStore<B extends PictureBitmap> {
     if (ps.jobs.get(image) === job) ps.jobs.delete(image);
   }
 
-  /** End a job because its pixels cannot be used: the generation is not asked for again. */
-  private fail(ps: PaneImages<B>, image: number, job: Job): void {
+  /** End a job because its pixels cannot be used: the generation is not asked for again until an event clears the mark. */
+  private fail(ps: PaneImages<B>, image: number, job: Job, kind: FailKind): void {
     this.drop(ps, image, job);
-    ps.failed.set(image, job.generation);
+    ps.failed.set(image, { generation: job.generation, kind });
     while (ps.failed.size > MAX_FAILED) ps.failed.delete(ps.failed.keys().next().value as number);
+  }
+
+  /** Clear the marks of a pane that can go away (`fit` and `transport`); a refusal stays. How many were cleared. */
+  private clearMarks(ps: PaneImages<B>): number {
+    let n = 0;
+    for (const [image, f] of ps.failed) {
+      if (f.kind === "refused") continue;
+      ps.failed.delete(image);
+      n++;
+    }
+    return n;
+  }
+
+  /**
+   * Memory was freed in the panes that closed a bitmap to make room: their marks that can go away are cleared. The
+   * panes whose marks were cleared are returned, for their pulls to restart. A job that ends by failing frees nothing
+   * and never gets here.
+   */
+  private clearFreed(): PaneImages<B>[] {
+    const out: PaneImages<B>[] = [];
+    for (const pane of this.freed) {
+      const ps = this.panes.get(pane);
+      if (ps && this.clearMarks(ps) > 0) out.push(ps);
+    }
+    this.freed.clear();
+    return out;
+  }
+
+  /** Close a bitmap the pane lets go of to make room, and note that memory was freed. */
+  private evict(ps: PaneImages<B>, image: number, h: Held<B>): void {
+    h.bitmap.close();
+    ps.held.delete(image);
+    this.freed.add(ps.pane);
+  }
+
+  /** Start a pull for every picture the pane wants that it does not hold, pull or remember as failed, and send what may go out. */
+  private plan(pane: number, ps: PaneImages<B>): void {
+    for (const [image, generation] of ps.wanted) {
+      if (ps.held.get(image)?.generation === generation) continue;
+      if (ps.jobs.has(image) || ps.failed.get(image)?.generation === generation) continue;
+      ps.jobs.set(image, {
+        image, generation, live: true, headAsked: false, width: 0, height: 0, total: 0, buf: null, next: 0, filled: 0,
+        reserved: 0,
+      });
+    }
+    this.pump(pane, ps);
+    this.tidy(pane, ps);
   }
 
   /** The pane's state is dropped when it holds nothing, waits for nothing and remembers no failure (`forget` clears those). */
@@ -294,8 +364,7 @@ export class ImageStore<B extends PictureBitmap> {
     if (used + need <= budget) return true;
     const unused = [...ps.held].filter(([image]) => !ps.wanted.has(image)).sort((a, b) => a[1].used - b[1].used);
     for (const [image, h] of unused) {
-      h.bitmap.close();
-      ps.held.delete(image);
+      this.evict(ps, image, h);
       used -= h.bytes;
       if (used + need <= budget) return true;
     }
@@ -308,8 +377,7 @@ export class ImageStore<B extends PictureBitmap> {
     if (this.makeRoom(ps, 0, budget)) return;
     const rest = [...ps.held].sort((a, b) => a[1].used - b[1].used);
     for (const [image, h] of rest) {
-      h.bitmap.close();
-      ps.held.delete(image);
+      this.evict(ps, image, h);
       if (this.bytesIn(ps) <= budget) return;
     }
     // Only buffers still being assembled remain: they were reserved under the old budget.
@@ -353,42 +421,47 @@ export class ImageStore<B extends PictureBitmap> {
       failed = true; // the core's text is not shown or kept
     }
     ps.inFlight--;
-    if (job.live) {
-      if (failed || !this.accept(ps, job, offset, raw)) this.fail(ps, job.image, job);
-    }
-    this.pump(pane, ps);
-    this.tidy(pane, ps);
+    let kind: FailKind | null = null;
+    if (job.live) kind = failed ? "transport" : this.accept(ps, job, offset, raw);
+    // What this answer freed clears the marks first, so that the job that failed is marked after and stays marked.
+    const others = this.clearFreed();
+    if (kind !== null) this.fail(ps, job.image, job, kind);
+    this.plan(pane, ps);
+    for (const o of others) if (o !== ps) this.plan(o.pane, o);
   }
 
-  /** Check one answer against what was asked and take its bytes; false when anything does not match. */
-  private accept(ps: PaneImages<B>, job: Job, offset: number, raw: unknown): boolean {
+  /** Check one answer against what was asked and take its bytes; why it failed when anything does not match, else null. */
+  private accept(ps: PaneImages<B>, job: Job, offset: number, raw: unknown): FailKind | null {
     const bytes = bytesOf(raw);
-    if (!bytes || bytes.length < HEADER_BYTES) return false;
+    if (!bytes || bytes.length < HEADER_BYTES) return "refused";
     const head = new DataView(bytes.buffer, bytes.byteOffset, HEADER_BYTES);
     const width = head.getUint32(0);
     const height = head.getUint32(4);
     const total = head.getUint32(8);
-    if (head.getUint32(12) !== offset) return false;
+    if (head.getUint32(12) !== offset) return "refused";
     if (job.buf === null) {
       // The first answer: the sizes decide the allocation, so they are checked before it.
-      if (width < 1 || height < 1 || width > MAX_IMAGE_SIDE || height > MAX_IMAGE_SIDE) return false;
-      if (total !== width * height * 4 || !this.reserve(ps, job, total)) return false;
+      if (width < 1 || height < 1 || width > MAX_IMAGE_SIDE || height > MAX_IMAGE_SIDE) return "refused";
+      if (total !== width * height * 4) return "refused";
+      // Larger than the whole budget: no event but a new budget can change that, so it is the picture's own fault.
+      if (!(total <= this.deps.budget())) return "refused";
+      if (!this.reserve(ps, job, total)) return "fit";
       job.width = width;
       job.height = height;
       job.total = total;
       job.buf = new Uint8ClampedArray(total);
       job.next = CHUNK_BYTES;
     } else if (width !== job.width || height !== job.height || total !== job.total) {
-      return false;
+      return "refused";
     }
     const buf = job.buf;
     const body = bytes.subarray(HEADER_BYTES);
     // Every piece is exactly as long as the core cuts it: a shorter or a longer one is a lie about this request.
-    if (body.length !== Math.min(CHUNK_BYTES, job.total - offset)) return false;
+    if (body.length !== Math.min(CHUNK_BYTES, job.total - offset)) return "refused";
     buf.set(body, offset);
     job.filled += body.length;
     if (job.filled === job.total) this.finish(ps, job, buf);
-    return true;
+    return null;
   }
 
   /**
@@ -404,8 +477,7 @@ export class ImageStore<B extends PictureBitmap> {
     if (!this.makeRoom(ps, total, budget)) {
       const own = ps.held.get(job.image);
       if (!own) return false;
-      own.bitmap.close();
-      ps.held.delete(job.image);
+      this.evict(ps, job.image, own);
       if (!this.makeRoom(ps, total, budget)) return false;
     }
     ps.reserved += total;
@@ -428,7 +500,7 @@ export class ImageStore<B extends PictureBitmap> {
         this.deps.ready();
       },
       () => {
-        if (job.live) this.fail(ps, job.image, job);
+        if (job.live) this.fail(ps, job.image, job, "refused"); // no bitmap could be made of these pixels
       },
     );
   }
@@ -483,6 +555,8 @@ export async function initImages(): Promise<void> {
   report(false);
   onPreferenceChange(() => report(false));
   onConnection((info) => {
-    if (info.state === "open" && info.resumed) report(true);
+    if (info.state !== "open") return;
+    images.retry(); // a pull that failed while the connection was down is asked for again, resumed or not
+    if (info.resumed) report(true);
   });
 }

@@ -165,6 +165,8 @@ export default async function ({ page, url, errors }) {
   await motionCase(page, url);
   await refusedCase(page, url);
   if (currentBackend() === "ws") await reconnectCase(page, url);
+  if (currentBackend() === "ws") await failedPullReconnectCase(page, url);
+  await failedPullClosedBitmapCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -458,4 +460,104 @@ async function reconnectCase(page, url) {
   await page.evaluate(() => window.__WS_MOCK__.drop(1006));
   assert.deepEqual(await reportsAre(page, 2), [false, false], "after the reconnect the current fact is sent again");
   await page.emulateMedia({ reducedMotion: null });
+}
+
+/** Poll the canvas at `points` until `ok(colours)` holds or `ms` pass, with no frame delivered; the colours of the last read. */
+async function until(page, points, ok, ms = 6000) {
+  const deadline = Date.now() + ms;
+  let got = await read(page, points);
+  while (!ok(got) && Date.now() < deadline) {
+    await page.waitForTimeout(40);
+    got = await read(page, points);
+  }
+  return got;
+}
+
+/** Put a solid picture of `w` by `h` pixels into the stub's table, built in the page so a big one never travels through the test. */
+const scriptSolidBig = (page, key, w, h, rgb) =>
+  page.evaluate(([k, ww, hh, c]) => {
+    const px = new Uint8Array(ww * hh * 4);
+    for (let i = 0; i < ww * hh; i++) px.set([(c >> 16) & 255, (c >> 8) & 255, c & 255, 255], i * 4);
+    window.__PICS__ = { ...(window.__PICS__ ?? {}), [k]: { w: ww, h: hh, px } };
+  }, [key, w, h, rgb]);
+
+/**
+ * A pull that failed for a reason that can go away is asked for again, with no new frame: here the connection was lost
+ * while the picture was asked for and comes back. A picture the core refused for a property of its own (a header that
+ * lies) is not asked for again. Web backend only, as the case above: the desktop has no connection to lose; the other
+ * trigger of the same rule (a bitmap closed in the pane) is the next case and runs on both backends.
+ */
+async function failedPullReconnectCase(page, url) {
+  const c = await open(page, url);
+  const cell = (col, row) => [PAD + (col + 0.5) * c.cw, HEADER + (row + 0.5) * c.ch];
+  await script(page, {
+    "1:81:1": { ...solid(1, 1, RED), total: 8 }, // refused: says 8 bytes for a 1 by 1 picture
+    "1:82:1": solid(1, 1, GREEN), // the control: nothing wrong with it
+  }); // picture 80 is not in the table yet: the stub throws, as a core that cannot answer does
+  const at = (image, col) => placement(c, { image, col, row: 1, cols: 1, rows: 1, src: [0, 0, 1, 1] });
+  const list = [at(80, 2), at(81, 4), at(82, 6)];
+  const points = [cell(2, 1), cell(4, 1), cell(6, 1)];
+
+  let got = await settle(page, [["frame", fullFrame(1, { images: list })]], points, (g) => g[2] === GREEN);
+  colours(got, [PANE_1_BG, PANE_1_BG, GREEN], "the control is drawn, the two that failed are not");
+  for (const [image, n] of [[80, 1], [81, 1], [82, 1]]) assert.equal((await asked(page, image)).length, n, `picture ${image} is asked once`);
+
+  // Frames that repeat the same list are no reason to ask again, whatever failed.
+  await settle(page, [["frame", frame(2, { images: list })]], points, () => true);
+  await settle(page, [["frame", frame(3, { images: list })]], points, () => true);
+  await page.waitForTimeout(150);
+  assert.equal((await asked(page, 80)).length, 1, "a failed pull is not asked again by frames that repeat the list");
+  assert.equal((await asked(page, 81)).length, 1);
+  assert.deepEqual(await held(page, 1), { held: 1, bytes: 4, jobs: 0 }, "only the control is held");
+
+  // The core can answer now; the connection is lost and comes back, and no frame is delivered.
+  await script(page, { "1:80:1": solid(1, 1, RED) });
+  const sockets = await page.evaluate(() => window.__WS_MOCK__.sockets.length);
+  await page.evaluate(() => window.__WS_MOCK__.drop(1006));
+  await page.waitForFunction((n) => window.__WS_MOCK__.sockets.length > n, sockets, { timeout: 5000 });
+  got = await until(page, points, (g) => g[0] === RED);
+  colours(got, [RED, PANE_1_BG, GREEN], "after the connection came back the picture whose pull failed is drawn, without a new frame");
+  assert.equal((await asked(page, 80)).length, 2, "asked again once");
+  assert.equal((await asked(page, 81)).length, 1, "a refused picture is not asked for again after the reconnect");
+  assert.equal((await asked(page, 82)).length, 1, "a picture that is held is not asked for again");
+  await page.waitForTimeout(150);
+  assert.equal((await asked(page, 80)).length, 2, "and nothing loops");
+}
+
+/**
+ * The other trigger of the retry rule: a bitmap closed in the pane. With a budget of 1 MiB picture A (600 KiB) is held
+ * and then no longer placed; picture B is placed and its pull fails; picture C (600 KiB) is placed as well, its header
+ * makes the page close A, and that frees memory, so B is asked for once more and, now answerable, is drawn. No frame
+ * is sent for B after the one that placed it.
+ */
+async function failedPullClosedBitmapCase(page, url) {
+  const c = await openWith(page, url, settingsView({ image_memory_mib: 1 }));
+  const cell = (col, row) => [PAD + (col + 0.5) * c.cw, HEADER + (row + 0.5) * c.ch];
+  await script(page, {});
+  await scriptSolidBig(page, "1:90:1", 512, 300, RED);
+  await scriptSolidBig(page, "1:92:1", 512, 300, BLUE);
+  const at = (image, col, w, h) => placement(c, { image, col, row: 1, cols: 2, rows: 1, src: [0, 0, w, h] });
+  const points = [cell(2, 1), cell(5, 1), cell(8, 1)];
+
+  let got = await settle(page, [["frame", fullFrame(1, { images: [at(90, 2, 512, 300)] })]], points, (g) => g[0] === RED);
+  colours(got, [RED, PANE_1_BG, PANE_1_BG], "picture A is drawn");
+  assert.equal((await held(page, 1)).bytes, 512 * 300 * 4, "A is held");
+
+  // A is not placed any more; B is, and cannot be had.
+  const b = [at(91, 5, 1, 1)];
+  got = await settle(page, [["frame", frame(2, { images: b })]], points, (g) => g[0] === PANE_1_BG);
+  await settle(page, [["frame", frame(3, { images: b })]], points, () => true);
+  await page.waitForTimeout(150);
+  assert.equal((await asked(page, 91)).length, 1, "B is asked once and the frame that repeats the list asks nothing");
+  colours(await read(page, points), [PANE_1_BG, PANE_1_BG, PANE_1_BG], "B failed: nothing drawn");
+  assert.equal((await held(page, 1)).held, 1, "A is still held (nothing needed its room yet)");
+
+  // The core can answer for B now. C is placed next to B: its header needs A's room.
+  await script(page, { "1:91:1": solid(1, 1, GREEN) });
+  const list = [at(91, 5, 1, 1), at(92, 8, 512, 300)];
+  got = await settle(page, [["frame", frame(4, { images: list })]], points, (g) => g[1] === GREEN && g[2] === BLUE);
+  colours(got, [PANE_1_BG, GREEN, BLUE], "A was closed for C, and B, which failed before, is asked again and drawn");
+  assert.equal((await asked(page, 91)).length, 2, "B was asked once more");
+  assert.deepEqual((await asked(page, 90)).map((a) => a.offset), [0, 512 * 1024], "A was pulled once, in two pieces, and not asked again");
+  assert.deepEqual((await asked(page, 92)).map((a) => a.offset), [0, 512 * 1024], "C in two pieces");
 }
