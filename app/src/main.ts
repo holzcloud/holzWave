@@ -34,7 +34,7 @@ import { initOverlay, renderOverlay } from "./overlay.js";
 import { initPalette } from "./palette.js";
 import { initDragDrop, initDragDropEvents } from "./dragdrop.js";
 import { initPointer } from "./pointer.js";
-import { applyView, fit, focusCanvas, initEvents, initScene } from "./scene.js";
+import { applyView, fit, focusCanvas, initEvents, initScene, schedule } from "./scene.js";
 import { initSearch } from "./search-ui.js";
 import { change, watch as watchSettings } from "./settings.js";
 import { initSelection } from "./selection.js";
@@ -74,6 +74,7 @@ async function main() {
   await initConnections(applyView, () => {
     renderStatus();
     renderOverlay();
+    schedule(); // a pane that gained or lost a connection changes which links get their dots
   }, () => void openConnections());
   // Encrypted sync: the state on the title bar and its popover.
   await initSync(() => {});

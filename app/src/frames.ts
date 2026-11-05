@@ -1,6 +1,6 @@
 // The webview's mirror of a pane: `frame` events patch it, the renderers draw from it. A pure module (no DOM, no
 // state): node imports it for the fixture-driven test and later plans read it for links and hints.
-import { gridCells } from "./frame.js";
+import { LINK, gridCells } from "./frame.js";
 import type { CursorShape, Extra, Frame, Run } from "./frame.js";
 
 // ---- the wire ---------------------------------------------------------------------------------------
@@ -233,13 +233,111 @@ export function applyFrame(
   return { mirror: build(msg, rows_, images), gap: false };
 }
 
-/** The frame the renderers draw: rows never received are empty, cluster tails are aligned by row. */
-export function toRenderFrame(mirror: PaneMirror, focused: boolean): Frame {
+/**
+ * What decides which marked links get the resting cue. `key` stands for everything `allow` reads, so equal keys mean equal
+ * answers (a row is not checked again under the same key); `allow` says whether the address of a span is a link here.
+ */
+export interface LinkFilter {
+  key: string;
+  allow(uri: string): boolean;
+}
+
+/** What is known of one row object (a row is replaced when a frame touches it, never changed): whether a cell carries LINK, and the last answer. */
+interface RowMask {
+  flagged: boolean;
+  key: string | null;
+  runs: Run[];
+}
+const masks = new WeakMap<RowMsg, RowMask>();
+
+/** Whether a run carries the flag LINK; anything that is not a run does not. */
+const flaggedRun = (run: Run): boolean => Array.isArray(run) && typeof run[4] === "number" && (run[4] & LINK) !== 0;
+
+/**
+ * The runs of `row` with the flag LINK cleared on every cell that does not lie inside a span of the row whose address
+ * `allow` accepts. A cell keeps every other flag, colour and character; runs are split at the edges of the spans, so the
+ * cells of each run and the number of them stay what they were. A wide character and its spacer decide together (the
+ * decision of the wide character). Where nothing changes the very array of the row comes back.
+ */
+function maskedRuns(row: RowMsg, cols: number, allow: (uri: string) => boolean): Run[] {
+  const accepted = new Uint8Array(cols);
+  for (const [x0, x1, uri] of row.links ?? []) {
+    if (!allow(uri)) continue;
+    for (let c = x0; c <= x1 && c < cols; c++) accepted[c] = 1;
+  }
+  const out: Run[] = [];
+  let changed = false;
+  let col = 0;
+  let prev = false; // the decision for the cell before, for the spacer of a wide character
+  for (const run of row.runs) {
+    if (!Array.isArray(run) || typeof run[1] !== "number" || !Number.isInteger(run[1]) || run[1] < 0) {
+      out.push(run); // not something to split; the renderers read it as they always did
+      prev = false;
+      continue;
+    }
+    const [text, n, fg, bg, flags] = run;
+    if (!flaggedRun(run)) {
+      out.push(run);
+      prev = false;
+      col += n;
+      continue;
+    }
+    const chars = typeof text === "string" ? Array.from(text) : [];
+    // The pieces of this run: [from, to) in cells of the run and whether the cue stays on them.
+    let from = 0;
+    let keep = false;
+    const pieces: [number, number, boolean][] = [];
+    for (let i = 0; i < n; i++) {
+      const spacer = chars[i] === "\0" && i + col > 0;
+      const now: boolean = spacer ? prev : col + i < cols && accepted[col + i] === 1;
+      if (i > 0 && now !== keep) {
+        pieces.push([from, i, keep]);
+        from = i;
+      }
+      keep = now;
+      prev = now;
+    }
+    if (n > 0) pieces.push([from, n, keep]);
+    if (pieces.length === 1 && pieces[0]![2]) {
+      out.push(run); // every cell of it is inside a link the page treats as one
+    } else {
+      changed = true;
+      for (const [a, b, kept] of pieces) {
+        const piece = typeof text === "string" ? (a === 0 && b >= chars.length ? text : chars.slice(a, b).join("")) : text;
+        out.push([piece, b - a, fg, bg, kept ? flags : flags & ~LINK]);
+      }
+    }
+    col += n;
+  }
+  return changed ? out : row.runs;
+}
+
+/** The runs of `row` as the renderers draw them under `filter`; rows without a flagged cell and rows already checked under the same key cost a lookup. */
+function filteredRuns(row: RowMsg, cols: number, filter: LinkFilter): Run[] {
+  let mask = masks.get(row);
+  if (!mask) {
+    mask = { flagged: row.runs.some(flaggedRun), key: null, runs: row.runs };
+    masks.set(row, mask);
+  }
+  if (!mask.flagged) return row.runs;
+  if (mask.key !== filter.key) {
+    mask.runs = maskedRuns(row, cols, filter.allow);
+    mask.key = filter.key;
+  }
+  return mask.runs;
+}
+
+/**
+ * The frame the renderers draw: rows never received are empty, cluster tails are aligned by row. With a `filter` the
+ * flag LINK stays only on cells inside a span the filter accepts, so the dotted cue marks what the page treats as a link
+ * and nothing else (the core flags every span it keeps; the page decides). Without one the rows are drawn as they came.
+ */
+export function toRenderFrame(mirror: PaneMirror, focused: boolean, filter?: LinkFilter): Frame {
   const lines: Run[][] = [];
   const extras: Extra[][] = [];
   for (let y = 0; y < mirror.rows; y++) {
     const row = mirror.rows_[y];
-    lines.push(row ? row.runs : []);
+    lines.push(row ? (filter ? filteredRuns(row, mirror.cols, filter) : row.runs) : []);
     extras.push(row?.extras ?? []);
   }
   return {

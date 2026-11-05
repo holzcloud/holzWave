@@ -10,11 +10,12 @@ import { renderBar } from "./chrome.js";
 import { BOLD, ITALIC, Metrics, Renderer, font, getFontPx } from "./frame.js";
 import type { Frame, PaneFx } from "./frame.js";
 import { RateMeter, applyFrame, decorationSignature, forgetPane, leavePane, toRenderFrame } from "./frames.js";
-import type { FrameMsg, PaneMirror } from "./frames.js";
+import type { FrameMsg, LinkFilter, PaneMirror } from "./frames.js";
 import { Leaving } from "./dropzone.js";
 import { fitCells, gridRect, headerHeight } from "./geometry.js";
 import { images, onImageReady, wantedOf } from "./images.js";
 import type { PlaceGeometry } from "./images.js";
+import { linkAllowed, pagePolicy } from "./links.js";
 import { renderOverlay } from "./overlay.js";
 import { renderPaneHeads } from "./panehead.js";
 import { Motion } from "./scroll.js";
@@ -466,7 +467,7 @@ function paneFx(id: number, mirror: PaneMirror, focused: boolean, frame: Frame):
   if (mo.rows !== 0) {
     fx.offsetY = mo.rows * cellH;
     fx.under = mo.under.map((u) => ({
-      frame: { ...toRenderFrame(u.mirror, false), cursor: null },
+      frame: { ...toRenderFrame(u.mirror, false, linkFilter(id)), cursor: null },
       offsetY: u.rows * cellH,
     }));
   }
@@ -501,6 +502,16 @@ function wantImages(pane: number, mirror: PaneMirror): void {
 
 // ---- drawing -------------------------------------------------------------------------------------
 
+/**
+ * Which marked links of `pane` get the resting cue: the ones the page treats as links, by the same function and the same
+ * policy as the hover, the status line, the click and hint mode. The key holds what the policy reads (the person's list,
+ * the browser build, whether the pane has a connection), so a change of any of them moves the dots on the next draw.
+ */
+function linkFilter(pane: number): LinkFilter {
+  const policy = pagePolicy(pane);
+  return { key: `${policy.schemes.join(",")}|${policy.web}|${policy.remote}`, allow: (uri) => linkAllowed(uri, policy) };
+}
+
 /** Draw times since the last stats update. */
 let batch: number[] = [];
 let pending = false;
@@ -516,7 +527,7 @@ function draw(): void {
     const mirror = state.frames.get(id);
     if (!mirror) continue;
     const focused = id === view.focus;
-    const frame = toRenderFrame(mirror, focused);
+    const frame = toRenderFrame(mirror, focused, linkFilter(id));
     // The off phase of a blinking cursor: the focused pane is drawn without it.
     if (focused && blinkTimer !== null && !state.blink.on) frame.cursor = null;
     if (mirror.images.length > 0) {

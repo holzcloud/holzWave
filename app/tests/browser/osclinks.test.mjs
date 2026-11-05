@@ -206,6 +206,8 @@ export default async function ({ page, url, errors }) {
   await step("file", () => fileCase(page, url));
   await step("hints", () => hintCase(page, url));
   await step("dots", () => dotsCase(page, url));
+  await step("dots follow the policy", () => dotsPolicyCase(page, url));
+  await step("dots follow a connection", () => dotsConnectionCase(page, url));
   if (currentBackend() === "ws") await step("web", () => webCase(page, url));
   assert.deepEqual(errors, [], "the page reported errors");
 }
@@ -828,6 +830,95 @@ async function dotsCase(page, url) {
       [x0 + first + 0.5, dotRow + 0.5, FG],
     );
   }
+}
+
+// ---- the resting cue follows the page's own link policy ------------------------------------------------------
+
+/** One word, no descender, in the same column of every row: only the dots can put ink on the row they lie in. */
+const POLICY_ROWS = () => [
+  rowOf(0, ["see ", { link: "docs" }, " here"], [[4, 7, DOCS]]),
+  rowOf(1, ["see ", { link: "docs" }, " here"], [[4, 7, "ssh://host/x"]]),
+  rowOf(2, ["see ", { link: "docs" }, " here"], [[4, 7, "javascript:alert(1)"]]),
+  rowOf(3, ["see ", { link: "docs" }, " here"], [[4, 7, "file:///home/u/a.txt"]]),
+  rowOf(4, ["see docs here"]),
+];
+
+/** How many pixels under the cells x0..x1 of row `y` of `pane`, in the two rows the dotted line lies in, differ from the background. */
+async function dotInk(page, g, pane, y, x0, x1) {
+  const b = g.box(pane, y, x0, x1);
+  return page.evaluate(
+    ([left, top, w, h, bg]) => {
+      const c = document.getElementById("term");
+      const r = c.getBoundingClientRect();
+      const d = c.getContext("2d").getImageData(Math.round(left - r.left), Math.round(top - r.top), w, h).data;
+      let n = 0;
+      for (let i = 0; i < d.length; i += 4) if (((d[i] << 16) | (d[i + 1] << 8) | d[i + 2]) !== bg) n++;
+      return n;
+    },
+    [b.x, b.y + b.h - 2, Math.round(b.w), 2, BG],
+  );
+}
+
+/** The ink of the dotted line under each of the five rows of the policy rows of pane 1, after one more draw. */
+async function dotRows(page, g, pane = 1) {
+  await frames(page, 3);
+  const out = [];
+  for (let y = 0; y < 5; y++) out.push(await dotInk(page, g, pane, y, 4, 7));
+  return out;
+}
+
+/**
+ * A marked link has dots only where the page treats it as a link: the scheme is in the person's list, no list can enable
+ * javascript, and a change of the list moves the dots on the next draw with no new frame from the core.
+ */
+async function dotsPolicyCase(page, url) {
+  const g = await open(page, url, { rows: POLICY_ROWS() });
+  let ink = await dotRows(page, g);
+  assert.ok(ink[0] > 0, `an https link has dots (the control): ${ink}`);
+  assert.equal(ink[1], 0, `an ssh link is not in the default list: no dots (${ink})`);
+  assert.equal(ink[2], 0, `a javascript link has no dots (${ink})`);
+  assert.ok(ink[3] > 0, `a file link is a link on the desktop in a local pane (${ink})`);
+  assert.equal(ink[4], 0, `plain text has none (${ink})`);
+  const https = ink[0];
+
+  await setSchemes(page, ["http", "https", "mailto", "file", "ssh"]);
+  ink = await dotRows(page, g);
+  assert.equal(ink[1], https, `ssh is on the list now: the same dots as the https link (${ink})`);
+  assert.equal(ink[2], 0, `javascript has none whatever the list says (${ink})`);
+
+  await setSchemes(page, ["http", "https", "mailto", "file"]);
+  ink = await dotRows(page, g);
+  assert.equal(ink[1], 0, `ssh is off the list again: the dots are gone (${ink})`);
+  assert.equal(ink[0], https, "and the https link keeps its dots");
+
+  await setSchemes(page, ["https"]);
+  ink = await dotRows(page, g);
+  assert.equal(ink[3], 0, `file is not in the list: no dots (${ink})`);
+  assert.equal(ink[0], https, `https is (${ink})`);
+}
+
+/** A pane with a connection profile: a file link names a file on another machine, so it has no dots there and has them in a local pane. */
+async function dotsConnectionCase(page, url) {
+  const g = await open(page, url, { rows: POLICY_ROWS(), remote: 1 });
+  await frames(page, 3);
+  assert.equal(await dotInk(page, g, 1, 3, 4, 7), 0, "a file link in a pane with a connection has no dots");
+  assert.ok((await dotInk(page, g, 2, 3, 4, 7)) > 0, "the same link in a local pane has them");
+  assert.ok((await dotInk(page, g, 1, 0, 4, 7)) > 0, "an https link in the pane with a connection keeps them");
+
+  // A connection that appears after the rows were drawn takes the dots away on the next draw, with no new frame from the core.
+  const l = await open(page, url, { rows: POLICY_ROWS() });
+  // The init scripts of the cases before this one stay on the page and may give a pane a connection: no connection at the start.
+  await page.evaluate(() => window.__MOCK__.on("pane_connections", () => []));
+  await page.waitForFunction(() => window.__conns.size === 0, null, { timeout: 8000 });
+  await frames(page, 3);
+  assert.ok((await dotInk(page, l, 1, 3, 4, 7)) > 0, "a local pane: a file link has dots");
+  await page.evaluate(() =>
+    window.__MOCK__.on("pane_connections", () => [{ pane: 1, profile: "talos", name: "Talos", state: "connected", attempt: 0, of: 0, secs: 0 }]),
+  );
+  await page.waitForFunction(() => window.__conns.size === 1, null, { timeout: 8000 });
+  await frames(page, 3);
+  assert.equal(await dotInk(page, l, 1, 3, 4, 7), 0, "the pane has a connection now: the dots of the file link are gone");
+  assert.ok((await dotInk(page, l, 2, 3, 4, 7)) > 0, "the other pane is still local");
 }
 
 // ---- the browser build ---------------------------------------------------------------------------------------
