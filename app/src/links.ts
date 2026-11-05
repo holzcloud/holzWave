@@ -412,6 +412,28 @@ interface LinkDeps {
   call: (cmd: string, args: Record<string, unknown>) => Promise<unknown>;
   /** The question `Open this link?`; `onOpen` is called synchronously from the click or key that confirms. Null: no question can be asked. */
   ask: ((shown: string, target: string, onOpen: () => void) => void) | null;
+  /** Say `text` in the notice segment of the status line (docs/design.md 6.31, a link that cannot be opened). */
+  say: (text: string) => void;
+}
+
+/** What is said when the host refused or failed in a way the page cannot put in words. */
+export const LINK_REFUSED = "The link could not be opened.";
+/** The most characters of the host's sentence the status line takes. */
+const MAX_REFUSAL = 200;
+/** A control, format, unassigned, surrogate or private-use character, and the line and paragraph separators: none may reach the status line. */
+const NOT_PLAIN = /[\p{C}\p{Zl}\p{Zp}]/u;
+
+/**
+ * What the status line says when `open_url` or `reveal_path` rejected with `reason`. The host's refusals are fixed sentences that
+ * never repeat the address or the path, so a plain string is said as it is, cut at 200 characters (code points). Anything else
+ * (an object, an empty or blank string, a string with a control, format or line-separator character such as a bidirectional
+ * override) is the one fixed sentence: the page does not guess what such a value means and never shows what a program could have
+ * put in it. The caller puts the result in as text.
+ */
+export function refusalSentence(reason: unknown): string {
+  if (typeof reason !== "string" || reason.trim() === "" || NOT_PLAIN.test(reason)) return LINK_REFUSED;
+  const points = Array.from(reason);
+  return points.length > MAX_REFUSAL ? points.slice(0, MAX_REFUSAL).join("") : reason;
 }
 
 let deps: LinkDeps | null = null;
@@ -419,9 +441,13 @@ let deps: LinkDeps | null = null;
 /** Load what opening a link needs (the bridge and the dialog) once; `activateLink` does nothing before this has run. */
 export async function linkDeps(): Promise<void> {
   if (deps) return;
-  const { call } = await import("./bridge.js");
+  const [{ call }, { showNotice }] = await Promise.all([import("./bridge.js"), import("./status.js")]);
   // The dialog's module is fetched at the first question, not at start-up: nothing new is loaded while the page starts.
-  deps = { call, ask: (shown, target, onOpen) => void import("./linkask.js").then((m) => m.askOpenLink(shown, target, onOpen)).catch(() => {}) };
+  deps = {
+    call,
+    ask: (shown, target, onOpen) => void import("./linkask.js").then((m) => m.askOpenLink(shown, target, onOpen)).catch(() => {}),
+    say: showNotice,
+  };
 }
 
 /** What decides whether a marked link in `pane` is a link: the person's list, the build and the pane's connection. */
@@ -442,17 +468,19 @@ export function pagePolicy(pane: number): LinkPolicy {
 export function activateLink(pane: number, target: Target): void {
   const d = deps;
   if (!d) return;
+  // A refusal of the host is answered in the status line; the click itself stays what it was, a call started from the gesture.
+  const refused = (reason: unknown): void => d.say(refusalSentence(reason));
   if (target.source !== "osc8") {
     const action = linkAction(target, state.cwds.get(pane) ?? null, canRevealPaths());
     if (action?.command === "open_url") {
       const { url } = action.args;
-      openUrl(url, () => void d.call("open_url", { url }).catch(() => {}));
-    } else if (action) void d.call(action.command, action.args).catch(() => {});
+      openUrl(url, () => void d.call("open_url", { url }).catch(refused));
+    } else if (action) void d.call(action.command, action.args).catch(refused);
     return;
   }
   const url = target.text;
   if (!linkAllowed(url, pagePolicy(pane))) return;
-  const open = (): void => openUrl(url, () => void d.call("open_url", { url, pane }).catch(() => {}));
+  const open = (): void => openUrl(url, () => void d.call("open_url", { url, pane }).catch(refused));
   if (!linkTextDiffers(target.shown ?? "", url)) {
     open();
     return;

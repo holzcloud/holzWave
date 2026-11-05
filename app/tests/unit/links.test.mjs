@@ -8,6 +8,7 @@ import {
   cellInk, cutMiddle, cutShown, findTargets, isLinkModifier, linkAction, linkAllowed, linkTextDiffers, mergeTargets, osc8Targets,
   targetAt,
 } from "../../dist/links.js";
+import { LINK_REFUSED, refusalSentence } from "../../dist/links.js";
 
 /** A row of narrow cells: one string per character. */
 const row = (text) => Array.from(text);
@@ -352,4 +353,24 @@ test("cutShown cuts the visible text at 120 code points with an ellipsis and lea
   assert.equal(cutShown("a".repeat(121)), `${"a".repeat(120)}…`);
   assert.equal([...cutShown("\u{1F600}".repeat(130))].length, 121, "code points, not UTF-16 units: a pair is not split");
   assert.equal(cutShown("abcdef", 3), "abc…");
+});
+
+// ---- the answer to a click the host refuses ----------------------------------------------------------------
+
+test("refusalSentence: a plain host sentence is said as it is, cut at 200 code points", () => {
+  const host = "file links are not in the list of link schemes in the settings";
+  assert.equal(refusalSentence(host), host);
+  assert.equal(refusalSentence("a".repeat(200)), "a".repeat(200));
+  assert.equal(refusalSentence("a".repeat(500)), "a".repeat(200));
+  assert.equal([...refusalSentence("\u{1F600}".repeat(300))].length, 200, "code points: a pair is not split");
+  assert.equal(refusalSentence("<b>x</b> & more"), "<b>x</b> & more", "the text is not changed: it is shown as text");
+});
+
+test("refusalSentence: anything that is not a plain string is the one fixed sentence", () => {
+  assert.equal(LINK_REFUSED, "The link could not be opened.");
+  const bad = [
+    undefined, null, 0, true, {}, { text: "no" }, ["a"], new Error("x"), "", " ", "\t", "a\u0007b", "a\nb", "a\u0000b", "a\u007Fb",
+    "a\u202Eb", "a\u2066b", "a\u200Bb", "a\uFEFFb", "a\u2028b", "a\u2029b", "a\uD800b", "a\uE000b",
+  ];
+  for (const reason of bad) assert.equal(refusalSentence(reason), LINK_REFUSED, JSON.stringify(reason) ?? String(reason));
 });

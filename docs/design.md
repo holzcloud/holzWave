@@ -264,7 +264,7 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | Web: account | ![](design/web-account.png) | the account dialog (6.29) with its six groups and the layer `Confirm it is you` above it |
 | Web: people | ![](design/web-people.png) | the people dialog (6.29): the table of accounts with state marks, the menu of one row and the invitation link shown once |
 | Web: window | ![](design/web-window.png) | the window as the browser shows it (6.30): no window buttons, the marks of the status line, the upload target, the `Download` row menu and the Notifications setting |
-| Links | ![](design/links.png) | links in the output of a shell pane (6.31): two at rest with a dotted underline, one under the pointer with a solid underline and its target in the `LINK` segment of the status line, one with the open gesture held in rose, one in text the program underlined itself, and an address with a scheme that is not allowed, which stays plain text |
+| Links | ![](design/links.png) | links in the output of a shell pane (6.31): two at rest with a dotted underline, one under the pointer with a solid underline and its target in the `LINK` segment of the status line, with the notice beside it that says why a click could not open it, one with the open gesture held in rose, one in text the program underlined itself, and an address with a scheme that is not allowed, which stays plain text |
 | Link dialog | ![](design/link-ask.png) | the question `Open this link?` (6.31) for a link whose text names one site and whose target is another: the text and the target in mono, `Cancel` focused, `Open` solid rose |
 | Images | ![](design/images.png) | pictures in a shell pane (6.31): one in each of the three layers, a picture clipped at the edge of the pane body, a picture made of placeholder cells, and the cursor and a selection drawn over a picture |
 | Drag | ![](design/drag.png) | drop zones on the outer quarter of a pane, a tab drop zone, tear-off into a new window |
@@ -2602,11 +2602,14 @@ gesture held the link under the pointer gets a solid underline in `--hw-rose` an
 | The program already underlined the text | its own underline stays, no dotted line | found by hover and by hint mode |
 | A scheme that is not allowed | nothing: plain text | no underline, no click |
 | A `file` link in a server pane or in a browser | nothing: plain text | no underline, no click |
+| A link that cannot be opened | the notice segment of the status line holds the host's sentence for the usual time; the text is not marked | the words; the `LINK` segment may stay beside it |
 
 **The target in the status line.** A segment at the left of the status line holds the label `LINK` (uppercase, tracked, `.label`) and the target in
 mono, with the scheme and the host in `--hw-ink` and the rest in `--hw-ink-2`. A target longer than the segment is cut in the middle with `…` so that
 the scheme, the host and the last 12 characters stay. It is there while the pointer is over a link and gone when it leaves. It does not use the
 segment of the notice. The full target is also the accessible name of the segment.
+
+**A link that cannot be opened.** A click, or a link chosen in hint mode with `Shift` held, that the host refuses or cannot carry out (a scheme taken off the list since, a `file` link whose file is gone, no program to open it) is answered in the notice segment of the status line (section 2 rule 5) for the usual time. The words are the host's own fixed sentence, which never repeats the address; any other failure is the one sentence `The link could not be opened.` There is no dialog and no mark on the text, and the `LINK` segment may stay beside the notice while the pointer stays on the link. A click that succeeds says nothing. The browser build opens a tab itself and never asks the host, so it has no such notice.
 
 **The question.** When the visible text of the link and its target differ, the click with the gesture opens a dialog of the shape of the close
 confirmation (title, body lines, two buttons, centred over a backdrop): the title `Open this link?`, a line `The text says` with the visible text in

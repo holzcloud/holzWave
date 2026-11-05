@@ -596,7 +596,7 @@ This is every claim of this part that no suite here supports. It is listed so th
   on that row is only a part of the address; Open then opens it. The hover underline and the status line follow pointer and key events: when the output changes under a pointer that does not move,
   they stay until the next event.
 - `contrast-high` and `motion-reduce` were not looked at by eye for the dialog of the link question and for the status segment.
-- A refused link, a missing path or a failed opener gives no visible answer.
+- A refused link, a missing path or a failed opener is answered in the notice segment of the status line with the host's sentence. This was tested with a mock host in the browser tests (a click, a printed address, a path, a link chosen in hint mode with `Shift` and the `Open` button of the question, in both engines) and, for the host's own sentences, in the unit tests of the host. The real openers of Linux (`xdg-open`) and of Windows (`rundll32` and Explorer) were not run, so what they say when they fail was not seen.
 - An animation that replaces a frame (the form of the protocol that names a frame to replace) was not tested; the tests append frames. The
   animation switch is one per person: two browser windows with different preferences share it, and the last page to report wins.
 - Memory with pictures was measured at the default limit with many pictures of 1 MiB each, on an Apple Silicon Mac. A single
@@ -628,7 +628,7 @@ Known limits of this build, so they are not reported as defects:
 
 - While a scroll slides (at most 120 ms) the selection highlight, the search matches and the copy cursor are already at
   their final place, because they are drawn from the core's answer and not moved with the text.
-- A link or path that cannot be opened (a refused scheme, a missing path, no opener) gives no visible answer yet.
+- A link or path that cannot be opened (a refused scheme, a missing path, no opener) is answered with a notice in the status line for five seconds; the words are the host's, or `The link could not be opened.` when it says nothing the page can show.
 - The palette matches action titles only, shows no highlight of the matched letters and has no recent-first order.
 - Hint labels cover the first 676 targets of a pane in reading order, and a number of 7 to 40 digits counts as a hash.
 - `Cmd+C` is a fixed shortcut. A chord the core refused stays in the overrides map of `settings.json` until it is reset.

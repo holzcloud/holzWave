@@ -615,6 +615,7 @@ td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
 .status .lk-seg .lk-l{letter-spacing:.1em;text-transform:uppercase;color:var(--ink3);margin-right:8px}
 .status .lk-seg .lk-h{color:var(--ink)}
 .status .lk-seg .lk-r{color:var(--ink2)}
+.status .lk-note{color:var(--ink);font-weight:700}
 .lk-v{font:400 12px/1.5 var(--mono);color:var(--ink);background:var(--ground);border:1px solid var(--edge);border-radius:4px;padding:6px 8px;overflow-wrap:anywhere}
 .btn.lk-fo{outline:2px solid var(--ink);outline-offset:2px}
 .imt{position:relative;overflow:hidden;padding:0}
@@ -1348,10 +1349,11 @@ const lkChrome=()=>{const b=base('alltag');return b.slice(0,b.indexOf('<div clas
 const lkBody=(inner)=>`<div class="body"><div class="area" style="grid-template-columns:1fr;grid-template-rows:1fr">${P('','❯','shell','pane 1 · ~/holzWave',inner,{f:1})}</div></div>`;
 const lkTarget='https://example.com/downloads/archive/2026/08/holzwave-setup.dmg';
 const lkSeg=`<span class="lk-seg" role="status" aria-label="Link target ${lkTarget}"><span class="lk-l">Link</span><span class="lk-h">https://example.com</span><span class="lk-r">/downloads/…ve-setup.dmg</span></span>`;
+const lkNote=`<span class="lk-note" role="status">cannot start xdg-open: No such file or directory (os error 2)</span>`;
 const lkShell=`<div class="term pre"><span class="ro">❯</span> holz-release --notes
 Build 0.0.1-beta2 is out. Read the <span class="ol">release notes</span> and the <span class="ol">changelog</span>.<span class="dim">   ← two links at rest: dotted</span>
 
-Get it from the <span class="ol hv">download page</span>.<span class="dim">   ← the pointer is over it: solid, and its target is in the status line</span>
+Get it from the <span class="ol hv">download page</span>.<span class="dim">   ← the pointer is over it: solid, target in the status line, and a refused click says why beside it</span>
 Docs are at <span class="ol gs">docs.example.org</span>.<span class="dim">   ← the open gesture is held: solid rose</span>
 Read the <span class="ol pu">migration guide</span> first.<span class="dim">   ← the program underlined this text itself: its own line stays</span>
 Mirror: ftp://files.example.org/readme<span class="dim">   ← a scheme that is not allowed: plain text</span>
@@ -1381,7 +1383,7 @@ const imScene=()=>`<div class="term imt">
  <div class="cap" style="left:${IM_X+122*IM_CW}px;bottom:82px">Clipped at the bottom edge too</div>${imPic('l2',`left:${IM_X+122*IM_CW}px;bottom:-37px;width:${28*IM_CW}px;height:${6*IM_CH}px`,imBands)}
  <div class="cap" style="left:${IM_X}px;bottom:28px">Animated pictures do not move under reduced motion:</div><div class="cap" style="left:${IM_X}px;bottom:12px">the first frame if never started, else the frame they show.</div></div>`;
 const lkViews={
- links:()=>lkChrome()+lkBody(lkShell)+status().replace('<div class="status row">','<div class="status row">'+lkSeg),
+ links:()=>lkChrome()+lkBody(lkShell)+`<div class="status row">${lkSeg}${lkNote}<span>5 tabs · 5 panes</span><span style="margin-left:auto">webgl2</span><span>utf-8</span><span>0.0.1-beta2</span></div>`,
  'link-ask':()=>lkChrome()+lkBody(lkShell)+status(),
  images:()=>lkChrome()+lkBody(imScene())+status()
 };
@@ -1438,7 +1440,7 @@ const views=[
  ['web-account','Web: account','The account dialog, opened from the palette entry Account\u2026: one group for each thing a person can change (password, authenticator, passkeys, unlock passphrase, recovery code) with its state as a word, and the sessions with this one marked by the word this session and a dot, Sign out and Sign out everywhere. A change asks again in the layer Confirm it is you above the dialog, which shows the account name in mono and offers the password or a passkey.'],
  ['web-people','Web: people','The people dialog, for administrators only: the table of accounts with role, state (active with a dot, disabled with a ring, locked out with ! and an underline) and last sign-in, the menu of one row (Make admin, Disable, Unlock sign-in while locked out, Reset secrets, Delete) and the layer that shows a new invitation link once with Copy link. The dialog shows no secret, terminal, command or layout of anyone.'],
  ['web-window','Web: window','The window as a browser shows it: the bar starts at the left edge, with no window buttons and no drag region. In the status line the marks reconnecting (a dotted ring), session ends in 4 min (a quarter circle) and secrets locked (a lock and the text button Unlock), and the notice Not available in the browser. A file dragged over a pane that takes it (a shell, a chat or a file browser; a preview, the monitor and a tool view take nothing and show no edge) shows a dashed edge and Drop to upload, with the upload folder once the page has seen it (the first drop of a page load shows the label alone); the edge is drawn here on the shell pane, and it is the same on a chat and on a file browser. A dropped file becomes its quoted path typed in a shell, the same path in the message of a chat, and the selected row of a file browser that lists the upload folder (a browser that lists another folder stays as it is and the status line says Uploaded to the folder). The row menu of a file in the file browser has the one entry Download; Settings has the row Notifications, here off, on and blocked by the browser.'],
-  ['links','Links','Links the program marked, in a shell pane (docs/design.md 6.31): two at rest with a dotted underline, one under the pointer with a solid underline and its target in the LINK segment of the status line (cut in the middle), one with the open gesture held in solid rose, one in text the program underlined itself, and an address with a scheme that is not allowed, which stays plain text. The pointer cursor is the system\u2019s and is not drawn.'],
+  ['links','Links','Links the program marked, in a shell pane (docs/design.md 6.31): two at rest with a dotted underline, one under the pointer with a solid underline and its target in the LINK segment of the status line (cut in the middle) with the notice beside it that says why a click could not open it (the host\u2019s own sentence, here an opener that cannot be started), one with the open gesture held in solid rose, one in text the program underlined itself, and an address with a scheme that is not allowed, which stays plain text. The pointer cursor is the system\u2019s and is not drawn.'],
   ['link-ask','Link dialog','The question Open this link? for a link whose text names one site and whose target is another: the text and the full target in mono, Cancel focused with the 2 px ring, Open the solid rose button. It has the shape of the close confirmation and is a floating layer.'],
   ['images','Images','Pictures in a shell pane: one in each of the three layers (below the cell backgrounds, between the backgrounds and the text, above the text), pictures clipped at the top and bottom edge of the pane body, a picture made of placeholder cells, and the cursor and a selection drawn over a picture. An animated picture does not move under reduced motion: its first frame if it was never started, else the frame it shows.'],
   ['drag','Drag','Reorder panes by drag and drop, drop them as a tab, drag them out into a new window. On Wayland use the palette.']

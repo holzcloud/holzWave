@@ -11,20 +11,20 @@ import { APP_DIR, callsOf, currentBackend, emit } from "./lib.mjs";
 
 const PAD = 6; // CSS px between a pane's edge and its grid (geometry.ts)
 const HEADER = 24; // CSS px of a pane's header strip at the base font size
-const BG = 0x14091a;
-const FG = 0xf6efe6;
+export const BG = 0x14091a;
+export const FG = 0xf6efe6;
 const LINK = 16; // the wire flag of a cell inside a marked link
 const MODES = { alt: false, bracketed_paste: false, mouse: false };
-const COLS = 50;
+export const COLS = 50;
 
-const DOCS = "https://example.org/docs";
+export const DOCS = "https://example.org/docs";
 const golden = JSON.parse(readFileSync(join(APP_DIR, "tests/fixtures/protocol.json"), "utf8"));
 
 /**
  * One row of `COLS` cells from parts: a string is plain text, `{ link: "text" }` is text with the flag LINK. `links` are the
  * spans the core would send for it, which the test writes out itself so that the page is tested against the wire.
  */
-const rowOf = (y, parts, links, cols = COLS) => {
+export const rowOf = (y, parts, links, cols = COLS) => {
   const runs = [];
   let used = 0;
   for (const part of parts) {
@@ -49,13 +49,13 @@ const ROWS = () => [
   rowOf(7, ["https://example.com/x here"], [[0, 20, "https://example.com/z"]]),
 ];
 
-const frame = (pane, seq, changed, over = {}) => ({
+export const frame = (pane, seq, changed, over = {}) => ({
   pane, seq, full: true, cols: COLS, rows: 8, fg: FG, bg: BG, cursor: null, scrollbar: [0, over.rows ?? 8, over.rows ?? 8],
   selection: [], matches: [], search: null, copy_cursor: null, modes: MODES, changed, ...over,
 });
 
 /** Open the page as `os` with the rows in both panes; returns the geometry helpers. */
-async function open(page, url, { os = "macos", rows = ROWS(), schemes = null, remote = false, cols = COLS, spy = false } = {}) {
+export async function open(page, url, { os = "macos", rows = ROWS(), schemes = null, remote = false, cols = COLS, spy = false } = {}) {
   await page.addInitScript((o) => window.__MOCK__.on("app_info", () => ({ os: o, version: "t", hostname: "h" })), os);
   if (remote) {
     // `remote` is the pane that has a connection profile.
@@ -140,7 +140,7 @@ const spyOpen = (page) =>
 const opened = (page) => page.evaluate(() => structuredClone(window.__opened));
 const anchors = (page) => page.evaluate(() => structuredClone(window.__anchors));
 
-const frames = (page, n = 2) =>
+export const frames = (page, n = 2) =>
   page.evaluate(async (count) => {
     for (let i = 0; i < count; i++) await new Promise((done) => requestAnimationFrame(() => done()));
   }, n);
@@ -148,14 +148,14 @@ const names = (page, ...cmds) =>
   page.evaluate((set) => window.__MOCK__.calls.filter(([c]) => set.includes(c)).map(([c, a]) => [c, a]), cmds);
 
 /** Hold `mod`, click at (x, y), release. */
-async function modClick(page, mod, [x, y]) {
+export async function modClick(page, mod, [x, y]) {
   await page.keyboard.down(mod);
   await page.mouse.click(x, y);
   await page.keyboard.up(mod);
 }
 
 /** The box of the overlay element `selector` (client pixels), or null. */
-const boxOf = (page, selector) =>
+export const boxOf = (page, selector) =>
   page.evaluate((sel) => {
     const n = document.querySelector(sel);
     if (!n) return null;
@@ -167,7 +167,7 @@ const near = (got, want, what) => {
   for (const k of ["x", "y", "w", "h"]) assert.ok(Math.abs(got[k] - want[k]) < 0.6, `${what}: ${k} ${got[k]} != ${want[k]}`);
 };
 /** What the LINK segment of the status line holds: its text and its accessible name, or null when it is not shown. */
-const linkSeg = (page) =>
+export const linkSeg = (page) =>
   page.evaluate(() => {
     const n = document.querySelector("#status .seg.link");
     if (!n || getComputedStyle(n).display === "none") return null;
@@ -175,14 +175,14 @@ const linkSeg = (page) =>
   });
 const cursor = (page) => page.evaluate(() => getComputedStyle(document.getElementById("term")).cursor);
 /** Wait until the LINK segment is shown (or gone). */
-const waitSeg = (page, shown) =>
+export const waitSeg = (page, shown) =>
   page.waitForFunction((want) => {
     const n = document.querySelector("#status .seg.link");
     return (n !== null && getComputedStyle(n).display !== "none") === want;
   }, shown);
 
 /** Run one case; a failure says which one. */
-async function step(name, fn) {
+export async function step(name, fn) {
   try {
     await fn();
   } catch (e) {
@@ -433,7 +433,7 @@ async function textLinkCase(page, url) {
 // ---- the question ------------------------------------------------------------------------------------------
 
 /** The dialog, or null: its title, labels, texts, buttons and which button has the focus. */
-const dialog = (page) =>
+export const dialog = (page) =>
   page.evaluate(() => {
     const d = document.querySelector(".dlg-link");
     if (!d) return null;
@@ -450,11 +450,11 @@ const dialog = (page) =>
       foreign: d.querySelectorAll("img, a, script, [onerror]").length,
     };
   });
-const waitDialog = (page, shown) =>
+export const waitDialog = (page, shown) =>
   page.waitForFunction((want) => (document.querySelector(".dlg-link") !== null) === want, shown);
 
 /** A click with the gesture on `pt`, which asks (or not). */
-async function gestureClick(page, pt) {
+export async function gestureClick(page, pt) {
   await page.waitForTimeout(450); // the double click window of the pointer
   await modClick(page, "Meta", pt);
 }
