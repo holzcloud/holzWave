@@ -161,10 +161,11 @@ pub struct Settings {
     /// The program a new pane starts: one string, never split and never run through another shell. Empty means the
     /// platform default of [`crate::platform::shell_launch`]. It applies to panes started afterwards.
     pub shell: String,
-    /// The schemes of the links that may be opened (D-05): lower case, 1 to 32 characters (a letter, then letters, digits,
-    /// plus, dot or hyphen), at most [`MAX_LINK_SCHEMES`]. `javascript`, `data`, `vbscript`, `blob` and `about` are never
-    /// kept, from any route. An empty list means no link opens. `file` reveals the file and never opens it. Not in the
-    /// Settings dialog, like `shell`; the opener reads it at each click.
+    /// The schemes of the links that may be opened (D-05): lower case, 2 to 32 characters (a letter, then letters, digits,
+    /// plus, dot or hyphen; one letter is a drive letter on Windows and never a scheme), at most [`MAX_LINK_SCHEMES`].
+    /// `javascript`, `data`, `vbscript`, `blob` and `about` are never kept, from any route. An empty list means no link
+    /// opens. `file` reveals the file and never opens it. Not in the Settings dialog, like `shell`; the opener reads it at
+    /// each click.
     pub link_schemes: Vec<String>,
     /// Refuse every AI request whose destination leaves this computer, the local network included.
     pub ai_local_only: bool,
@@ -361,8 +362,8 @@ impl Settings {
         }
         if invalid > 0 {
             notes.push(format!(
-                "link_schemes: {} not a scheme name (a letter, then letters, digits, plus, dot or hyphen; at most 32 \
-                 characters) and dropped",
+                "link_schemes: {} not a scheme name (2 to 32 characters: a letter, then letters, digits, plus, dot or \
+                 hyphen) and dropped",
                 entries(invalid)
             ));
         }

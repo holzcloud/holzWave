@@ -249,7 +249,7 @@ test("a font size step is the current size plus the step, from the default when 
   assert.equal(DEFAULT_FONT_SIZE, 14);
 });
 
-test("link_schemes is a list of lower-case scheme names, at most 16; anything else is the default and never refuses the view", () => {
+test("link_schemes is a list of lower-case scheme names of 2 to 32 characters, at most 16; anything else is the default and never refuses the view", () => {
   const DEFAULT = ["http", "https", "mailto", "file"];
   const read = (value, drop = false) => {
     const view = sample();
@@ -266,5 +266,6 @@ test("link_schemes is a list of lower-case scheme names, at most 16; anything el
   assert.deepEqual(read([]), [], "an empty list is a list: no link opens");
   assert.deepEqual(read(["https", "SSH", "ssh", "ssh", "1x", "a_b", "", 7, null, "x-y.z+1"]), ["https", "ssh", "x-y.z+1"], "bad entries and repeats are dropped one by one");
   assert.deepEqual(read(["a".repeat(33), "a".repeat(32)]), ["a".repeat(32)], "32 characters at most");
+  assert.deepEqual(read(["c", "ssh", "x", "https", "ab", "a"]), ["ssh", "https", "ab"], "one letter is a drive letter, never a scheme: two characters at least, as in the core");
   assert.equal(read(Array.from({ length: 30 }, (_, i) => `s${i}`)).length, 16, "sixteen at most");
 });

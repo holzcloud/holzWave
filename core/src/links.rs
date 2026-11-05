@@ -31,6 +31,11 @@ pub const MAX_URI_BYTES_PER_FRAME: usize = 128 * 1024;
 /// The longest scheme, in characters.
 const MAX_SCHEME_CHARS: usize = 32;
 
+/// The fewest characters of a scheme name that a setting may list. A single letter is a drive letter on Windows
+/// (`c:\dir\file.exe`), which the system's link handler would run, so no one-letter scheme is a scheme name here. An
+/// address ([`clean_uri`]) still has the grammar of 1 to 32 characters: the core delivers, the page and the host decide.
+const MIN_SCHEME_CHARS: usize = 2;
+
 /// Schemes that are never delivered, whatever a setting says later: they run code or carry content, not a place.
 /// Compared in ASCII lower case.
 const DENIED_SCHEMES: [&str; 5] = ["javascript", "data", "vbscript", "blob", "about"];
@@ -43,11 +48,28 @@ pub struct LinkSpan {
     pub uri: String,
 }
 
-/// Whether `name` is a scheme name as a setting may list it: 1 to 32 characters, a lower case letter first, then lower
+/// Whether `name` is a scheme name as a setting may list it: 2 to 32 characters, a lower case letter first, then lower
 /// case letters, digits, plus, dot or hyphen. An upper-case letter is not valid here (a list is kept in lower case),
-/// while an address may carry its scheme in any case ([`clean_uri`]).
+/// while an address may carry its scheme in any case ([`clean_uri`]). One letter is never a scheme name here, so no
+/// Windows drive letter (`c:`) can be listed; the host asks this again of the scheme of every link it opens.
 pub fn valid_scheme(name: &str) -> bool {
-    !name.bytes().any(|b| b.is_ascii_uppercase()) && scheme_grammar(name.as_bytes())
+    name.len() >= MIN_SCHEME_CHARS && !name.bytes().any(|b| b.is_ascii_uppercase()) && scheme_grammar(name.as_bytes())
+}
+
+/// Whether the text after the colon of a link (`rest`) starts an option for the program that handles the link: its
+/// authority, or the part of it after the last `@` (the host), begins with a hyphen, written as `-` or as `%2d` in
+/// either letter case. The authority is the text after an optional `//` up to the first `/`, `?` or `#`. A scheme
+/// handler (`ssh` and others) may read such a text as an option (`ssh://-oProxyCommand=x@host/`), so the host refuses
+/// it for every scheme but the web ones and `mailto`. A hyphen inside a host or a user name, in a path, a query or a
+/// fragment is no option. Reads bytes only: nothing is decoded or allocated.
+pub fn option_like_authority(rest: &str) -> bool {
+    let bytes = rest.as_bytes();
+    let after_slashes = bytes.strip_prefix(b"//").unwrap_or(bytes);
+    let end = after_slashes.iter().position(|b| matches!(b, b'/' | b'?' | b'#')).unwrap_or(after_slashes.len());
+    let authority = &after_slashes[..end];
+    let host = authority.iter().rposition(|&b| b == b'@').map_or(authority, |at| &authority[at + 1..]);
+    let dash = |text: &[u8]| text.first() == Some(&b'-') || (text.len() >= 3 && text[0] == b'%' && text[1] == b'2' && text[2].eq_ignore_ascii_case(&b'd'));
+    dash(authority) || dash(host)
 }
 
 /// Whether `text` carries a character that a link must never have: a control character, a blank (space, tab, no-break
@@ -238,10 +260,10 @@ mod tests {
 
     #[test]
     fn valid_scheme_is_the_lower_case_grammar_of_a_scheme_name() {
-        for good in ["https", "ssh", "x-man-page", "a1+b.c", "a", &"a".repeat(32)] {
+        for good in ["https", "ssh", "x-man-page", "a1+b.c", &"a".repeat(32)] {
             assert!(valid_scheme(good), "{good}");
         }
-        for bad in ["", "1http", "ht_tp", "-a", "+a", &"a".repeat(33), "HTTPS", "Ssh", "a b", "a:b", "a\tb", "h\u{e4}", "a/b"] {
+        for bad in ["", "a", "1http", "ht_tp", "-a", "+a", &"a".repeat(33), "HTTPS", "Ssh", "a b", "a:b", "a\tb", "h\u{e4}", "a/b"] {
             assert!(!valid_scheme(bad), "{bad:?}");
         }
     }
@@ -261,6 +283,77 @@ mod tests {
         let printable: String = (0x21u8..=0x7E).map(char::from).collect();
         for fine in ["", "https://example.org/a?b=c%20d#e", printable.as_str(), "\u{e4}", "\u{e9}", "\u{fc}", "\u{65e5}", "\u{44f}", "\u{1f600}", "https://ex\u{e4}mple.org/\u{65e5}"] {
             assert!(!has_hidden_char(fine), "{fine:?}");
+        }
+    }
+
+    #[test]
+    fn a_scheme_name_of_a_setting_has_two_to_32_characters_so_no_drive_letter_is_one() {
+        for letter in 'a'..='z' {
+            assert!(!valid_scheme(&letter.to_string()), "{letter}");
+        }
+        for good in ["ab", "ssh", "x-man-page", "a1+b.c", &"a".repeat(32)] {
+            assert!(valid_scheme(good), "{good}");
+        }
+        assert!(valid_scheme("a1"));
+        for bad in ["", "A", "1a"] {
+            assert!(!valid_scheme(bad), "{bad}");
+        }
+        assert!(!valid_scheme(&"a".repeat(33)));
+    }
+
+    #[test]
+    fn an_address_with_a_one_letter_scheme_is_still_delivered_the_page_and_the_host_decide() {
+        assert_eq!(clean_uri(br"c:\Windows\System32\calc.exe").as_deref(), Some(r"c:\Windows\System32\calc.exe"));
+        assert!(ok("C:/x.exe"));
+        assert!(ok("x:y"));
+        assert!(!ok("javascript:x"), "the denied schemes stay denied");
+    }
+
+    #[test]
+    fn option_like_authority_finds_a_dash_that_a_handler_may_read_as_an_option() {
+        for bad in [
+            "//-oProxyCommand=x@host/",
+            "-oProxyCommand=x",
+            "//%2DoProxyCommand=x/",
+            "//%2doProxyCommand=x/",
+            "//user@-host/",
+            "//user@%2dhost/",
+            "//user@%2Dhost/",
+            "//user:pw@-host/",
+            "//a@b@-host/",
+            "-x",
+            "//-x",
+            "//-",
+            "-",
+            "%2d",
+            "//%2D",
+            "//-host:22/path",
+            "//-x?a=b",
+            "//-x#f",
+        ] {
+            assert!(option_like_authority(bad), "{bad}");
+        }
+        for fine in [
+            "//host.example/path",
+            "//my-host.example",
+            "//user-name@host.example/",
+            "//user-name:pw-x@host.example/",
+            "//host.example/-x",
+            "//host.example/?a=-b",
+            "//host.example#-x",
+            "//host:22/",
+            "//host.example/a@-b",
+            "//host.example?u=a@-b",
+            "x",
+            "//",
+            "",
+            "//%2",
+            "//%2e",
+            "//%2fx",
+            "//a%2d",
+            "/-x",
+        ] {
+            assert!(!option_like_authority(fine), "{fine}");
         }
     }
 

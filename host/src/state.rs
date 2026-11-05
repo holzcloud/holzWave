@@ -3779,11 +3779,15 @@ fn process_env(name: &str) -> Option<String> {
 }
 
 /// Whether `url` is a link that may be opened under the list `schemes` (the `link_schemes` setting in force): at most
-/// [`MAX_URL_BYTES`], no control, blank or invisible character, a scheme that the list holds (compared without regard to case) and
-/// that is none of the five that are never opened, and the shape of that scheme: a host after `//` for http and https, an
-/// address for mailto, something after the colon for any other. `file` is never handed to the opener: a file link is
-/// revealed through the pane path of [`AppCore::open_url`]. The text is never interpreted further, and a refusal is a
-/// fixed sentence that does not repeat the link.
+/// [`MAX_URL_BYTES`], no control, blank or invisible character, a scheme of 2 to 32 characters (the rule of the list,
+/// checked again here, so no Windows drive letter is a scheme whatever the list holds) that the list holds (compared
+/// without regard to case) and that is none of the five that are never opened, and the shape of that scheme: a host after
+/// `//` for http and https, an address for mailto, something after the colon for any other. For every scheme except
+/// http, https and mailto the link must not name a host or first part that starts with a dash, written `-` or `%2d`
+/// ([`holzwave_core::links::option_like_authority`]), because a handler of a custom scheme gets the text as written and
+/// may read that as an option. `file` is never handed to the opener: a file link is revealed through the pane path of
+/// [`AppCore::open_url`]. The text is never interpreted further, and a refusal is a fixed sentence that does not repeat
+/// the link.
 fn check_link(url: &str, schemes: &[String]) -> Result<(), String> {
     let (scheme, rest) = check_link_text(url)?;
     let scheme = scheme.to_ascii_lowercase();
@@ -3793,6 +3797,11 @@ fn check_link(url: &str, schemes: &[String]) -> Result<(), String> {
     if scheme == "file" {
         return Err("a file link is shown in the file manager from a pane on this computer, it is not opened".into());
     }
+    // The rule of the list, asked again of the link's own scheme: a one-letter scheme is a Windows drive letter and
+    // never reaches the opener, whatever the list holds.
+    if !holzwave_core::links::valid_scheme(&scheme) {
+        return Err("the link does not start with a scheme name of 2 to 32 characters".into());
+    }
     if !schemes.iter().any(|listed| *listed == scheme) {
         return Err("links of this kind are not in the list of link schemes in the settings".into());
     }
@@ -3800,7 +3809,14 @@ fn check_link(url: &str, schemes: &[String]) -> Result<(), String> {
         "http" | "https" => rest.strip_prefix("//").is_some_and(|host| !host.is_empty() && !host.starts_with('/')),
         _ => !rest.is_empty(),
     };
-    if names_something { Ok(()) } else { Err("the link names nothing to open".into()) }
+    if !names_something {
+        return Err("the link names nothing to open".into());
+    }
+    // A handler of a custom scheme gets the text as written and may read a leading dash as an option.
+    if !matches!(scheme.as_str(), "http" | "https" | "mailto") && holzwave_core::links::option_like_authority(rest) {
+        return Err("the link names a host or a part that starts with a dash, which a handler may read as an option".into());
+    }
+    Ok(())
 }
 
 /// The checks that every link passes before its scheme is looked at: at most [`MAX_URL_BYTES`], no control, blank or
@@ -7200,6 +7216,84 @@ mod tests {
         let js = "javascript:alert(1)//lk-5";
         assert!(core.open_url(js, None).is_err());
         assert!(launches_with(js).is_empty());
+    }
+
+    #[test]
+    fn open_url_refuses_a_one_letter_scheme_whatever_the_list_holds() {
+        let (core, _rec, _dir) = recording_core();
+        // The sanitiser drops the entry; the command does not depend on that.
+        set_schemes(&core, &["https", "c", "ssh", "x", "ab"]);
+        assert_eq!(core.get_settings().settings.link_schemes, ["https", "ssh", "ab"]);
+        for url in [r"c:\Windows\System32\calc.exe-one-1", "C:/x.exe-one-2", "x:y-one-3", "d:\\server\\share\\a.exe-one-4", "z:-one-5"] {
+            let err = core.open_url(url, None).expect_err(url);
+            assert!(!err.contains("one-") && !err.contains("calc") && err.len() < 160, "{err}");
+            assert!(launches_with(url).is_empty(), "an opener was started for {url}");
+        }
+        // A scheme of two characters that is listed opens as before.
+        assert_eq!(core.open_url("ab:thing-one-6", None), Ok(()));
+        assert_eq!(launches_with("ab:thing-one-6").len(), 1);
+    }
+
+    #[test]
+    fn check_link_checks_the_length_of_the_scheme_itself_for_a_list_that_never_went_through_the_sanitiser() {
+        let hostile = schemes(&["c", "x", "ssh"]);
+        for url in [r"c:\x.exe", "C:\\x.exe", "c:/x.exe", "x:y"] {
+            let err = check_link(url, &hostile).expect_err(url);
+            assert!(!err.contains("x.exe") && err.len() < 160, "{err}");
+        }
+        assert_eq!(check_link("ssh://host.example/p", &hostile), Ok(()));
+        // The refusal of the scheme comes with its own words, not the ones of the list or the shape.
+        let one = check_link("c:/x", &hostile).unwrap_err();
+        assert_ne!(one, check_link("ftp://h/", &hostile).unwrap_err());
+        assert_ne!(one, check_link("ssh:", &hostile).unwrap_err());
+    }
+
+    #[test]
+    fn open_url_refuses_a_listed_scheme_whose_host_or_first_part_starts_like_an_option_and_opens_the_others() {
+        let (core, _rec, _dir) = recording_core();
+        set_schemes(&core, &["http", "https", "mailto", "ssh", "x-man-page"]);
+        let refused = [
+            "ssh://-oProxyCommand=touch%20x@host.example/opt-1",
+            "ssh:-oProxyCommand=x-opt-2",
+            "ssh://%2DoProxyCommand=x/opt-3",
+            "ssh://%2doProxyCommand=x/opt-4",
+            "ssh://user@-host.example/opt-5",
+            "ssh://user@%2dhost.example/opt-6",
+            "ssh://user@%2Dhost.example/opt-7",
+            "ssh://user:pw@-host.example/opt-8",
+            "ssh://a@b@-host.example/opt-9",
+            "ssh://-/opt-10",
+            "ssh:-x-opt-11",
+            "SSH://-oProxyCommand=x/opt-12",
+            "x-man-page://-k/opt-13",
+            "x-man-page:%2dk-opt-14",
+        ];
+        for url in refused {
+            let err = core.open_url(url, None).expect_err(url);
+            assert!(err.contains("dash") && !err.contains("opt-") && !err.contains("Proxy") && err.len() < 160, "{err}");
+            assert!(launches_with(url).is_empty(), "an opener was started for {url}");
+        }
+        // Controls: a hyphen anywhere else is no option, and the web schemes and mailto are not touched by the rule.
+        let opened = [
+            "ssh://host.example/path-opt-20",
+            "ssh://my-host.example/opt-21",
+            "ssh://user-name@host.example:22/opt-22",
+            "ssh://host.example/-x-opt-23",
+            "ssh://host.example/?a=-b-opt-24",
+            "ssh://host.example#-x-opt-25",
+            "ssh:host.example-opt-26",
+            "https://-x.example/opt-27",
+            "http://user@-x.example/opt-28",
+            "mailto:-x@example.org?subject=opt-29",
+        ];
+        for url in opened {
+            assert_eq!(core.open_url(url, None), Ok(()), "{url}");
+            let launches = launches_with(url);
+            assert_eq!(launches.len(), 1, "{url} is opened exactly once");
+            if OS != "windows" {
+                assert_eq!(launches[0].args, [url], "the link is the only argument");
+            }
+        }
     }
 
     #[test]

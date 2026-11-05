@@ -51,8 +51,8 @@ export interface SettingsValues {
   image_memory_mib: number;
   /**
    * The schemes that are links in a pane (OSC 8), lower case, at most 16. Read leniently: a view that lacks it or sends
-   * something else gets the default `http`, `https`, `mailto`, `file`; an entry that is not a lower-case scheme name is
-   * dropped. The opener of the core decides again at every click.
+   * something else gets the default `http`, `https`, `mailto`, `file`; an entry that is not a lower-case scheme name (2 to 32
+   * characters) is dropped. The opener of the core decides again at every click.
    */
   link_schemes: string[];
   /** The overrides as the user typed them: action id to chord text, the empty text meaning unbound. */
@@ -192,9 +192,10 @@ export const MAX_IMAGE_MEMORY_MIB = 512;
 export const DEFAULT_LINK_SCHEMES: readonly string[] = ["http", "https", "mailto", "file"];
 /** The most schemes the page keeps: the core's own bound. */
 const MAX_LINK_SCHEMES = 16;
-const SCHEME_NAME = /^[a-z][a-z0-9+.-]{0,31}$/;
+/** A scheme name as the core's `valid_scheme` has it: 2 to 32 characters, so no one-letter drive letter is a scheme. */
+const SCHEME_NAME = /^[a-z][a-z0-9+.-]{1,31}$/;
 
-/** `link_schemes` as the page uses it: a list of lower-case scheme names (at most 16), else the default. Never refuses a view. */
+/** `link_schemes` as the page uses it: a list of lower-case scheme names of 2 to 32 characters (at most 16), else the default. Never refuses a view. */
 export function linkSchemesOf(v: unknown): string[] {
   if (!Array.isArray(v)) return [...DEFAULT_LINK_SCHEMES];
   const out: string[] = [];

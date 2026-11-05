@@ -881,6 +881,31 @@ mod link_schemes {
     }
 
     #[test]
+    fn a_one_letter_entry_is_dropped_with_the_note_of_an_entry_that_is_no_scheme_name_and_two_letters_stay() {
+        let names = ["c", "ssh", "x", "https", "ab"];
+        let mut s = Settings::default();
+        s.set_value("link_schemes", json!(names)).unwrap();
+        assert_eq!(s.link_schemes, ["ssh", "https", "ab"], "set_value");
+
+        let (loaded, status) = Settings::from_json(&json!({ "link_schemes": names }).to_string());
+        assert_eq!(loaded.link_schemes, ["ssh", "https", "ab"], "a hand-edited file");
+        let LoadStatus::Repaired(notes) = status else { panic!("expected Repaired") };
+        assert_eq!(notes.len(), 1, "one note for the entries that are no scheme name: {notes:?}");
+        assert!(notes[0].contains("2 entries") && notes[0].contains("not a scheme name"), "{notes:?}");
+        assert!(notes[0].contains("2 to 32"), "the note names the length: {notes:?}");
+        assert!(!notes[0].contains("\"c\"") && !notes[0].contains("ssh"), "the note does not echo an entry: {notes:?}");
+
+        // Every single letter, in either case, is dropped; two characters are the least that stay.
+        for letter in ('a'..='z').chain('A'..='Z') {
+            let mut one = Settings::default();
+            one.set_value("link_schemes", json!([letter.to_string(), "ab"])).unwrap();
+            assert_eq!(one.link_schemes, ["ab"], "{letter}");
+        }
+        let (_, status) = Settings::from_json(r#"{"link_schemes": ["ab", "a1", "a+", "a."]}"#);
+        assert_eq!(status, LoadStatus::Clean, "two characters are a scheme name");
+    }
+
+    #[test]
     fn an_empty_list_is_valid_and_means_no_link_opens() {
         let mut s = Settings::default();
         s.set_value("link_schemes", json!([])).unwrap();
