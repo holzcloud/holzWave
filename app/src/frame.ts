@@ -102,7 +102,9 @@ export function rowExtras(f: Frame, y: number): Map<number, string> | null {
 export const BOLD = 1, ITALIC = 2, UNDERLINE = 4, INVERSE = 8;
 /**
  * The wire flag of a cell inside a link the program marked (core/src/wire.rs). A renderer draws the resting cue of it, a dotted
- * underline (docs/design.md 6.31), unless the cell already has the program's own underline.
+ * underline (docs/design.md 6.31), unless the cell already has the program's own underline. The core flags every span it keeps;
+ * the page clears the flag in the frame it hands the renderers for a span it does not treat as a link (`toRenderFrame` with a
+ * `LinkFilter`), so a renderer draws the cue for the flag it is given and asks nothing.
  */
 export const LINK = 16;
 

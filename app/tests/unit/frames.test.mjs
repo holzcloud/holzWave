@@ -4,6 +4,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 import {
   RateMeter, applyFrame, decorationSignature, forgetPane, gridText, rowCells, spansSignature, toRenderFrame,
   visibleMatches, visibleSpans,
@@ -319,4 +321,162 @@ test("a row keeps its links over later frames until it is sent again", () => {
   assert.deepEqual(next.rows_[1].links, [[4, 7, "https://example.org/docs"]], "an untouched row keeps its links");
   const again = applyFrame(next, full({ seq: 3, full: false, changed: [row(1, "see docs  ")] })).mirror;
   assert.equal(again.rows_[1].links, undefined, "a row sent again without links has none");
+});
+
+// ---- the resting cue of links: the page keeps the flag only where it treats the span as a link ----------------
+
+const LINK = 16, BOLD = 1, UNDERLINE = 4;
+const FG = 0xffffff, BG = 0;
+/** A filter that accepts the addresses in `ok` and counts every call. */
+const filterOf = (ok, key = "k") => {
+  const f = { key, calls: [], allow: (uri) => (f.calls.push(uri), ok.includes(uri)) };
+  return f;
+};
+/** A mirror of one row of `cols` cells made of `runs` and `links` (the page's own `usableLinks` reads the spans). */
+const linkMirror = (runs, links, cols = 20) => applyFrame(undefined, full({ cols, rows: 1, changed: [{ y: 0, runs, links }] })).mirror;
+const run = (text, flags = 0, fg = FG, bg = BG) => [text, Array.from(text).length, fg, bg, flags];
+const cellsOfRuns = (runs) => runs.reduce((n, r) => n + r[1], 0);
+const OK = "https://ok.example/", NO = "ssh://no.example/";
+const REST = " ".repeat(10);
+
+test("a row with no flagged run comes back as the same array of runs and allow is not asked", () => {
+  const mirror = linkMirror([run("plain text"), run(REST, UNDERLINE | BOLD)], [[0, 3, NO]]);
+  const filter = filterOf([]);
+  const lines = toRenderFrame(mirror, true, filter).lines;
+  assert.equal(lines[0], mirror.rows_[0].runs, "the very array of the mirror's row");
+  assert.deepEqual(filter.calls, [], "no cell is flagged: nothing to ask");
+});
+
+test("a row whose flagged cells all lie in accepted spans keeps its runs and allow is asked once per span", () => {
+  const runs = [run("see "), run("docs", LINK), run(" and "), run("more", LINK), run(" ")];
+  const mirror = linkMirror(runs, [[4, 7, OK], [13, 16, OK + "b"]], 18);
+  const filter = filterOf([OK, OK + "b"]);
+  const lines = toRenderFrame(mirror, true, filter).lines;
+  assert.equal(lines[0], mirror.rows_[0].runs, "the same array");
+  assert.deepEqual(filter.calls, [OK, OK + "b"], "one call for each span of the row");
+});
+
+test("a refused span loses LINK and keeps every other flag, colour and character, and the cells add up", () => {
+  const runs = [run("see ", 0, 1, 2), run("docs", LINK | BOLD, 3, 4), run(" here" + REST, 0, 5, 6)];
+  const mirror = linkMirror(runs, [[4, 7, NO]], 19);
+  const out = toRenderFrame(mirror, true, filterOf([])).lines[0];
+  assert.deepEqual(out, [run("see ", 0, 1, 2), run("docs", BOLD, 3, 4), run(" here" + REST, 0, 5, 6)]);
+  assert.equal(cellsOfRuns(out), cellsOfRuns(runs));
+  assert.deepEqual(mirror.rows_[0].runs[1], run("docs", LINK | BOLD, 3, 4), "the mirror's own row is not changed");
+});
+
+test("a span that covers part of a run splits it at the edges of the span, the rest of the run loses the flag", () => {
+  // One run of ten flagged cells, a span over cells 3 to 5 that is accepted: the other cells lose the flag.
+  const mirror = linkMirror([run("0123456789", LINK | BOLD, 7, 8), run(" ".repeat(10))], [[3, 5, OK]]);
+  const out = toRenderFrame(mirror, true, filterOf([OK])).lines[0];
+  assert.deepEqual(out, [run("012", BOLD, 7, 8), run("345", LINK | BOLD, 7, 8), run("6789", BOLD, 7, 8), run(" ".repeat(10))]);
+  for (const r of out) assert.equal(Array.from(r[0]).length, r[1], "one code point per cell");
+});
+
+test("a wide character keeps its spacer at the edge of a span and when a span ends between the two", () => {
+  const wide = "a\u4e2d\0b"; // a, a wide character, its spacer, b: four cells
+  const rest = run(" ".repeat(16));
+  // The span is the wide character's cell alone: the spacer goes with it.
+  let out = toRenderFrame(linkMirror([run(wide, LINK), rest], [[1, 1, OK]]), true, filterOf([OK])).lines[0];
+  assert.deepEqual(out, [run("a", 0), run("\u4e2d\0", LINK), run("b", 0), rest]);
+  // The span ends on the wide character and not on its spacer, and it starts at the first cell.
+  out = toRenderFrame(linkMirror([run("\u4e2d\0b", LINK), rest], [[0, 0, OK]], 19), true, filterOf([OK])).lines[0];
+  assert.deepEqual(out, [run("\u4e2d\0", LINK), run("b", 0), rest]);
+  // The span names only the spacer: the wide character is not inside it, so neither of the two keeps the cue.
+  out = toRenderFrame(linkMirror([run(wide, LINK), rest], [[2, 2, OK]]), true, filterOf([OK])).lines[0];
+  assert.deepEqual(out, [run(wide, 0), rest]);
+  for (const r of out) assert.equal(Array.from(r[0]).length, r[1], "one code point per cell, the spacer included");
+});
+
+test("with two spans in one row only the accepted one keeps the flag, and two refused neighbours clear both", () => {
+  const runs = [run("aaaa", LINK), run("bbbb", LINK), run(" ".repeat(12))];
+  const mixed = linkMirror(runs, [[0, 3, OK], [4, 7, NO]]);
+  assert.deepEqual(toRenderFrame(mixed, true, filterOf([OK])).lines[0], [run("aaaa", LINK), run("bbbb", 0), run(" ".repeat(12))]);
+  const both = linkMirror(runs, [[0, 3, NO], [4, 7, NO + "2"]]);
+  assert.deepEqual(toRenderFrame(both, true, filterOf([])).lines[0], [run("aaaa", 0), run("bbbb", 0), run(" ".repeat(12))]);
+});
+
+test("a flagged cell outside every valid span loses the flag, a row with no links at all loses it everywhere", () => {
+  const runs = [run("xxxx", LINK), run(" ".repeat(16))];
+  const filter = filterOf([OK]);
+  // No links member at all.
+  assert.deepEqual(toRenderFrame(linkMirror(runs, undefined), true, filter).lines[0], [run("xxxx", 0), run(" ".repeat(16))]);
+  // The page dropped the span as malformed (backwards) and so there is none to accept.
+  assert.deepEqual(toRenderFrame(linkMirror(runs, [[3, 0, OK]]), true, filter).lines[0], [run("xxxx", 0), run(" ".repeat(16))]);
+  // Past the eighth: nine spans of one cell each, all of them would be accepted, the page holds eight.
+  const nine = Array.from({ length: 9 }, (_, i) => [i, i, OK + i]);
+  const mirror = linkMirror([run("012345678", LINK), run(" ".repeat(11))], nine);
+  assert.equal(mirror.rows_[0].links.length, 8);
+  const out = toRenderFrame(mirror, true, filterOf(nine.map((s) => s[2]))).lines[0];
+  assert.deepEqual(out, [run("01234567", LINK), run("8", 0), run(" ".repeat(11))], "the ninth span is not held, so its cell has no cue");
+});
+
+test("the program's own underline is untouched, with LINK or without", () => {
+  const runs = [run("under", UNDERLINE), run("both ", UNDERLINE | LINK), run(" ".repeat(10))];
+  const out = toRenderFrame(linkMirror(runs, [[5, 9, NO]]), true, filterOf([])).lines[0];
+  assert.deepEqual(out, [run("under", UNDERLINE), run("both ", UNDERLINE), run(" ".repeat(10))]);
+  const kept = toRenderFrame(linkMirror(runs, [[5, 9, OK]]), true, filterOf([OK])).lines[0];
+  assert.deepEqual(kept, runs, "an accepted span keeps both flags");
+});
+
+test("a second frame of the same mirror under an equal key asks allow nothing, another key asks again, a new row once", () => {
+  const runs = [run("docs", LINK), run(" ".repeat(16))];
+  const mirror = linkMirror(runs, [[0, 3, OK]]);
+  const filter = filterOf([OK]);
+  toRenderFrame(mirror, true, filter);
+  toRenderFrame(mirror, false, filter);
+  toRenderFrame(mirror, true, { ...filter, calls: filter.calls });
+  assert.equal(filter.calls.length, 1, "asked once for the three frames");
+  const other = filterOf([], "other");
+  assert.deepEqual(toRenderFrame(mirror, true, other).lines[0][0], run("docs", 0), "another key gives another answer");
+  assert.equal(other.calls.length, 1, "and is asked again");
+  // Back to the first key: the answer is the first again (one more evaluation, the memo holds the last key).
+  assert.equal(toRenderFrame(mirror, true, filter).lines[0], mirror.rows_[0].runs);
+  // A frame replaces the row: the new row is asked once, and the untouched rows are not asked again.
+  const f2 = filterOf([OK]);
+  const first = applyFrame(undefined, full({ cols: 20, rows: 2, changed: [{ y: 0, runs, links: [[0, 3, OK]] }, { y: 1, runs, links: [[0, 3, OK]] }] })).mirror;
+  toRenderFrame(first, true, f2);
+  assert.equal(f2.calls.length, 2);
+  const next = applyFrame(first, full({ cols: 20, rows: 2, seq: 2, full: false, changed: [{ y: 1, runs, links: [[0, 3, OK]] }] })).mirror;
+  toRenderFrame(next, true, f2);
+  assert.equal(f2.calls.length, 3, "the replaced row is asked once; the row the frame did not touch is not asked again");
+});
+
+test("sixty draws of a pane with twenty link rows under one key ask allow for the first draw only", () => {
+  const changed = Array.from({ length: 20 }, (_, y) => ({ y, runs: [run("docs", LINK), run(" ".repeat(16))], links: [[0, 3, OK + y]] }));
+  const mirror = applyFrame(undefined, full({ cols: 20, rows: 20, changed })).mirror;
+  const filter = filterOf(changed.map((r) => r.links[0][2]));
+  for (let i = 0; i < 60; i++) toRenderFrame(mirror, i % 2 === 0, filter);
+  assert.equal(filter.calls.length, 20, `20 calls for 60 draws, not ${20 * 60}`);
+  console.log(`frames: ${filter.calls.length} allow calls for 60 draws of 20 link rows under one key`);
+});
+
+test("the memo does not keep a row alive after the mirror drops it", async () => {
+  setFlagsFromString("--expose-gc");
+  const gc = runInNewContext("gc");
+  const runs = [run("docs", LINK), run(" ".repeat(16))];
+  const filter = filterOf([OK]);
+  let ref;
+  {
+    let mirror = linkMirror(runs, [[0, 3, OK]]);
+    toRenderFrame(mirror, true, filter);
+    ref = new WeakRef(mirror.rows_[0]);
+    mirror = null;
+  }
+  for (let i = 0; i < 10 && ref.deref() !== undefined; i++) {
+    await new Promise((done) => setImmediate(done));
+    gc();
+  }
+  assert.equal(ref.deref(), undefined, "the row was collected: the memo holds it weakly");
+});
+
+test("the header, the cursor, the cluster tails and the sizes are what the call without a filter gives", () => {
+  const changed = [{ y: 0, runs: [run("docs", LINK), run(" ".repeat(16))], links: [[0, 3, NO]], extras: [[1, "\u0301"]] }];
+  const mirror = applyFrame(undefined, full({ cols: 20, rows: 3, cursor: { x: 2, y: 0, shape: "block", visible: true }, fg: 0xabcdef, bg: 0x123456, changed })).mirror;
+  const plain = toRenderFrame(mirror, true);
+  const masked = toRenderFrame(mirror, true, filterOf([]));
+  assert.deepEqual({ ...masked, lines: null }, { ...plain, lines: null });
+  assert.notDeepEqual(masked.lines[0], plain.lines[0], "only the runs differ");
+  assert.deepEqual(masked.lines.slice(1), plain.lines.slice(1), "and only in the row with a link");
+  assert.deepEqual(toRenderFrame(mirror, false, filterOf([])), { ...masked, focused: false });
 });
