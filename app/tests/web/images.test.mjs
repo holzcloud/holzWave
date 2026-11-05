@@ -4,6 +4,10 @@
 // it treats the desktop). Every positive case has its control in the same test: the colours of the same cells before the command, and the
 // animation that runs without the preference before it is held with it.
 //
+// The last case of each renderer is the page's memory: a picture the program deleted is let go after the grace, and with WebGL its texture
+// is deleted on the GPU (the textures made minus the textures deleted, counted by wrapping the context's `createTexture` and `deleteTexture`
+// before the page's scripts run, is one higher with the picture on screen and back to what it was after the grace).
+//
 // With HW_SELF_CHECK=1 two deliberately wrong expectations run too and must fail.
 //
 // The Kitty fields used: `a=T` transmit and display, `f=32` straight RGBA, `s`/`v` the size in pixels, `i` the image id, `c`/`r` the cells it is
@@ -43,9 +47,28 @@ await runTest("images", {}, async ({ engine, harness, open }) => {
   await first.close();
 
   /** A page of the application with the renderer asked for. Resolves with `null` when the engine has no WebGL2 for `webgl`. */
-  const appPage = async (renderer, { reduced } = {}) => {
+  const appPage = async (renderer, { reduced, counters = false } = {}) => {
     const page = await owned.context.newPage();
     if (reduced !== undefined) await page.emulateMedia({ reducedMotion: reduced });
+    if (counters) {
+      await page.addInitScript(() => {
+        const count = { made: 0, deleted: 0 };
+        window.__TEX__ = count;
+        const proto = window.WebGL2RenderingContext?.prototype;
+        if (!proto) return;
+        const make = proto.createTexture;
+        const del = proto.deleteTexture;
+        proto.createTexture = function (...args) {
+          const texture = make.apply(this, args);
+          if (texture) count.made++;
+          return texture;
+        };
+        proto.deleteTexture = function (...args) {
+          if (args[0]) count.deleted++;
+          return del.apply(this, args);
+        };
+      });
+    }
     const net = watchSocket(page);
     await page.goto(`${harness.origin}/?renderer=${renderer}`);
     await page.waitForSelector("canvas#term");
@@ -81,7 +104,7 @@ await runTest("images", {}, async ({ engine, harness, open }) => {
       return wanted.every((w, i) => isColour(got[i], w)) ? got : undefined;
     }, what, ms);
 
-  const report = { pixels: [], motion: [], budget: [], renderers: [] };
+  const report = { pixels: [], motion: [], budget: [], textures: [], renderers: [] };
 
   for (const renderer of ["canvas", "webgl"]) {
     const name = renderer === "canvas" ? "canvas2d" : "webgl2";
@@ -208,11 +231,54 @@ await runTest("images", {}, async ({ engine, harness, open }) => {
     equal(JSON.stringify(offsets), JSON.stringify([0, 524_288, 1_048_576, 1_572_864]), "the big picture is pulled in four pieces of 512 KiB");
     report.budget.push(`${name}: with 1 MiB image_data calls for the 2 MiB picture ${JSON.stringify(askedSmall.map((a) => a.offset))} (drawn: no); with 64 MiB offsets ${JSON.stringify(offsets)} (drawn: yes)`);
     await budget.page.close();
+
+    // ---- the memory of a picture the program deleted: the page lets go of the bitmap, and with WebGL the GPU lets go of the texture -----
+    const mem = await appPage(renderer, { counters: true });
+    const grace = await mem.page.evaluate(async () => (await import(new URL("images.js", location.href).href)).UNUSED_GRACE_MS);
+    check(Number.isFinite(grace) && grace > 0, `the page names its grace (${grace})`);
+    const store = () =>
+      mem.page.evaluate(async (pane) => (await import(new URL("images.js", location.href).href)).images.stats(pane), mem.pane);
+    const liveTextures = () => mem.page.evaluate(() => window.__TEX__.made - window.__TEX__.deleted);
+    const memImage = image + 4;
+    const memPoints = cells(mem.grid, SMALL, 2);
+    // What the earlier cases left on the screen is let go of after the grace; the count is taken once the page holds nothing.
+    await run(mem, `clear-memory-${renderer}`, RESET);
+    await poll(async () => {
+      const held = await store();
+      return held.held === 0 && held.jobs === 0 ? true : undefined;
+    }, "the page holds no bitmap once the screen is clear", grace + 15_000);
+    await sleep(700); // the draw after the sweep deletes the textures
+    const baseline = await liveTextures();
+    await run(mem, `memory-${renderer}`, RESET, cursorTo(SMALL.col, SMALL.row), kittyPicture({ id: memImage, width: 2, height: 1, rgba: RED_GREEN, cols: 2, rows: 1 }));
+    await untilColours(mem, memPoints, [RED, GREEN], `the picture is on the ${name} canvas for the memory case`);
+    equal((await store()).held, 1, "the page holds the picture's bitmap while it is on screen");
+    const withPicture = renderer === "webgl" ? await poll(async () => ((await liveTextures()) === baseline + 1 ? baseline + 1 : undefined), "one live texture more with the picture on screen", 5_000) : null;
+    // The control for the sweep: a placed picture stays however long it is on screen.
+    await sleep(grace + 1_000);
+    equal((await store()).held, 1, `a picture that is still placed is not let go of after the grace (${grace} ms)`);
+    await untilColours(mem, memPoints, [RED, GREEN], "and it is still drawn");
+    if (renderer === "webgl") equal(await liveTextures(), baseline + 1, "and its texture is still alive");
+    // The program clears the screen: within the grace the bitmap is kept, after it the bitmap and the texture are gone.
+    await run(mem, `clear-memory-after-${renderer}`, RESET);
+    const clearedAt = Date.now();
+    equal((await store()).held, 1, "the bitmap is still held right after the screen was cleared (the grace has not passed)");
+    await poll(async () => ((await store()).held === 0 ? true : undefined), "the bitmap is let go of after the grace", grace + 15_000);
+    const letGoAfter = Date.now() - clearedAt;
+    check(letGoAfter > grace - 2_500, `the bitmap was not let go of before the grace (${letGoAfter} ms after the clear, grace ${grace} ms)`);
+    let afterGrace = null;
+    if (renderer === "webgl") afterGrace = await poll(async () => ((await liveTextures()) === baseline ? baseline : undefined), "the texture is deleted on the GPU in the draw after the sweep", 5_000);
+    equal(JSON.stringify(await store()), JSON.stringify({ held: 0, bytes: 0, jobs: 0 }), "the pane holds nothing");
+    report.textures.push(
+      renderer === "webgl"
+        ? `${name}: live textures before ${baseline}, with the picture ${withPicture}, still ${baseline + 1} after the grace with the picture placed, after the clear and the grace ${afterGrace}; bitmap let go of ${letGoAfter} ms after the clear`
+        : `${name}: bitmap let go of ${letGoAfter} ms after the clear (grace ${grace} ms); no texture to count`,
+    );
+    await mem.page.close();
   }
 
   owned.expectClean("the context of the pictures test");
   console.log(
-    `images [${engine}]: renderers: ${report.renderers.join(", ")}; Pixels: ${report.pixels.join(" | ")}; Motion: ${report.motion.join(" | ")}; Budget: ${report.budget.join(" | ")}`,
+    `images [${engine}]: renderers: ${report.renderers.join(", ")}; Pixels: ${report.pixels.join(" | ")}; Motion: ${report.motion.join(" | ")}; Budget: ${report.budget.join(" | ")}; Textures: ${report.textures.join(" | ")}`,
   );
 
   /** Two expectations that cannot hold. Each must fail; the runner counts the lines. */

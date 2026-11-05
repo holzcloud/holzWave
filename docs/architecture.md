@@ -416,9 +416,20 @@ anything is allocated. Every request is bounded: the memory that one pane keeps 
 and the terminal's allocator refuses a request that would take a pane past twice the setting plus 64 MiB, which is what bounds
 a transmission that is never finished. An escape sequence the engine cannot use is answered as the protocol says and costs
 nothing else. The page draws the placements of `Frame.images` in both renderers in three layers (below the cell backgrounds,
-below the text, above the text), pulls the pixels of a placement in checked pieces with `image_data`, keeps the decoded bitmaps
-inside the same `image_memory_mib`, and releases a WebGL texture when its bitmap is closed or has not been drawn for 120
-frames. The page tells the core whether the person asked for reduced motion (`set_image_animation`); with it, an animation
+below the text, above the text), pulls the pixels of a placement in checked pieces with `image_data`, and keeps the decoded bitmaps of one
+pane inside the same `image_memory_mib` and those of all panes together inside four times that. The size of a picture is
+checked on its header, before anything is allocated; a picture that does not fit next to the ones in use is not pulled further,
+and room is made first from bitmaps that no placement asks for, in any pane, the least recently drawn first, never from a
+placed one. A bitmap that no placement asks for any more is let go of after five seconds (one timer for the page, set only while
+such a bitmap exists), so a picture scrolled out of view and back is not pulled again, and a picture a program deleted does not
+stay until the pane closes. A WebGL texture goes with its bitmap at the next draw, and also when it has not been drawn for 120
+frames. A picture whose pull failed for a reason that can go away is asked for again: one that did not fit when memory is freed
+or the pane's pictures change, one whose pull failed when memory is freed or the connection opens again (the page does not ask
+again by itself, so a failing pull never loops); a picture the core refused for a property of its own (a header that lies, sizes
+that do not add up, a piece of the wrong length, a picture over the whole budget) is not asked for again until the budget
+changes. The budget counts decoded bytes only, not the second copy that a WebGL texture holds on the GPU. The server's key
+`workers.max_image_mib` accepts up to 4096, but a pane never keeps more than 512 MiB (the top of the range of
+`image_memory_mib`), so a value above 512 has no further effect. The page tells the core whether the person asked for reduced motion (`set_image_animation`); with it, an animation
 stays on one frame. The switch is one per person, not one per pane. These parts are described in
 [config.md](config.md) and [server.md](server.md#memory-for-pictures); what ran against what is in section 12.
 

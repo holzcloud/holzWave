@@ -108,6 +108,12 @@ carrying the bytes. A server that shares terminals with other people caps the me
 `workers.max_image_mib` (see [the server configuration](#the-server-configuration)); the smaller number then holds, and a server
 that sets it to 0 shows no pictures whatever the setting is.
 
+The page keeps the decoded pictures of one pane within `image_memory_mib` and those of all its panes together within four
+times that, so a page that shows fifty panes with pictures does not hold fifty times the setting. A picture that no
+placement asks for any more is let go of after five seconds, and a picture that did not fit or whose pull failed is asked
+for again when memory is freed or the connection opens again. The count is of decoded bytes; the copy that WebGL keeps on the
+GPU is not in it.
+
 `option_as_alt` is off by default so that a Swiss layout types `|`, `[` and `{` with Option (D-12).
 `confirm_multiline_paste` asks before a multi-line paste into a program that did not turn on bracketed paste (D-15).
 `copy_on_select` writes the core's selection to the system clipboard the moment the mouse is released after a drag, a
@@ -1151,7 +1157,7 @@ Rules for the whole file:
 | `workers.idle_timeout` | 1d | 1m to 90d | A worker, and with it every pane of the person, ends this long after the person's last socket closed. |
 | `workers.max_panes` | 64 | 1 to 1024 | The most panes one person holds. |
 | `workers.max_scrollback_lines` | 10000 | 100 to 1000000 | The scrollback lines of a pane. |
-| `workers.max_image_mib` | 64 | 0 to 4096 | The most MiB of pictures one pane of a person may keep, on each of its two screens, whatever the person's own `image_memory_mib` setting says: the setting is cut to it, and a smaller setting keeps its value. `0` turns pictures off on this server (unlike the pane and scrollback limits, where 0 is not an option). What the cap bounds and what it does not is in [Memory for pictures](server.md#memory-for-pictures). |
+| `workers.max_image_mib` | 64 | 0 to 4096 | The most MiB of pictures one pane of a person may keep, on each of its two screens, whatever the person's own `image_memory_mib` setting says: the setting is cut to it, and a smaller setting keeps its value. The key accepts up to 4096, but a pane never keeps more than 512 MiB (the top of the range of `image_memory_mib`), so a value above 512 has no further effect. `0` turns pictures off on this server (unlike the pane and scrollback limits, where 0 is not an option). What the cap bounds and what it does not is in [Memory for pictures](server.md#memory-for-pictures). |
 | `workers.nproc` | 1024 | 8 to 4194304 | The process limit of a person's user id. |
 | `workers.nofile` | 4096 | 16 to 1048576 | The open-file limit of a worker. |
 | `workers.helper_path` | `/usr/local/bin/holzwave-spawn-helper` | an absolute path | The spawn helper. |

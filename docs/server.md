@@ -218,7 +218,8 @@ the server refuses a value outside its bound at start.
 A program in a pane can send pictures (the Kitty graphics protocol), and the terminal keeps them for as long as the screen shows
 them. The key `workers.max_image_mib` is the most MiB of pictures that one pane keeps, on each of its two screens: the normal
 one and the one a full-screen program switches to. The default is 64, the range is 0 to 4096, and `0` turns pictures off on
-this server. The cap wins over the person's own setting `image_memory_mib`: a person who allows 512 MiB gets the cap, and a
+this server. A pane never keeps more than 512 MiB, whatever the key says (the same number tops the range of the person's own
+setting), so a value above 512 has no further effect. The cap wins over the person's own setting `image_memory_mib`: a person who allows 512 MiB gets the cap, and a
 person who allows 2 MiB under a cap of 8 gets 2 MiB. The server reads the key when it starts and hands it to every worker in
 the first frame it sends, so a changed value applies after a restart, which ends every pane anyway.
 
