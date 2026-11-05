@@ -309,25 +309,41 @@ function lowerHost(rest: string, mail: boolean): string {
   return end < 0 ? rest.toLowerCase() : rest.slice(0, end).toLowerCase() + rest.slice(end);
 }
 
-/** `text` or an address in the form that is compared: no spacers, trimmed, no leading `http://`, `https://` or `mailto:`, no trailing `/`, the host in lower case. */
-function comparable(text: string): string {
+/** What is compared of a text or of an address: the scheme it states (`http`, `https` or `mailto`, lower case), whether it is a mail address, and the rest. */
+interface Comparable {
+  scheme: string | null;
+  mail: boolean;
+  rest: string;
+}
+
+/**
+ * `text` or an address in the form that is compared: no spacers, trimmed, a leading `http://`, `https://` or `mailto:` taken off and
+ * kept as the scheme, no trailing `/`, the host (or the mail domain) in lower case. A text is mail when it says `mailto:` or, with no
+ * scheme, has the shape of an address (`name@domain`).
+ */
+function comparable(text: string): Comparable {
   let t = text.replace(/\0/g, "").trim();
   const lead = /^(?:https?:\/\/|mailto:)/i.exec(t);
   if (lead) t = t.slice(lead[0].length);
   if (t.endsWith("/")) t = t.slice(0, -1);
+  const scheme = lead ? lead[0].slice(0, lead[0].indexOf(":")).toLowerCase() : null;
   // A mail address: only the domain is lower-cased, the part before the @ is the person's.
-  const mail = lead !== null ? lead[0].toLowerCase() === "mailto:" : /^[^/?#:@\s]+@[^/?#@\s]+$/.test(t);
-  return lowerHost(t, mail);
+  const mail = scheme !== null ? scheme === "mailto" : /^[^/?#:@\s]+@[^/?#@\s]+$/.test(t);
+  return { scheme, mail, rest: lowerHost(t, mail) };
 }
 
 /**
- * Whether the visible text of a link and its target say different things, so that a click has to ask first. They are
- * equal after trimming blanks, dropping a leading `http://`, `https://` or `mailto:` and one trailing `/`, and lower-casing
- * the host. A blank text differs from every target, and so does a text with another host or another path.
+ * Whether the visible text of a link and its target say different things, so that a click has to ask first. They are equal after
+ * trimming blanks, taking off one trailing `/` and lower-casing the host. A scheme the text states (`http://`, `https://` or
+ * `mailto:`) must be the target's own, so `https://` over an `http://` target asks, and so does `mailto:` over a web address; a text
+ * that is mail-shaped is only equal to a mail target, and a web text is not equal to a mail target. A text with no scheme is compared
+ * with the target after its scheme. A blank text differs from every target, and so does a text with another host or another path.
  */
 export function linkTextDiffers(shown: string, target: string): boolean {
   const a = comparable(shown);
-  return a === "" || a !== comparable(target);
+  const b = comparable(target);
+  if (a.rest === "") return true;
+  return a.rest !== b.rest || a.mail !== b.mail || (a.scheme !== null && a.scheme !== b.scheme);
 }
 
 /**

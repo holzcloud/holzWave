@@ -2615,8 +2615,9 @@ segment of the notice. The full target is also the accessible name of the segmen
 confirmation (title, body lines, two buttons, centred over a backdrop): the title `Open this link?`, a line `The text says` with the visible text in
 mono (cut at 120 characters), a line `The link goes to` with the full target in mono, wrapped and never cut, and two buttons, `Cancel` (focused
 first, the default) and `Open` (solid rose, section 2 rule 4). `Escape` and a click outside the dialog are `Cancel`. The dialog is a floating layer,
-so it may have a shadow. The texts are compared after the scheme (`http`, `https` or `mailto:`) and a trailing slash are ignored and with the host in
-lower case; when they are equal the click opens at once, as for a printed address. Every string in the dialog is set as text and never as markup.
+so it may have a shadow. The two texts are compared with the host in lower case and a trailing slash left out. A scheme the text states (`http`, `https` or
+`mailto:`) must be the target's own, so `https://` over an `http://` target asks, as does `mailto:` over a web address; a text that looks like a mail
+address is only equal to a mail target; a text without a scheme is compared after the target's scheme. When they are equal the click opens at once, as for a printed address. Every string in the dialog is set as text and never as markup.
 
 **Schemes.** Only the schemes of the allowed list are links. The list is `http`, `https`, `mailto` and `file` unless the settings file says
 otherwise. A range with another scheme is text and gets no underline. The list and the memory below are settings in the settings file, described in

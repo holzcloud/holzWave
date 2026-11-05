@@ -305,7 +305,6 @@ test("linkTextDiffers: equal after the scheme, one trailing slash, blanks and th
   const same = [
     ["example.org", "https://Example.org/"],
     ["https://example.org", "https://example.org"],
-    ["http://example.org", "https://example.org/"],
     ["  example.org/docs  ", "https://example.org/docs"],
     ["EXAMPLE.ORG/docs", "https://example.org/docs"],
     ["example.org/docs/", "https://example.org/docs"],
@@ -332,6 +331,7 @@ test("linkTextDiffers: a different word, path, host, query or case in the path i
     ["Me@example.org", "mailto:me@example.org"], // the part before @ is case-sensitive
     ["example.org", "https://example.org:8443/"],
     ["example.org", "ssh://example.org/"], // not a web scheme: it is not ignored
+    ["http://example.org", "https://example.org/"], // the text states http: that is not the target's scheme
   ];
   for (const [shown, target] of differ) assert.equal(linkTextDiffers(shown, target), true, `${shown} != ${target}`);
 });
@@ -373,4 +373,35 @@ test("refusalSentence: anything that is not a plain string is the one fixed sent
     "a\u202Eb", "a\u2066b", "a\u200Bb", "a\uFEFFb", "a\u2028b", "a\u2029b", "a\uD800b", "a\uE000b",
   ];
   for (const reason of bad) assert.equal(refusalSentence(reason), LINK_REFUSED, JSON.stringify(reason) ?? String(reason));
+});
+
+// ---- the question: a change of scheme or of kind is a difference -------------------------------------------
+
+test("linkTextDiffers: a scheme the text states must be the target's own, and mail is only equal to mail", () => {
+  const differ = [
+    ["https://bank.example/login", "http://bank.example/login"],
+    ["http://bank.example/login", "https://bank.example/login"],
+    ["HTTPS://Bank.Example/login", "http://bank.example/login"],
+    ["mailto:alice@example.org", "https://alice@example.org"],
+    ["alice@example.org", "https://alice@example.org"],
+    ["https://alice@example.org", "mailto:alice@example.org"],
+    ["example.org", "mailto:example.org"],
+    ["http://example.org", "https://example.org"],
+    ["https://example.org", "mailto:example.org"],
+  ];
+  for (const [shown, target] of differ) assert.equal(linkTextDiffers(shown, target), true, `${shown} over ${target} asks`);
+});
+
+test("linkTextDiffers: a text without a scheme is compared after the target's scheme, and what was equal stays equal", () => {
+  const same = [
+    ["example.org/docs", "https://example.org/docs"],
+    ["example.org/docs", "http://example.org/docs"],
+    ["HTTPS://Example.ORG/docs/", "https://example.org/docs"],
+    ["alice@example.org", "mailto:alice@example.org"],
+    ["mailto:alice@Example.org", "mailto:alice@example.org"],
+    ["https://example.org", "https://example.org/"],
+    ["HTTP://EXAMPLE.org/", "http://example.org"],
+    ["example.org", "http://Example.org/"],
+  ];
+  for (const [shown, target] of same) assert.equal(linkTextDiffers(shown, target), false, `${shown} over ${target} does not ask`);
 });

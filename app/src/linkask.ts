@@ -35,8 +35,26 @@ export function askOpenLink(shown: string, target: string, onOpen: () => void): 
     .then(() => build(shown, target, onOpen));
 }
 
+/**
+ * Build and show the question. A failure at any step ends it cleanly: the lock is released, what the build had added to the page
+ * (the backdrop and the key handler) is removed, and the error is swallowed as a failed style sheet is, so the next click asks again
+ * and the keyboard is the terminal's.
+ */
 function build(shown: string, target: string, onOpen: () => void): void {
-  const backdrop = el("div", "dlg-backdrop", document.body);
+  let backdrop: HTMLElement | null = null;
+  let pop = (): void => {};
+  try {
+    backdrop = el("div", "dlg-backdrop", document.body);
+    show(backdrop, shown, target, onOpen, (undo) => (pop = undo));
+  } catch {
+    open = false;
+    pop();
+    backdrop?.remove();
+  }
+}
+
+/** Fill `backdrop` with the dialog and put the question on the key stack; `setPop` is given the function that takes it off again. */
+function show(backdrop: HTMLElement, shown: string, target: string, onOpen: () => void, setPop: (undo: () => void) => void): void {
   const box = el("div", "dlg dlg-link", backdrop);
   box.setAttribute("role", "alertdialog");
   box.setAttribute("aria-modal", "true");
@@ -97,6 +115,7 @@ function build(shown: string, target: string, onOpen: () => void): void {
     e.preventDefault();
     return true;
   });
+  setPop(pop);
   cancel.addEventListener("click", () => finish(false));
   ok.addEventListener("click", () => finish(true));
   const shownAt = performance.now();
