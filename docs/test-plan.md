@@ -586,6 +586,11 @@ This is every claim of this part that no suite here supports. It is listed so th
   (`-`, `%2d` and `%2D`, with and without a user name) for a custom scheme, and a one-letter scheme even when it is in the
   list. No real handler (an SSH client, for one) was given a link with a dashed host or an invisible character, so what such
   a program does with the links that are let through is not known.
+- The Linux container run (`scripts/linux-container-test.sh all`) is not green: `core/tests/scrollback.rs::a_smaller_limit_still_prunes`
+  keeps 697 rows for a limit of 1 000 lines there (it passes on the Mac and fails the same way before this phase's last
+  plans), and `app/src-tauri/tests/bundle.rs::the_secret_key_has_no_place_in_the_repository` fails because the script sends
+  the tree without `.git`. Neither is explained or fixed yet. One run of `h2_a_flood_of_settings_frames_ends_in_a_disconnect`
+  failed once and passed on every rerun; its cause is not known.
 - The desktop app has no automated test of its window. Pictures and links were tested in WebKit and Chromium against the real
   server and against a page with a mock core; the desktop's webview and the window itself were not driven.
 - Windows was not tested for pictures or links, and its performance was not measured.
