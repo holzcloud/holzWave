@@ -6,9 +6,14 @@
 //! left about 1 000 rows at 80 columns whatever the setting said (found by the web transport test of the page, same
 //! on the revisions before and after the Zig 0.17 bump). The engine now sets the line limit and removes the byte limit.
 //!
-//! libghostty-vt prunes whole pages, so the kept history is near the limit and not exactly on it (measured: 9 836 rows
-//! for 10 000 lines, 10 013 rows at 200 columns); the bounds here are that slack, not an exact count. The failure that
-//! these tests guard is a factor of ten, not a page.
+//! libghostty-vt prunes whole pages: while the rows above the active screen exceed the limit it drops the oldest page.
+//! The kept total is therefore never more than the limit plus the screen rows and, after the first prune, more than that
+//! minus one page. A page is not the same size everywhere: its byte size is rounded up to the memory page of the
+//! target, so at 80 columns it holds 591 rows on macOS arm64 and 578 rows on Linux arm64 (measured: with 40 000 lines
+//! of input, 24 rows and a limit of 1 000 the Mac keeps 995 rows and the Linux container 697). The test that asks for a
+//! small limit measures the page of the engine under test and checks the kept total against that page, so the bound
+//! is tight on every platform and a limit that is a quarter or double of what was asked still fails. The tests with
+//! the limit of 10 000 lines guard the factor of ten that the byte limit used to cost, not a page.
 #![cfg(feature = "ghostty")]
 
 use holzwave_core::{GhosttyEngine, TerminalEngine};
@@ -36,12 +41,36 @@ fn the_default_ten_thousand_lines_are_kept_and_not_about_a_thousand() {
     assert!(total <= 10_000 + 24 + 500, "{total} rows kept: the limit no longer prunes");
 }
 
+/// The rows that one history page of this engine holds, measured: feed lines one at a time until the library drops its
+/// oldest page, which shows as the total falling by the page's rows less the one row that the line added.
+fn rows_per_page(cols: u16, rows: u16, limit: usize) -> u64 {
+    let mut engine = GhosttyEngine::new(cols, rows, limit).expect("engine");
+    let mut before = 0;
+    // The first drop comes once the history passes the limit: after about `limit + page` lines.
+    for i in 0..limit + 5_000 {
+        engine.feed(format!("line {i}\r\n").as_bytes());
+        let total = total_rows(&mut engine);
+        if total < before {
+            return before - total + 1;
+        }
+        before = total;
+    }
+    panic!("no page was dropped in {} lines for a limit of {limit}", limit + 5_000);
+}
+
 #[test]
 fn a_smaller_limit_still_prunes() {
     let mut engine = GhosttyEngine::new(80, 24, 1_000).expect("engine");
     engine.feed(&numbered_lines(40_000));
     let total = total_rows(&mut engine);
-    assert!(total >= 900, "only {total} rows kept for a limit of 1 000 lines");
+    let page = rows_per_page(80, 24, 1_000);
+    assert!(page >= 100, "a page of {page} rows: the measurement is not of a history page");
+    // The oldest page is dropped as long as more than the limit lies above the screen, so what is kept is within one
+    // page of the limit plus the screen.
+    assert!(
+        total + page > 1_000 + 24,
+        "only {total} rows kept for a limit of 1 000 lines (a page holds {page} rows)"
+    );
     assert!(total <= 1_000 + 24 + 500, "{total} rows kept for a limit of 1 000 lines");
 }
 
