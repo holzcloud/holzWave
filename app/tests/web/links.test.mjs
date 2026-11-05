@@ -78,7 +78,7 @@ await runTest("links", {}, async ({ engine, harness, open }) => {
     poll(async () => ((await sock.screen(pane)).split("\n").some((l) => l.trim() === word) ? true : undefined), `the screen shows ${word}`, 20_000);
 
   // ---- what the shell prints ----------------------------------------------------------------------------------------------------------
-  const ROW = { equal: 3, differs: 4, file: 5, javascript: 6, ssh: 7, data: 8, markup: 9, blank: 10, wrap: 11, plain: 14, ulink: 16, ufile: 17, uplain: 18 };
+  const ROW = { equal: 3, differs: 4, file: 5, javascript: 6, ssh: 7, data: 8, markup: 9, blank: 10, wrap: 11, plain: 14, ulink: 16, ufile: 17, uplain: 18, ussh: 19 };
   const at = (row, text) => [cursorTo(0, row), `printf '${text}'`];
   await typeInto(
     sock,
@@ -96,9 +96,10 @@ await runTest("links", {}, async ({ engine, harness, open }) => {
       // A link as long as its address that starts ten cells before the right edge: it wraps onto the next row.
       cursorTo(grid.cols - 10, ROW.wrap), osc8(WRAPPED, WRAPPED),
       ...at(ROW.plain, "plain text row"),
-      // The same word three times: with a link, with a file link, without a link (no descender, so the bottom rows of a cell hold no glyph).
+      // The same word four times: with a link, with a file link, with an ssh link, without a link (no descender, so the bottom rows of a cell hold no glyph).
       cursorTo(4, ROW.ulink), osc8(`${TARGET_ORIGIN}/u`, "welcome"),
       cursorTo(4, ROW.ufile), osc8("file:///etc/motd", "welcome"),
+      cursorTo(4, ROW.ussh), osc8("ssh://host/x", "welcome"),
       ...at(ROW.uplain, "    welcome"),
       cursorTo(0, 21), marker("links"),
     ),
@@ -270,19 +271,47 @@ await runTest("links", {}, async ({ engine, harness, open }) => {
   await noPopup(before, "a gesture click on file, javascript, ssh, data and blank addresses");
   report.popups.push(`not links (file, javascript, ssh, data, blank): hover shows nothing, ${notLinks.length * 2} gesture clicks, no tab`);
 
-  // The dotted underline at rest: with a link, the cells have dots; without one they do not. The file link is recorded, not required.
-  const inkOf = async (row) => {
-    const y = grid.y + (row + 1) * grid.cellH - 1.5; // the row of device pixels the dots are on (two above the cell's bottom edge)
-    const pts = [];
-    for (let x = grid.x + 4 * grid.cellW; x < grid.x + 11 * grid.cellW; x++) pts.push({ x, y });
-    const colours = await readColours(page, pts);
-    const background = colours[0];
-    return colours.filter((c) => c !== background).length;
-  };
-  const dots = { link: await inkOf(ROW.ulink), file: await inkOf(ROW.ufile), plain: await inkOf(ROW.uplain) };
-  check(dots.link > 0, `a link has dots under its cells (${JSON.stringify(dots)})`);
-  equal(dots.plain, 0, "text with no link has no dots (the control)");
-  report.popups.push(`dots at rest: link ${dots.link}, file link ${dots.file}, plain ${dots.plain} pixels`);
+  // The dotted underline at rest marks only what the page treats as a link: an https link has dots, a file link and an ssh link (neither is a link
+  // in the browser build) have none, and neither has plain text. Read from each renderer on a page of its own (a new page attaches to the same pane);
+  // a renderer the engine lacks is reported as not run.
+  const dotsReport = [];
+  for (const renderer of ["canvas", "webgl"]) {
+    const name = renderer === "canvas" ? "canvas2d" : "webgl2";
+    making = true;
+    const rp = await context.newPage();
+    making = false;
+    await rp.goto(`${harness.origin}/?renderer=${renderer}`);
+    await rp.waitForSelector("canvas#term");
+    // The page knows it is the browser build (the policy reads it) before anything is read.
+    const rg = await poll(async () => {
+      const g = await gridOf(rp);
+      return g && g.cols >= 60 && g.rows >= 24 && g.os === "web" ? g : undefined;
+    }, `the ${name} page lays out the pane and knows it is the browser build`, 20_000);
+    if (rg.renderer !== name) {
+      check(renderer === "webgl", `the page used ${rg.renderer} where ${name} was asked for`);
+      dotsReport.push(`${name} NOT RUN (no WebGL2 in this engine)`);
+      await rp.close();
+      continue;
+    }
+    const inkOf = async (row) => {
+      const y = rg.y + (row + 1) * rg.cellH - 1.5; // the row of device pixels the dots are on (two above the cell's bottom edge)
+      const pts = [];
+      for (let x = rg.x + 4 * rg.cellW; x < rg.x + 11 * rg.cellW; x++) pts.push({ x, y });
+      const colours = await readColours(rp, pts);
+      const background = colours[0];
+      return colours.filter((c) => c !== background).length;
+    };
+    // The control first: the rows are on the page once the https link has its dots; they all arrive in one frame.
+    const https = await poll(async () => ((await inkOf(ROW.ulink)) > 0 ? await inkOf(ROW.ulink) : undefined), `an https link has dots on the ${name} canvas`, 20_000);
+    const dots = { https, file: await inkOf(ROW.ufile), ssh: await inkOf(ROW.ussh), plain: await inkOf(ROW.uplain) };
+    equal(dots.file, 0, `${name}: a file link has no dots in the browser build (${JSON.stringify(dots)})`);
+    equal(dots.ssh, 0, `${name}: an ssh link has no dots (${JSON.stringify(dots)})`);
+    equal(dots.plain, 0, `${name}: text with no link has no dots (the control, ${JSON.stringify(dots)})`);
+    dotsReport.push(`${name} https ${dots.https}, file ${dots.file}, ssh ${dots.ssh}, plain ${dots.plain}`);
+    await rp.close();
+  }
+  console.log(`links [${engine}]: dots at rest (pixels under the word): ${dotsReport.join("; ")}`);
+  report.popups.push(`dots at rest: ${dotsReport.join("; ")}`);
 
   // ---- markup in an address ----------------------------------------------------------------------------------------------------------------
   const hostile = await hoverLink(6, ROW.markup, MARKUP);

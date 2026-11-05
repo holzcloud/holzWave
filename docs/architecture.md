@@ -422,8 +422,10 @@ frames. The page tells the core whether the person asked for reduced motion (`se
 stays on one frame. The switch is one per person, not one per pane. These parts are described in
 [config.md](config.md) and [server.md](server.md#memory-for-pictures); what ran against what is in section 12.
 
-**Links.** The engine reads OSC 8 hyperlinks and the core sends them as spans in the row (section 6). The page underlines a
-link dotted at rest, shows its real address in a `LINK` segment of the status line while the pointer is on it, and opens it on
+**Links.** The engine reads OSC 8 hyperlinks and the core sends them as spans in the row (section 6). The page underlines only a link
+it treats as one, dotted at rest (the scheme is on the person's list, and a `file` link counts only on the desktop in a pane that runs
+on this computer; the core flags every span it keeps and the page clears the flag for the others before either renderer
+draws), shows its real address in a `LINK` segment of the status line while the pointer is on it, and opens it on
 a modified click (Cmd on macOS, Ctrl elsewhere, either in the browser) through `open_url(url, pane)`; when the text on the
 screen names another place than the address, it asks first. `open_url` checks the address again in the core: only the
 schemes of the person's list `link_schemes` (default `http`, `https`, `mailto`, `file`) are opened, `javascript`, `data`,

@@ -587,9 +587,11 @@ This is every claim of this part that no suite here supports. It is listed so th
 - The browsers were headless on one Mac. No real popup blocker (the test browsers have it off), no real screen reader, no real
   Windows high-contrast theme (only the engines' forced-colours emulation), no touch input (a link has no gesture on touch),
   and no real GPU compared with the headless one.
-- The dotted underline that marks a link is drawn from the core's link flag alone. In the browser build a `file` link, which the
-  page never opens, still shows the dots, so the dots mark something that does nothing; the same is expected for any scheme the
-  core keeps and the person's list does not name (`ssh` by default). The second case was not measured.
+- A link the page refuses shows no dots. This was measured for a `file` link and an `ssh` link in the browser build, in the
+  canvas renderer and in WebGL, in WebKit and Chromium, against the real server (an `https` link had 28 pixels of dots, the
+  `file` link, the `ssh` link and plain text 0 each). A `file` link in a pane that has a connection, and a scheme that is taken
+  off or put on the person's list, were tested only in a page with a mock core. The desktop's webview and a real SSH pane were
+  not looked at.
 - A wrapped link is two links with the same address, one for each row. A click on the second part asks first, because the text
   on that row is only a part of the address; Open then opens it. The hover underline and the status line follow pointer and key events: when the output changes under a pointer that does not move,
   they stay until the next event.
