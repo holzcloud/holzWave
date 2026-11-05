@@ -66,12 +66,16 @@
    of the shown one covers both. The × is always visible, dim like the rest of the idle bar, and drawn by the
    stylesheet: the buttons that hold names keep no stray character in their text. */
 .bar-item { display: flex; align-items: stretch; flex: none; min-width: 0; }
-.bar-item.tab-item { flex: 0 1 auto; min-width: 4.5rem; overflow: hidden; }
+.bar-item.tab-item { flex: 0 1 auto; min-width: 4.9rem; overflow: hidden; }
 #bar .bar-item:hover, #bar .bar-item.active { background: var(--hw-rose-wash); }
 #bar .bar-item > :not(.close) { padding-right: .25rem; }
 #bar button.close { min-width: 0; padding: 0 .5rem 0 .25rem; color: var(--hw-dim); }
 #bar button.close::before { content: "\00d7"; }
 #bar button.close:hover { color: var(--hw-ink); }
+/* A tab's × sits clear of its name: .4 rem after the name and .5 rem before the ×, about .9 rem between the last letter
+   and the glyph (the pills keep the tighter .5 rem). The minimum widths below carry the extra .4 rem. */
+#bar .tab-item > :not(.close):not(.attn) { padding-right: .4rem; }
+#bar .tab-item > button.close { padding-left: .5rem; }
 
 /* Attention marks (docs/design.md section 6.23): between the name and the ×, one bold glyph of the bundled mono face
    per kind that is present, side by side in the fixed order. Written with `span.attn` so they beat the padding rule
@@ -88,10 +92,10 @@
 /* A tab gives way to the host label by shortening its name, down to the 4.5 rem of its minimum; with marks the minimum
    grows by their width (a glyph is .6 rem, the gap .167 rem, the padding .25 rem on each side), so the marks and the × are
    never clipped. All four kinds take 3.4 rem. */
-.bar-item.tab-item[data-marks="1"] { min-width: 5.7rem; }
-.bar-item.tab-item[data-marks="2"] { min-width: 6.5rem; }
-.bar-item.tab-item[data-marks="3"] { min-width: 7.3rem; }
-.bar-item.tab-item[data-marks="4"] { min-width: 8rem; }
+.bar-item.tab-item[data-marks="1"] { min-width: 6.1rem; }
+.bar-item.tab-item[data-marks="2"] { min-width: 6.9rem; }
+.bar-item.tab-item[data-marks="3"] { min-width: 7.7rem; }
+.bar-item.tab-item[data-marks="4"] { min-width: 8.4rem; }
 #bar .ws-item > span.attn { line-height: calc(20rem / 12); }
 #bar span.attn > .mk[data-kind="ask"] { color: var(--hw-info); }
 #bar span.attn > .mk[data-kind="bell"] { color: var(--hw-warn); }
