@@ -1,10 +1,13 @@
 // The picture store on the compiled output in dist/: what the page does with placements and with the pixels the core
 // sends. The store takes its transport and its bitmap maker as parameters, so these tests drive it with fakes: every
 // `image_data` call is a promise the test answers (or fails) by hand, in the order it likes, and a bitmap is a small
-// object that counts its `close()` calls. No DOM, no clock.
+// object that counts its `close()` calls. No DOM. The clock and the timer are fakes too: time moves only when a test
+// moves it (`advance`), and the fake timer lists what is pending, so a test can say that nothing is armed.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { CHUNK_BYTES, HEADER_BYTES, ImageStore, MAX_IN_FLIGHT, MIB, placementRect, wantedOf } from "../../dist/images.js";
+import {
+  CHUNK_BYTES, HEADER_BYTES, ImageStore, MAX_IN_FLIGHT, MIB, PAGE_PANES, UNUSED_GRACE_MS, placementRect, wantedOf,
+} from "../../dist/images.js";
 import { MAX_PLACEMENTS, applyFrame, usablePlacement, usablePlacements } from "../../dist/frames.js";
 
 /** Let every promise chain that can run, run. */
@@ -14,19 +17,42 @@ const flush = () => new Promise((done) => setTimeout(done, 0));
 function rig(budget = 64 * MIB) {
   const calls = [];
   const bitmaps = [];
-  const knobs = { budget, ready: 0 };
+  const knobs = { budget, ready: 0, noBitmap: false };
+  const clock = { now: 0, timers: [] };
   const store = new ImageStore({
     fetchChunk: (pane, image, generation, offset) =>
       new Promise((resolve, reject) => calls.push({ pane, image, generation, offset, resolve, reject })),
     makeBitmap: async (width, height, rgba) => {
+      if (knobs.noBitmap) throw new Error("no bitmap");
       const bitmap = { width, height, rgba, closed: 0, close() { this.closed++; } };
       bitmaps.push(bitmap);
       return bitmap;
     },
     ready: () => knobs.ready++,
     budget: () => knobs.budget,
+    now: () => clock.now,
+    later: (fn, ms) => {
+      const timer = { fn, at: clock.now + ms };
+      clock.timers.push(timer);
+      return () => {
+        const i = clock.timers.indexOf(timer);
+        if (i >= 0) clock.timers.splice(i, 1);
+      };
+    },
   });
-  return { store, calls, bitmaps, knobs };
+  /** Move the fake clock to `to`, running every timer that falls due on the way, in order, each at its own time. */
+  const advance = async (to) => {
+    for (;;) {
+      const due = clock.timers.filter((x) => x.at <= to).sort((a, b) => a.at - b.at)[0];
+      if (!due) break;
+      clock.timers.splice(clock.timers.indexOf(due), 1);
+      clock.now = due.at;
+      due.fn();
+    }
+    clock.now = to;
+    await flush();
+  };
+  return { store, calls, bitmaps, knobs, clock, advance, served: new Set() };
 }
 
 /** `w * h * 4` bytes that differ from place to place, so a piece in the wrong place is noticed. */
@@ -475,4 +501,326 @@ test("the budget is read at each want: a change takes effect on the next frame",
   t.knobs.budget = 4 * MIB;
   t.store.want(1, [want(1)]);
   assert.equal(t.calls.length, 2, "the picture that did not fit is asked for again once the budget grew");
+});
+
+// ---- failures that can go away, the sweep of bitmaps nobody places, the cap over panes -------------------------------------
+
+/** Answer every call for (pane, image) that was not answered yet, until the picture is whole or no call is left. */
+async function serve(t, pane, image, w, h, seed = 1) {
+  const px = pixels(w, h, seed);
+  for (;;) {
+    const next = t.calls.find((c) => c.pane === pane && c.image === image && !t.served.has(c));
+    if (!next) return;
+    t.served.add(next);
+    await respond(next, reply(w, h, px, next.offset));
+  }
+}
+
+/** The calls made for (pane, image) so far. */
+const callsFor = (t, pane, image) => t.calls.filter((c) => c.pane === pane && c.image === image);
+
+/** Reject the latest call for (pane, image) that is still open, as a transport that fails does. */
+async function breakCall(t, pane, image) {
+  const open = callsFor(t, pane, image).filter((c) => !t.served.has(c)).pop();
+  t.served.add(open);
+  open.reject("closed");
+  await flush();
+}
+
+const KIB900 = [480, 480]; // 921 600 bytes
+
+/** A store in which picture 1 is held and placed, and picture 2 failed on its header: 600 KiB each under a budget of 1 MiB. */
+async function fitFailed() {
+  const t = rig(1 * MIB);
+  const [w, h] = KIB600;
+  t.store.want(1, [want(1), want(2)]);
+  await serve(t, 1, 1, w, h, 1);
+  await serve(t, 1, 2, w, h, 5); // picture 2's header: 600 + 600 KiB is over 1 MiB, it does not fit
+  assert.equal(t.bitmaps.length, 1);
+  assert.equal(callsFor(t, 1, 2).length, 1, "no piece of picture 2 is asked for");
+  return t;
+}
+
+test("fit is retried: when the list no longer places the first picture the second is pulled at once, the first is closed, the second is held and drawn", async () => {
+  const t = await fitFailed();
+  const [w, h] = KIB600;
+  const ready = t.knobs.ready;
+  t.store.want(1, [want(2)]); // no other event than this list
+  assert.equal(callsFor(t, 1, 2).length, 2, "picture 2 is asked for again at once");
+  await serve(t, 1, 2, w, h, 5);
+  assert.equal(t.bitmaps.length, 2);
+  assert.equal(t.bitmaps[0].closed, 1, "the first bitmap was closed to make room");
+  assert.equal(t.bitmaps[1].closed, 0);
+  assert.ok(t.knobs.ready > ready, "the scene is told");
+  assert.deepEqual(t.store.resolve(1, [place(2)], GEO).map((d) => d.id), [2], "the second is drawn");
+  assert.deepEqual(t.store.stats(1), { held: 1, bytes: w * h * 4, jobs: 0 });
+});
+
+test("fit does not loop: ten more looks with both still placed send no request", async () => {
+  const t = await fitFailed();
+  const before = t.calls.length;
+  for (let i = 0; i < 10; i++) {
+    t.store.want(1, [want(1), want(2)]);
+    await flush();
+  }
+  assert.equal(t.calls.length, before, "the same list is no event");
+  assert.equal(t.bitmaps[0].closed, 0, "and the placed bitmap stays");
+});
+
+test("transport is retried by retry() only: repeated looks ask nothing, retry asks once, and a pull that rejects again is bounded by the retries", async () => {
+  const t = rig();
+  t.store.want(1, [want(5)]);
+  await breakCall(t, 1, 5);
+  for (let i = 0; i < 5; i++) t.store.want(1, [want(5)]);
+  await flush();
+  assert.equal(t.calls.length, 1, "repeated looks do not ask again");
+  t.store.retry();
+  assert.equal(t.calls.length, 2, "retry asks once");
+  await serve(t, 1, 5, 2, 1);
+  assert.equal(t.bitmaps.length, 1, "answered, it is held");
+  assert.deepEqual(t.store.stats(1), { held: 1, bytes: 8, jobs: 0 });
+
+  // A picture whose pull keeps failing: one more request for each retry and none by itself.
+  t.store.want(1, [want(5), want(6)]);
+  await breakCall(t, 1, 6);
+  let retries = 0;
+  for (let round = 0; round < 3; round++) {
+    t.store.retry();
+    retries++;
+    await breakCall(t, 1, 6);
+    for (let i = 0; i < 20; i++) {
+      t.store.want(1, [want(5), want(6)]);
+      await flush();
+    }
+  }
+  assert.equal(callsFor(t, 1, 6).length, retries + 1, "the calls over twenty flushes are the retries plus the first");
+});
+
+test("retry() asks only for what the placements still ask for", async () => {
+  const t = rig();
+  t.store.want(1, [want(5)]);
+  await breakCall(t, 1, 5);
+  t.store.want(1, []); // scrolled away
+  t.store.retry();
+  await flush();
+  assert.equal(t.calls.length, 1, "a picture nobody places is not pulled again");
+  t.store.retry(); // nothing to do, and no pane
+  assert.equal(t.calls.length, 1);
+});
+
+test("a freed bitmap clears the fit and transport marks of its pane and what is wanted is pulled again; a job that fails frees nothing", async () => {
+  const t = rig(1 * MIB);
+  const [w, h] = KIB600;
+  t.store.want(1, [want(1)]);
+  await serve(t, 1, 1, w, h, 1);
+  t.store.want(1, [want(2)]); // picture 1 is not placed any more
+  await breakCall(t, 1, 2); // picture 2: a transport failure
+  assert.equal(callsFor(t, 1, 2).length, 1);
+
+  // A picture that fails for itself frees nothing: picture 2 is not asked for again.
+  t.store.want(1, [want(2), want(4)]);
+  await respond(callsFor(t, 1, 4)[0], new Uint8Array(3).buffer); // not a header: refused
+  assert.equal(callsFor(t, 1, 2).length, 1, "a job that ends by failing is not an event");
+  assert.equal(t.bitmaps[0].closed, 0);
+
+  // Picture 3 needs room: the unused bitmap 1 is closed for it, and that frees memory.
+  t.store.want(1, [want(2), want(3)]);
+  await respond(callsFor(t, 1, 3)[0], reply(w, h, pixels(w, h, 3), 0));
+  assert.equal(t.bitmaps[0].closed, 1, "the unused bitmap was closed to make room");
+  assert.equal(callsFor(t, 1, 2).length, 2, "picture 2, which failed before, is asked for again");
+  assert.equal(callsFor(t, 1, 4).length, 1, "the refused picture is not");
+});
+
+test("refused stays refused: after retry(), after freed bitmaps and for each kind of refusal; a change of the budget clears every mark", async () => {
+  const t = rig(1 * MIB);
+  const px = pixels(2, 1);
+  t.store.want(1, [want(1), want(2), want(3), want(4)]);
+  const heads = [
+    [1, reply(2, 1, px, 0, { total: 12 })], // sizes that do not add up
+    [2, reply(2, 1, px, 0, { w: 0, total: 0 })], // a header that lies
+    [3, new Uint8Array(HEADER_BYTES + 12).buffer], // a piece of the wrong length (all zero: 0 by 0)
+  ];
+  for (const [image, raw] of heads) {
+    const call = callsFor(t, 1, image)[0];
+    t.served.add(call);
+    await respond(call, raw);
+  }
+  // Picture 4: the bitmap cannot be made.
+  t.knobs.noBitmap = true;
+  await serve(t, 1, 4, 2, 1);
+  t.knobs.noBitmap = false;
+  const count = t.calls.length;
+
+  // A held bitmap that nothing places is closed after the grace: memory is freed.
+  t.store.want(1, [want(5), want(1), want(2), want(3), want(4)]);
+  await serve(t, 1, 5, 2, 1);
+  t.store.want(1, [want(1), want(2), want(3), want(4)]);
+  await t.advance(UNUSED_GRACE_MS);
+  assert.equal(t.bitmaps[0].closed, 1, "memory was freed");
+  t.store.retry();
+  await flush();
+  assert.equal(t.calls.length, count + 1 /* picture 5 */ + 0, "after retry() and a freed bitmap no refused picture is asked for");
+  for (let i = 0; i < 5; i++) t.store.want(1, [want(1), want(2), want(3), want(4)]);
+  assert.equal(t.calls.length, count + 1);
+
+  t.knobs.budget = 2 * MIB;
+  t.store.want(1, [want(1), want(2), want(3), want(4)]);
+  for (let round = 0; round < 3; round++) {
+    for (const call of t.calls.filter((c) => !t.served.has(c))) {
+      t.served.add(call);
+      await respond(call, new Uint8Array(3).buffer); // not a header: refused again, which frees the slot for the next
+    }
+  }
+  assert.deepEqual([1, 2, 3, 4].map((i) => callsFor(t, 1, i).length), [2, 2, 2, 2], "a change of the budget clears every mark (two requests are in flight at a time)");
+});
+
+test("the grace: a bitmap that no placement asks for stays until UNUSED_GRACE_MS, is closed then, the scene is told, and the pane holds nothing", async () => {
+  const t = rig();
+  t.store.want(1, [want(1)]);
+  await serve(t, 1, 1, 2, 1);
+  await t.advance(100);
+  t.store.want(1, []); // unused since 100
+  assert.equal(t.clock.timers.length, 1);
+  const ready = t.knobs.ready;
+  await t.advance(100 + UNUSED_GRACE_MS - 1);
+  assert.equal(t.bitmaps[0].closed, 0, "one millisecond before the grace it is kept");
+  assert.equal(t.store.has(1), true);
+  await t.advance(100 + UNUSED_GRACE_MS);
+  assert.equal(t.bitmaps[0].closed, 1, "at the grace it is closed");
+  assert.equal(t.knobs.ready, ready + 1, "the scene is told to draw after the sweep");
+  assert.equal(t.store.has(1), false, "the pane holds no state");
+  assert.equal(t.clock.timers.length, 0, "and nothing is armed");
+});
+
+test("a picture wanted again inside the grace is kept, not closed and not pulled again", async () => {
+  const t = rig();
+  t.store.want(1, [want(1)]);
+  await serve(t, 1, 1, 2, 1);
+  t.store.want(1, []);
+  await t.advance(3000);
+  t.store.want(1, [want(1)]); // scrolled back
+  assert.equal(t.calls.length, 1, "not pulled again");
+  assert.equal(t.clock.timers.length, 0, "nothing is unused: no timer");
+  await t.advance(3000 + 3 * UNUSED_GRACE_MS);
+  assert.equal(t.bitmaps[0].closed, 0, "kept");
+  assert.equal(t.store.resolve(1, [place(1)], GEO).length, 1, "and drawn");
+  t.store.want(1, []); // unused again from 18 000: the grace starts over
+  await t.advance(3000 + 3 * UNUSED_GRACE_MS + UNUSED_GRACE_MS - 1);
+  assert.equal(t.bitmaps[0].closed, 0);
+  await t.advance(3000 + 4 * UNUSED_GRACE_MS);
+  assert.equal(t.bitmaps[0].closed, 1);
+});
+
+test("a placed picture is never swept however long it stays", async () => {
+  const t = rig();
+  t.store.want(1, [want(1)]);
+  await serve(t, 1, 1, 2, 1);
+  for (let i = 1; i <= 10; i++) {
+    await t.advance(i * UNUSED_GRACE_MS);
+    t.store.want(1, [want(1)]);
+  }
+  assert.equal(t.bitmaps[0].closed, 0);
+  assert.equal(t.clock.timers.length, 0);
+});
+
+test("one timer for the store: none without an unused bitmap, exactly one with any number, re-armed for the next, cleared by forget and by a budget of 0", async () => {
+  const t = rig();
+  assert.equal(t.clock.timers.length, 0, "a new store arms nothing");
+  t.store.want(1, [want(1), want(2)]);
+  await serve(t, 1, 1, 2, 1);
+  await serve(t, 1, 2, 2, 1, 4);
+  assert.equal(t.clock.timers.length, 0, "placed pictures arm nothing");
+  t.store.want(2, [want(1)]);
+  await serve(t, 2, 1, 2, 1, 7);
+  t.store.want(1, [want(2)]); // picture 1 of pane 1 is unused since 0
+  assert.equal(t.clock.timers.length, 1);
+  await t.advance(2000);
+  t.store.want(2, []); // pane 2's picture is unused since 2000
+  assert.equal(t.clock.timers.length, 1, "two unused bitmaps, one timer");
+  await t.advance(UNUSED_GRACE_MS);
+  assert.equal(t.bitmaps[0].closed, 1, "the first is due");
+  assert.equal(t.bitmaps[2].closed, 0, "the second is not");
+  assert.equal(t.clock.timers.length, 1, "armed for the second");
+  await t.advance(2000 + UNUSED_GRACE_MS);
+  assert.equal(t.bitmaps[2].closed, 1);
+  assert.equal(t.clock.timers.length, 0);
+  assert.equal(t.store.has(2), false);
+
+  t.store.want(2, [want(1)]); // pulled again, held again
+  await serve(t, 2, 1, 2, 1, 7);
+  t.store.want(2, []);
+  assert.equal(t.clock.timers.length, 1);
+  t.store.forget(2);
+  assert.equal(t.clock.timers.length, 0, "forget clears the timer");
+  t.store.want(1, []);
+  assert.equal(t.clock.timers.length, 1);
+  t.knobs.budget = 0;
+  t.store.want(1, []);
+  assert.equal(t.clock.timers.length, 0, "a budget of 0 clears it");
+  assert.equal(t.store.has(1), false);
+});
+
+/** `n` panes, each places one 900 KiB picture and gets it; `after` sees the page total after every answer. */
+async function fillPanes(t, n, after) {
+  const [w, h] = KIB900;
+  for (let pane = 1; pane <= n; pane++) {
+    t.store.want(pane, [want(1)]);
+    const px = pixels(w, h, pane);
+    for (;;) {
+      const next = t.calls.find((c) => c.pane === pane && !t.served.has(c));
+      if (!next) break;
+      t.served.add(next);
+      await respond(next, reply(w, h, px, next.offset));
+      after(pane);
+    }
+  }
+}
+
+test("the cap over panes: four panes of 900 KiB fit a budget of 1 MiB each, the fifth fails on its header as fit, the total never goes over, reserved bytes count", async () => {
+  const t = rig(1 * MIB);
+  const totals = [];
+  await fillPanes(t, PAGE_PANES + 1, (pane) => {
+    const total = t.store.pageBytes();
+    totals.push([pane, total]);
+    assert.ok(total <= PAGE_PANES * 1 * MIB, `the total ${total} is over the cap after an answer for pane ${pane}`);
+  });
+  const [w, h] = KIB900;
+  const one = w * h * 4;
+  // Each of the first four: the header reserves the whole picture, the second piece makes it a bitmap; the fifth reserves nothing.
+  assert.deepEqual(totals, [[1, one], [1, one], [2, 2 * one], [2, 2 * one], [3, 3 * one], [3, 3 * one], [4, 4 * one], [4, 4 * one], [5, 4 * one]]);
+  for (let pane = 1; pane <= PAGE_PANES; pane++) assert.equal(t.store.stats(pane).held, 1, `pane ${pane} holds its picture`);
+  assert.equal(t.store.stats(5).held, 0, "the fifth is not held");
+  assert.equal(t.calls.filter((c) => c.pane === 5).length, 1, "and nothing past its header was asked for");
+  assert.ok(t.bitmaps.every((b) => b.closed === 0), "no placed bitmap was closed for it");
+});
+
+test("when a placement of one pane goes, the fifth pane is pulled at once and drawn, and the pane that let go has its bitmap closed", async () => {
+  const t = rig(1 * MIB);
+  await fillPanes(t, PAGE_PANES + 1, () => {});
+  const [w, h] = KIB900;
+  const before = t.calls.filter((c) => c.pane === 5).length;
+  t.store.want(1, []); // the program in pane 1 deleted its picture
+  assert.equal(t.calls.filter((c) => c.pane === 5).length, before + 1, "pane 5 is asked for again at once");
+  await serve(t, 5, 1, w, h, 5);
+  assert.equal(t.bitmaps[0].closed, 1, "pane 1's unused bitmap was closed for it");
+  assert.deepEqual(t.store.resolve(5, [place(1)], GEO).map((d) => d.id), [1], "pane 5 draws it");
+  assert.equal(t.store.pageBytes(), PAGE_PANES * w * h * 4, "the total is four pictures again");
+  assert.equal(t.store.has(1), false, "and pane 1 holds no state");
+});
+
+test("room over panes is made from unused bitmaps of any pane first, the least recently drawn first, and a placed one is never touched", async () => {
+  const t = rig(1 * MIB);
+  const [w, h] = KIB900;
+  await fillPanes(t, PAGE_PANES, () => {});
+  t.store.resolve(1, [place(1)], GEO); // pane 1 drawn before pane 2
+  t.store.resolve(2, [place(1)], GEO);
+  t.store.want(1, []);
+  t.store.want(2, []); // both unused now; panes 3 and 4 are placed
+  t.store.want(5, [want(1)]);
+  await serve(t, 5, 1, w, h, 5);
+  assert.equal(t.bitmaps[0].closed, 1, "the one drawn longest ago goes");
+  assert.equal(t.bitmaps[1].closed, 0, "the other stays: one was enough");
+  assert.equal(t.bitmaps[2].closed + t.bitmaps[3].closed, 0, "the placed ones are untouched");
+  assert.equal(t.store.stats(5).held, 1);
+  assert.ok(t.store.pageBytes() <= PAGE_PANES * MIB);
 });

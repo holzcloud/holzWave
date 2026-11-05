@@ -3,7 +3,9 @@
 // the page does not hold, it asks the core for the bytes with `image_data`, piece by piece, checks every header
 // against what it asked, assembles straight RGBA and makes one bitmap of it. Nothing the core sends is trusted: the
 // sizes are checked before anything is allocated, a piece that does not match the request fails its generation, and
-// the bitmaps a pane keeps never exceed the person's own memory setting.
+// the bitmaps a pane keeps never exceed the person's own memory setting. All panes together keep at most `PAGE_PANES`
+// times that, a bitmap no placement asks for any more is closed after `UNUSED_GRACE_MS`, and a picture that failed for a
+// reason that can go away (it did not fit yet, the connection was down) is asked for again when that reason has gone.
 //
 // The store is a class that takes its transport and its bitmap maker as parameters, so node tests it with fakes (this
 // file has no DOM and no bridge at import). The page's one store is `images`, wired to `image_data` and
@@ -27,6 +29,10 @@ export const MAX_IN_FLIGHT = 2;
 export const MIB = 1024 * 1024;
 /** How many failed (image, generation) pairs a pane remembers, so that a failed one is not asked for again. */
 const MAX_FAILED = 256;
+/** How long a bitmap that no placement asks for is kept, in milliseconds: scrolling a picture out of view and back does not pull it again. */
+export const UNUSED_GRACE_MS = 5000;
+/** All panes of the page together keep at most this many times the per-pane budget (decoded bitmaps and buffers being assembled). */
+export const PAGE_PANES = 4;
 
 /**
  * Why a picture failed, which decides what asks for it again. `refused`: the picture itself is not usable (a header that
@@ -104,6 +110,10 @@ export interface StoreDeps<B extends PictureBitmap> {
   ready(): void;
   /** The picture memory of one pane in bytes, read at each `want`; 0 means pictures are off. */
   budget(): number;
+  /** The clock in milliseconds; the default is `performance.now`. */
+  now?(): number;
+  /** Run `fn` once after `ms` milliseconds and answer the function that cancels it; the default is `setTimeout`. */
+  later?(fn: () => void, ms: number): () => void;
 }
 
 /** A picture a placement asks for. */
@@ -138,6 +148,8 @@ interface Held<B> {
   bytes: number;
   /** When the bitmap was last drawn, on the store's own counter: the smaller, the longer ago. */
   used: number;
+  /** The time (the store's clock) at which no placement asked for it any more; null while one does. */
+  idle: number | null;
 }
 
 interface PaneImages<B> {
@@ -164,6 +176,13 @@ export interface PaneStats {
   jobs: number;
 }
 
+/** Whether two sets of wanted pictures (image to generation) are the same. */
+function sameWanted(a: ReadonlyMap<number, number>, b: ReadonlyMap<number, number>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [image, generation] of a) if (b.get(image) !== generation) return false;
+  return true;
+}
+
 /** The bytes of a raw answer: a buffer, a view or an array of numbers (as `pdfview.ts` reads one); null for anything else. */
 function bytesOf(raw: unknown): Uint8Array | null {
   if (raw instanceof ArrayBuffer) return new Uint8Array(raw);
@@ -177,12 +196,27 @@ export class ImageStore<B extends PictureBitmap> {
   private tick = 0;
   /** The panes in which a bitmap was closed to make room since the marks were last looked at. */
   private readonly freed = new Set<number>();
+  /** The one timer of the store: set only while a bitmap that no placement asks for exists. */
+  private cancelTimer: (() => void) | null = null;
+  /** The time the timer fires at, on the store's clock. */
+  private due = 0;
 
   constructor(private readonly deps: StoreDeps<B>) {}
+
+  private clock(): number {
+    return this.deps.now ? this.deps.now() : performance.now();
+  }
 
   /** Whether the store holds or does anything for this pane. A pane without pictures costs nothing. */
   has(pane: number): boolean {
     return this.panes.has(pane);
+  }
+
+  /** The bytes all panes hold against the page's cap: decoded bitmaps and buffers being assembled. */
+  pageBytes(): number {
+    let n = 0;
+    for (const ps of this.panes.values()) n += this.bytesIn(ps);
+    return n;
   }
 
   stats(pane: number): PaneStats {
@@ -200,7 +234,7 @@ export class ImageStore<B extends PictureBitmap> {
   want(pane: number, items: readonly Wanted[]): void {
     const budget = this.deps.budget();
     if (!(budget > 0)) {
-      this.forget(pane);
+      for (const id of [...this.panes.keys()]) this.forget(id); // pictures are off for the page, not for one pane
       return;
     }
     let ps = this.panes.get(pane);
@@ -218,12 +252,26 @@ export class ImageStore<B extends PictureBitmap> {
       const have = wanted.get(image);
       if (have === undefined || generation > have) wanted.set(image, generation);
     }
+    // A change of what the pane wants can make room (a placement went) or leave a picture that did not fit its turn.
+    if (!sameWanted(ps.wanted, wanted)) this.clearMarks(ps, "fit");
     ps.wanted = wanted;
+    const now = this.clock();
+    let unplaced = false;
+    for (const [image, h] of ps.held) {
+      if (wanted.has(image)) h.idle = null;
+      else if (h.idle === null) {
+        h.idle = now;
+        unplaced = true;
+      }
+    }
     for (const [image, job] of ps.jobs) if (wanted.get(image) !== job.generation) this.drop(ps, image, job);
     this.trim(ps, budget);
-    const others = this.clearFreed();
+    const woken = new Set(this.clearFreed());
+    // A bitmap that stopped being placed may be closed for a picture of another pane, which is asked for again now.
+    if (unplaced) for (const o of this.panes.values()) if (o !== ps && this.clearMarks(o, "fit") > 0) woken.add(o);
     this.plan(pane, ps);
-    for (const o of others) if (o !== ps) this.plan(o.pane, o);
+    for (const o of woken) if (o !== ps) this.plan(o.pane, o);
+    this.arm();
   }
 
   /**
@@ -275,6 +323,7 @@ export class ImageStore<B extends PictureBitmap> {
     ps.failed.clear();
     this.freed.delete(pane);
     this.tidy(pane, ps);
+    this.arm();
   }
 
   // ---- the pulls ----------------------------------------------------------------------------------
@@ -295,11 +344,11 @@ export class ImageStore<B extends PictureBitmap> {
     while (ps.failed.size > MAX_FAILED) ps.failed.delete(ps.failed.keys().next().value as number);
   }
 
-  /** Clear the marks of a pane that can go away (`fit` and `transport`); a refusal stays. How many were cleared. */
-  private clearMarks(ps: PaneImages<B>): number {
+  /** Clear the marks of a pane that can go away (`only`, or both `fit` and `transport`); a refusal stays. How many were cleared. */
+  private clearMarks(ps: PaneImages<B>, only?: FailKind): number {
     let n = 0;
     for (const [image, f] of ps.failed) {
-      if (f.kind === "refused") continue;
+      if (f.kind === "refused" || (only !== undefined && f.kind !== only)) continue;
       ps.failed.delete(image);
       n++;
     }
@@ -307,15 +356,17 @@ export class ImageStore<B extends PictureBitmap> {
   }
 
   /**
-   * Memory was freed in the panes that closed a bitmap to make room: their marks that can go away are cleared. The
-   * panes whose marks were cleared are returned, for their pulls to restart. A job that ends by failing frees nothing
-   * and never gets here.
+   * Memory was freed in the panes that closed a bitmap to make room: their marks that can go away are cleared. Those
+   * panes are returned, for their pulls to restart (and for an empty one to be dropped). A job that ends by failing
+   * frees nothing and never gets here.
    */
   private clearFreed(): PaneImages<B>[] {
     const out: PaneImages<B>[] = [];
     for (const pane of this.freed) {
       const ps = this.panes.get(pane);
-      if (ps && this.clearMarks(ps) > 0) out.push(ps);
+      if (!ps) continue;
+      this.clearMarks(ps);
+      out.push(ps);
     }
     this.freed.clear();
     return out;
@@ -348,6 +399,52 @@ export class ImageStore<B extends PictureBitmap> {
     if (idle && this.panes.get(pane) === ps) this.panes.delete(pane);
   }
 
+  /** Set the store's one timer for the next bitmap that no placement asks for to be due, or none when there is no such bitmap. */
+  private arm(): void {
+    let first = Infinity;
+    for (const ps of this.panes.values()) {
+      for (const h of ps.held.values()) if (h.idle !== null && h.idle + UNUSED_GRACE_MS < first) first = h.idle + UNUSED_GRACE_MS;
+    }
+    if (first === Infinity) {
+      this.disarm();
+      return;
+    }
+    if (this.cancelTimer && this.due === first) return;
+    this.disarm();
+    this.due = first;
+    const later = this.deps.later ?? ((fn, ms) => {
+      const t = setTimeout(fn, ms);
+      return () => clearTimeout(t);
+    });
+    this.cancelTimer = later(() => this.sweep(), Math.max(0, first - this.clock()));
+  }
+
+  private disarm(): void {
+    this.cancelTimer?.();
+    this.cancelTimer = null;
+  }
+
+  /**
+   * The timer fired: close every bitmap that no placement has asked for during the grace, then tell the scene to draw
+   * (the WebGL renderer deletes the texture of a closed bitmap in that draw). Closing frees memory, so what failed for
+   * lack of it is asked for again.
+   */
+  private sweep(): void {
+    this.cancelTimer = null;
+    const now = this.clock();
+    let closed = 0;
+    for (const ps of [...this.panes.values()]) {
+      for (const [image, h] of [...ps.held]) {
+        if (h.idle === null || now - h.idle < UNUSED_GRACE_MS) continue;
+        this.evict(ps, image, h);
+        closed++;
+      }
+    }
+    for (const ps of this.clearFreed()) this.plan(ps.pane, ps);
+    this.arm();
+    if (closed > 0) this.deps.ready();
+  }
+
   /** The bytes the pane holds against its budget: decoded bitmaps and the buffers being assembled. */
   private bytesIn(ps: PaneImages<B>): number {
     let n = ps.reserved;
@@ -367,6 +464,34 @@ export class ImageStore<B extends PictureBitmap> {
       this.evict(ps, image, h);
       used -= h.bytes;
       if (used + need <= budget) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Evict bitmaps until `need` more bytes fit under the page's cap, `PAGE_PANES` times the per-pane budget over all
+   * panes together: only bitmaps no placement asks for, of any pane, the least recently drawn first, never a placed one.
+   * Nothing is closed when that would not be enough. False when it does not fit.
+   */
+  private makePageRoom(need: number, budget: number): boolean {
+    const cap = PAGE_PANES * budget;
+    let total = this.pageBytes();
+    if (total + need <= cap) return true;
+    const unused: Array<[PaneImages<B>, number, Held<B>]> = [];
+    let spare = 0;
+    for (const ps of this.panes.values()) {
+      for (const [image, h] of ps.held) {
+        if (ps.wanted.has(image)) continue;
+        unused.push([ps, image, h]);
+        spare += h.bytes;
+      }
+    }
+    if (total - spare + need > cap) return false;
+    unused.sort((a, b) => a[2].used - b[2].used);
+    for (const [ps, image, h] of unused) {
+      this.evict(ps, image, h);
+      total -= h.bytes;
+      if (total + need <= cap) return true;
     }
     return false;
   }
@@ -428,6 +553,7 @@ export class ImageStore<B extends PictureBitmap> {
     if (kind !== null) this.fail(ps, job.image, job, kind);
     this.plan(pane, ps);
     for (const o of others) if (o !== ps) this.plan(o.pane, o);
+    this.arm();
   }
 
   /** Check one answer against what was asked and take its bytes; why it failed when anything does not match, else null. */
@@ -480,6 +606,7 @@ export class ImageStore<B extends PictureBitmap> {
       this.evict(ps, job.image, own);
       if (!this.makeRoom(ps, total, budget)) return false;
     }
+    if (!this.makePageRoom(total, budget)) return false;
     ps.reserved += total;
     job.reserved = total;
     return true;
@@ -496,7 +623,11 @@ export class ImageStore<B extends PictureBitmap> {
         }
         this.drop(ps, job.image, job);
         ps.held.get(job.image)?.bitmap.close();
-        ps.held.set(job.image, { generation: job.generation, bitmap, bytes: job.total, used: ++this.tick });
+        ps.held.set(job.image, {
+          generation: job.generation, bitmap, bytes: job.total, used: ++this.tick,
+          idle: ps.wanted.has(job.image) ? null : this.clock(),
+        });
+        this.arm();
         this.deps.ready();
       },
       () => {
