@@ -147,7 +147,7 @@ function measure(): Metrics {
   probe.font = font(0);
   const dpr = window.devicePixelRatio || 1;
   const root = document.documentElement;
-  state.headerPx = headerHeight(parseFloat(getComputedStyle(root).fontSize), dpr);
+  state.headerPx = headerHeight(parseFloat(getComputedStyle(root).fontSize), dpr, layoutNow());
   root.style.setProperty("--hw-header", `${state.headerPx}px`);
   const snap = (cssPx: number) => Math.max(1, Math.round(cssPx * dpr)) / dpr;
   return {

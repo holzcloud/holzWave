@@ -26,6 +26,7 @@ test("headerHeight follows the layout and is unchanged without one", () => {
   assert.equal(headerHeight(12, 1, "tablet"), 44);
   assert.equal(headerHeight(12, 2, "tablet"), 44, "whole device pixels");
   assert.equal(headerHeight(15, 1, "tablet"), 55);
+  assert.equal(headerHeight(9, 1, "tablet"), 44, "a UI scale of 75 % does not make the touch strip smaller than 44 px");
   assert.equal(headerHeight(13.25, 2, "tablet"), 48.5, "snapped to a half CSS pixel at 2x");
   // The same table the geometry test holds, with the layout left out and with the other two layouts.
   for (const layout of [undefined, "desktop", "phone"]) {

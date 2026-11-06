@@ -39,6 +39,7 @@ import { refusalText } from "./labels.js";
 import { canvas, markLeaving, unmarkLeaving } from "./scene.js";
 import { state } from "./state.js";
 import { showNotice } from "./status.js";
+import { tearOffAllowed } from "./tablet.js";
 import { NOT_AVAILABLE } from "./webstate.js";
 import type { View } from "./types.js";
 
@@ -171,7 +172,7 @@ let hoverPending = false;
 let hoverChain: Promise<unknown> = Promise.resolve();
 
 function pollHover(): void {
-  if (state.os === "web") return; // a browser has no second window to show the outline in
+  if (!tearOffAllowed(state.os)) return; // a browser and Android have no second window to show the outline in
   const view = state.view;
   const gone = press?.active && view ? leavingPanes(press.source, view) : null;
   if (!gone || hoverPending) return; // a slow shell is not asked again before it answered
@@ -262,8 +263,9 @@ function refused(kind: "pane" | "tab", ids: number[], reason: unknown): void {
  * Nothing moves when the shell cancels (a lone pane or tab, no other place to put it) or fails.
  */
 function releaseOutside(source: Source): void {
-  if (state.os === "web") {
-    showNotice(NOT_AVAILABLE); // a browser cannot give a pane a window: it stays where it is
+  if (!tearOffAllowed(state.os)) {
+    // A browser cannot give a pane a window: it stays where it is and says so. Android has no window to say it about: it just stays.
+    if (state.os === "web") showNotice(NOT_AVAILABLE);
     return;
   }
   const view = state.view;
@@ -332,8 +334,8 @@ function moveToTab(step: 1 | -1): void {
 
 /** Give the focused pane, or the shown tab, a window of its own, beside this one. A lone pane or tab is refused. */
 function moveToNewWindow(kind: "pane" | "tab"): void {
-  if (state.os === "web") {
-    showNotice(NOT_AVAILABLE); // the palette does not list it in a browser; a stored shortcut or a script gets the answer in words
+  if (!tearOffAllowed(state.os)) {
+    if (state.os === "web") showNotice(NOT_AVAILABLE); // the palette does not list it in a browser; a stored shortcut or a script gets the answer in words
     return;
   }
   const view = state.view;
@@ -439,6 +441,10 @@ export function initDragDrop(apply: (v: View) => void): void {
   registerAction({ id: "pane.swap_next", title: "Swap with next pane", run: swapWithNext });
   registerAction({ id: "pane.move_next_tab", title: "Move pane to next tab", run: () => moveToTab(1) });
   registerAction({ id: "pane.move_prev_tab", title: "Move pane to previous tab", run: () => moveToTab(-1) });
-  registerAction({ id: "pane.move_to_new_window", title: "Move pane to new window", run: () => moveToNewWindow("pane") });
-  registerAction({ id: "tab.move_to_new_window", title: "Move tab to new window", run: () => moveToNewWindow("tab") });
+  // Android has no second window: the two actions do not exist there, so no palette lists them and no stored shortcut runs them.
+  // A browser keeps them registered (the page answers in words, and the palette hides them: web.ts).
+  if (state.os !== "android") {
+    registerAction({ id: "pane.move_to_new_window", title: "Move pane to new window", run: () => moveToNewWindow("pane") });
+    registerAction({ id: "tab.move_to_new_window", title: "Move tab to new window", run: () => moveToNewWindow("tab") });
+  }
 }

@@ -13,19 +13,22 @@ export const HEADER_REM = 24 / 12;
 /** The pane header's height on the tablet layout in root font sizes: 44 px at the base size of 12 px, the size of a finger's target. */
 export const TABLET_HEADER_REM = 44 / 12;
 
+/** The least height of the tablet's pane header in CSS px at any UI scale: a touch target is never smaller than this. */
+export const TABLET_HEADER_MIN_PX = 44;
+
 /** The root font size at UI scale 100 %: what `headerHeight` assumes for a size that is not a size. */
 const BASE_ROOT_PX = 12;
 
 /**
  * The header height in CSS px for a root font size: `HEADER_REM` root sizes, snapped to whole device pixels so the
  * grid below it starts on a pixel edge. The UI scale changes the root size, so header and chrome scale together.
- * The tablet layout has a taller strip (`TABLET_HEADER_REM`); any other layout, or none, gives the desktop's.
+ * The tablet layout has a taller strip (`TABLET_HEADER_REM`, never under `TABLET_HEADER_MIN_PX`); any other layout, or none, gives the desktop's.
  */
 export function headerHeight(rootFontPx: number, dpr: number, layout?: Layout): number {
   const root = Number.isFinite(rootFontPx) && rootFontPx > 0 ? rootFontPx : BASE_ROOT_PX;
   const ratio = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
-  const rem = layout === "tablet" ? TABLET_HEADER_REM : HEADER_REM;
-  return Math.max(1, Math.round(rem * root * ratio)) / ratio;
+  if (layout === "tablet") return Math.max(TABLET_HEADER_MIN_PX * ratio, Math.round(TABLET_HEADER_REM * root * ratio)) / ratio;
+  return Math.max(1, Math.round(HEADER_REM * root * ratio)) / ratio;
 }
 
 /** CSS px of a divider's hit area across its axis. */

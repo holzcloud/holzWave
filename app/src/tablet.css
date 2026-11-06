@@ -1,0 +1,67 @@
+/* The tablet layout (docs/design.md section 6.6): the desktop window with the changes a finger needs. Loaded by tablet.ts on the tablet class
+   only, so a desktop, a browser and a phone never fetch it; every rule is also scoped to `:root.layout-tablet`. Every colour is a `--hw-*`
+   token (so `contrast-high` reaches it), every size is in rem except what makes up a 44 px touch target, which is never smaller than 44 px
+   (the UI scale can only make it larger). Flat and hairline: no gradient, no blur, no shadow, no motion. The key row is placed by keyrow.css
+   at the bottom of the window; the divider's 24 px touch area is set by the page (overlay.ts), the line inside it stays 1 px. */
+
+:root.layout-tablet { --tab-target: max(44px, calc(44rem / 12)); }
+
+/* The window follows the on-screen keyboard: keyrow.ts writes the visual viewport's height to --hw-vvh while the keyboard is up. */
+:root.layout-tablet #app { height: var(--hw-vvh, 100dvh); }
+
+/* ---- the bar: every control is a 44 px target ------------------------------------------------------------------------------------ */
+
+/* The title row holds the pill (44 px and its hairline) with 4 px above and below; the tab row holds the numbered squares. Nothing in the
+   bar is a window button or a drag region on Android: the system owns the window, so the cursor stays the plain one. */
+:root.layout-tablet #bar {
+  grid-template-rows: calc(var(--tab-target) + 2px + .667rem) calc(var(--tab-target) + 1px);
+  height: calc(2 * var(--tab-target) + 3px + .667rem); cursor: default;
+}
+:root.layout-tablet #bar button,
+:root.layout-tablet #bar [role="button"],
+:root.layout-tablet #bar [role="tab"] {
+  min-width: var(--tab-target); min-height: var(--tab-target); line-height: var(--tab-target);
+}
+/* The × of a tab or a pill is its own target, 44 px wide, always drawn: there is no pointer to hover with. */
+:root.layout-tablet #bar button.close { min-width: var(--tab-target); padding: 0; }
+:root.layout-tablet #bar .bar-item.ws-item { height: calc(var(--tab-target) + 2px); }
+:root.layout-tablet #bar .ws-item button { line-height: var(--tab-target); }
+:root.layout-tablet #bar .ws-item .ws-chip { padding-left: .833rem; }
+:root.layout-tablet #bar .tab-item > :not(.close):not(.attn) { padding-right: .667rem; }
+
+/* ---- the pane header: a 44 px strip with 44 px targets ----------------------------------------------------------------------------- */
+
+/* The strip's two lines (the hairline below it and the focus line above it) move from borders to lines drawn over its edges, so the
+   controls inside it have the whole 44 px and none of it is lost to a border. Forced colours replace backgrounds, so they are named. */
+:root.layout-tablet .panehead { border-top-width: 0; border-bottom-width: 0; }
+:root.layout-tablet .panehead::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1px; background: var(--hw-line); pointer-events: none;
+}
+:root.layout-tablet .panehead.focus-line::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 0; height: var(--hw-focus-w); background: var(--hw-rose); pointer-events: none;
+}
+:root.layout-tablet .ph-close { min-width: var(--tab-target); min-height: var(--tab-target); margin-right: -.667rem; padding: 0; text-align: center; }
+:root.layout-tablet .ph-close::before { line-height: var(--tab-target); }
+/* The name is the edit target (a double tap renames): the strip's full height and at least 44 px wide. */
+:root.layout-tablet .ph-title { align-self: stretch; min-width: var(--tab-target); min-height: var(--tab-target); line-height: var(--tab-target); }
+
+/* ---- dividers: 1 px line, 24 px touch area ------------------------------------------------------------------------------------------- */
+
+/* A finger on the area moves the divider and never scrolls or zooms the page. The area's size is set by overlay.ts; the line stays 1 px. */
+:root.layout-tablet .divider { touch-action: none; -webkit-tap-highlight-color: transparent; }
+:root.layout-tablet .divider.row::after { width: 1px; }
+:root.layout-tablet .divider.column::after { height: 1px; }
+/* No pointer rests on a tablet, so the rose of a hover would stay after a tap: the rose belongs to the drag (the area under the finger). */
+:root.layout-tablet .divider:hover::after { background: var(--hw-line, var(--hw-edge)); }
+:root.layout-tablet .divider:active::after { background: var(--hw-rose); }
+
+/* ---- forced colours --------------------------------------------------------------------------------------------------------------- */
+
+@media (forced-colors: active) {
+  :root.layout-tablet .divider::after { background: none; box-sizing: border-box; }
+  :root.layout-tablet .divider.row::after { border-left: 1px solid CanvasText; }
+  :root.layout-tablet .divider.column::after { border-top: 1px solid CanvasText; }
+  :root.layout-tablet .divider:active::after { border-color: Highlight; }
+  :root.layout-tablet .panehead::after { background: CanvasText; }
+  :root.layout-tablet .panehead.focus-line::before { background: Highlight; }
+}

@@ -12,6 +12,7 @@ import { visibleMatches, visibleSpans } from "./frames.js";
 import { dividerRect, gridRect, paneRect, ratioAt } from "./geometry.js";
 import { initPaneHeads, renderPaneHeads } from "./panehead.js";
 import { state } from "./state.js";
+import { dividerHit, initTablet, onTabletChange, tabletLayout } from "./tablet.js";
 import type { Divider, View } from "./types.js";
 
 const root = document.getElementById("overlay") as HTMLDivElement;
@@ -32,6 +33,9 @@ export function initOverlay(apply: (v: View) => void): void {
 }
 
 initPaneHeads(headLayer);
+// The tablet's divider is wider to touch: place the dividers again when the layout class changes.
+initTablet();
+onTabletChange(() => syncDividers(state.view));
 
 // ---- divider drag -------------------------------------------------------------------------------
 
@@ -141,7 +145,7 @@ function syncDividers(view: View | null): void {
     }
     const cls = `divider ${d.axis === "Row" ? "row" : "column"}`;
     if (node.className !== cls) node.className = cls;
-    setRect(node, dividerRect(state.metrics, d));
+    setRect(node, dividerRect(state.metrics, d, dividerHit(tabletLayout())));
   }
   for (const [split, node] of dividers) {
     if (live.has(split)) continue;
