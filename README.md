@@ -183,7 +183,7 @@ asks. The files under `packaging/flatpak/` are references for the owner to read,
 ## Build from source
 
 macOS on Apple Silicon, Windows and Linux are the verified platforms; the steps below are for macOS, the others are in
-[docs/build-windows.md](docs/build-windows.md) and [docs/build-linux.md](docs/build-linux.md). You need Rust, Node and **Zig 0.17.0 exactly**, because
+[docs/build-windows.md](docs/build-windows.md) and [docs/build-linux.md](docs/build-linux.md). You need Rust, Node and **Zig 0.17.1 exactly**, because
 the pinned `libghostty-vt` (Ghostty's `build.zig.zon` says `minimum_zig_version = "0.17.0"`) is built with that Zig. On a Mac the Swift toolchain (Xcode or the Command Line Tools) is also needed
 for the bridge of the on-device model, and the model itself needs the Xcode 26 SDK; with an older SDK the app builds without
 it.

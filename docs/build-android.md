@@ -49,10 +49,10 @@ act: an agent or a script must not accept them for you.
    rustup target add aarch64-linux-android
    ```
 
-6. **Zig stays 0.17.0 exactly**, as in [building.md](building.md): the terminal engine is built by Ghostty's own build script for
+6. **Zig stays 0.17.1 exactly**, as in [building.md](building.md): the terminal engine is built by Ghostty's own build script for
    Android too. Homebrew's `zig@0.17` formula has since moved on to 0.17.1, so the check fails on a machine that only has that
-   one. Unpack 0.17.0 to `$HOME/.holzwave/zig-0.17.0` (the steps and the checksum source are in
-   [build-linux.md](build-linux.md#zig-0170-exactly); on a Mac the archive is `zig-aarch64-macos-0.17.0.tar.xz`), which
+   one. Unpack 0.17.1 to `$HOME/.holzwave/zig-0.17.1` (the steps and the checksum source are in
+   [build-linux.md](build-linux.md#zig-0170-exactly); on a Mac the archive is `zig-aarch64-macos-0.17.1.tar.xz`), which
    `scripts/env.sh` puts first on `PATH`.
 
 Only the vendors' own sites are the place to get these (developer.android.com, the SDK manager's own repository, Homebrew's
@@ -92,7 +92,7 @@ The check prints the paths it resolved, then one line per item:
 
 What it requires: the JDK major version (21), the NDK revision exactly (`30.0.16248370`), the directories
 `platforms/android-37.0` and `build-tools/37.0.0`, platform-tools and the emulator at least at the pinned minimum, `sdkmanager`
-present, the Rust target `aarch64-linux-android` and Zig exactly 0.17.0. The last line is `android-env: ok` only when nothing
+present, the Rust target `aarch64-linux-android` and Zig exactly 0.17.1. The last line is `android-env: ok` only when nothing
 failed. **The check only reads** (`java -version`, `rustup target list --installed`, `zig version`, `adb version` and the
 `source.properties` files of the SDK packages): it never runs `sdkmanager --install`, `rustup target add`, `brew` or a download.
 

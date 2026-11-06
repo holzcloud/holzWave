@@ -10,7 +10,7 @@ of the measurements (Part 11). All of it runs locally; nothing here needs GitHub
 ## Part 1: run everything locally
 
 ```sh
-. scripts/env.sh                      # Rust stable and Zig 0.17 on PATH (the pinned engine needs exactly 0.17.0)
+. scripts/env.sh                      # Rust stable and Zig 0.17 on PATH (the pinned engine needs exactly 0.17.1)
 npm --prefix app ci                   # once: typescript, the Tauri CLI and playwright-core, nothing else
 (cd app && npx playwright-core install webkit chromium)   # once: the two browsers of the browser tests, cached
 

@@ -12,10 +12,10 @@ author has no code-signing certificate (the reason is in [signing.md](signing.md
 
 ## Rules of this build
 
-- **Zig is exactly 0.17.0.** The pinned Ghostty commit builds the terminal engine with its own `build.zig`, and its
+- **Zig is exactly 0.17.1.** The pinned Ghostty commit builds the terminal engine with its own `build.zig`, and its
   `build.zig.zon` says `minimum_zig_version = "0.17.0"` (the commit before the pin needed 0.16.0, so the version moved
   with the pin). `winget`, Scoop, Chocolatey and every other package manager hand out the newest Zig, which will not stay
-  0.17.0, so none of them is used: `scripts/env.ps1` installs and checks the exact version.
+  0.17.1, so none of them is used: `scripts/env.ps1` installs and checks the exact version.
 - **Everything else is the newest version**: Rust stable, Node, npm, git, Visual Studio Build Tools.
 - **Build only locally**, on your own machine.
 - x64 is the build that has been run. `scripts\release-windows.ps1 -Arch arm64` can build a Windows ARM64 installer
@@ -30,7 +30,7 @@ author has no code-signing certificate (the reason is in [signing.md](signing.md
 | Rust stable with the **MSVC** host | From <https://rustup.rs>; the host triple must be `x86_64-pc-windows-msvc` (the default on Windows). A GNU toolchain cannot link the engine. `rustup update` keeps it current. |
 | Node 26 or newer, with npm | <https://nodejs.org>. Used for the page (TypeScript) and the Tauri CLI. |
 | git | <https://git-scm.com>. The engine's build clones Ghostty at the pinned commit the first time. |
-| Zig **0.17.0** | Installed by `scripts\env.ps1 -InstallZig` below, never by a package manager. |
+| Zig **0.17.1** | Installed by `scripts\env.ps1 -InstallZig` below, never by a package manager. |
 | For the ARM64 build only: the Visual Studio component **MSVC ARM64/ARM64EC build tools** and the Rust target `aarch64-pc-windows-msvc` | Tick the individual component with the id `Microsoft.VisualStudio.Component.VC.Tools.ARM64` in the Visual Studio Installer (the id is the authority, the display name changes between releases), then `rustup target add aarch64-pc-windows-msvc`. The build host stays an x64 machine with the MSVC host triple; `scripts\env.ps1` checks the component when `HOLZWAVE_WINDOWS_ARCH` is `arm64`. Building on an ARM64 Windows host was not considered. |
 | WebView2 Evergreen runtime | Already on current Windows 10 and Windows 11. The installer downloads its bootstrapper when the runtime is missing, which needs the network at install time. |
 | Network on the first build | Cloning Ghostty and fetching its Zig packages (some come from codeberg.org). Later builds reuse what is cached. |
@@ -59,7 +59,7 @@ cd C:\src\holzWave
 ### 2. Check and set up the environment
 
 ```powershell
-.\scripts\env.ps1 -InstallZig      # once: downloads Zig 0.17.0, verifies it, unpacks it to $HOME\.holzwave\zig-0.17.0
+.\scripts\env.ps1 -InstallZig      # once: downloads Zig 0.17.1, verifies it, unpacks it to $HOME\.holzwave\zig-0.17.1
 . .\scripts\env.ps1                # every new window: note the dot and the space in front
 ```
 
@@ -72,16 +72,16 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
 
 What `env.ps1` does, and does not do:
 
-- `-InstallZig` fetches the 0.17.0 archive for your machine from ziglang.org, compares its sha256 with the value in the
+- `-InstallZig` fetches the 0.17.1 archive for your machine from ziglang.org, compares its sha256 with the value in the
   published index at <https://ziglang.org/download/index.json> **before anything is unpacked**, and stops on a mismatch.
-  It overwrites nothing: if `$HOME\.holzwave\zig-0.17.0` exists, it says so and leaves it.
-- Sourced (`. .\scripts\env.ps1`), it finds Zig in `$env:HOLZWAVE_ZIG_DIR` or in `$HOME\.holzwave\zig-0.17.0`, accepts
-  only exactly `0.17.0`, puts it first on `PATH` of this window and prints `zig version`. It checks that Rust's host is
+  It overwrites nothing: if `$HOME\.holzwave\zig-0.17.1` exists, it says so and leaves it.
+- Sourced (`. .\scripts\env.ps1`), it finds Zig in `$env:HOLZWAVE_ZIG_DIR` or in `$HOME\.holzwave\zig-0.17.1`, accepts
+  only exactly `0.17.1`, puts it first on `PATH` of this window and prints `zig version`. It checks that Rust's host is
   `x86_64-pc-windows-msvc` and that `vswhere.exe` finds the Visual Studio C++ tools, and prints what it found: Zig,
   Rust, Cargo, Node, npm, git and Visual Studio. It changes nothing but this window's `PATH`, and it never closes your
   window.
 - It ends with `env.ps1: ready` when the three hard requirements (Zig, Rust host, C++ tools) are met. Each missing one
-  gets one line that says what to install. If a Zig other than 0.17.0 is on your `PATH`, it does no harm: the checked one
+  gets one line that says what to install. If a Zig other than 0.17.1 is on your `PATH`, it does no harm: the checked one
   is put in front of it.
 
 ### 3. Install the page's tools and build the page
@@ -181,7 +181,7 @@ No release is made by this guide.
 `rustup target add` line when it is missing), builds `wsh.exe` for that target, runs the Tauri build with
 `--target aarch64-pc-windows-msvc` and names the result `holzWave_<version>_arm64-setup.exe` with its `.sha256` file, under
 `target\release\bundle\release`. The terminal engine is built through Zig for `aarch64-windows-msvc` (the engine's build
-script maps the Rust target to it), and the Zig 0.17.0 `aarch64-windows` archive is already in the table of `env.ps1`, so
+script maps the Rust target to it), and the Zig 0.17.1 `aarch64-windows` archive is already in the table of `env.ps1`, so
 nothing new is downloaded. The Linux `wsh` resources that the installer carries are the same on both architectures.
 
 The app is a native ARM64 program. The NSIS installer program itself is an x86 program, which Windows on ARM runs under
@@ -309,9 +309,10 @@ this order from a clean user account; the installer, its install folder, SmartSc
 bootstrapper and the ConPTY tests. The author has installed and run the preview installer on a real Windows machine
 (rows W14 and W1 to W13 are the record); the two `winget` ids and the long-path advice are still from memory.
 
-**Not covered since the move to Zig 0.17.0 (2026-11-01):** that record and the `pwsh` row above were made with Zig 0.16.0 and
+**Not covered since the move to Zig 0.17.0 (2026-11-01), and not covered for 0.17.1 either:** that record and the `pwsh` row above were made with Zig 0.16.0 and
 were not repeated. No Windows host and no `pwsh` were available for the move. What was checked: the index entry of 0.17.0
 for `x86_64-windows` and `aarch64-windows`, the sha256 of both downloaded `.zip` files against it, and the folder name inside
 (`zig-<key>-0.17.0`, which `env.ps1` expects). Not checked: `env.ps1 -InstallZig` and the sourced `env.ps1` on Windows, and the
 MSVC build of the terminal engine with Zig 0.17.0. The GNU-ABI cross build (`scripts/cross-check.sh`) is the only Windows build
-that was run with Zig 0.17.0, see the result in [test-plan.md](test-plan.md) and the plan summary.
+that was run with Zig 0.17.0, see the result in [test-plan.md](test-plan.md) and the plan summary. The move to 0.17.1 (2026-11-06) was not run on Windows at all; `env.ps1`
+reads the checksum from the published index, so it holds no checksum of its own.

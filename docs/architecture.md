@@ -957,7 +957,7 @@ All of it runs locally; GitHub builds only on request.
 
 ## 13. Build and release
 
-- Toolchain: Rust stable, Zig 0.17.0 for `libghostty-vt` (the pinned Ghostty commit, 521cf2c, requires it in `build.zig.zon`), Node and `tsc` for
+- Toolchain: Rust stable, Zig 0.17.1 for `libghostty-vt` (the pinned Ghostty commit, 521cf2c, requires it in `build.zig.zon`), Node and `tsc` for
   the frontend. `libghostty-rs` is pinned by git revision. On a Mac the Swift toolchain (Xcode or the Command Line Tools)
   builds the Apple bridge crate with the workspace; the Foundation Models code is compiled only when the installed SDK has
   the framework (Xcode 26 or newer), and an older SDK builds the app without the model ([building.md](building.md)).
@@ -965,7 +965,7 @@ All of it runs locally; GitHub builds only on request.
 - Local build and signing first; one GitHub build only when asked.
 - Windows builds an unsigned per-user NSIS installer, Linux a deb, an rpm and an AppImage (`scripts/sign-linux.sh` signs the
   three with minisign and `scripts/verify-release.sh` checks them; see [signing.md](signing.md)), each on the owner's own machine
-  ([build-windows.md](build-windows.md), [build-linux.md](build-linux.md)); Zig is exactly 0.17.0 and `scripts/env.sh` and
+  ([build-windows.md](build-windows.md), [build-linux.md](build-linux.md)); Zig is exactly 0.17.1 and `scripts/env.sh` and
   `scripts/env.ps1` find it. No guide builds on GitHub, and no tag or release is made by them; the one GitHub build is the manual `linux-packages.yml` workflow for the Linux packages of `0.0.1-beta2`.
 - The server is one image built from `packaging/docker/Dockerfile` in three stages (the page with Node, the binaries with
   Zig and Rust, a slim runtime with `tini`), pinned by tag and digest. It runs as 10001 with a read-only root file system,

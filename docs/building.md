@@ -4,7 +4,7 @@ Preview installers exist for macOS, Windows and Linux (see Releases below); the 
 
 ```sh
 brew install rustup zig@0.17 node
-export PATH="/opt/homebrew/opt/zig@0.17/bin:$PATH"   # Zig 0.17.0 exactly; see below
+export PATH="/opt/homebrew/opt/zig@0.17/bin:$PATH"   # Zig 0.17.1 exactly (what zig@0.17 installs); see below
 rustup default stable
 
 git clone https://github.com/holzcloud/holzwave
@@ -13,9 +13,10 @@ npm --prefix app ci && npm --prefix app run build    # the frontend, compiled by
 cargo run -p holzwave-app                            # builds libghostty-vt with Zig, then starts the app
 ```
 
-**Why Zig 0.17.0 exactly?** `libghostty-vt` is built by Ghostty's own `build.zig`; the pinned commit (521cf2c, through
+**Why Zig 0.17.1 exactly?** `libghostty-vt` is built by Ghostty's own `build.zig`; the pinned commit (521cf2c, through
 `libghostty-rs` 575ed6b) declares `minimum_zig_version = "0.17.0"` in its `build.zig.zon`, and the commit that was pinned
-before needed 0.16.0 (it fails on 0.17). A later Zig is not tried: every Zig release has so far changed the build API. The
+before needed 0.16.0 (it fails on 0.17). We pin the patch release 0.17.1, which is what `brew install zig@0.17` installs now
+(the engine builds and the core tests pass with it on a Mac); 0.17.0 was the pin before and is refused by the scripts. A later Zig is not tried: every Zig release has so far changed the build API. The
 crate is pinned by git revision for the same reason, and the Zig version moves only together with that pin.
 
 Run the tests and the renderer benchmark locally:
@@ -35,7 +36,7 @@ Windows and Linux are built from source as described in [build-windows.md](build
 
 The web build ([server.md](server.md)) is one image built from `packaging/docker/Dockerfile` in three stages: the page with
 Node, the binaries with Zig and Rust, and a slim Debian runtime. Everything it fetches is pinned: the base images by tag and
-digest (Node 26.11.1 for the page, Debian trixie for the build and the runtime), Zig by the build argument `ZIG_VERSION` (0.17.0,
+digest (Node 26.11.1 for the page, Debian trixie for the build and the runtime), Zig by the build argument `ZIG_VERSION` (0.17.1,
 with the checksum from ziglang.org's index verified before unpacking), rustup 1.29.2 with Rust 1.99.1, and the page's
 packages with `npm ci --ignore-scripts`. From the repository root:
 

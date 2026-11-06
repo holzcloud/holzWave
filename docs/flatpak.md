@@ -25,7 +25,7 @@ update here. The Linux signatures described in [signing.md](signing.md) cover th
 
 | File | What |
 |---|---|
-| `packaging/flatpak/ch.holzcloud.holzwave.yml` | The manifest: GNOME 51 runtime and SDK (org.freedesktop 26.08), the Rust and Node 26 SDK extensions, Zig 0.17.0 as a build tool, the nine permissions with their reasons in comments, and the build of this repository inside the SDK with no network in any build step |
+| `packaging/flatpak/ch.holzcloud.holzwave.yml` | The manifest: GNOME 51 runtime and SDK (org.freedesktop 26.08), the Rust and Node 26 SDK extensions, Zig 0.17.1 as a build tool, the nine permissions with their reasons in comments, and the build of this repository inside the SDK with no network in any build step |
 | `packaging/flatpak/ch.holzcloud.holzwave.metainfo.xml` | AppStream: name, developer `holzcloud.ch`, links, licence `GPL-3.0-only`, branding colours, release notes, and a description that says it is a beta, which permissions it asks for and what is untested. It has no screenshots, because none exist |
 | `packaging/flatpak/ch.holzcloud.holzwave.desktop` | The desktop file (`Categories=System;TerminalEmulator;`) |
 | `packaging/flatpak/generated/` | Tool output, never edited by hand: the Zig packages of the terminal engine, the Cargo crates and the npm packages as hashed sources, the Ghostty commit, the one cargo command of the build, and the pin of the tool that made them |
@@ -237,7 +237,7 @@ Checked (Docker Desktop, Ubuntu 26.04, arm64):
 
 - `sh scripts/build-flatpak.sh --check`: `flatpak-builder --show-manifest` reads the manifest without warning,
   `appstreamcli validate --no-net` and `desktop-file-validate` pass.
-- `sh scripts/build-flatpak.sh --container-build`: **the manifest built** in a privileged Docker container with Zig 0.17.0 and
+- `sh scripts/build-flatpak.sh --container-build`: **the manifest built** in a privileged Docker container with Zig 0.17.1 and
   no network in any build step (the run printed `flatpak-container-build: offline`). It installed the GNOME 51 runtime, the SDK
   and the two SDK extensions from Flathub, built the release app from 765 hashed crates, 115 npm packages and the Zig packages,
   removed Zig from the result, composed AppStream and exported the files, and `ldd` found every library of the binary in the
