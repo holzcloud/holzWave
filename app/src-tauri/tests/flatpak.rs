@@ -21,6 +21,7 @@ const SCRIPT: &str = include_str!("../../../scripts/build-flatpak.sh");
 const TAURI_CONF: &str = include_str!("../tauri.conf.json");
 const FLATPAK_PAGE: &str = include_str!("../../../docs/flatpak.md");
 const TEST_PLAN: &str = include_str!("../../../docs/test-plan.md");
+const SUBMISSION_PAGE: &str = include_str!("../../../docs/flathub-submission.md");
 const GENERATOR_PIN: &str = include_str!("../../../packaging/flatpak/generated/generator-pin.txt");
 
 const HOST_PERMISSION: &str = "--talk-name=org.freedesktop.Flatpak";
@@ -1099,4 +1100,117 @@ fn the_test_plan_has_the_seven_flatpak_rows_and_every_result_is_empty() {
     }
     // Neither the rows nor the page they belong to carry a plan label.
     assert_eq!(planning_labels(TEST_PLAN.split("## Part 12").nth(1).expect("part 12")), Vec::<String>::new());
+}
+
+// ---- the owner's checklist for a Flathub submission --------------------------------------------------------------------------
+
+#[test]
+fn the_checklist_says_first_that_the_owner_writes_everything_by_hand_and_holds_no_pull_request_text() {
+    let head = squashed(&SUBMISSION_PAGE.lines().take(8).collect::<Vec<_>>().join(" "));
+    for phrase in [
+        "status: not submitted",
+        "nothing on this page is a submission",
+        "the owner writes the flathub manifest, the metainfo and the pull request by hand",
+        "an agent must not open or automate the submission",
+        "the files under `packaging/flatpak/` are references",
+        "this page contains no text for the pull request",
+    ] {
+        assert!(head.contains(phrase), "the first lines of docs/flathub-submission.md do not say {phrase:?}: {head}");
+    }
+    // It is a list of steps with reasons: no block meant to be pasted (no fenced block, no quoted draft of a description or a
+    // commit message, no `Add ch.holzcloud...` title) and no pull request template of its own.
+    assert!(!SUBMISSION_PAGE.contains("```"), "a fenced block: the page holds steps, not text to paste");
+    let text = squashed(SUBMISSION_PAGE);
+    for pasted in ["add ch.holzcloud.holzwave", "## description", "### description", "this pull request adds", "i have read"] {
+        assert!(!text.contains(pasted), "the checklist holds text that looks meant for a submission: {pasted:?}");
+    }
+}
+
+#[test]
+fn the_checklist_lists_the_steps_in_order() {
+    // A step is its numbered line and the indented lines that continue it.
+    let mut steps: Vec<String> = Vec::new();
+    for line in SUBMISSION_PAGE.lines().skip_while(|l| *l != "## The steps, in order").skip(1).take_while(|l| !l.starts_with("## ")) {
+        if line.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            steps.push(line.to_owned());
+        } else if line.starts_with(' ') {
+            let last = steps.last_mut().expect("a continuation follows a step");
+            last.push(' ');
+            last.push_str(line);
+        }
+    }
+    let steps: Vec<String> = steps.iter().map(|step| squashed(step)).collect();
+    let expected = [
+        ("1. **run the flatpak rows on a linux machine.**", "fpk1 to fpk7"),
+        ("2. **take real screenshots.**", "docs/design/"),
+        ("3. **cut the release, and set the tag and the screenshot addresses.**", "no release tag exists"),
+        ("4. **prove the domain.**", "/.well-known/org.flathub.verifiedapps.txt"),
+        ("5. **decide the beta flow.**", "flathub-beta"),
+        ("6. **fork and open the pull request.**", "`new-pr`"),
+        ("7. **explain each permission, in your own words.**", "the secret service name"),
+        ("8. **read the linter's warning for the host permission.**", "finish-args-flatpak-spawn-access"),
+        ("9. **disclose the ai use.**", "readme"),
+        ("10. **answer the reviewers.**", "volunteers"),
+        ("11. **know the fallbacks before you start**", "most likely to ask"),
+    ];
+    assert_eq!(steps.len(), expected.len(), "the numbered steps: {steps:?}");
+    for (step, (start, keyword)) in steps.iter().zip(expected) {
+        assert!(step.starts_with(start), "step out of order or missing: wanted {start:?}, found {step:?}");
+        assert!(step.contains(keyword), "the step {start:?} does not say {keyword:?}");
+    }
+    // The domain step is the owner's, and says where the token goes and that it is free; the permission topics are topics.
+    let domain = &steps[3];
+    for phrase in ["holzcloud.ch", "dns txt record", "the owner's step", "an agent cannot do it"] {
+        assert!(domain.contains(phrase), "the domain step does not say {phrase:?}");
+    }
+    let permissions = &steps[6];
+    for topic in ["the host", "the home folder", "the network", "the ssh agent socket", "the secret service name"] {
+        assert!(permissions.contains(topic), "the permission step does not name the topic {topic:?}");
+    }
+}
+
+#[test]
+fn the_checklist_states_the_three_designs_in_the_order_they_are_tried_and_the_first_is_current() {
+    let section = a_section(SUBMISSION_PAGE, "## The three designs, in the order they are tried");
+    let text = squashed(&section);
+    let a = text.find("1. **design a (the current one)").expect("design A first");
+    let b = text.find("2. **design b: no permission, a documented override.**").expect("design B second");
+    let c = text.find("3. **design c: the setting only outside flathub.**").expect("design C third");
+    assert!(a < b && b < c, "the designs are in the order A, B, C");
+    for phrase in ["the permission is shipped, a setting decides", "what it costs the person", "a sandbox-only terminal"] {
+        assert!(text.contains(phrase), "the designs do not say {phrase:?}");
+    }
+    assert_eq!(text.matches("what it costs the person").count(), 3, "each design says what it costs the person");
+}
+
+#[test]
+fn the_checklist_says_what_is_known_and_unknown_about_acceptance() {
+    let section = squashed(&a_section(SUBMISSION_PAGE, "## What is known and what is not"));
+    for terminal in ["konsole", "wezterm", "blackbox", "ptyxis", "contour"] {
+        assert!(section.contains(terminal), "the terminal {terminal} is not named");
+    }
+    for phrase in [
+        "five terminals on flathub ship the permission",
+        "read on 2026-11-05",
+        "nobody has asked the maintainers",
+        "a listing that starts as a beta",
+        "a zig toolchain archive",
+        "native npm packages",
+        "is an opinion of the person who answered",
+        "maturity is the reviewers' call",
+        "single-maintainer beta",
+    ] {
+        assert!(section.contains(phrase), "the known-and-unknown section does not say {phrase:?}");
+    }
+    // The AI rule, and that the page links the README disclosure and the references.
+    let page = squashed(SUBMISSION_PAGE);
+    for phrase in ["must not contain ai-generated or ai-assisted content", "[readme.md](../readme.md)", "flatpak.md", "unmodified output of a tool"] {
+        assert!(page.contains(phrase), "docs/flathub-submission.md does not say {phrase:?}");
+    }
+}
+
+#[test]
+fn the_checklist_has_no_label_of_the_planning_tree_and_no_german() {
+    assert_eq!(planning_labels(SUBMISSION_PAGE), Vec::<String>::new(), "labels of the private planning tree in docs/flathub-submission.md");
+    assert!(!looks_german(SUBMISSION_PAGE), "docs/flathub-submission.md is English only");
 }
