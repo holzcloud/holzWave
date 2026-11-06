@@ -317,7 +317,7 @@ interface Comparable {
 }
 
 /**
- * `text` or an address in the form that is compared: no spacers, trimmed, a leading `http://`, `https://` or `mailto:` taken off and
+ * `text` or an address in the form that is compared: no spacers, trimmed, a leading web or mail scheme (`http`, `https` or `mailto`) taken off and
  * kept as the scheme, no trailing `/`, the host (or the mail domain) in lower case. A text is mail when it says `mailto:` or, with no
  * scheme, has the shape of an address (`name@domain`).
  */
@@ -334,8 +334,8 @@ function comparable(text: string): Comparable {
 
 /**
  * Whether the visible text of a link and its target say different things, so that a click has to ask first. They are equal after
- * trimming blanks, taking off one trailing `/` and lower-casing the host. A scheme the text states (`http://`, `https://` or
- * `mailto:`) must be the target's own, so `https://` over an `http://` target asks, and so does `mailto:` over a web address; a text
+ * trimming blanks, taking off one trailing `/` and lower-casing the host. A scheme the text states (`http`, `https` or
+ * `mailto`) must be the target's own, so a secure scheme over a plain one asks, and so does a mail scheme over a web address; a text
  * that is mail-shaped is only equal to a mail target, and a web text is not equal to a mail target. A text with no scheme is compared
  * with the target after its scheme. A blank text differs from every target, and so does a text with another host or another path.
  */
