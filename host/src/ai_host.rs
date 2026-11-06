@@ -662,6 +662,26 @@ impl AiHost {
         Ok(status == Some(KeyStatus::Present))
     }
 
+    /// The fault `key` / `locked` when a send for `profile` would need a key that a locked store holds back, `None`
+    /// otherwise. A send returns at once and reads the key on the thread of the turn, so without this look the person
+    /// would only see a turn that ends in an error. The profile that is named is looked at alone (a provider that needs no
+    /// key, such as a local one, is not held back); with no profile named the chat's own pin applies and is not known
+    /// here, so any profile whose key the locked store holds back counts.
+    pub(crate) fn locked_for(&self, profile: Option<&str>) -> Option<AiFault> {
+        let (views, locked) = watching(|| self.service.profiles());
+        if !locked {
+            return None;
+        }
+        let held_back = |view: &ProfileView| {
+            [Some(view.key), view.gateway_key].into_iter().flatten().any(|status| status == KeyStatus::Unreadable)
+        };
+        let blocked = match profile.map(str::trim).filter(|id| !id.is_empty()) {
+            Some(id) => views.iter().any(|view| view.id == id && held_back(view)),
+            None => views.iter().any(held_back),
+        };
+        blocked.then(AiFault::locked)
+    }
+
     /// Tells the service the two settings it reads (`ai_local_only`, `ai_persist_context`). Call it at start and on
     /// every change of the settings; the effect (turns it stopped) is not needed by the shell.
     pub fn apply_settings(&self, settings: &Settings) {
@@ -908,7 +928,20 @@ impl AppCore {
         model: Option<String>,
     ) -> Result<TicketView, AiFault> {
         self.open_pane(pane)?;
+        self.refuse_if_vault_locked(profile.as_deref())?;
         self.ai().send(conversation, text, pane, profile, model)
+    }
+
+    /// The fault `key` / `locked` for a send while the host's vault does not give its secrets (locked, or lost: the vault
+    /// answers both with the locked error) and the profile needs its key. A host with no vault, or with an unlocked one,
+    /// is never asked anything: nothing about the send changes there.
+    fn refuse_if_vault_locked(&self, profile: Option<&str>) -> Result<(), AiFault> {
+        use holzwave_core::vault::VaultState;
+        let locked = self.host().vault().is_some_and(|vault| matches!(vault.state(), VaultState::Locked | VaultState::Lost));
+        match locked.then(|| self.ai().locked_for(profile)).flatten() {
+            Some(fault) => Err(fault),
+            None => Ok(()),
+        }
     }
 
     /// The send of the command: the typed text alone when `offer` and `picked` are both left out, with the items of an
@@ -945,6 +978,7 @@ impl AppCore {
         picked: Vec<u32>,
     ) -> Result<TicketView, AiFault> {
         self.open_pane(pane)?;
+        self.refuse_if_vault_locked(profile.as_deref())?;
         self.ai().send_with_offer(conversation, text, pane, profile, model, offer, picked)
     }
 
