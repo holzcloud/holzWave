@@ -5,6 +5,7 @@
 #   .\scripts\release-windows.ps1 -Version 0.0.1-alpha1 -Upload    also upload the installer and its checksum to the
 #                                                                  release v0.0.1-alpha1 (it must exist: the macOS
 #                                                                  script creates it)
+#   .\scripts\release-windows.ps1 -Version 0.0.1-alpha1 -Arch arm64   build the Windows ARM64 installer instead
 #
 # -Version must equal the version of app/src-tauri/tauri.conf.json. The installer is NSIS, per user, unsigned (the
 # author has no code-signing certificate, see docs/signing.md), so Windows SmartScreen warns on the first start ("More
@@ -19,13 +20,22 @@
 # installer is built without the Linux resources and the script says so. Afterwards the script checks that wsh.exe is
 # beside holzwave-app.exe and is the file it built.
 #
+# -Arch: x64 (the default) builds as always. arm64 builds a native Windows ARM64 app and installer for the Rust target
+# aarch64-pc-windows-msvc (the engine build maps it to Zig's aarch64-windows-msvc), with wsh.exe for that target, and names
+# the installer holzWave_<version>_arm64-setup.exe. The NSIS installer program itself stays an x86 program that Windows
+# ARM64 runs under emulation. It needs the Rust target (rustup target add aarch64-pc-windows-msvc) and the Visual Studio
+# component "MSVC ARM64 build tools" (env.ps1 checks it when HOLZWAVE_WINDOWS_ARCH is arm64, which this script sets). The
+# ARM64 build has never been run: no ARM64 Windows machine was available, so whether it builds, installs or starts is
+# untried. The Linux wsh resources do not depend on the architecture.
+#
 # Written on a Mac without a Windows host: the parser and the pure checks are tried there; the build itself is the
 # first thing row W12 of docs/test-plan.md runs. It works in Windows PowerShell 5.1 and in PowerShell 7.
 
 param(
     [Parameter(Mandatory = $true)][string]$Version,
     [switch]$Upload,
-    [string]$LinuxWsh
+    [string]$LinuxWsh,
+    [ValidateSet('x64', 'arm64')][string]$Arch = 'x64'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,7 +59,18 @@ if (git status --porcelain) { Fail 'the working tree is not clean' }
 git fetch -q origin main
 if ((git rev-parse HEAD) -ne (git rev-parse origin/main)) { Fail 'main is not the same commit as origin/main: pull first' }
 
+# The Rust target of the installer. The environment check reads the architecture from the variable, because a script that is
+# sourced with a dot must not take a parameter that overwrites one of ours.
+if ($Arch -eq 'arm64') { $triple = 'aarch64-pc-windows-msvc' } else { $triple = 'x86_64-pc-windows-msvc' }
+$env:HOLZWAVE_WINDOWS_ARCH = $Arch
+
 . (Join-Path $PSScriptRoot 'env.ps1')   # puts Zig 0.17.0 on the PATH for this session, checks MSVC Rust and VS tools
+Remove-Item Env:\HOLZWAVE_WINDOWS_ARCH -ErrorAction SilentlyContinue   # the check has read it; do not leave it in the session
+
+if ($Arch -eq 'arm64') {
+    $installed = @(rustup target list --installed)
+    if ($installed -notcontains $triple) { Fail "the Rust target $triple is not installed: run  rustup target add $triple" }
+}
 
 npm --prefix app ci
 if ($LASTEXITCODE -ne 0) { Fail 'npm ci failed' }
@@ -59,10 +80,10 @@ if ($LASTEXITCODE -ne 0) { Fail 'the page build failed' }
 # wsh.exe is the sidecar, built here from this commit; the Linux builds come from -LinuxWsh.
 $binaries = Join-Path $root 'app/src-tauri/binaries'
 New-Item -ItemType Directory -Force $binaries | Out-Null
-cargo build --locked --release -p wsh --target x86_64-pc-windows-msvc
+cargo build --locked --release -p wsh --target $triple
 if ($LASTEXITCODE -ne 0) { Fail 'the wsh build failed' }
-$sidecar = Join-Path $binaries 'wsh-x86_64-pc-windows-msvc.exe'
-Copy-Item (Join-Path $root 'target/x86_64-pc-windows-msvc/release/wsh.exe') $sidecar -Force
+$sidecar = Join-Path $binaries "wsh-$triple.exe"
+Copy-Item (Join-Path $root "target/$triple/release/wsh.exe") $sidecar -Force
 $overlays = @('--config', 'src-tauri/tauri.wsh.conf.json')
 if ($LinuxWsh) {
     foreach ($arch in 'x86_64', 'aarch64') {
@@ -78,18 +99,26 @@ if ($LinuxWsh) {
     $overlays += @('--config', $noLinux)
     Write-Host 'release-windows: no -LinuxWsh given: the installer carries wsh.exe but NOT the Linux wsh builds (the app cannot install wsh on a remote host from this installer)'
 }
-npm --prefix app run tauri -- build --bundles nsis @overlays
+# x64 builds for the host target as always (output under target/release); arm64 passes the target, and Cargo then puts
+# everything under target/<triple>/release.
+$releaseDir = Join-Path $root 'target/release'
+$targetArgs = @()
+if ($Arch -eq 'arm64') {
+    $releaseDir = Join-Path $root "target/$triple/release"
+    $targetArgs = @('--target', $triple)
+}
+npm --prefix app run tauri -- build --bundles nsis @targetArgs @overlays
 if ($LASTEXITCODE -ne 0) { Fail 'tauri build failed' }
 git checkout -- app/src-tauri/Cargo.toml   # the Tauri CLI rewrites feature lists there; the commit stays as it is
 
-$found = Get-ChildItem (Join-Path $root 'target/release/bundle/nsis') -Filter '*-setup.exe' |
+$found = Get-ChildItem (Join-Path $releaseDir 'bundle/nsis') -Filter '*-setup.exe' |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not $found) { Fail 'no *-setup.exe under target/release/bundle/nsis' }
+if (-not $found) { Fail "no *-setup.exe under $releaseDir/bundle/nsis" }
 
 # The package holds the wsh that was built: wsh.exe sits beside holzwave-app.exe and is the sidecar (the bundler copies the
 # sidecar there at build time and puts the same file into the installer); with 7z at hand the installer listing says so too.
-$sideBySide = Join-Path $root 'target/release/wsh.exe'
-if (-not (Test-Path $sideBySide -PathType Leaf)) { Fail 'no wsh.exe beside holzwave-app.exe under target/release' }
+$sideBySide = Join-Path $releaseDir 'wsh.exe'
+if (-not (Test-Path $sideBySide -PathType Leaf)) { Fail "no wsh.exe beside holzwave-app.exe under $releaseDir" }
 if ((Get-FileHash -Algorithm SHA256 $sideBySide).Hash -ne (Get-FileHash -Algorithm SHA256 $sidecar).Hash) {
     Fail 'wsh.exe beside holzwave-app.exe is not the sidecar that was built'
 }
@@ -102,7 +131,7 @@ if ($sevenZip) {
     Write-Host 'release-windows: 7z is not on PATH: the installer content was not listed, only the build folder was checked'
 }
 
-$name = "holzWave_${Version}_x64-setup.exe"
+$name = "holzWave_${Version}_${Arch}-setup.exe"
 $out = Join-Path $root 'target/release/bundle/release'
 New-Item -ItemType Directory -Force $out | Out-Null
 $exe = Join-Path $out $name

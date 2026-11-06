@@ -12,6 +12,10 @@
 #   * checks that Rust's host triple is x86_64-pc-windows-msvc, because Zig cannot build the MSVC library from another
 #     host and a GNU toolchain cannot link it;
 #   * checks that the Visual Studio C++ tools exist (vswhere.exe), the workload "Desktop development with C++";
+#   * with HOLZWAVE_WINDOWS_ARCH=arm64 in the environment (scripts/release-windows.ps1 -Arch arm64 sets it) it also checks
+#     that the Visual Studio component "MSVC ARM64 build tools" is installed (vswhere, Microsoft.VisualStudio.Component.
+#     VC.Tools.ARM64) and says what to install when it is not. The default x64 checks do not change. It is an environment
+#     variable and not a parameter because a dot-sourced script's parameters overwrite the caller's variables;
 #   * prints the versions of what it found (Zig, Rust, Cargo, Node, npm, git, Visual Studio).
 #
 #   .\scripts\env.ps1 -InstallZig
@@ -224,6 +228,23 @@ function Find-HolzwaveVisualStudio {
     }
 }
 
+# Visual Studio (or Build Tools) with the MSVC ARM64 build tools (needed for -Arch arm64 only): the installation path, or
+# $null. Not tried on a machine that has it: there was no Windows host for this check.
+function Find-HolzwaveArm64Tools {
+    $programFiles = ${env:ProgramFiles(x86)}
+    if (-not $programFiles) { $programFiles = $env:ProgramFiles }
+    if (-not $programFiles) { return $null }
+    $vswhere = Join-Path $programFiles 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { return $null }
+    try {
+        $path = & $vswhere -products '*' -latest -requires 'Microsoft.VisualStudio.Component.VC.Tools.ARM64' -property installationPath 2>$null | Select-Object -First 1
+        if (-not $path) { return $null }
+        return [string]$path
+    } catch {
+        return $null
+    }
+}
+
 # The whole check. Returns the exit code: 0 everything the build needs was found, 1 something is missing, 2 not Windows.
 function Invoke-HolzwaveEnv([bool]$Install) {
     if (-not (Test-HolzwaveWindows)) {
@@ -268,6 +289,17 @@ function Invoke-HolzwaveEnv([bool]$Install) {
         $ok = $false
     }
 
+    if ($env:HOLZWAVE_WINDOWS_ARCH -eq 'arm64') {
+        $arm = Find-HolzwaveArm64Tools
+        if ($arm) {
+            Write-HolzwaveLine "Visual Studio MSVC ARM64 build tools ($arm)"
+        } else {
+            Write-HolzwaveLine 'the MSVC ARM64 build tools were not found: in the Visual Studio Installer add the individual component "MSVC ... C++ ARM64/ARM64EC build tools (Latest)" (id Microsoft.VisualStudio.Component.VC.Tools.ARM64); the ARM64 build needs it'
+            $ok = $false
+        }
+        Write-HolzwaveLine 'ARM64 build: also needed once: rustup target add aarch64-pc-windows-msvc'
+    }
+
     # Not part of the build's hard requirements here: a missing one is said, not a failure of the check.
     $node = Get-HolzwaveFirstLine node @('--version')
     if ($node) { Write-HolzwaveLine "node $node" } else { Write-HolzwaveLine 'node was not found (Node 26 or newer is needed for the page and the tests)' }
@@ -300,7 +332,7 @@ Remove-Item -Path Function:\Write-HolzwaveLine, Function:\Test-HolzwaveWindows, 
     Function:\Resolve-HolzwaveZigEntry, Function:\Test-HolzwaveSha256, Function:\Install-HolzwaveZig,
     Function:\Add-HolzwaveFirst, Function:\Add-HolzwaveIfMissing, Function:\Find-HolzwaveZig,
     Function:\Get-HolzwaveFirstLine, Function:\Get-HolzwaveRustHost, Function:\Find-HolzwaveVisualStudio,
-    Function:\Invoke-HolzwaveEnv -ErrorAction SilentlyContinue
+    Function:\Find-HolzwaveArm64Tools, Function:\Invoke-HolzwaveEnv -ErrorAction SilentlyContinue
 Remove-Variable -Name HolzwaveZigVersion, HolzwaveSourced, HolzwaveResult, InstallZig -ErrorAction SilentlyContinue
 if ($HolzwaveRun) { exit $HolzwaveExit }
 Remove-Variable -Name HolzwaveExit, HolzwaveRun -ErrorAction SilentlyContinue

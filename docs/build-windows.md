@@ -18,7 +18,8 @@ author has no code-signing certificate (the reason is in [signing.md](signing.md
   0.17.0, so none of them is used: `scripts/env.ps1` installs and checks the exact version.
 - **Everything else is the newest version**: Rust stable, Node, npm, git, Visual Studio Build Tools.
 - **Build only locally**, on your own machine.
-- x64 Windows only. ARM64 is not a 0.0.1 target.
+- x64 is the build that has been run. `scripts\release-windows.ps1 -Arch arm64` can build a Windows ARM64 installer
+  (see [The ARM64 build](#the-arm64-build-never-run)); that build was never run and its result is untried.
 
 ## What you need
 
@@ -30,6 +31,7 @@ author has no code-signing certificate (the reason is in [signing.md](signing.md
 | Node 26 or newer, with npm | <https://nodejs.org>. Used for the page (TypeScript) and the Tauri CLI. |
 | git | <https://git-scm.com>. The engine's build clones Ghostty at the pinned commit the first time. |
 | Zig **0.17.0** | Installed by `scripts\env.ps1 -InstallZig` below, never by a package manager. |
+| For the ARM64 build only: the Visual Studio component **MSVC ARM64/ARM64EC build tools** and the Rust target `aarch64-pc-windows-msvc` | Tick the individual component with the id `Microsoft.VisualStudio.Component.VC.Tools.ARM64` in the Visual Studio Installer (the id is the authority, the display name changes between releases), then `rustup target add aarch64-pc-windows-msvc`. The build host stays an x64 machine with the MSVC host triple; `scripts\env.ps1` checks the component when `HOLZWAVE_WINDOWS_ARCH` is `arm64`. Building on an ARM64 Windows host was not considered. |
 | WebView2 Evergreen runtime | Already on current Windows 10 and Windows 11. The installer downloads its bootstrapper when the runtime is missing, which needs the network at install time. |
 | Network on the first build | Cloning Ghostty and fetching its Zig packages (some come from codeberg.org). Later builds reuse what is cached. |
 
@@ -168,6 +170,24 @@ Get-FileHash -Algorithm SHA256 .\target\release\bundle\nsis\holzWave_0.0.1-beta2
 Publish the hash beside the file (on the release page when there is one). It says the download is whole, not who made it.
 No release is made by this guide.
 
+## The ARM64 build (never run)
+
+```powershell
+.\scripts\release-windows.ps1 -Version 0.0.1-beta2 -Arch arm64
+```
+
+`-Arch` takes `x64` (the default; the script does what it always did) or `arm64`. With `arm64` the script sets
+`HOLZWAVE_WINDOWS_ARCH=arm64` for the environment check, requires the Rust target `aarch64-pc-windows-msvc` (it stops with the
+`rustup target add` line when it is missing), builds `wsh.exe` for that target, runs the Tauri build with
+`--target aarch64-pc-windows-msvc` and names the result `holzWave_<version>_arm64-setup.exe` with its `.sha256` file, under
+`target\release\bundle\release`. The terminal engine is built through Zig for `aarch64-windows-msvc` (the engine's build
+script maps the Rust target to it), and the Zig 0.17.0 `aarch64-windows` archive is already in the table of `env.ps1`, so
+nothing new is downloaded. The Linux `wsh` resources that the installer carries are the same on both architectures.
+
+The app is a native ARM64 program. The NSIS installer program itself is an x86 program, which Windows on ARM runs under
+emulation. **Not run:** the ARM64 build on any machine, the installer, the app on ARM64 hardware (none was available), the
+ConPTY tests there. A release note or a listing must call it untried; the x64 installer remains the one that has been run.
+
 ## The preview installer built from a Mac (GNU ABI, not the MSVC build)
 
 For a test round before a Windows build host is set up, the owner builds a Windows installer **on the Mac**:
@@ -231,6 +251,11 @@ Verified on a Mac, with a tool that exists there:
 | The Zig install path: the published index is read (the entry of 0.17.0 for both Windows architectures), a foreign address or a malformed checksum in the index is refused, a download whose sha256 differs is deleted and nothing is unpacked, the archive's real checksum equals the index and its layout is the one the script expects, a Zig of another version is refused | run with `pwsh` on the Mac against the real ziglang.org download, and with a tampered checksum |
 | The core and the app compile for `x86_64-pc-windows-gnu`, including every test target | `sh scripts/cross-check.sh all` |
 | The preview installer: the GNU-ABI release build links, the executable is a 64-bit GUI PE file that imports no mingw runtime DLL, the NSIS installer holds the executable and `WebView2Loader.dll`, both read back out of it | `sh scripts/release-windows-cross.sh <version>` on a Mac (mingw-w64 from Homebrew, NSIS in Docker) |
+
+**ARM64 (read, not run):** `-Arch arm64` in `scripts/release-windows.ps1` and the ARM64 check in `scripts/env.ps1` were
+written without a Windows host and without `pwsh`, so they were only read. That the engine's build script maps
+`aarch64-pc-windows-msvc` to Zig's `aarch64-windows-msvc` target was read in the pinned source of the engine's build script.
+Not checked: the ARM64 build, the ARM64 installer and the app on ARM64 hardware.
 
 **Not covered by the Mac checks:** that `env.ps1` finds `vswhere.exe` and the C++ tools, reads `rustc -vV` and runs
 `zig.exe` on Windows; Windows PowerShell 5.1 running it; the MSVC build of the terminal engine; the guide's commands in
