@@ -188,6 +188,47 @@ The app is a native ARM64 program. The NSIS installer program itself is an x86 p
 emulation. **Not run:** the ARM64 build on any machine, the installer, the app on ARM64 hardware (none was available), the
 ConPTY tests there. A release note or a listing must call it untried; the x64 installer remains the one that has been run.
 
+## The Microsoft Store package (built-only, never run)
+
+A package for the Microsoft Store is prepared next to the unsigned installer. **Nothing of it has been built or run on any
+Windows machine** (not on x64 and not on ARM64), and the Store channel is on hold: the identity values below do not exist yet.
+
+- **What it is.** An MSIX package that the Store signs. The author has no code-signing certificate and none is needed for the
+  Store, so the `.msix` made here is not signed and cannot be installed by double click; it is only for the Store upload. The
+  GitHub installer stays unsigned, as step 7 says.
+- **Identity values come from the owner's Partner Center.** The package name, the publisher string and the publisher display
+  name are shown on the product's identity page once the Store account and the product exist. They are never invented in this
+  repository: `packaging/msix/identity.example.json` shows the shape with placeholders, the real file
+  `packaging/msix/identity.json` is untracked, and the stager refuses a placeholder or an empty value. A wrong value makes a
+  different package family.
+- **Version.** A Store version has four numbers, the first not 0 and the fourth reserved for the Store, and it can never go
+  down after an upload. `packaging/msix/version.mjs` maps the project version to it: `major.minor.patch` with an optional
+  `-alphaN`, `-betaN` or `-rcN` becomes `(major+1).minor.(patch*100 + stage).0`, with stage N for alpha, 20 + N for beta, 60 + N
+  for rc and 99 for a final version (`0.0.1-beta2` is `1.0.122.0`, `0.0.1` is `1.0.199.0`). A version that fits no rule is
+  refused, never rounded. Unit tests pin the table and the order.
+- **Steps (Windows).** After `scripts\release-windows.ps1` has built the app: `.\scripts\build-msix.ps1` (or `-Arch arm64`).
+  It runs `node packaging/msix/build.mjs`, which stages `holzwave-app.exe`, `wsh.exe`, the Linux `wsh` resources when they are
+  there, the app's own icons as logos and the generated `AppxManifest.xml` into `target\msix`, then packs the folder with
+  `makeappx.exe` and prints the path and the sha256. `-Certify` also runs the Windows App Certification Kit. `makeappx` and the
+  kit come with the free Windows SDK. The script uploads nothing.
+- **What the manifest declares.** `runFullTrust` (a terminal starts the person's own shell, so the app runs with the person's
+  rights) and `internetClient`, and nothing else: no file associations, no protocol handlers, no startup tasks.
+- **The stager runs on any host** (Node only), so the version mapping, the manifest, the staged folder and the refusals are
+  tested on a Mac. The manifest is checked by the stager's own reader, not by Microsoft's schema tools.
+
+**Not run, and open:**
+
+- The stager's output through `makeappx`, the certification kit and the Store; whether the Store accepts the package. The
+  target-version values in the manifest (`MinVersion` 10.0.17763.0, `MaxVersionTested` 10.0.26100.0) and the plain logo files
+  (the Store may ask for more sizes) are unchecked until the kit has run.
+- The `appcert` command line in `build-msix.ps1` is written from the documentation, not tried; `build-msix.ps1` itself was
+  read, not run (no PowerShell on the Mac).
+- **WebView2 on a clean machine.** Whether a package without the bundled bootstrapper finds the Evergreen runtime on a clean
+  Windows 10 machine was not tried.
+- **The app's per-user files under MSIX.** Packaged desktop apps get package virtualisation of some writes under `AppData`;
+  this was not relied on and not tried. Whether settings, saved connections and keychain entries behave the same in an MSIX
+  install is for the first install on Windows to show, and [config.md](config.md) describes the unpackaged app only.
+
 ## The preview installer built from a Mac (GNU ABI, not the MSVC build)
 
 For a test round before a Windows build host is set up, the owner builds a Windows installer **on the Mac**:
@@ -251,6 +292,11 @@ Verified on a Mac, with a tool that exists there:
 | The Zig install path: the published index is read (the entry of 0.17.0 for both Windows architectures), a foreign address or a malformed checksum in the index is refused, a download whose sha256 differs is deleted and nothing is unpacked, the archive's real checksum equals the index and its layout is the one the script expects, a Zig of another version is refused | run with `pwsh` on the Mac against the real ziglang.org download, and with a tampered checksum |
 | The core and the app compile for `x86_64-pc-windows-gnu`, including every test target | `sh scripts/cross-check.sh all` |
 | The preview installer: the GNU-ABI release build links, the executable is a 64-bit GUI PE file that imports no mingw runtime DLL, the NSIS installer holds the executable and `WebView2Loader.dll`, both read back out of it | `sh scripts/release-windows-cross.sh <version>` on a Mac (mingw-w64 from Homebrew, NSIS in Docker) |
+
+**Store package (written and tested on the Mac, never built):** the version mapping, the manifest generator and the stager have
+unit tests that run on any host; the manifest was also parsed once by Python's XML parser. `scripts/build-msix.ps1` was read
+only. Not checked: `makeappx`, the certification kit, an install of the package, WebView2 on a clean machine, the per-user
+files under MSIX, the Store's acceptance, and any Store identity (none exists yet).
 
 **ARM64 (read, not run):** `-Arch arm64` in `scripts/release-windows.ps1` and the ARM64 check in `scripts/env.ps1` were
 written without a Windows host and without `pwsh`, so they were only read. That the engine's build script maps

@@ -1,0 +1,6 @@
+{
+  "_comment": "Copy this file to packaging/msix/identity.json (untracked) and paste the three values from the owner's Partner Center, product identity page: IdentityName is 'Package/Identity/Name', Publisher is 'Package/Identity/Publisher' (starts with CN=), PublisherDisplayName is 'Package/Properties/PublisherDisplayName'. They are never invented: a wrong one is a different package family. The stager refuses this file as it is.",
+  "IdentityName": "PASTE-FROM-PARTNER-CENTER",
+  "Publisher": "PASTE-FROM-PARTNER-CENTER",
+  "PublisherDisplayName": "PASTE-FROM-PARTNER-CENTER"
+}

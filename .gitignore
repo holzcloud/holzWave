@@ -24,3 +24,6 @@ dist/
 
 # Lokale Claude-Einstellungen gehören nicht in das öffentliche Repo
 .claude/settings.local.json
+
+# Microsoft Store identity values (from the owner's Partner Center; see packaging/msix/identity.example.json)
+/packaging/msix/identity.json

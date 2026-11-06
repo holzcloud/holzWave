@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Microsoft Store manifest of holzWave, as a template. packaging/msix/build.mjs fills the five placeholders in double
+  braces and refuses to write a manifest when one is left over. Identity name, publisher and publisher display name are
+  OWNER-SUPPLIED: they come from the owner's Partner Center (the product's identity page) through the untracked
+  packaging/msix/identity.json and are never invented here. Shape checked by reading only: never run through makeappx or
+  the certification kit.
+  The Store signs the package; nothing in here needs a certificate.
+-->
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap rescap">
+  <Identity Name="{{IDENTITY_NAME}}" Publisher="{{PUBLISHER}}" Version="{{VERSION}}" ProcessorArchitecture="{{ARCH}}"/>
+  <Properties>
+    <DisplayName>holzWave</DisplayName>
+    <PublisherDisplayName>{{PUBLISHER_DISPLAY_NAME}}</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <!-- 10.0.17763.0 is Windows 10 1809, the oldest Windows the project builds for. MaxVersionTested is the value the
+         research gave; it is unchecked until the certification kit has run on a Windows machine. -->
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0"/>
+  </Dependencies>
+  <Resources>
+    <Resource Language="en-us"/>
+  </Resources>
+  <Applications>
+    <Application Id="holzWave" Executable="holzwave-app.exe" EntryPoint="Windows.FullTrustApplication">
+      <!-- BackgroundColor is the Store tile behind the logo, not a decoration of the app: the value of the design token
+           hw-ground (app/src/app.css). -->
+      <uap:VisualElements DisplayName="holzWave"
+                          Description="A terminal emulator (beta)"
+                          BackgroundColor="#14091a"
+                          Square150x150Logo="Assets\Square150x150Logo.png"
+                          Square44x44Logo="Assets\Square44x44Logo.png"/>
+    </Application>
+  </Applications>
+  <Capabilities>
+    <!-- A terminal starts the person's own shell, so the app runs with the person's rights (runFullTrust, restricted). -->
+    <rescap:Capability Name="runFullTrust"/>
+    <Capability Name="internetClient"/>
+  </Capabilities>
+</Package>
