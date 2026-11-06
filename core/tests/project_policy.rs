@@ -412,7 +412,7 @@ const DENIED_PREFIXES: [&str; 3] = ["sentry", "opentelemetry", "tauri-plugin-"];
 /// A denied crate that is in the closure anyway: its name, the exact set of packages allowed to depend on it, and why.
 type Exception = (&'static str, &'static [&'static str], &'static str);
 
-/// Honest evidence, not a weakened list. `tauri` 3.0.0-alpha.4 lists `reqwest` as a plain dependency (`default-features
+/// Honest evidence, not a weakened list. `tauri` 3.0.0-alpha.5 lists `reqwest` as a plain dependency (`default-features
 /// = false`, features `json` and `stream`: no TLS backend is selected, so it cannot even speak https). Its only use is
 /// `protocol/tauri.rs`, the proxy to a dev server URL, which `manager/webview.rs` switches on with
 /// `PROXY_DEV_SERVER = cfg!(all(dev, mobile))`: a desktop build never creates the client, and `tauri.conf.json`
