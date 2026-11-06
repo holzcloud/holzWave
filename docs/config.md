@@ -11,6 +11,7 @@ change that forgets the document fails a test.
 - [Key bindings](#key-bindings)
 - [`session.json`](#sessionjson)
 - [`local_network.json`](#local_networkjson)
+- [`host_shell.json`](#host_shelljson)
 - [`layout.json`](#layoutjson)
 - [Accessibility](#accessibility)
 - [Privacy](#privacy)
@@ -40,6 +41,7 @@ against scratch directories and never touch the real one.
 | `layout.json` | workspaces, tabs, panes and split ratios | 250 ms after the first change of a burst, and on quit | no |
 | `session.json` | the working directory of each pane and the window frame | 2 s after the first change of a burst, and on quit | yes |
 | `local_network.json` | whether the notice about the Local Network permission of macOS was answered (macOS 15 or later only) | when you answer the notice | yes |
+| `host_shell.json` | whether panes start on the host computer instead of inside the sandbox (inside a Flatpak only) | when you switch Host shell | yes |
 | `connections.json` | the saved SSH, WSL and Docker connections, without secrets | when a connection is saved or deleted | no |
 | `pane_connections.json` | which pane runs which connection | when it changes | yes (the assignments travel inside the layout, see [sync.md](sync.md)) |
 | `known_hosts` | the host keys SSH has learned (OpenSSH format) | when a new host is trusted | yes |
@@ -572,6 +574,43 @@ first, once per computer, and the file keeps what you chose. Windows and Linux n
 {
   "version": 1,
   "choice": "requested"
+}
+```
+
+## `host_shell.json`
+
+Read and written inside a Flatpak only. A Flatpak runs holzWave in a sandbox, and a terminal in a sandbox sees none of your
+own tools. With **Host shell** switched on in the Settings, a new local pane starts on this computer through
+`flatpak-spawn --host`, with your rights and outside the sandbox. It is off until you turn it on, and the file keeps what you
+chose. macOS, Windows, a Linux session that is not a Flatpak and the browser build never read or write it.
+
+```json
+{
+  "version": 1,
+  "host_shell": true
+}
+```
+
+- `host_shell` is a JSON boolean. Only the exact value `true` turns the host shell on; `false`, a missing key, a string such
+  as `"true"`, a number and `null` all mean off. A missing file means off.
+- **Panes that are already open keep running where they started.** A change reaches the panes started afterwards. A saved
+  SSH connection starts no local shell and is not affected.
+- **Machine-local, and not a setting.** The file is not part of `settings.json` and is never synced, and the sync refuses it
+  by name. `settings.json` travels to every computer, and a second computer must not inherit a way out of the sandbox.
+- **The file cannot grant the permission.** Running commands on the host needs the Flatpak's permission to talk to
+  `org.freedesktop.Flatpak`, which is fixed in the manifest when the Flatpak is built. holzWave reads it from the sandbox's own
+  `/.flatpak-info`. When it is missing (a Flatpak tool revoked it, or the build never had it) the Settings say `not available`,
+  every pane starts in the sandbox whatever this file says, and the setting cannot be changed.
+- A damaged file costs the choice (it reads off) and never the start: text that is not JSON, a value that is not a boolean, a
+  version this build does not know, or a file over 4 KiB is replaced by the default and the original bytes are kept as
+  `host_shell.json.bad`. An unknown key is ignored.
+- Not run: no Flatpak has been started on a desktop for this file, so the permission check is tested with sample text only.
+
+<!-- example: host_shell.json -->
+```json
+{
+  "version": 1,
+  "host_shell": true
 }
 ```
 

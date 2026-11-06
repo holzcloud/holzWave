@@ -47,6 +47,7 @@ mod error;
 pub mod exec;
 pub mod files;
 pub mod history;
+pub mod host_shell;
 pub mod integrate;
 pub mod keybindings;
 pub mod monitor;
