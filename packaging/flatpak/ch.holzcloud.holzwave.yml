@@ -77,7 +77,7 @@ build-options:
     ZIG_GLOBAL_CACHE_DIR: /run/build/holzwave/.zig-cache
 
 modules:
-  # Zig exactly 0.17.0, which the Ghostty engine is built with (the pinned Ghostty commit requires it). A build tool
+  # Zig exactly 0.17.1, which the Ghostty engine is built with (the pinned Ghostty commit requires it). A build tool
   # only: nothing of it stays in the app. One archive per architecture; the checksums are those of
   # https://ziglang.org/download/index.json, and both were also computed over the downloaded archives. The aarch64
   # archive lets the same manifest build on an ARM machine (for 0.0.1 only x86_64 is a target).
@@ -90,12 +90,12 @@ modules:
       - /opt/zig
     sources:
       - type: archive
-        url: https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz
-        sha256: 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
+        url: https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz
+        sha256: 3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a
         only-arches: [x86_64]
       - type: archive
-        url: https://ziglang.org/download/0.17.0/zig-aarch64-linux-0.17.0.tar.xz
-        sha256: 9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
+        url: https://ziglang.org/download/0.17.1/zig-aarch64-linux-0.17.1.tar.xz
+        sha256: a1546d5646eb184437918d6635ca6b762a0e889eac09cef720ee7a1ed3fe7795
         only-arches: [aarch64]
 
   # holzWave itself, inside the SDK: a binary built outside the runtime could be ABI-incompatible with it. The build step has

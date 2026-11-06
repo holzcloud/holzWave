@@ -5,9 +5,9 @@
 #
 # What it does, for this PowerShell session only (it never changes the machine, the registry or the user's PATH):
 #
-#   * finds Zig exactly 0.17.0 in $env:HOLZWAVE_ZIG_DIR or in $HOME\.holzwave\zig-0.17.0, puts it first on PATH and
-#     prints `zig version`; it stops with a message when no Zig there is exactly 0.17.0. The pinned Ghostty commit
-#     requires 0.17.0 (its build.zig.zon: minimum_zig_version 0.17.0; the previous pin needed 0.16.0): a package
+#   * finds Zig exactly 0.17.1 in $env:HOLZWAVE_ZIG_DIR or in $HOME\.holzwave\zig-0.17.1, puts it first on PATH and
+#     prints `zig version`; it stops with a message when no Zig there is exactly 0.17.1. The pinned Ghostty commit
+#     requires 0.17.1 (its build.zig.zon: minimum_zig_version 0.17.0; the previous pin needed 0.16.0): a package
 #     manager's "latest" is never the right Zig for this project;
 #   * checks that Rust's host triple is x86_64-pc-windows-msvc, because Zig cannot build the MSVC library from another
 #     host and a GNU toolchain cannot link it;
@@ -20,9 +20,9 @@
 #
 #   .\scripts\env.ps1 -InstallZig
 #
-# The only part that downloads anything: it fetches the Zig 0.17.0 archive for this machine's architecture from
+# The only part that downloads anything: it fetches the Zig 0.17.1 archive for this machine's architecture from
 # ziglang.org, compares its sha256 with the value in ziglang.org's published index BEFORE anything is unpacked (a
-# mismatch deletes the download and stops), unpacks it to $HOME\.holzwave\zig-0.17.0 and overwrites nothing that
+# mismatch deletes the download and stops), unpacks it to $HOME\.holzwave\zig-0.17.1 and overwrites nothing that
 # already exists. Afterwards source the script as above.
 #
 # Sourced, the script never calls `exit` (that would close the caller's window) and never changes strict mode or the
@@ -34,7 +34,7 @@
 
 param([switch]$InstallZig)
 
-$HolzwaveZigVersion = '0.17.0'
+$HolzwaveZigVersion = '0.17.1'
 
 function Write-HolzwaveLine([string]$Text) {
     Write-Host "env.ps1: $Text"
@@ -112,7 +112,7 @@ function Install-HolzwaveZig {
     }
     $key = Get-HolzwaveZigKey
     if (-not $key) {
-        Write-HolzwaveLine 'this machine architecture has no Zig build for holzWave; download Zig 0.17.0 yourself from https://ziglang.org/download/'
+        Write-HolzwaveLine 'this machine architecture has no Zig build for holzWave; download Zig 0.17.1 yourself from https://ziglang.org/download/'
         return $false
     }
     $root = Split-Path -Parent $target
@@ -169,7 +169,7 @@ function Add-HolzwaveIfMissing([string]$Dir) {
     $env:PATH = "$Dir;$env:PATH"
 }
 
-# Finds Zig 0.17.0: the directory named by HOLZWAVE_ZIG_DIR first, then the default one. Returns the directory, or
+# Finds Zig 0.17.1: the directory named by HOLZWAVE_ZIG_DIR first, then the default one. Returns the directory, or
 # $null after saying what it found instead.
 function Find-HolzwaveZig {
     $candidates = @()
@@ -180,7 +180,7 @@ function Find-HolzwaveZig {
         $version = Get-HolzwaveZigVersionOf $exe
         if ($version -eq $HolzwaveZigVersion) { return $dir }
         if ($version) {
-            Write-HolzwaveLine "$exe is Zig $version, not $HolzwaveZigVersion (exactly 0.17.0 is needed to build the terminal engine)"
+            Write-HolzwaveLine "$exe is Zig $version, not $HolzwaveZigVersion (exactly 0.17.1 is needed to build the terminal engine)"
         } else {
             Write-HolzwaveLine "no zig.exe in $dir"
         }
@@ -264,7 +264,7 @@ function Invoke-HolzwaveEnv([bool]$Install) {
         Add-HolzwaveFirst $zigDir
         Write-HolzwaveLine "zig version $(Get-HolzwaveZigVersionOf (Join-Path $zigDir 'zig.exe')) ($zigDir)"
     } else {
-        Write-HolzwaveLine 'no Zig 0.17.0 found: run  .\scripts\env.ps1 -InstallZig  once, or set HOLZWAVE_ZIG_DIR to the folder of a Zig 0.17.0 zig.exe'
+        Write-HolzwaveLine 'no Zig 0.17.1 found: run  .\scripts\env.ps1 -InstallZig  once, or set HOLZWAVE_ZIG_DIR to the folder of a Zig 0.17.1 zig.exe'
         $ok = $false
     }
 

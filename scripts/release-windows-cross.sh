@@ -84,7 +84,7 @@ if [ -n "$rustup_cmd" ]; then
     "$rustup_cmd" target list --installed 2>/dev/null | grep -qx "$TARGET" ||
         need "rustup target missing: rustup target add $TARGET (a toolchain change, not a dependency)"
 fi
-[ "$(zig version 2>/dev/null)" = 0.17.0 ] || need "Zig 0.17.0 is not on PATH (. scripts/env.sh; docs/building.md)"
+[ "$(zig version 2>/dev/null)" = 0.17.1 ] || need "Zig 0.17.1 is not on PATH (. scripts/env.sh; docs/building.md)"
 
 conf=$(sed -n 's/^ *"version": "\(.*\)",/\1/p' app/src-tauri/tauri.conf.json | head -1)
 [ "$conf" = "$version" ] || fail "version $version is not the version of tauri.conf.json ($conf)"

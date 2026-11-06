@@ -109,7 +109,7 @@ echo "test 2: each wrong or missing item fails once, with found and wanted"
 C_NDK_REV=30.0.1; mkcase; unset C_NDK_REV; expect_fail "a wrong NDK revision" ndk 30.0.1 "$NDK"
 C_PLATFORM=no; mkcase; unset C_PLATFORM; expect_fail "a missing platform directory" platform missing "$PLATFORM"
 C_JAVA=17.0.9; mkcase; unset C_JAVA; expect_fail "a java of major 17" jdk 17.0.9 "major $JDK"
-C_ZIG=0.17.1; mkcase; unset C_ZIG; expect_fail "a zig of 0.17.1" zig 0.17.1 "$ZIG"
+C_ZIG=0.17.0; mkcase; unset C_ZIG; expect_fail "a zig of 0.17.0" zig 0.17.0 "$ZIG"
 mkcase; rm -f "$sdk/ndk/$NDK/source.properties"; expect_fail "an NDK with no source.properties" ndk missing "$NDK"
 C_RUST=x86_64-linux-android; mkcase; unset C_RUST
 run_check

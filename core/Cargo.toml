@@ -8,7 +8,7 @@ repository.workspace = true
 
 [features]
 default = ["ghostty"]
-# Terminal engine backed by libghostty-vt. Needs Zig 0.17.0 at build time: the pinned
+# Terminal engine backed by libghostty-vt. Needs Zig 0.17.1 at build time: the pinned
 # Ghostty commit (521cf2c, build.zig.zon version 1.3.2-dev) says minimum_zig_version 0.17.0.
 ghostty = ["dep:libghostty-vt", "libghostty-vt/png", "libghostty-vt/allocator_api", "dep:allocator-api2"]
 keyring = ["dep:keyring"]
@@ -22,7 +22,7 @@ zeroize = "1"
 getrandom = "0.4"
 infer = "0.22"
 keyring = { version = "4", optional = true }
-# libghostty-rs master (commit of 2026-10-25), pinned; the 0.2.2 on crates.io is older. Needs Zig 0.17.0.
+# libghostty-rs master (commit of 2026-10-25), pinned; the 0.2.2 on crates.io is older. Needs Zig 0.17.1.
 libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs", rev = "575ed6b8ceb79ffaf247ecf7e34333876b0d5be4", optional = true }
 # The allocator trait that libghostty-vt's `allocator_api` feature takes: core/src/images.rs implements it to bound what one
 # terminal may ask the allocator for (a hostile Kitty stream can otherwise make the library hold 400 MiB). Exact version,

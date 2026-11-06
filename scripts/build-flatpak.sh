@@ -51,7 +51,7 @@
 # with an empty scratch Zig cache (what that build fetches is the list of packages that are used, not the 37 that Ghostty
 # lists), derives the two files, downloads exactly the listed sources and checks each sha256 before it unpacks it. Stage B
 # runs `docker run --network none`: the Ghostty folder is GHOSTTY_SOURCE_DIR, the unpacked packages are
-# GHOSTTY_ZIG_SYSTEM_DIR (both read-only), ZIG is the pinned Zig 0.17.0, and `cargo build --locked --offline --release -p
+# GHOSTTY_ZIG_SYSTEM_DIR (both read-only), ZIG is the pinned Zig 0.17.1, and `cargo build --locked --offline --release -p
 # libghostty-vt-sys` must produce libghostty-vt.a. It prints `flatpak-engine-offline: ok` as its last line only then. Only
 # the architecture of the Docker VM is built (arm64 on an Apple Silicon Mac): Zig 0.17 crashes in the emulated amd64
 # container, so the x86_64 engine build is not run and is untried. It does not build the app, run a Flatpak or run
@@ -288,7 +288,7 @@ fail() {
 }
 tar -x --no-same-owner --warning=no-unknown-keyword -C /work || fail "unpacking the working tree"
 cd /work || exit 1
-[ "$(zig version)" = 0.17.0 ] || fail "Zig is not 0.17.0"
+[ "$(zig version)" = 0.17.1 ] || fail "Zig is not 0.17.1"
 # Zig 0.17 unpacks the packages it fetches into zig-pkg/ next to build.zig of the project, so the checkout is a writable copy
 # (the git source of a Flatpak build is writable too) and the folder it ends with is the list of packages that are used.
 rm -rf /tmp/ghostty-src
@@ -321,7 +321,7 @@ fi
 echo "stage B: the network is cut (no connection to deps.files.ghostty.org)"
 tar -x --no-same-owner --warning=no-unknown-keyword -C /work || fail "unpacking the working tree"
 cd /work || exit 1
-[ "$(zig version)" = 0.17.0 ] || fail "Zig is not 0.17.0"
+[ "$(zig version)" = 0.17.1 ] || fail "Zig is not 0.17.1"
 rm -rf /tmp/engine-target /tmp/ghostty-src
 cp -a /ghostty /tmp/ghostty-src || fail "copying the Ghostty checkout"
 export GHOSTTY_SOURCE_DIR=/tmp/ghostty-src GHOSTTY_ZIG_SYSTEM_DIR=/zig-pkgs CARGO_TARGET_DIR=/tmp/engine-target ZIG=/usr/local/bin/zig
@@ -383,7 +383,7 @@ engine_offline() {
     generated="$dir/generated"
     mkdir -p "$work" "$generated" || exit 1
 
-    # The image with Rust and Zig 0.17.0, always the native architecture (no amd64 emulation: Zig crashes in it).
+    # The image with Rust and Zig 0.17.1, always the native architecture (no amd64 emulation: Zig crashes in it).
     HOLZWAVE_LINUX_ARCH= sh "$here/linux-container-test.sh" image || {
         echo "flatpak-engine-offline: the image $ENGINE_IMAGE could not be built" >&2
         exit 1
@@ -655,7 +655,7 @@ app_cli_free() {
         echo "# The build script output of the app has no cargo:rustc-cfg=dev line in either build, so the page is embedded and the"
         echo "# app does not wait for a development server."
         echo "# Environment the build needs: CARGO_HOME (a folder inside the build directory), GHOSTTY_SOURCE_DIR (a writable"
-        echo "# checkout of the pinned Ghostty commit), GHOSTTY_ZIG_SYSTEM_DIR (the packages of zig-sources.json), ZIG (Zig 0.17.0)."
+        echo "# checkout of the pinned Ghostty commit), GHOSTTY_ZIG_SYSTEM_DIR (the packages of zig-sources.json), ZIG (Zig 0.17.1)."
         echo "$plain_command"
     } >"$generated/app-build-command.txt.new" || exit 1
     mv "$generated/app-build-command.txt.new" "$generated/app-build-command.txt" || exit 1

@@ -9,5 +9,5 @@
 # The build script output of the app has no cargo:rustc-cfg=dev line in either build, so the page is embedded and the
 # app does not wait for a development server.
 # Environment the build needs: CARGO_HOME (a folder inside the build directory), GHOSTTY_SOURCE_DIR (a writable
-# checkout of the pinned Ghostty commit), GHOSTTY_ZIG_SYSTEM_DIR (the packages of zig-sources.json), ZIG (Zig 0.17.0).
+# checkout of the pinned Ghostty commit), GHOSTTY_ZIG_SYSTEM_DIR (the packages of zig-sources.json), ZIG (Zig 0.17.1).
 cargo build --locked --bins --features tauri/custom-protocol --release --offline -p holzwave-app

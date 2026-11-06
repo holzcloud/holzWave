@@ -35,7 +35,7 @@ RUN npm run build
 # ---- the Rust build ---------------------------------------------------------------------------------------------
 FROM debian:trixie-20261027@sha256:2dc419c6d7fe3dad0a2f9fd469c34cc90b0f9ba642d8fde837fe3d7d34a0e7f1 AS build
 ARG TARGETARCH
-ARG ZIG_VERSION=0.17.0
+ARG ZIG_VERSION=0.17.1
 ARG RUSTUP_VERSION=1.29.2
 ARG RUST_VERSION=1.99.1
 ENV DEBIAN_FRONTEND=noninteractive \

@@ -17,7 +17,7 @@
 #                        when only ANDROID_HOME is set, and a second NDK on the machine would silently change the build
 #   platform android-37.0 and build-tools 37.0.0
 #   platform-tools, emulator: a minimum, not an exact version (what the SDK manager offered on 2026-11-06)
-#   Zig 0.17.0           exactly, as in docs/building.md
+#   Zig 0.17.1           exactly, as in docs/building.md
 #   one Rust Android target: aarch64-linux-android (ABI arm64-v8a); nothing else is built, listed or documented
 #
 # Where the SDK is looked for, the first one winning: $HOLZWAVE_ANDROID_HOME; $HOME/Library/Android/sdk on macOS or
@@ -37,7 +37,7 @@ HOLZWAVE_ANDROID_PLATFORM=android-37.0
 HOLZWAVE_BUILD_TOOLS=37.0.0
 HOLZWAVE_PLATFORM_TOOLS_MIN=37.0.1
 HOLZWAVE_EMULATOR_MIN=37.2.13
-HOLZWAVE_ZIG=0.17.0
+HOLZWAVE_ZIG=0.17.1
 HOLZWAVE_RUST_ANDROID_TARGET=aarch64-linux-android
 
 if [ -f scripts/env.sh ]; then

@@ -64,7 +64,7 @@ if ((git rev-parse HEAD) -ne (git rev-parse origin/main)) { Fail 'main is not th
 if ($Arch -eq 'arm64') { $triple = 'aarch64-pc-windows-msvc' } else { $triple = 'x86_64-pc-windows-msvc' }
 $env:HOLZWAVE_WINDOWS_ARCH = $Arch
 
-. (Join-Path $PSScriptRoot 'env.ps1')   # puts Zig 0.17.0 on the PATH for this session, checks MSVC Rust and VS tools
+. (Join-Path $PSScriptRoot 'env.ps1')   # puts Zig 0.17.1 on the PATH for this session, checks MSVC Rust and VS tools
 Remove-Item Env:\HOLZWAVE_WINDOWS_ARCH -ErrorAction SilentlyContinue   # the check has read it; do not leave it in the session
 
 if ($Arch -eq 'arm64') {

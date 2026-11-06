@@ -26,7 +26,7 @@
 # dropped and exactly CHOWN, KILL, SETGID and SETUID added. It makes a key with `keygen`, a throwaway certificate for the name
 # `holzwave.test`, starts the server on a private network and asks it for the sign-in state over TLS 1.3 from a second
 # container. HOLZWAVE_WEB_CONTEXT names another build context than the repository root (a clean checkout, for example), and
-# HOLZWAVE_ZIG_VERSION another Zig than the default of the Dockerfile (0.17.0) for a tree whose terminal engine needs it.
+# HOLZWAVE_ZIG_VERSION another Zig than the default of the Dockerfile (0.17.1) for a tree whose terminal engine needs it.
 # `multiarch` builds the image for linux/amd64 and linux/arm64, one platform at a time, and on each runs `uname -m`, `ldd`,
 # `keygen` and `check-config` on the example configuration with a generated certificate. A platform that cannot be built or
 # run on this machine is reported as `NOT RUN <platform>: <reason>` and the mode exits 1; it is never a pass.
