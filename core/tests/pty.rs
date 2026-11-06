@@ -398,6 +398,14 @@ mod spawn_options {
     }
 
     #[test]
+    fn process_cwd_of_a_pid_that_is_no_process_id_is_none() {
+        // 0 would mean "the calling process group" to some tools; a pid_t is an i32.
+        for pid in [0, u32::try_from(i32::MAX).unwrap() + 1, u32::MAX] {
+            assert_eq!(process_cwd(pid), None, "{pid}");
+        }
+    }
+
+    #[test]
     fn process_cwd_of_a_pid_that_does_not_exist_is_none() {
         assert_eq!(process_cwd(u32::MAX), None);
         let mut gone = Pty::spawn("/bin/sh", &["-c", "exit 0"], 80, 24).expect("spawn");

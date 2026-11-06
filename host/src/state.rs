@@ -52,7 +52,7 @@ use crate::integrate_host::{
     ConfirmAnswer, ConfirmKind, ContextAnswer, IntegrationEvent, IntegrationFault, IntegrationHost, IntegrationParts,
     LaunchAnswer, LaunchNote,
 };
-use crate::seams::{Host, NeutralHost};
+use crate::seams::{Host, NeutralHost, Platform, PrivateDirs};
 use crate::windows::{CursorSpot, DropKind, Drops, Hovers, Place};
 
 /// A layout file larger than this is not read: a real layout is a few KiB.
@@ -2817,10 +2817,20 @@ impl AppCore {
     /// Touches the file system and starts a process, so the command is async.
     pub fn reveal_path(&self, path: &str, base: Option<&str>) -> Result<(), String> {
         let os = std::env::consts::OS;
-        let home = home_dir(os, &process_env);
+        let home = home_dir(os, &process_env, self.private_home().as_deref());
         let resolved = resolve_reveal(os, path, base, home.as_deref())?;
         let launch = reveal_launch(os, &resolved, resolved.is_dir(), &process_env)?;
         self.launch(&launch)
+    }
+
+    /// The private folders of the app, on a host that names them and is the Android one; `None` on every other.
+    fn private_dirs(&self) -> Option<PrivateDirs> {
+        if self.host.platform() == Platform::Android { self.host.private_dirs() } else { None }
+    }
+
+    /// The home folder of the Android host, for `~/` ([`home_dir`]).
+    fn private_home(&self) -> Option<PathBuf> {
+        self.private_dirs().map(|dirs| dirs.home)
     }
 
     /// The version of the app, the operating system and the name of the machine.
@@ -3297,12 +3307,23 @@ impl AppCore {
                     ("HOLZWAVE_TOKEN".into(), token),
                     ("HOLZWAVE_PANE".into(), pane.to_string()),
                 ];
-                // `wsh` is installed beside the app; the panes find it by name.
-                if let Some(path) = std::env::current_exe().ok().as_deref().and_then(std::path::Path::parent).and_then(|bin| {
+                // `wsh` is installed beside the app; the panes find it by name. Android bundles none: the folder of its
+                // process is the system's, and nothing of the app is put on the `PATH` of a pane.
+                let bundled = std::env::current_exe().ok().filter(|_| self.host.platform() != Platform::Android);
+                if let Some(path) = bundled.as_deref().and_then(std::path::Path::parent).and_then(|bin| {
                     path_with_wsh(bin, std::env::var_os("PATH").as_deref())
                 }) {
                     spec.env.push(("PATH".into(), path.to_string_lossy().into_owned()));
                 }
+            }
+            // On Android the shell lives in the app's private folder: it starts there when nothing else was asked, and
+            // `HOME` and `TMPDIR` name that folder and the cache folder. Nothing is started from these folders.
+            if let Some(dirs) = self.private_dirs() {
+                let env = private_pane_env(&dirs);
+                if spec.cwd.is_none() && env.iter().any(|(name, _)| name == "HOME") {
+                    spec.cwd = Some(dirs.home.clone());
+                }
+                spec.env.extend(env);
             }
             // A pane that runs a saved connection starts that instead of a local shell. A connection that cannot be made up
             // (a missing jump host, an unreadable keychain) is said on the pane's screen, and the pane is a local shell.
@@ -4086,8 +4107,31 @@ fn check_path_text(what: &str, text: &str) -> Result<(), String> {
     }
 }
 
-/// The home directory for `~/`: `HOME`, and on Windows `USERPROFILE`. An empty value is no value.
-fn home_dir(os: &str, env: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
+/// The variables a local shell gets from the private folders of an Android host: `HOME` and `TMPDIR`. A folder that is
+/// not an absolute path, or whose text has a control character, gives no variable: the shell then keeps what it
+/// inherits.
+fn private_pane_env(dirs: &PrivateDirs) -> Vec<(String, String)> {
+    let text = |dir: &Path| {
+        let text = dir.to_str()?;
+        (text.starts_with('/') && !text.chars().any(char::is_control)).then(|| text.to_owned())
+    };
+    let mut env = Vec::new();
+    if let Some(home) = text(&dirs.home) {
+        env.push(("HOME".to_owned(), home));
+    }
+    if let Some(cache) = text(&dirs.cache) {
+        env.push(("TMPDIR".to_owned(), cache));
+    }
+    env
+}
+
+/// The home directory for `~/`: `HOME`, and on Windows `USERPROFILE`. An empty value is no value. `private_home` is the
+/// home folder of the Android host ([`Host::private_dirs`]; `None` everywhere else): when it is given it is the home,
+/// whatever the environment says, because an Android app's process has no `HOME` of its own worth reading.
+fn home_dir(os: &str, env: &dyn Fn(&str) -> Option<String>, private_home: Option<&Path>) -> Option<PathBuf> {
+    if let Some(home) = private_home {
+        return Some(home.to_path_buf());
+    }
     let name = if os == "windows" { "USERPROFILE" } else { "HOME" };
     env(name).filter(|home| !home.is_empty()).map(PathBuf::from)
 }
@@ -8006,12 +8050,90 @@ mod tests {
             "USERPROFILE" => Some(r"C:\Users\me".to_owned()),
             _ => None,
         };
-        assert_eq!(home_dir("linux", &env), Some(PathBuf::from("/home/me")));
-        assert_eq!(home_dir("macos", &env), Some(PathBuf::from("/home/me")));
-        assert_eq!(home_dir("windows", &env), Some(PathBuf::from(r"C:\Users\me")), "USERPROFILE, not HOME");
-        assert_eq!(home_dir("windows", &|n: &str| (n == "HOME").then(|| "/home/me".to_owned())), None);
-        assert_eq!(home_dir("linux", &|n: &str| (n == "HOME").then(String::new)), None, "empty is no value");
-        assert_eq!(home_dir("linux", &no_env), None);
+        assert_eq!(home_dir("linux", &env, None), Some(PathBuf::from("/home/me")));
+        assert_eq!(home_dir("macos", &env, None), Some(PathBuf::from("/home/me")));
+        assert_eq!(home_dir("windows", &env, None), Some(PathBuf::from(r"C:\Users\me")), "USERPROFILE, not HOME");
+        assert_eq!(home_dir("windows", &|n: &str| (n == "HOME").then(|| "/home/me".to_owned()), None), None);
+        assert_eq!(home_dir("linux", &|n: &str| (n == "HOME").then(String::new), None), None, "empty is no value");
+        assert_eq!(home_dir("linux", &no_env, None), None);
+    }
+
+    #[test]
+    fn the_private_folder_of_the_android_host_is_the_home_whatever_the_environment_says() {
+        let private = Path::new("/data/user/0/ch.holzcloud.holzwave/files/home");
+        let wanted = Some(private.to_path_buf());
+        assert_eq!(home_dir("android", &no_env, Some(private)), wanted, "HOME unset");
+        assert_eq!(home_dir("android", &|n: &str| (n == "HOME").then(String::new), Some(private)), wanted, "HOME empty");
+        assert_eq!(home_dir("android", &|n: &str| (n == "HOME").then(|| "/".to_owned()), Some(private)), wanted, "HOME set");
+        // Without a folder from the host the rule is the one of every other platform.
+        assert_eq!(home_dir("android", &|n: &str| (n == "HOME").then(|| "/h".to_owned()), None), Some(PathBuf::from("/h")));
+        assert_eq!(home_dir("android", &no_env, None), None);
+    }
+
+    /// A host that is the neutral one in everything but its platform and its private folders.
+    struct PrivateHost {
+        base: NeutralHost,
+        platform: Platform,
+        dirs: PrivateDirs,
+    }
+
+    impl crate::seams::Host for PrivateHost {
+        fn platform(&self) -> Platform {
+            self.platform
+        }
+
+        fn secrets(&self) -> Arc<dyn SecretStore> {
+            self.base.secrets()
+        }
+
+        fn local_network(&self) -> Arc<dyn crate::local_network::Source> {
+            self.base.local_network()
+        }
+
+        fn text_scale(&self) -> u32 {
+            self.base.text_scale()
+        }
+
+        fn limits(&self) -> crate::seams::HostLimits {
+            self.base.limits()
+        }
+
+        fn private_dirs(&self) -> Option<PrivateDirs> {
+            Some(self.dirs.clone())
+        }
+    }
+
+    #[test]
+    fn a_core_asks_the_host_for_the_private_folders_only_on_android() {
+        let dirs = PrivateDirs { home: PathBuf::from("/p/home"), cache: PathBuf::from("/p/cache") };
+        let (dir, _pane) = dir_with_one_pane("private-dirs");
+        for (platform, expected) in [(Platform::Android, Some(dirs.clone())), (Platform::Linux, None), (Platform::MacOs, None)] {
+            let host = Arc::new(PrivateHost { base: NeutralHost::new(), platform, dirs: dirs.clone() });
+            let core = AppCore::new_with_host(
+                dir.0.clone(),
+                Arc::new(Recorder::default()),
+                ShellSpec::new("/bin/cat", &[]),
+                None,
+                None,
+                host,
+            );
+            assert_eq!(core.private_dirs(), expected, "{platform:?}");
+            assert_eq!(core.private_home(), expected.map(|d| d.home), "{platform:?}");
+            assert_eq!(core.app_info().os, platform.as_str(), "the page is told the platform of the host");
+            core.shutdown();
+        }
+    }
+
+    #[test]
+    fn the_variables_of_the_private_folders_are_home_and_tmpdir_and_a_bad_folder_gives_none() {
+        let dirs = |home: &str, cache: &str| PrivateDirs { home: PathBuf::from(home), cache: PathBuf::from(cache) };
+        assert_eq!(
+            private_pane_env(&dirs("/data/x/files/home", "/data/x/cache")),
+            [("HOME".to_owned(), "/data/x/files/home".to_owned()), ("TMPDIR".to_owned(), "/data/x/cache".to_owned())]
+        );
+        assert_eq!(private_pane_env(&dirs("relative", "/data/x/cache")), [("TMPDIR".to_owned(), "/data/x/cache".to_owned())]);
+        assert_eq!(private_pane_env(&dirs("/data/x\nhome", "")), Vec::<(String, String)>::new());
+        assert_eq!(private_pane_env(&dirs("/data/x/\u{7}home", "/data/x/cache\n")), Vec::<(String, String)>::new());
     }
 
     #[cfg(unix)]
