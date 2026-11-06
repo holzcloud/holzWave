@@ -3150,6 +3150,86 @@ fn the_readme_lists_the_server_guide_and_links_it_from_the_install_paragraph() {
     assert!(root().join("docs/server.md").is_file());
 }
 
+// ---- the distribution page ---------------------------------------------------------------------------------
+
+/// Wording that says a channel exists for the public. The page names every channel `not submitted` or `not built` until a
+/// listing exists, so none of these may appear.
+const DISTRIBUTION_CLAIMS: [&str; 3] = ["available now", "now live", "published on"];
+
+/// The channels the page has a table row for, as the text a row starts with after its first bold mark.
+const DISTRIBUTION_CHANNELS: [&str; 6] = ["GitHub", "Homebrew", "Flathub", "Microsoft Store", "Obtainium", "F-Droid"];
+
+/// Links of `docs/distribution.md` to a file of `docs/` that may still be missing, by file name. Empty: every page the
+/// distribution page links to exists. A page that is written in a parallel plan goes here until it is merged.
+const DISTRIBUTION_LINKS_MAY_BE_MISSING: [&str; 0] = [];
+
+/// The relative file targets of the Markdown links in `text`: no address with a scheme, no mail link, no bare anchor, and
+/// the fragment cut off.
+fn relative_link_targets(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("](") {
+        rest = &rest[at + 2..];
+        let Some(end) = rest.find(')') else { break };
+        let target = &rest[..end];
+        rest = &rest[end..];
+        let target = target.split('#').next().unwrap_or("");
+        if target.is_empty() || target.contains("://") || target.starts_with("mailto:") {
+            continue;
+        }
+        out.push(target.to_owned());
+    }
+    out
+}
+
+#[test]
+fn distribution_page_states_what_is_true() {
+    // The link reader first, on strings.
+    assert_eq!(relative_link_targets("see [a](a.md), [b](b.md#x), [c](https://x.y/z), [d](#top), [e](mailto:a@b.c)"), ["a.md", "b.md"]);
+    assert!(relative_link_targets("no link here (and a bracket] alone)").is_empty());
+
+    let page = read("docs/distribution.md");
+    let flat = one_line(&page);
+    let lowered = flat.to_lowercase();
+
+    // Nothing is called available or published; the statuses say what has not happened.
+    assert!(flat.contains("not submitted"), "the page does not say `not submitted`");
+    assert!(flat.contains("not built"), "the page does not say `not built`");
+    for claim in DISTRIBUTION_CLAIMS {
+        assert!(!lowered.contains(claim), "docs/distribution.md says {claim:?}, which claims that a channel exists");
+    }
+
+    // The three things that would cost money, the update decision and the Store name.
+    assert!(flat.contains("Authenticode") || lowered.contains("code-signing certificate"), "the Windows certificate is not named");
+    assert!(lowered.contains("notarization"), "Apple notarization is not named");
+    assert!(lowered.contains("developer verification"), "Google's developer verification is not named");
+    assert!(lowered.contains("has no update check"), "the page does not say that the app has no update check");
+    assert!(flat.contains("decided at the Store sign-up"), "the Store publisher name is not marked as open");
+
+    // A row for each channel, each with the same cells as the header and none empty.
+    let rows: Vec<&str> = page.lines().filter(|line| line.starts_with('|')).collect();
+    let header = rows.iter().find(|row| row.starts_with("| Channel |")).expect("the table has a header row");
+    let width = header.matches('|').count();
+    assert!(width >= 9, "the table lost columns: {header}");
+    for channel in DISTRIBUTION_CHANNELS {
+        let row = rows.iter().find(|row| row.starts_with(&format!("| **{channel}"))).unwrap_or_else(|| panic!("no table row for {channel}"));
+        assert_eq!(row.matches('|').count(), width, "the row of {channel} has another number of cells than the header");
+        for cell in row.trim_matches('|').split('|') {
+            assert!(!cell.trim().is_empty(), "the row of {channel} has an empty cell");
+        }
+    }
+
+    // Every link to a file resolves.
+    let targets = relative_link_targets(&page);
+    assert!(targets.iter().any(|t| t == "signing.md") && targets.iter().any(|t| t == "test-plan.md"), "the page lost its links");
+    for target in targets {
+        if DISTRIBUTION_LINKS_MAY_BE_MISSING.contains(&target.as_str()) {
+            continue;
+        }
+        assert!(root().join("docs").join(&target).exists(), "docs/distribution.md links to docs/{target}, which does not exist");
+    }
+}
+
 // ---- no plan label in the public tree -----------------------------------------------------------------------
 
 /// The first-party directories whose text files are public: the labels of the private planning tree stay out of them.
