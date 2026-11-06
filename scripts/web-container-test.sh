@@ -223,10 +223,10 @@ exec /opt/hw/caps_container --ignored --show-output
 
     status=$(cat "$code")
     expected=$(echo $CAPS_TESTS | wc -w | tr -d ' ')
-    passed=$(grep -c '^test .* \.\.\. ok$' "$log")
+    passed=$(grep -c 'test [A-Za-z0-9_:]* \.\.\. ok$' "$log")
     missing=
     for name in $CAPS_TESTS; do
-        grep -q "^test $name \.\.\. ok$" "$log" || missing="$missing $name"
+        grep -q "test $name \.\.\. ok$" "$log" || missing="$missing $name"
     done
     rm -f "$log" "$code"
     echo
@@ -440,7 +440,7 @@ install -m 0755 "$test_bin" /opt/hw/acme
     status=$(cat "$code")
     missing=
     for name in $ACME_TESTS; do
-        grep -q "^test $name \.\.\. ok$" "$log" || missing="$missing $name"
+        grep -q "test $name \.\.\. ok$" "$log" || missing="$missing $name"
     done
     passed=$(grep '^test .* \.\.\. ok$' "$log" | sed 's/^test \(.*\) \.\.\. ok$/\1/')
     rm -f "$log" "$code"
