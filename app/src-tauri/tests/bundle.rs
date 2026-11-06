@@ -387,3 +387,117 @@ fn the_plist_declares_the_use_of_the_local_network() {
     assert!(text.len() <= 400, "the usage description is a sentence, not a page");
     assert!(Path::new(env!("CARGO_MANIFEST_DIR")).join("Info.plist").is_file(), "Info.plist sits next to tauri.conf.json");
 }
+
+// ---- the aarch64 Linux packages (the second wave, built in the native arm64 container) -------------------------
+
+const LINUX_ARM64: &str = include_str!("../../../scripts/release-linux-arm64.sh");
+
+/// The text of a script with every run of white space cut to one space, so a phrase is found across a wrapped line.
+fn squash(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Runs a script with `sh` from the repository root and returns its exit code and standard error.
+fn run_script(script: &str, args: &[&str]) -> (i32, String) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let out = std::process::Command::new("sh").current_dir(&root).arg(script).args(args).output().expect("sh runs");
+    (out.status.code().expect("the script ended by itself"), String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+#[test]
+fn the_arm64_script_refuses_what_is_not_a_version_before_it_touches_anything() {
+    assert!(LINUX_ARM64.starts_with("#!/bin/sh\n"), "release-linux-arm64.sh is not a /bin/sh script");
+    // Every refusal below happens before Docker, npm or git are asked, so it runs the same on any machine.
+    for args in [&[][..], &["0.0.1", "extra"], &["bad/version"], &["0.0.1 beta"], &["-0.0.1"], &["0.0.1;id"], &[""]] {
+        let (code, err) = run_script("scripts/release-linux-arm64.sh", args);
+        assert_eq!(code, 2, "arguments {args:?} were not refused with 2: {err}");
+        assert!(err.starts_with("release-linux-arm64: "), "the refusal does not carry the script's name: {err}");
+    }
+    // The usage line names the one argument.
+    let (_, err) = run_script("scripts/release-linux-arm64.sh", &[]);
+    assert!(err.contains("usage: sh scripts/release-linux-arm64.sh <version>"), "no usage line: {err}");
+}
+
+#[test]
+fn the_arm64_script_checks_the_version_the_tree_and_the_host() {
+    let text = squash(LINUX_ARM64);
+    // The version is the one of tauri.conf.json, and a dirty tree is a failure (exit 1, `fail`).
+    assert!(text.contains(r#"app/src-tauri/tauri.conf.json"#) && text.contains(r#"[ "$conf" = "$version" ] || fail "version"#), "the version is not compared with tauri.conf.json");
+    assert!(text.contains(r#"[ -z "$(git status --porcelain)" ] || fail "the working tree is not clean""#), "a dirty tree is not refused");
+    // An emulated arm64 build is untried and linuxdeploy cannot cross-compile ARM AppImages: a host that is not arm64 stops.
+    assert!(text.contains("arm64 | aarch64) ;;") && text.contains("not arm64") && text.contains("cannot cross-compile"), "the host check or its reason is missing");
+    // The tool checks are refusals (exit 2).
+    for tool in ["docker is missing", "the Docker daemon does not answer", "npm is missing"] {
+        assert!(text.contains(tool), "no refusal `{tool}`");
+    }
+}
+
+#[test]
+fn the_arm64_script_builds_natively_and_never_as_amd64() {
+    // linux-container-bundle.sh is run with no architecture variable (the native arm64 container) and with the AppImage required.
+    let lines = code_lines(LINUX_ARM64);
+    let run = lines.iter().find(|l| l.contains("linux-container-bundle.sh")).expect("the script does not run linux-container-bundle.sh");
+    assert!(run.contains("HOLZWAVE_BUNDLE_APPIMAGE=required"), "a missing AppImage must fail the build: {run}");
+    for line in &lines {
+        for forbidden in ["HOLZWAVE_LINUX_ARCH", "amd64", "--platform", "x86_64"] {
+            assert!(!line.contains(forbidden), "release-linux-arm64.sh runs with `{forbidden}`: {line}");
+        }
+    }
+    // The inspections run in the arm64 image, which is the default one of linux-container-bundle.sh.
+    assert!(LINUX_ARM64.contains("IMAGE=holzwave-linux-bundle\n"), "the inspection image is not holzwave-linux-bundle");
+    assert!(LINUX_ARM64.contains(r#"built="$root/target/linux-bundle""#), "the packages are not read from target/linux-bundle");
+}
+
+#[test]
+fn the_arm64_script_demands_the_architecture_words_of_each_package() {
+    let text = squash(LINUX_ARM64);
+    for demand in [
+        r#"grep -qx 'deb arm64' || fail "the deb is not arm64""#,
+        r#"grep -qx 'rpm aarch64' || fail "the rpm is not aarch64""#,
+        r#"grep -q '^appimage ELF 64-bit LSB .*ARM aarch64' || fail"#,
+        r#"grep -q '^appimage-program ELF 64-bit LSB .*ARM aarch64' || fail "the program inside the AppImage is not an aarch64 ELF file""#,
+        r#"grep -qx 'appimage-apprun yes' || fail"#,
+        r#"grep -qx 'appimage-webkit yes' || fail"#,
+    ] {
+        assert!(text.contains(demand), "release-linux-arm64.sh does not demand `{demand}`");
+    }
+    // The tools that read the architecture, as the x86_64 script reads it, and the ELF header offset of the squashfs.
+    for tool in ["dpkg-deb -f", "rpm -qp --qf", "file -b", "readelf -h", "unsquashfs -o"] {
+        assert!(text.contains(tool), "release-linux-arm64.sh does not run `{tool}`");
+    }
+}
+
+#[test]
+fn the_arm64_script_writes_the_release_names_and_a_checksum_each() {
+    for name in [r#""holzWave_${version}_arm64.deb""#, r#""holzWave_${version}_aarch64.rpm""#, r#""holzWave_${version}_aarch64.AppImage""#] {
+        assert!(LINUX_ARM64.contains(name), "release-linux-arm64.sh does not name {name}");
+    }
+    // The same folder as the x86_64 packages, a .sha256 file for each, and nothing of theirs is removed or renamed.
+    assert!(LINUX_ARM64.contains("out=target/release-cross") && LINUX_CONTAINER.contains("out=target/release-cross"));
+    assert!(LINUX_ARM64.contains(r#"echo "$sum  $2" >"$out/$2.sha256""#), "no checksum file is written");
+    for line in commands(LINUX_ARM64) {
+        let padded = format!(" {line} ");
+        assert!(!padded.contains(" rm ") && !padded.contains(" mv "), "the script removes or renames a file: {line}");
+    }
+}
+
+#[test]
+fn the_arm64_script_signs_and_publishes_nothing_and_says_what_it_is() {
+    for line in commands(LINUX_ARM64) {
+        for forbidden in ["gh ", "curl", "docker push", "minisign", "git push", "git tag", "sudo ", "brew install", "cargo install"] {
+            assert!(!line.contains(forbidden), "release-linux-arm64.sh runs `{forbidden}`: {line}");
+        }
+    }
+    let text = squash(LINUX_ARM64);
+    for said in [
+        "built in a native arm64 container on an Apple Silicon Mac",
+        "were not run on ARM Linux hardware",
+        "the container cannot start the AppImage",
+        "unsigned until the owner signs",
+        "sh scripts/sign-linux.sh $version --arch aarch64",
+        "nothing was signed or published",
+        "release-linux-arm64: ok",
+    ] {
+        assert!(text.contains(said), "release-linux-arm64.sh does not say `{said}`");
+    }
+}
