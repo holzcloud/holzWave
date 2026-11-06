@@ -92,10 +92,11 @@ fn path_with_wsh(bin: &Path, path: Option<&std::ffi::OsStr>) -> Option<std::ffi:
 fn load_connections(
     dir: &Path,
     secrets: Arc<dyn SecretStore>,
+    home: Option<PathBuf>,
     live_panes: &[PaneId],
     dropped: &[String],
 ) -> (Connections, holzwave_core::layout::LoadStatus) {
-    let (connections, status) = Connections::load(dir, secrets, user_home(), live_panes);
+    let (connections, status) = Connections::load(dir, secrets, home, live_panes);
     connections.forget_secrets(dropped);
     (connections, status)
 }
@@ -1109,7 +1110,8 @@ impl AppCore {
         let config = Mutex::new(Config::load(&dir, host.platform().chord_table()));
         let connections = {
             let live = lock(&windows).all_panes();
-            let (connections, status) = load_connections(&dir, secrets.clone(), &live, &promoted.dropped_profiles);
+            let (connections, status) =
+                load_connections(&dir, secrets.clone(), shell_home(&*host), &live, &promoted.dropped_profiles);
             match status {
                 holzwave_core::layout::LoadStatus::Clean => {}
                 holzwave_core::layout::LoadStatus::Repaired(notes) => {
@@ -1121,7 +1123,7 @@ impl AppCore {
         };
         let blocks = {
             let live = lock(&windows).all_panes();
-            Blocks::load(&dir, user_home(), &live)
+            Blocks::load(&dir, shell_home(&*host), &live)
         };
 
         // The panes that ran a tool last time (a tool session is never started again). Pane ids are small per-device
@@ -4150,6 +4152,14 @@ fn private_pane_env(dirs: &PrivateDirs) -> Vec<(String, String)> {
     env
 }
 
+/// The home for `~/` in the key paths of connections and in the paths of blocks: the private home folder on the Android
+/// host (the same folder `reveal_path` and the shell use, so `~/.ssh/id_ed25519` names a file a person can put there), the
+/// process's own home everywhere else.
+fn shell_home(host: &dyn Host) -> Option<PathBuf> {
+    let private = if host.platform() == Platform::Android { host.private_dirs().map(|dirs| dirs.home) } else { None };
+    private.or_else(user_home)
+}
+
 /// The home directory for `~/`: `HOME`, and on Windows `USERPROFILE`. An empty value is no value. `private_home` is the
 /// home folder of the Android host ([`Host::private_dirs`]; `None` everywhere else): when it is given it is the home,
 /// whatever the environment says, because an Android app's process has no `HOME` of its own worth reading.
@@ -6749,7 +6759,7 @@ mod tests {
 
         let promoted = holzwave_core::sync::engine::promote_incoming_with_report(&dir.0);
         assert_eq!(promoted.dropped_profiles, ["web"]);
-        let (connections, _) = load_connections(&dir.0, secrets.clone(), &[], &promoted.dropped_profiles);
+        let (connections, _) = load_connections(&dir.0, secrets.clone(), user_home(), &[], &promoted.dropped_profiles);
 
         assert_eq!(secrets.get("ssh:web").unwrap(), None, "the removed profile's secret is gone");
         assert_eq!(secrets.get("ssh:db").unwrap().as_deref(), Some("db-secret"), "the other profile's secret stays");
@@ -8147,6 +8157,22 @@ mod tests {
             assert_eq!(core.app_info().os, platform.as_str(), "the page is told the platform of the host");
             core.shutdown();
         }
+    }
+
+    #[test]
+    fn the_home_of_connection_key_paths_and_blocks_is_the_private_home_only_on_android() {
+        let dirs = PrivateDirs { home: PathBuf::from("/p/home"), cache: PathBuf::from("/p/cache") };
+        for (platform, private) in [(Platform::Android, true), (Platform::Linux, false), (Platform::MacOs, false)] {
+            let host = PrivateHost { base: NeutralHost::new(), platform, dirs: dirs.clone() };
+            let home = shell_home(&host);
+            if private {
+                assert_eq!(home, Some(PathBuf::from("/p/home")), "{platform:?}: the private home, whatever HOME says");
+            } else {
+                assert_eq!(home, user_home(), "{platform:?}: the process's own home, as before");
+            }
+        }
+        // A host with no private folders (the neutral one) keeps the process's home on every platform.
+        assert_eq!(shell_home(&NeutralHost::new()), user_home());
     }
 
     #[test]
