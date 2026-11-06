@@ -74,6 +74,8 @@ async function open(page, url, { os = "android", width = 390, height = 844, scre
   );
   await page.goto(`${url}index.html?renderer=canvas`);
   await page.waitForFunction(() => window.__MOCK__.callsOf("start_pane").length >= 1);
+  // The key row (it takes its place once its module is loaded) changes the height of the stage; measure after it has.
+  if (os === "android") await page.waitForSelector("#keyrow:not([hidden])");
 }
 
 const pageState = (page) =>
@@ -119,19 +121,28 @@ async function phoneCase(page, url) {
   assert.equal(await page.locator("#overlay .panehead").count(), 1, "one pane header");
   const box = await page.evaluate(() => {
     const rect = (id) => document.getElementById(id).getBoundingClientRect().toJSON();
-    return { term: rect("term"), stage: rect("stage"), top: rect("phone-top"), nav: rect("phone-nav"), win: [innerWidth, innerHeight] };
+    const row = document.getElementById("keyrow");
+    // The key row sits between the stage and the bottom bar while the terminal input has the focus (it has, here).
+    return {
+      term: rect("term"), stage: rect("stage"), top: rect("phone-top"), nav: rect("phone-nav"), win: [innerWidth, innerHeight],
+      row: row && !row.hidden ? rect("keyrow") : null,
+    };
   });
   for (const key of ["x", "y", "width", "height"]) {
     assert.ok(Math.abs(box.term[key] - box.stage[key]) <= 1, `the canvas fills the stage (${key}: ${box.term[key]} against ${box.stage[key]})`);
   }
-  assert.ok(Math.abs(box.top.bottom - box.stage.top) <= 1 && Math.abs(box.stage.bottom - box.nav.top) <= 1, "top strip, stage, bottom bar in a column");
+  const aboveNav = box.row ? box.row.top : box.nav.top;
+  assert.ok(Math.abs(box.top.bottom - box.stage.top) <= 1 && Math.abs(box.stage.bottom - aboveNav) <= 1, "top strip, stage, bottom bar in a column");
+  if (box.row) assert.ok(Math.abs(box.row.bottom - box.nav.top) <= 1, "with the key row between the stage and the bottom bar");
   assert.ok(Math.abs(box.nav.bottom - box.win[1]) <= 1 && box.stage.width >= box.win[0] - 1, "the page fills the window");
 
   // The pty is told the full grid for the shown pane; the panes that are not shown are not touched.
   const grid = await fullGrid(page);
   const started = await callsOf(page, "start_pane");
   assert.deepEqual(started.map((a) => a.pane), [2], "only the shown pane was started");
-  assert.deepEqual({ cols: started[0].cols, rows: started[0].rows }, grid, "the full-size grid");
+  // The key row shows a moment after the first measurement and takes some rows: the size the shell was told last is the current one.
+  const told = (await callsOf(page, "resize")).filter((a) => a.pane === 2).at(-1) ?? started[0];
+  assert.deepEqual({ cols: told.cols, rows: told.rows }, grid, "the full-size grid");
   assert.ok(grid.cols > 20 && grid.rows > 20, `a grid that fills a phone: ${JSON.stringify(grid)}`);
   assert.equal((await callsOf(page, "close_pane")).length, 0, "no pane was closed");
 
@@ -157,7 +168,7 @@ async function phoneCase(page, url) {
   // A height-only change that the keyboard makes shrinks the stage and asks the pty for the smaller full grid.
   const before = grid.rows;
   await page.setViewportSize({ width: 390, height: 500 });
-  await page.waitForFunction((n) => window.__MOCK__.callsOf("resize").length >= 1 && n > 0, before);
+  await page.waitForFunction((n) => (window.__MOCK__.callsOf("resize").at(-1)?.rows ?? n) < n, before);
   const resized = (await callsOf(page, "resize")).at(-1);
   const smaller = await fullGrid(page);
   assert.deepEqual({ cols: resized.cols, rows: resized.rows }, smaller, "the resize carries the full grid of the smaller stage");
