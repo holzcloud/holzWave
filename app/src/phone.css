@@ -1,0 +1,156 @@
+/* The phone layout (docs/design.md section 6.6): a top strip, one pane filling the stage, a bottom bar with the tabs, and a
+   sheet from the bottom edge. Loaded with `loadStyles("./phone.css")` by phone.ts on the Android classes only, so a desktop
+   never fetches it. Every colour is a `--hw-*` token, every size is in rem (the UI scale moves it), and the one fixed
+   pixel size is the 44 px floor of a touch target. The sheet is the only floating layer here, so it alone has the shadow.
+   Everything is keyed on the root class `layout-phone`; `layout-tablet` takes nothing from this file yet. */
+
+:root.layout-phone {
+  /* A touch target is at least 44 px (design.md section 6.6): 44 px at the base size, never less when the UI scale is below 100 %. */
+  --phone-target: max(44px, calc(44rem / 12));
+}
+
+/* The desktop window bar, the sidebar column and the status line are not drawn on a phone. */
+:root.layout-phone #bar,
+:root.layout-phone #sidebar,
+:root.layout-phone #status { display: none; }
+
+/* The page is a column: top strip, the stage (one pane), bottom bar. `--hw-vvh` is the height the visual viewport leaves while an
+   on-screen keyboard is up (set by the key row's module); without it the page is the dynamic viewport. */
+:root.layout-phone #app { height: var(--hw-vvh, 100dvh); }
+
+/* ---- top strip -------------------------------------------------------------------------------------------- */
+
+#phone-top {
+  box-sizing: border-box; display: flex; align-items: center; flex: none; min-width: 0;
+  min-height: calc(var(--phone-target) + env(safe-area-inset-top, 0px));
+  padding: env(safe-area-inset-top, 0px) .667rem 0 0; background: var(--hw-ground-2); border-bottom: 1px solid var(--hw-line);
+  font-size: calc(16rem / 12); user-select: none; -webkit-user-select: none;
+}
+#phone-top button {
+  -webkit-appearance: none; appearance: none; box-sizing: border-box; display: flex; align-items: center; gap: .5rem;
+  flex: 0 1 auto; min-width: var(--phone-target); min-height: var(--phone-target); max-width: 100%; margin: 0;
+  padding: 0 .667rem 0 .833rem; border: 0; border-radius: 0; background: none; color: var(--hw-ink); font: inherit;
+  text-align: left; cursor: pointer;
+}
+#phone-top button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
+#phone-top button:active { background: var(--hw-rose-wash); }
+/* The workspace diamond, drawn like the pill's (chrome.css): it is the workspace's mark in the strip. The page has no token for the
+   wood colour of the picture, so the diamond takes the ink, filled: the shape is what marks it. */
+.phone-dia {
+  box-sizing: border-box; flex: none; width: .5rem; height: .5rem; border: 1px solid currentColor; background: currentColor;
+  transform: rotate(45deg);
+}
+.phone-ws, .phone-tab, .phone-count { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.phone-ws { flex: 0 1 auto; font-weight: 700; }
+.phone-sep { flex: none; color: var(--hw-dim); }
+.phone-tab { flex: 0 1 auto; min-width: 0; color: var(--hw-ink-2); }
+.phone-count { flex: none; color: var(--hw-ink-2); }
+.phone-count[hidden] { display: none; }
+/* The place of a status chip: it takes the free width, empty, so nothing moves when a chip is put in. */
+#phone-chip { display: flex; align-items: center; justify-content: flex-end; flex: 1 1 0; min-width: 0; }
+
+/* ---- bottom bar ------------------------------------------------------------------------------------------- */
+
+#phone-nav {
+  box-sizing: border-box; display: flex; align-items: stretch; flex: none; min-width: 0;
+  min-height: calc(var(--phone-target) + env(safe-area-inset-bottom, 0px)); padding-bottom: env(safe-area-inset-bottom, 0px);
+  background: var(--hw-ground-2); border-top: 1px solid var(--hw-line); font-size: calc(16rem / 12);
+  user-select: none; -webkit-user-select: none;
+}
+.phone-tabs {
+  position: relative; display: flex; flex: 1 1 0; min-width: 0; overflow-x: auto; overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+.phone-tabs::-webkit-scrollbar { display: none; }
+#phone-nav button {
+  -webkit-appearance: none; appearance: none; box-sizing: border-box; flex: none; min-width: var(--phone-target);
+  min-height: var(--phone-target); margin: 0; padding: 0 .833rem; border: 0; border-top: 2px solid transparent; border-radius: 0;
+  background: none; color: var(--hw-dim); font: inherit; white-space: nowrap; text-align: center; cursor: pointer;
+}
+#phone-nav button.phone-tab-btn { flex: 1 0 auto; max-width: 14rem; overflow: hidden; text-overflow: ellipsis; }
+#phone-nav button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
+#phone-nav button:active { background: var(--hw-rose-wash); }
+/* The shown tab: a rose line above it, the wash and an underline, so it is told apart without the colour. */
+#phone-nav button.active {
+  background: var(--hw-rose-wash); color: var(--hw-ink); border-top-color: var(--hw-rose);
+  border-top-width: calc(var(--hw-focus-w) + 1px);
+  text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: .417rem; text-decoration-color: var(--hw-rose);
+}
+.phone-opener { color: var(--hw-ink-2); }
+.phone-opener[aria-expanded="true"] { color: var(--hw-ink); }
+
+/* ---- the sheet -------------------------------------------------------------------------------------------- */
+
+#phone-scrim { position: fixed; inset: 0; z-index: 20; background: color-mix(in srgb, var(--hw-ground) 60%, transparent); }
+#phone-scrim[hidden], #phone-sheet[hidden] { display: none; }
+#phone-sheet {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 21; box-sizing: border-box; display: flex; flex-direction: column;
+  max-height: min(85%, calc(var(--hw-vvh, 100dvh) - 1rem)); overflow-y: auto; overscroll-behavior: contain;
+  padding: 1rem .833rem env(safe-area-inset-bottom, 0px); background: var(--hw-ground-2); color: var(--hw-ink); border-top: 1px solid var(--hw-line);
+  border-radius: 8px 8px 0 0; box-shadow: 0 -12px 40px rgb(0 0 0 / .5); font-size: calc(16rem / 12);
+  user-select: none; -webkit-user-select: none;
+}
+#phone-sheet:focus { outline: none; }
+.phone-cap { margin: 1rem 0 .333rem; color: var(--hw-dim); font-size: calc(13rem / 12); }
+.phone-cap:first-child { margin-top: 0; }
+#phone-sheet button {
+  -webkit-appearance: none; appearance: none; box-sizing: border-box; margin: 0; font: inherit; color: var(--hw-ink-2);
+  background: none; cursor: pointer;
+}
+#phone-sheet button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
+
+/* Workspace pills: round, hairline, a diamond; the shown one is a solid fill with a filled diamond. */
+#phone-sheet .phone-pills { display: flex; flex-wrap: wrap; gap: .5rem; }
+#phone-sheet .phone-pill {
+  display: flex; align-items: center; gap: .5rem; min-width: var(--phone-target); min-height: var(--phone-target);
+  padding: 0 1rem; border: 1px solid var(--hw-line); border-radius: 999px; font-weight: 700; white-space: nowrap;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+}
+#phone-sheet .phone-pill::before {
+  content: ""; flex: none; box-sizing: border-box; width: .5rem; height: .5rem; border: 1px solid currentColor;
+  transform: rotate(45deg);
+}
+#phone-sheet .phone-pill.active { background: var(--hw-rose-deep); border-color: var(--hw-rose-deep); color: var(--hw-on-accent); }
+#phone-sheet .phone-pill.active::before { background: currentColor; }
+#phone-sheet .phone-pill-plus { justify-content: center; padding: 0; }
+#phone-sheet .phone-pill-plus::before { content: none; }
+
+/* Rows: tabs and panes, 44 px high. The shown one has the wash, a bar on its left and an underlined name. */
+.phone-list { display: flex; flex-direction: column; }
+#phone-sheet .phone-row {
+  display: flex; align-items: center; gap: .667rem; width: 100%; min-height: var(--phone-target); padding: 0 .833rem;
+  border: 0; border-left: calc(var(--hw-focus-w) + 1px) solid transparent; text-align: left;
+}
+#phone-sheet .phone-row.active { background: var(--hw-rose-wash); border-left-color: var(--hw-rose); color: var(--hw-ink); }
+#phone-sheet .phone-row.active .phone-row-name {
+  text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: .333rem; text-decoration-color: var(--hw-rose);
+}
+/* The line box is tall enough for the underline: `overflow: hidden` (the ellipsis) would cut a decoration that sits below it. */
+#phone-sheet .phone-row-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.5; }
+#phone-sheet .phone-row-ctx {
+  flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; color: var(--hw-dim);
+}
+#phone-sheet .phone-row-ctx:empty { display: none; }
+
+/* The footer is the same `Sheet` control as the bottom bar's, so the sheet closes where it opened. */
+#phone-sheet .phone-sheet-close {
+  position: sticky; bottom: 0; flex: none; width: 100%; min-height: var(--phone-target); margin-top: 1rem; padding: 0;
+  background: var(--hw-ground-2); border: 0; border-top: calc(var(--hw-focus-w) + 1px) solid var(--hw-rose); color: var(--hw-ink);
+  text-align: center;
+}
+
+/* Motion: the sheet slides up in 160 ms, only when the person has not asked for less (the root class is the one place that decides). */
+@keyframes phone-sheet-in { from { transform: translateY(1.5rem); opacity: 0; } }
+:root:not(.motion-reduce) #phone-sheet:not([hidden]) { animation: phone-sheet-in 160ms cubic-bezier(.2, .7, .3, 1); }
+
+/* ---- forced colours --------------------------------------------------------------------------------------- */
+
+/* The browser replaces the colours; this keeps the cues that are borders and decorations, in system colours. */
+@media (forced-colors: active) {
+  :root #phone-nav button.active { border-top-color: Highlight; text-decoration-color: Highlight; }
+  :root #phone-sheet .phone-row.active { border-left-color: Highlight; }
+  :root #phone-sheet .phone-row.active .phone-row-name { text-decoration-color: Highlight; }
+  :root #phone-sheet .phone-pill { border-color: CanvasText; }
+  :root #phone-sheet .phone-pill.active { outline: 2px solid Highlight; outline-offset: -2px; }
+  :root #phone-sheet .phone-sheet-close { border-top-color: Highlight; }
+}

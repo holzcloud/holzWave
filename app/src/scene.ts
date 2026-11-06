@@ -18,6 +18,8 @@ import type { PlaceGeometry } from "./images.js";
 import { linkAllowed, pagePolicy } from "./links.js";
 import { renderOverlay } from "./overlay.js";
 import { renderPaneHeads } from "./panehead.js";
+import { layoutNow, renderPhone } from "./phone.js";
+import { phoneView } from "./phoneview.js";
 import { Motion } from "./scroll.js";
 import { initSettings } from "./settings.js";
 import { forgetSelection, onSelectionSpans } from "./selection.js";
@@ -181,6 +183,14 @@ function watchDpr(): void {
 /** The `rev` of the view the page shows; 0 before the first one. */
 let shownRev = 0;
 
+/** The view as the core sent it, before the phone layout cut it to one pane; the phone's lists (tabs, panes) read it. */
+let rawView: View | null = null;
+
+/** The core's last view, whole; `state.view` is the one the layout draws (on a phone: the focused pane alone). */
+export function rawViewNow(): View | null {
+  return rawView;
+}
+
 /**
  * Take a new layout: the one place every answer and event of the core with a view ends up.
  *
@@ -195,6 +205,9 @@ export function applyView(v: View): void {
     if (v.rev < shownRev) return;
     shownRev = v.rev;
   }
+  // The one place a view enters the page: on a phone it becomes the focused pane at the full rectangle before any module sees it.
+  rawView = v;
+  if (layoutNow() === "phone") v = phoneView(v);
   state.view = v;
   const shown = new Set(v.panes.map(([id]) => id));
   for (const id of shown) state.away.delete(id); // a pane that comes back is a first appearance (syncSizes)
@@ -202,6 +215,7 @@ export function applyView(v: View): void {
   // The attention marks follow what is in view: showing a pane clears its marks, and a pane no tab holds loses them.
   attention.follow(shown, v.workspaces.flatMap((w) => (Array.isArray(w.pane_ids) ? w.pane_ids : [])));
   renderBar(v, applyView);
+  renderPhone();
   renderStatus();
   syncSizes();
   renderOverlay();
@@ -342,6 +356,7 @@ function onFrame(msg: FrameMsg): void {
 /** Bring everything that shows a title, a working directory or an exit in line with the state. */
 function renderLabels(): void {
   if (state.view) renderBar(state.view, applyView);
+  renderPhone();
   renderPaneHeads();
 }
 

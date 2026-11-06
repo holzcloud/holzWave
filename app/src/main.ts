@@ -31,6 +31,7 @@ import { initImages } from "./images.js";
 import { initKeyboard } from "./keyboard.js";
 import { initLinks } from "./links.js";
 import { initOverlay, renderOverlay } from "./overlay.js";
+import { initPhone } from "./phone.js";
 import { initPalette } from "./palette.js";
 import { initDragDrop, initDragDropEvents } from "./dragdrop.js";
 import { initPointer } from "./pointer.js";
@@ -51,6 +52,7 @@ window.addEventListener("unhandledrejection", (e) => {
 
 async function main() {
   await initChrome(); // its styles and app_info first: the first measurement needs the bar and the status line
+  await initPhone(); // the layout class of an Android window, with its stylesheet, before the first measurement
   await initScene();
   // The motion preference is resolved by now (initScene starts the settings): animated pictures play or pause by it.
   await initImages();

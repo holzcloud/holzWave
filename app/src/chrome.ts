@@ -32,6 +32,14 @@ let send: (request: Promise<View>) => void = () => {};
 /** The `apply` of the last `renderBar`, so a change of the marks can draw the bar again without a new layout. */
 let lastApply: (v: View) => void = () => {};
 
+/**
+ * Send a layout command the way the bar's buttons do and draw the answer. The phone's strips and sheet use it, so a change
+ * of tab, workspace or focus has one code path whatever layout shows it.
+ */
+export function sendLayout(request: Promise<View>): void {
+  send(request);
+}
+
 function button(cls: string, pick: (index: number) => Promise<View>): HTMLButtonElement {
   const node = el("button", cls);
   node.type = "button";
@@ -182,7 +190,7 @@ export function renderBar(view: View, apply: (v: View) => void): void {
 }
 
 /** The name a tab shows: one the user gave wins; a tab still called `shell` shows the title its focus pane's program set. */
-function tabName(t: View["tabs"][number]): string {
+export function tabName(t: View["tabs"][number]): string {
   return t.title !== AUTO_TAB ? t.title : state.titles.get(t.focus) || t.title;
 }
 
