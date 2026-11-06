@@ -76,6 +76,8 @@ sync_off|none|async||holzwave_host::sync::SyncView|-
 local_network_status|none|async||holzwave_host::local_network::LocalNetworkView|-
 local_network_answer|none|async|allow|holzwave_host::local_network::LocalNetworkView|String
 local_network_open_settings|none|async||()|String
+host_shell_status|none|async||holzwave_host::host_shell::HostShellView|-
+host_shell_set|none|async|enabled|holzwave_host::host_shell::HostShellView|String
 monitor_sample|none|async|pane|holzwave_core::monitor::Reading|String
 wsh_install|none|async|pane|String|String
 history_search|window|async|query,limit|Vec<holzwave_core::history::Hit>|-

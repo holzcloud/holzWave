@@ -11,6 +11,7 @@ use holzwave_host::commands::registry::{
     COMMANDS, CAP_DEFAULT, CAP_INPUT, CAP_PASTE, Command, ERROR_TEXT_LIMIT, Mode, NOT_IN_BROWSER, Outcome, Scope, Shell,
     Web, lookup,
 };
+use holzwave_host::commands::history_sync;
 use holzwave_host::seams::{Host, HostLimits, NeutralHost, Platform};
 use holzwave_host::state::{AppCore, Out, ShellSpec, Sink, Target};
 use holzwave_host::windows::{CursorSpot, Place};
@@ -1517,12 +1518,14 @@ impl holzwave_host::local_network::Source for CountingSource {
     }
 }
 
-const UNAVAILABLE_BROWSER: [(&str, &str); 5] = [
+const UNAVAILABLE_BROWSER: [(&str, &str); 7] = [
     ("open_url", r#"{"url":"ftp://example.test/x","pane":null}"#),
     ("reveal_path", r#"{"path":"/no/such/holzwave/path","base":null}"#),
     ("local_network_status", "{}"),
     ("local_network_answer", r#"{"allow":true}"#),
     ("local_network_open_settings", "{}"),
+    ("host_shell_status", "{}"),
+    ("host_shell_set", r#"{"enabled":true}"#),
 ];
 
 #[test]
@@ -1553,14 +1556,48 @@ fn the_commands_that_need_the_desktop_answer_one_sentence_and_run_nothing() {
     assert_eq!(source.asked.load(Ordering::SeqCst), asked, "the permission source was not asked");
     assert_eq!((world.events(), world.opened()), (events, windows));
     assert!(!world.dir.join("local-network.json").exists(), "no choice was stored");
+    assert!(!world.dir.join("host_shell.json").exists(), "no host shell choice was stored");
 }
 
 #[test]
-fn the_unavailable_rows_of_this_group_are_exactly_these_five() {
+fn the_unavailable_rows_of_this_group_are_exactly_these_seven() {
     let rows: BTreeSet<&str> =
         COMMANDS.iter().filter(|row| row.web == Web::Unavailable && !FIRST_GROUPS.contains(&row.group)).map(|row| row.name).collect();
     let named: BTreeSet<&str> = UNAVAILABLE_BROWSER.iter().map(|(name, _)| *name).collect();
     assert_eq!(rows, named);
+}
+
+#[test]
+fn the_host_shell_rows_are_desktop_only_and_take_one_boolean() {
+    let status = lookup("host_shell_status").expect("a row");
+    let set = lookup("host_shell_set").expect("a row");
+    for row in [status, set] {
+        assert_eq!((row.group, row.scope, row.mode, row.web), ("history_sync", Scope::None, Mode::Async, Web::Unavailable), "{}", row.name);
+    }
+    assert!(status.args.is_empty() && status.error.is_none(), "the status takes nothing and cannot fail");
+    assert_eq!(set.args.iter().map(|arg| (arg.name, arg.ty)).collect::<Vec<_>>(), [("enabled", "bool")], "one boolean and nothing else");
+    assert_eq!(set.error, Some("String"));
+    assert_eq!(status.answer.split_whitespace().collect::<String>(), "holzwave_host::host_shell::HostShellView");
+    assert_eq!(set.answer.split_whitespace().collect::<String>(), "holzwave_host::host_shell::HostShellView");
+}
+
+#[test]
+fn outside_a_flatpak_the_host_shell_answers_that_it_does_not_apply_and_refuses_to_be_set() {
+    if std::env::var_os("FLATPAK_ID").is_some() || std::path::Path::new("/.flatpak-info").exists() {
+        return; // the test is about a process that is not in a Flatpak
+    }
+    let world = World::new("host-shell-outside");
+    let view = history_sync::host_shell_status(&world.core);
+    assert!(!view.applies, "the group does not apply outside a Flatpak");
+    assert!(["off", "on", "unavailable"].contains(&view.state));
+
+    for enabled in [true, false] {
+        let refused = history_sync::host_shell_set(&world.core, enabled).expect_err("refused outside a Flatpak");
+        assert!(refused.contains("Flatpak"), "{refused}");
+    }
+    assert!(!world.dir.join("host_shell.json").exists(), "nothing was written");
+    assert!(!world.dir.join("host_shell.json.bad").exists());
+    assert!(!history_sync::host_shell_status(&world.core).applies, "and nothing changed");
 }
 
 // ---- connections, login prompts and the installation of wsh --------------------------------------------------------------
@@ -1887,13 +1924,15 @@ fn rows_expected() -> usize {
     golden_commands().len()
 }
 
-/// The 13 commands the browser build does not have: eight of the first table plan, five of the second.
-const THE_UNAVAILABLE: [&str; 13] = [
+/// The 15 commands the browser build does not have: eight of the first table plan, seven of the second.
+const THE_UNAVAILABLE: [&str; 15] = [
     "attach_pane",
     "attach_tab",
     "clipboard_text",
     "drag_end",
     "drag_over",
+    "host_shell_set",
+    "host_shell_status",
     "local_network_answer",
     "local_network_open_settings",
     "local_network_status",
@@ -2181,7 +2220,7 @@ fn surface_file_lists_every_golden_command() {
     let lines = surface_lines();
     let surface_names: BTreeSet<&str> = lines.iter().map(|(name, _)| *name).collect();
 
-    assert_eq!(lines.len(), 122, "one line for each command that was declared");
+    assert_eq!(lines.len(), 124, "one line for each command that was declared");
     assert_eq!(surface_names.len(), lines.len(), "no command twice");
     assert_eq!(surface_names, golden_names);
     for (_, line) in &lines {

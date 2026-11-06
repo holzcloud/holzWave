@@ -572,6 +572,18 @@ macro_rules! host_commands {
                 run: history_sync::local_network_open_settings, web: unavailable
             }
             {
+                name: host_shell_status, shell: generated, group: history_sync, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: holzwave_host::host_shell::HostShellView,
+                run: history_sync::host_shell_status, web: unavailable
+            }
+            {
+                name: host_shell_set, shell: generated, group: history_sync, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [enabled: bool],
+                answers: holzwave_host::host_shell::HostShellView, fails: String,
+                run: history_sync::host_shell_set, web: unavailable
+            }
+            {
                 name: ai_turn_snapshot, shell: generated, group: ai, scope: none, mode: async, cap: CAP_DEFAULT,
                 args: [conversation: String],
                 answers: ChatState, fails: AiFault,

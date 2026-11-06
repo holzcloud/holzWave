@@ -4,6 +4,7 @@
 
 use holzwave_core::history::Hit;
 
+use crate::host_shell::HostShellView;
 use crate::local_network::LocalNetworkView;
 use crate::state::AppCore;
 use crate::sync::SyncView;
@@ -60,4 +61,18 @@ pub fn local_network_answer(core: &AppCore, allow: bool) -> Result<LocalNetworkV
 /// does not have it.
 pub fn local_network_open_settings(core: &AppCore) -> Result<(), String> {
     core.open_local_network_settings()
+}
+
+/// The group `Host shell` of the Settings as the page needs it: `{applies, state}`, where `state` is `off`, `on` or
+/// `unavailable` and `applies` is false outside a Flatpak (the page then draws nothing). It reads the Flatpak the core runs
+/// in, so the browser build does not have it.
+pub fn host_shell_status(core: &AppCore) -> HostShellView {
+    core.host_shell().view()
+}
+
+/// The person pressed the switch `Host shell`. Takes one boolean and nothing else. Refused with the reason outside a Flatpak
+/// and in a Flatpak without the permission to run commands on the host; otherwise the choice is stored on this computer
+/// and the answer is the new view. Only panes started afterwards follow it. The browser build does not have it.
+pub fn host_shell_set(core: &AppCore, enabled: bool) -> Result<HostShellView, String> {
+    core.host_shell().set(enabled)
 }
