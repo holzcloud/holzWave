@@ -161,6 +161,20 @@ Built and tested by the author on macOS and Windows, and on Linux up to `0.0.1-b
 
 Per-phase detail: [docs/status.md](docs/status.md).
 
+## Built with AI help
+
+holzWave is built with the help of an AI coding assistant: Claude, made by Anthropic, working inside a planning and review
+workflow under the direction of the owner. The code (Rust, TypeScript and the shell and PowerShell scripts), the tests, the
+documentation and the packaging files were written with that help. The numbers come from the repository's own history: on
+2026-11-06 it held 1,053 commits since 2026-10-10, and 1,051 of them carry a `Co-Authored-By: Claude` trailer. The two that
+do not are a merge commit and a work-in-progress commit. The commits are made under the owner's own identity.
+
+The owner reads the results, runs the tests, tries the app on the machines named above and decides what ships. AI-written
+work can hold mistakes that the tests do not find, which is why every page here says what was not run.
+
+The Flathub manifest, its metainfo text and the submission are written and made by the owner by hand, as Flathub's policy
+asks. The files under `packaging/flatpak/` are references for the owner to read, not a submission.
+
 ## Build from source
 
 macOS on Apple Silicon, Windows and Linux are the verified platforms; the steps below are for macOS, the others are in
@@ -198,7 +212,10 @@ Full plan: [docs/roadmap.md](docs/roadmap.md).
 [Architecture](docs/architecture.md) · [Design](docs/design.md) · [Roadmap](docs/roadmap.md) ·
 [Status and stack](docs/status.md) · [Building](docs/building.md) · [Sync format](docs/sync.md) ·
 [Configuration files](docs/config.md) · [Server guide](docs/server.md) · [Test plan](docs/test-plan.md) ·
+[Distribution channels](docs/distribution.md) · [Privacy statement](PRIVACY.md) ·
 [Profile schema](docs/integrations.schema.json) · [View schema](docs/integration-view.schema.json)
+
+Questions and bug reports go to [GitHub Issues](https://github.com/holzcloud/holzWave/issues).
 
 ## License and credits
 

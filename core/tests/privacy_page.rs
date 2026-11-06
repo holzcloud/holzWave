@@ -251,3 +251,106 @@ fn the_label_scan_sees_a_label_and_leaves_dates_and_versions_alone() {
     assert_eq!(plan_labels(&format!("as {decision} says")), [decision]);
     assert!(plan_labels("on 2026-11-06 and v0.0.1-beta2 and 1.13-14x").is_empty());
 }
+
+// ---- Task 2: the disclosure and the links in the README ---------------------------------------------------------
+
+const README: &str = include_str!("../../README.md");
+
+/// The text of the README section whose heading holds `AI` and `built with AI` (any case), up to the next `## ` heading.
+fn disclosure(readme: &str) -> &str {
+    let start = readme
+        .lines()
+        .scan(0usize, |offset, line| {
+            let at = *offset;
+            *offset += line.len() + 1;
+            Some((at, line))
+        })
+        .find(|(_, line)| line.starts_with("## ") && line.to_lowercase().contains("built with ai"))
+        .map(|(at, _)| at)
+        .expect("the README has no section `Built with AI help`");
+    let body = &readme[start..];
+    let end = body[3..].find("\n## ").map_or(body.len(), |at| at + 3);
+    &body[..end]
+}
+
+/// The words German text would add to an English file; a few that no English sentence of this project uses.
+const GERMAN_WORDS: [&str; 8] = [" und ", " nicht ", " der ", " die ", " das ", " ist ", " wird ", " für "];
+
+#[test]
+fn the_readme_discloses_the_ai_help_with_the_parts_the_extent_and_the_owners_part() {
+    let text = disclosure(README);
+    assert_eq!(
+        missing(
+            text,
+            &[
+                "AI coding assistant",
+                "Claude, made by Anthropic",
+                "the code",
+                "the tests",
+                "the documentation",
+                "the packaging files",
+                "commits",
+                "Co-Authored-By: Claude",
+                "The owner reads the results, runs the tests",
+                "decides what ships",
+            ],
+        ),
+        Vec::<&str>::new()
+    );
+    // The extent is a number from the history, not an adjective alone: two counts and the day they were taken.
+    let digits = text.split(|c: char| !c.is_ascii_digit() && c != ',').filter(|w| w.chars().filter(char::is_ascii_digit).count() >= 3);
+    assert!(digits.count() >= 2, "the disclosure names no commit counts");
+    assert_eq!(missing(text, &["on 2026-"]), Vec::<&str>::new(), "the counts carry no date");
+}
+
+#[test]
+fn the_readme_says_the_owner_makes_the_flathub_submission_by_hand() {
+    let text = disclosure(README);
+    assert_eq!(
+        missing(
+            text,
+            &[
+                "Flathub manifest",
+                "the submission",
+                "written and made by the owner by hand",
+                "`packaging/flatpak/`",
+                "references",
+                "not a submission",
+            ],
+        ),
+        Vec::<&str>::new()
+    );
+}
+
+#[test]
+fn the_readme_links_the_statement_the_distribution_page_and_the_issues() {
+    assert_eq!(
+        missing(
+            README,
+            &[
+                "[Privacy statement](PRIVACY.md)",
+                "[Distribution channels](docs/distribution.md)",
+                "[GitHub Issues](https://github.com/holzcloud/holzWave/issues)",
+                "Questions and bug reports go to",
+            ],
+        ),
+        Vec::<&str>::new()
+    );
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("the workspace root");
+    assert!(root.join("PRIVACY.md").is_file() && root.join("docs/distribution.md").is_file(), "a linked file is missing");
+}
+
+#[test]
+fn the_readme_has_no_planning_label_and_no_german_and_the_disclosure_matcher_can_fail() {
+    assert_eq!(plan_labels(README), Vec::<String>::new(), "labels of the private planning tree in README.md");
+    let lowered = format!(" {} ", flat(README).to_lowercase());
+    for word in GERMAN_WORDS {
+        assert!(!lowered.contains(word), "README.md holds the German word {word:?}");
+    }
+    assert!(!README.chars().any(|c| "äöüßÄÖÜ".contains(c)), "README.md holds a German letter");
+    // The matcher fails on a disclosure without the owner's part, and on a README without the section.
+    let cut = without(disclosure(README), "decides what ships");
+    assert_eq!(missing(&cut, &["decides what ships"]), ["decides what ships"]);
+    let result = std::panic::catch_unwind(|| disclosure("# Title\n\n## Other\ntext\n").len());
+    assert!(result.is_err(), "a README without the section is accepted");
+}
