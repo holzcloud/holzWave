@@ -1,0 +1,56 @@
+/* The key row of a phone or a tablet (docs/design.md section 6.6): `esc tab ctrl alt ↑ ↓` in one strip above the on-screen keyboard.
+   Loaded with `loadStyles("./keyrow.css")` by keyrow.ts on the Android layouts only, so a desktop never fetches it. Every colour is a
+   `--hw-*` token (so `contrast-high` reaches it), every size is in rem, and the one fixed pixel size is the 44 px floor of a touch
+   target. The row is flat: a hairline above it, hairline keys, no shadow, no gradient and no animation.
+   `ctrl` and `alt` have three states that differ by shape, never by colour alone: idle (a plain key), armed (a 2 px underline under
+   the label and the rose wash) and locked (a filled square before the label as well). */
+
+:root {
+  /* A touch target is at least 44 px (design.md section 6.6): 44 px at the base size, never less when the UI scale is below 100 %. */
+  --key-target: max(44px, calc(44rem / 12));
+}
+
+/* The tablet's window is the page's full height; the phone's is set in phone.css. Both follow the visual viewport while the keyboard is up. */
+:root.layout-tablet #app { height: var(--hw-vvh, 100%); }
+
+#keyrow {
+  box-sizing: border-box; display: flex; flex: none; align-items: stretch; gap: .5rem; min-width: 0;
+  padding: .5rem .667rem; background: var(--hw-ground-2); border-top: 1px solid var(--hw-line);
+  user-select: none; -webkit-user-select: none; touch-action: manipulation;
+}
+#keyrow[hidden] { display: none; }
+
+#keyrow .keyrow-key {
+  -webkit-appearance: none; appearance: none; box-sizing: border-box; display: flex; align-items: center; justify-content: center;
+  flex: 1 1 0; min-width: var(--key-target); min-height: var(--key-target); margin: 0; padding: 0 .333rem;
+  background: none; border: 1px solid var(--hw-line); border-radius: .5rem; color: var(--hw-ink-2);
+  font: inherit; font-size: calc(14rem / 12); line-height: 1.5; text-align: center; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+#keyrow .keyrow-key:active { background: var(--hw-rose-wash); color: var(--hw-ink); }
+#keyrow .keyrow-key:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
+
+/* Armed: the next key only. A 2 px underline under the label and the wash. */
+#keyrow .keyrow-key[data-state="armed"], #keyrow .keyrow-key[data-state="locked"] {
+  background: var(--hw-rose-wash); color: var(--hw-ink);
+}
+#keyrow .keyrow-key[data-state="armed"] .keyrow-label, #keyrow .keyrow-key[data-state="locked"] .keyrow-label {
+  text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: .25rem; text-decoration-color: var(--hw-rose);
+}
+
+/* Locked: stays on until tapped. The same, with a filled square before the label. The square is a border, not a background, so
+   forced colours keep it. */
+#keyrow .keyrow-mark {
+  flex: none; box-sizing: content-box; width: 0; height: 0; margin-right: .417rem; border: .25rem solid currentColor;
+}
+
+/* Forced colours replace the colours; the underline, the square and the hairline stay, in system colours. */
+@media (forced-colors: active) {
+  :root #keyrow { border-top-color: CanvasText; }
+  :root #keyrow .keyrow-key { border-color: CanvasText; }
+  :root #keyrow .keyrow-key[data-state="armed"], :root #keyrow .keyrow-key[data-state="locked"] { border-color: Highlight; }
+  :root #keyrow .keyrow-key[data-state="armed"] .keyrow-label, :root #keyrow .keyrow-key[data-state="locked"] .keyrow-label {
+    text-decoration-color: Highlight;
+  }
+  :root #keyrow .keyrow-key:focus-visible { outline-color: Highlight; }
+}

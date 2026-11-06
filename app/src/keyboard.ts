@@ -11,7 +11,24 @@ import { call, listen } from "./bridge.js";
 import { actionIdFor, setBindingTable, setOs } from "./chords.js";
 import { isConfirmingClose } from "./confirm.js";
 import { gridRect } from "./geometry.js";
-import { chordsOf, isComposingKey, isModifierKey, keyPayload } from "./keymap.js";
+import { chordsOf, isComposingKey, isModifierKey, type KeyPayload, keyPayload } from "./keymap.js";
+import {
+  anySticky,
+  consume,
+  idleSticky,
+  keyEvents,
+  keyForChar,
+  keyForInputType,
+  modsFor,
+  type Modifier,
+  type RowKey,
+  SENTINEL,
+  type SourceEvent,
+  type StickyState,
+  sourceAfter,
+  stripSentinel,
+  tap,
+} from "./keyrowstate.js";
 import { offerKey, pushKeyHandler } from "./keystack.js";
 import { confirmPaste, isConfirmingPaste, pasteDecision } from "./paste-confirm.js";
 import { state } from "./state.js";
@@ -111,18 +128,19 @@ function placeInputSoon(): void {
 
 function onCompositionStart(): void {
   composing = true;
+  noteSource({ type: "compositionstart" });
   placeInput();
 }
 
 function onCompositionEnd(e: CompositionEvent): void {
   composing = false;
   const box = ime;
-  if (box) box.value = "";
+  if (box) resetField(box);
   const text = e.data ?? "";
   if (text === "") return;
   endedAt = performance.now();
   recent = { text, until: endedAt + DUPLICATE_MS };
-  sendText(text);
+  sendSoftText(text);
 }
 
 /** Text that did not come from a keydown: a dead key's result, the emoji picker, dictation. */
@@ -130,14 +148,14 @@ function onInput(e: Event): void {
   if (composing || (e as InputEvent).isComposing) return; // the commit arrives with compositionend
   const box = ime;
   if (!box) return;
-  const text = box.value;
-  box.value = "";
+  const text = touch ? stripSentinel(box.value) : box.value;
+  resetField(box);
   if (text === "") return;
   if (recent && performance.now() < recent.until && text === recent.text) {
     recent = null; // the same commit again: some engines deliver it after compositionend as well
     return;
   }
-  sendText(text);
+  sendSoftText(text);
 }
 
 // ---- terminal input ------------------------------------------------------------------------------
@@ -145,9 +163,11 @@ function onInput(e: Event): void {
 /** The codes of keys whose press went to the core: only their release is sent, so a shortcut leaves no stray one. */
 const pressed = new Set<string>();
 
-/** Send one key event for the focused pane. A command that fails is the core's to report, not an error here. */
-function sendKey(pane: number, e: KeyboardEvent, release: boolean): void {
-  const p = keyPayload(e, release);
+/**
+ * Send one key event for `pane`: the one path of the keyboard, the key row and a soft keyboard's keys, so the core sees one kind of
+ * key event. A command that fails is the core's to report, not an error here.
+ */
+export function sendKeyPayload(pane: number, p: KeyPayload): void {
   void call("key", {
     pane,
     code: p.code,
@@ -159,7 +179,14 @@ function sendKey(pane: number, e: KeyboardEvent, release: boolean): void {
   }).catch(() => {});
 }
 
+/** Send one key event of the keyboard; `extra` is the modifier bits of a sticky key that the event itself does not carry. */
+function sendKey(pane: number, e: KeyboardEvent, release: boolean, extra = 0): void {
+  const p = keyPayload(e, release);
+  sendKeyPayload(pane, extra === 0 ? p : { ...p, mods: p.mods | extra });
+}
+
 function onKeyDown(e: KeyboardEvent): void {
+  noteSource({ type: "keydown", key: e.key, code: e.code, keyCode: e.keyCode });
   // A key that belongs to an input method or a dead-key sequence is the textarea's: no command, no preventDefault.
   if (isComposingKey(e)) return;
   composing = false; // a key that is not an input method's proves no composition is running: never stay stuck
@@ -196,14 +223,168 @@ function onKeyDown(e: KeyboardEvent): void {
   if (pane === undefined) return;
   e.preventDefault();
   pressed.add(e.code);
-  sendKey(pane, e, false);
+  const extra = touch ? takeStickyMods() : 0; // a sticky modifier of the key row belongs to this key, from whatever keyboard
+  if (extra !== 0) stuck.set(e.code, extra);
+  sendKey(pane, e, false, extra);
 }
 
 function onKeyUp(e: KeyboardEvent): void {
   if (!pressed.delete(e.code)) return; // the press never went to the core
   const pane = state.view?.focus;
   if (pane === undefined) return;
-  sendKey(pane, e, true);
+  const extra = stuck.get(e.code) ?? 0;
+  stuck.delete(e.code);
+  sendKey(pane, e, true, extra);
+}
+
+// ---- touch layouts: sticky modifiers and the soft keyboard (docs/design.md section 6.6) -----------------------------
+//
+// Everything below is in force on a phone or a tablet only (`setTouchInput`, called by keyrow.ts from the layout class); on a
+// desktop and in a browser `touch` stays false, no listener is added to the terminal input and every function above behaves as before.
+// Built to the known behaviour of Android input methods and not run on a real one: a soft keyboard sends key code 229 for text
+// and may send nothing for Backspace or Enter in an empty field, so the field holds one sentinel character and a `beforeinput`
+// event stands for the key.
+
+/** The page is a phone or a tablet. */
+let touch = false;
+
+/** The sticky `ctrl` and `alt` of the key row. */
+let sticky: StickyState = idleSticky();
+
+/** The last keys came from a hardware keyboard (the key row is not drawn then). */
+let hardware = false;
+
+/** The modifier bits a sticky key added to a press, by key code, so its release carries the same bits. */
+const stuck = new Map<string, number>();
+
+const touchWatchers = new Set<() => void>();
+
+function touchChanged(): void {
+  for (const fn of [...touchWatchers]) fn();
+}
+
+/** Call `fn` when the sticky state or the keyboard source changes. The returned function stops it. */
+export function onTouchInputChange(fn: () => void): () => void {
+  touchWatchers.add(fn);
+  return () => void touchWatchers.delete(fn);
+}
+
+/** The sticky state, for the key row to draw. */
+export function stickyNow(): StickyState {
+  return sticky;
+}
+
+/** The last keys came from a hardware keyboard. */
+export function hardwareKeyboardNow(): boolean {
+  return hardware;
+}
+
+/** A tap on a sticky key of the row at time `now` (milliseconds on the event clock). */
+export function tapSticky(which: Modifier, now: number): void {
+  if (!touch) return;
+  sticky = tap(sticky, which, now);
+  touchChanged();
+}
+
+/**
+ * The modifier bits the next key carries: `base` plus every armed or locked modifier. The armed ones are spent by this call,
+ * the locked ones stay. Call it once for each key that is sent.
+ */
+export function takeStickyMods(base = 0): number {
+  const mods = modsFor(sticky, base);
+  const next = consume(sticky);
+  if (next !== sticky) {
+    sticky = next;
+    touchChanged();
+  }
+  return mods;
+}
+
+/** Say where the last event came from; on a desktop it is not asked. */
+function noteSource(event: SourceEvent): void {
+  if (!touch) return;
+  const next = sourceAfter(hardware, event);
+  if (next === hardware) return;
+  hardware = next;
+  touchChanged();
+}
+
+/** Put the terminal input back to its resting content: one sentinel on a touch layout, empty otherwise. */
+function resetField(box: HTMLTextAreaElement): void {
+  if (!touch) {
+    box.value = "";
+    return;
+  }
+  box.value = SENTINEL;
+  box.setSelectionRange(SENTINEL.length, SENTINEL.length);
+}
+
+/** Give the focused input its sentinel, unless a composition is running (setting the value would end it). */
+function keepSentinel(): void {
+  const box = ime;
+  if (!box || composing || box.value === SENTINEL) return;
+  resetField(box);
+}
+
+/** The key of `key` for the focused pane, with the sticky modifiers (spent by it). A pane that is gone makes no key. */
+function sendRowKeyEvents(key: RowKey): void {
+  const pane = state.view?.focus;
+  if (pane === undefined) return;
+  const { press, release } = keyEvents({ ...key, mods: takeStickyMods(key.mods) });
+  sendKeyPayload(pane, press);
+  sendKeyPayload(pane, release);
+}
+
+/**
+ * Text a soft keyboard committed. On a touch layout one printable character with a modifier armed or locked is that key with
+ * the modifier (`ctrl` then `c` is Ctrl+C, not the text "c"); any other commit is text, and it spends an armed modifier.
+ */
+function sendSoftText(text: string): void {
+  if (!touch || !anySticky(sticky)) {
+    sendText(text);
+    return;
+  }
+  const key = keyForChar(text);
+  if (key) {
+    sendRowKeyEvents(key);
+    return;
+  }
+  takeStickyMods();
+  sendText(text);
+}
+
+/** An on-screen keyboard's Backspace, Enter and word delete arrive as `beforeinput` events of the field, never as keys. */
+function onBeforeInput(e: Event): void {
+  const ev = e as InputEvent;
+  noteSource({ type: "beforeinput", isComposing: ev.isComposing });
+  if (composing || ev.isComposing) return; // an edit inside a composition belongs to the input method
+  const key = keyForInputType(ev.inputType);
+  if (!key) return;
+  ev.preventDefault(); // the field stays at its sentinel
+  sendRowKeyEvents(key);
+}
+
+/**
+ * Turn the touch input on or off (keyrow.ts follows the layout class). On: the sentinel and the `beforeinput` path. Off: the
+ * field is empty again, a modifier left locked is released and the keyboard source is forgotten.
+ */
+export function setTouchInput(on: boolean): void {
+  if (on === touch) return;
+  touch = on;
+  const box = ime;
+  if (on) {
+    box?.addEventListener("beforeinput", onBeforeInput);
+    box?.addEventListener("focus", keepSentinel);
+    if (box && document.activeElement === box) keepSentinel();
+  } else {
+    box?.removeEventListener("beforeinput", onBeforeInput);
+    box?.removeEventListener("focus", keepSentinel);
+    if (box && !composing) box.value = stripSentinel(box.value);
+    sticky = idleSticky();
+    hardware = false;
+    stuck.clear();
+  }
+  touchChanged();
 }
 
 // ---- the binding table ---------------------------------------------------------------------------
@@ -482,4 +663,7 @@ export function initKeyboard(applyView: (v: View) => void): void {
     }, 0);
   });
   focusInput();
+  // The key row and the touch input follow the layout class of an Android window. On a desktop and in a browser the module is
+  // never fetched. It is loaded when needed because it imports the scene and the phone chrome, which import this file.
+  if (state.os === "android") void import("./keyrow.js").then((m) => m.initKeyRow());
 }
