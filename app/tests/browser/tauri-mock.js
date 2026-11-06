@@ -45,6 +45,17 @@
 //       openFails(text)    `local_network_open_settings` rejects with `text` (a string, as the shell's error); openFails(null) stops it
 //       answerFails(text)  `local_network_answer` rejects with `text` and changes nothing; answerFails(null) stops it
 //       reset()        back to the default
+//     hostShell        the host shell switch of a Flatpak (docs/design.md 6.32): the commands `host_shell_status` and `host_shell_set`,
+//                      answered from this hook. The default is the view outside a Flatpak, so no other test sees the group
+//       view           a copy of the answer of both commands: `{ applies, state }`, by default `{ applies: false, state: "unavailable" }`
+//       set(partial)   change members of `view`
+//       calls          every call of the two commands as `[command, args]`, oldest first
+//       hold(), release()  the answer of `host_shell_status` waits until `release()`; the call is recorded at once
+//       statusFails(text)  `host_shell_status` rejects with `text` (a string, as the shell's error); statusFails(null) stops it
+//       setFails(text)     `host_shell_set` rejects with `text` and changes nothing; setFails(null) stops it. Without it a call
+//                      while the state is `unavailable` or `applies` is false rejects with the shell's reason; otherwise the state
+//                      becomes `on` or `off` by `enabled` and the new view is the answer
+//       reset()        back to the default
 //     ai               the AI chat of the core, played from the shapes of app/tests/fixtures/ai_stream.json:
 //       profiles       the `profiles` member of the answer of `ai_profiles` (default none). A profile view carries the
 //                      members of the core's `ProfileView` and the mock-only member `locality` (`on_device`,
@@ -1630,6 +1641,57 @@
     },
   };
 
+  // The host shell switch of the shell: one view, the calls, and the knobs of the header comment.
+  const shellStart = () => ({
+    view: { applies: false, state: "unavailable" }, calls: [], held: false, waiters: [], statusError: null, setError: null,
+  });
+  let shell = shellStart();
+  const shellCommands = {
+    async host_shell_status(args) {
+      shell.calls.push(["host_shell_status", args]);
+      if (shell.statusError !== null) throw shell.statusError;
+      if (shell.held) await new Promise((go) => shell.waiters.push(go));
+      return structuredClone(shell.view);
+    },
+    async host_shell_set(args) {
+      shell.calls.push(["host_shell_set", args]);
+      if (shell.setError !== null) throw shell.setError;
+      if (!shell.view.applies || shell.view.state === "unavailable") {
+        throw "host shell is not available in this Flatpak";
+      }
+      shell.view.state = args.enabled === true ? "on" : "off";
+      return structuredClone(shell.view);
+    },
+  };
+  const hostShell = {
+    get view() {
+      return structuredClone(shell.view);
+    },
+    set(partial) {
+      Object.assign(shell.view, structuredClone(partial));
+    },
+    get calls() {
+      return structuredClone(shell.calls);
+    },
+    hold() {
+      shell.held = true;
+    },
+    release() {
+      shell.held = false;
+      for (const go of shell.waiters.splice(0)) go();
+    },
+    statusFails(text) {
+      shell.statusError = text ?? null;
+    },
+    setFails(text) {
+      shell.setError = text ?? null;
+    },
+    reset() {
+      for (const go of shell.waiters.splice(0)) go();
+      shell = shellStart();
+    },
+  };
+
   // The integration commands of the core. Without a script (`on`) each answers what a machine without the tools would: empty
   // lists and nothing, so a test that does not use an integration block sees no difference.
   const integrationDefaults = {
@@ -1656,6 +1718,7 @@
     if (handler) return (await handler(args)) ?? null;
     if (Object.hasOwn(aiCommands, cmd)) return aiCommands[cmd](args ?? {}) ?? null;
     if (Object.hasOwn(netCommands, cmd)) return netCommands[cmd](args ?? {});
+    if (Object.hasOwn(shellCommands, cmd)) return shellCommands[cmd](args ?? {});
     if (Object.hasOwn(integrationDefaults, cmd)) return integrationDefaults[cmd](args ?? {});
     if (LAYOUT_COMMANDS.has(cmd) && layoutError !== null) throw layoutError; // Tauri rejects with the error text
     if (cmd === "set_ratio") setRatio(args);
@@ -1699,12 +1762,16 @@
       layoutError = null;
       mockAi.reset();
       localNetwork.reset();
+      hostShell.reset();
     },
     get ai() {
       return mockAi;
     },
     get localNetwork() {
       return localNetwork;
+    },
+    get hostShell() {
+      return hostShell;
     },
   };
 
