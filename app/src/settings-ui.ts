@@ -8,8 +8,10 @@
 // the inner element of a select with an inline style attribute, which the page's strict `style-src` reports as a
 // violation (measured: one `style-src-attr` per select). Radios have no such element, are one tab stop per group
 // and move with the arrow keys.
+import { backend } from "./bridge.js";
 import { el, fitNodes, loadStyles, setText } from "./dom.js";
 import { pushKeyHandler } from "./keystack.js";
+import { mountHostShellGroup } from "./hostshell.js";
 import { mountLocalNetworkGroup } from "./localnet.js";
 import { FONT_SIZE_RANGE, SCROLLBACK_RANGE, UI_SCALE_RANGE, typedInteger } from "./settings-model.js";
 import type { SettingsValues } from "./settings-model.js";
@@ -269,6 +271,8 @@ async function show(api: SettingsApi): Promise<void> {
     close.textContent = "Close";
     // The group sits after Accessibility and before the buttons; it reads the permission itself and leaves when the system has none.
     const removeNetwork = state.os === "macos" ? mountLocalNetworkGroup(box, actions) : null;
+    // The group `Host shell` is for a Flatpak: Linux in the desktop app only. It asks the shell and draws nothing when this is not a Flatpak (docs/design.md 6.32).
+    const removeHostShell = state.os === "linux" && backend === "tauri" ? mountHostShellGroup(box, actions) : null;
     // The browser build has a group for notifications in the same place. Its module is loaded on demand, so the desktop never loads it.
     let removeNotify: (() => void) | null = null;
     if (state.os === "web") {
@@ -317,6 +321,7 @@ async function show(api: SettingsApi): Promise<void> {
       if (done) return;
       done = true;
       removeNetwork?.();
+      removeHostShell?.();
       removeNotify?.();
       stop();
       pop();

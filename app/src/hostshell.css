@@ -1,0 +1,34 @@
+/* The group `Host shell` of the Settings dialog (hostshell.ts, docs/design.md section 6.32). Loaded with
+   `loadStyles("./hostshell.css")` after dialogs.css and settings.css, whose box, group, checkbox and focus-ring styles it builds
+   on. Every colour is a `--hw-*` token (the theme replaces the values) and every size is in rem, so the UI scale moves it with
+   the rest of the chrome; a pixel value appears only for the 28 px desktop minimum of a target and the 2 px focus ring. Flat and
+   hairline: no gradient, no blur, no shadow. Nothing here moves.
+
+   One row: the checkbox with the name, the dim meta, the state at the right (the mark and the word), then the advice. The state
+   is words first; `on` is also underlined and marked `!`, `not available` is marked `?` and its box is dashed and disabled. */
+.settings .set-hs-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0 .667rem; box-sizing: border-box;
+                        min-height: max(28px, calc(28rem / 12)); }
+.settings .set-hs-row:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.settings .set-hs-name { display: inline-flex; flex: none; align-items: center; gap: .5rem; box-sizing: border-box;
+                         min-height: max(28px, calc(28rem / 12)); color: var(--hw-ink); cursor: pointer; }
+.settings .set-hs-name input { flex: none; }
+.settings .set-hs-row[data-state="unavailable"] .set-hs-name { color: var(--hw-dim); cursor: default; }
+/* A box that cannot be pressed is drawn as a dashed hairline box, so the state is not the colour or the dimming alone. */
+.settings .set-hs-name input:disabled { appearance: none; box-sizing: border-box; background: transparent;
+                                        border: 1px dashed var(--hw-dim); border-radius: 2px; opacity: .6; }
+.settings .set-hs-meta { min-width: 0; color: var(--hw-dim); }
+.settings .set-hs-state { min-width: 0; margin-left: auto; color: var(--hw-dim); text-align: right; overflow-wrap: anywhere; }
+.settings .set-hs-mark:not(:empty) { margin-right: .5ch; font-weight: 700; }
+.settings .set-hs-row[data-tone="warn"] .set-hs-state { color: var(--hw-warn); }
+.settings .set-hs-row[data-tone="warn"] .set-hs-word { text-decoration: underline; }
+.settings .set-hs-advice { flex: 1 0 100%; margin: .167rem 0 .333rem; color: var(--hw-dim); overflow-wrap: anywhere; }
+.settings .set-hs-advice:empty { display: none; }
+.settings .set-hs-line { min-height: 1.4em; margin: .333rem 0 0; color: var(--hw-dim); overflow-wrap: anywhere; }
+
+/* ---- forced colours: system colours outline the row; the group keeps its border, the dashed box its dashes -------------------- */
+
+@media (forced-colors: active) {
+  :root .settings .set-hs-row { outline: 2px solid CanvasText; outline-offset: -2px; }
+  :root .settings .set-hs-name input:disabled { border-color: GrayText; opacity: 1; }
+  :root .settings .set-hs-row[data-tone="warn"] .set-hs-state { color: CanvasText; }
+}
