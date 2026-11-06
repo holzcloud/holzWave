@@ -3159,10 +3159,6 @@ const DISTRIBUTION_CLAIMS: [&str; 3] = ["available now", "now live", "published 
 /// The channels the page has a table row for, as the text a row starts with after its first bold mark.
 const DISTRIBUTION_CHANNELS: [&str; 6] = ["GitHub", "Homebrew", "Flathub", "Microsoft Store", "Obtainium", "F-Droid"];
 
-/// Links of `docs/distribution.md` to a file of `docs/` that may still be missing, by file name. Empty: every page the
-/// distribution page links to exists. A page that is written in a parallel plan goes here until it is merged.
-const DISTRIBUTION_LINKS_MAY_BE_MISSING: [&str; 0] = [];
-
 /// The relative file targets of the Markdown links in `text`: no address with a scheme, no mail link, no bare anchor, and
 /// the fragment cut off.
 fn relative_link_targets(text: &str) -> Vec<String> {
@@ -3223,9 +3219,6 @@ fn distribution_page_states_what_is_true() {
     let targets = relative_link_targets(&page);
     assert!(targets.iter().any(|t| t == "signing.md") && targets.iter().any(|t| t == "test-plan.md"), "the page lost its links");
     for target in targets {
-        if DISTRIBUTION_LINKS_MAY_BE_MISSING.contains(&target.as_str()) {
-            continue;
-        }
         assert!(root().join("docs").join(&target).exists(), "docs/distribution.md links to docs/{target}, which does not exist");
     }
 }
