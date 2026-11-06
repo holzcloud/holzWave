@@ -92,6 +92,10 @@ impl ConnView {
 /// Said when a WSL connection is assigned or started anywhere but on Windows: `wsl.exe` exists there only.
 pub const WSL_ONLY_ON_WINDOWS: &str = "WSL connections open on Windows only.";
 
+/// Said when a Docker connection is assigned or started on Android: it starts the `docker` program, which a phone does
+/// not have.
+pub const DOCKER_NOT_ON_ANDROID: &str = "Docker connections are not available on Android.";
+
 /// Said when a password or passphrase is saved for a connection that logs in through the ssh-agent.
 pub const AGENT_HAS_NO_SECRET: &str = "an agent login has no password or passphrase";
 
@@ -152,11 +156,15 @@ impl Connections {
         self
     }
 
-    /// The refusal of a connection that cannot open on this OS: a WSL profile off Windows. The profile stays in the
-    /// list and in the sync (one made on Windows must survive on a Mac); only opening it is refused.
+    /// The refusal of a connection that cannot open on this OS: a WSL profile off Windows and a Docker profile on
+    /// Android. The profile stays in the list and in the sync (one made on Windows must survive on a Mac); only opening
+    /// it is refused.
     fn check_opens_here(&self, profile: &Profile) -> Result<()> {
         if profile.kind == Kind::Wsl && self.os != Os::Windows {
             return Err(Error::Unsupported(WSL_ONLY_ON_WINDOWS.into()));
+        }
+        if profile.kind == Kind::Docker && self.os == Os::Android {
+            return Err(Error::Unsupported(DOCKER_NOT_ON_ANDROID.into()));
         }
         Ok(())
     }
@@ -646,6 +654,31 @@ mod tests {
         c.apply(3, &mut spec).unwrap();
         assert_eq!(spec.program, "wsl.exe");
         assert_eq!(spec.args, ["-d", "Ubuntu"]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn android_opens_neither_wsl_nor_docker_and_still_opens_ssh() {
+        let d = dir("android-dropped");
+        let (c, _) = manager(&d, &[1, 2, 3]);
+        let c = c.for_os(Os::Android);
+        let wsl = c.save(wsl_profile(), SecretChange::Keep).unwrap().profile.id;
+        let mut docker = Profile::new("", "Web", "web-1");
+        docker.kind = Kind::Docker;
+        let docker = c.save(docker, SecretChange::Keep).unwrap().profile.id;
+        let ssh = c.save(profile("Talos"), SecretChange::Set { value: "pw".into() }).unwrap().profile.id;
+        let err = c.assign(1, &wsl).unwrap_err().to_string();
+        assert!(err.contains(WSL_ONLY_ON_WINDOWS), "{err}");
+        let err = c.assign(2, &docker).unwrap_err().to_string();
+        assert!(err.contains(DOCKER_NOT_ON_ANDROID), "{err}");
+        assert!(c.ensure_opens_here(&wsl).is_err() && c.ensure_opens_here(&docker).is_err());
+        assert!(c.ensure_opens_here(&ssh).is_ok());
+        // The profiles stay in the list and in the sync; only opening them is refused.
+        assert_eq!(c.list().len(), 3);
+        c.assign(3, &ssh).unwrap();
+        let mut spec = PaneSpec::new("sh", 80, 24);
+        c.apply(3, &mut spec).unwrap();
+        assert!(spec.ssh.is_some());
         let _ = fs::remove_dir_all(&d);
     }
 

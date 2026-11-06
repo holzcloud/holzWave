@@ -111,6 +111,17 @@ export function readConnections(raw: unknown): Connection[] {
   return out;
 }
 
+/**
+ * Whether a connection of `kind` opens on the platform `os` (the name `app_info` gives; empty while it is not known). A
+ * WSL connection opens on Windows only, a Docker connection not on Android. The connection stays in the list and in the
+ * sync all the same; the core refuses it with a sentence, and the palette just lacks the entry.
+ */
+export function opensHere(kind: Connection["kind"], os: string): boolean {
+  if (kind === "wsl") return os === "" || os === "windows";
+  if (kind === "docker") return os !== "android";
+  return true;
+}
+
 /** The word in front of a connection's name in the palette and the lists: `ssh`, `wsl` or `docker`. */
 export function kindLabel(kind: Connection["kind"]): string {
   return kind;

@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  connDot, connSummary, connText, paneConns, readConnections, readPaneConns, setPaneConns,
+  connDot, connSummary, connText, opensHere, paneConns, readConnections, readPaneConns, setPaneConns,
 } from "../../dist/connstate.js";
 
 const conn = (over = {}) => ({ pane: 1, profile: "talos", name: "Talos", state: "connected", attempt: 0, of: 0, secs: 0, ...over });
@@ -98,4 +98,12 @@ test("readConnections_reads_interactive_as_a_login", () => {
   for (const odd of ["INTERACTIVE", "interactive ", "keyboard-interactive", "code", 2, [], {}]) {
     assert.equal(login(odd), "key", `${JSON.stringify(odd)} falls back to key`);
   }
+});
+
+test("a WSL connection opens on Windows only and a Docker connection not on Android", () => {
+  for (const os of ["windows", ""]) assert.equal(opensHere("wsl", os), true, os);
+  for (const os of ["macos", "linux", "android", "web"]) assert.equal(opensHere("wsl", os), false, os);
+  for (const os of ["windows", "macos", "linux", "web", ""]) assert.equal(opensHere("docker", os), true, os);
+  assert.equal(opensHere("docker", "android"), false);
+  for (const os of ["windows", "macos", "linux", "android", "web", ""]) assert.equal(opensHere("ssh", os), true, os);
 });
