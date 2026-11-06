@@ -332,6 +332,33 @@ fn allowed_source(url: &str, text: &str) -> bool {
     pinned && text.contains("sha256sum -c")
 }
 
+/// Whether `file` is a JSON file below `packaging/flatpak/generated/` whose `text` is an array in which every entry carries a
+/// sha256 (64 lower-case hex digits) or, for a git source, a 40-character commit. Such a file is the output of the source
+/// tools (`scripts/flatpak-zig-sources.sh`): its `url` fields are fetches, and each is pinned by content, so none of them
+/// needs to be listed by host. An entry without a pin, a pin of another length, or a file that is not such an array fails.
+/// The rule is by context (the folder, the file kind and the pins), never by host.
+fn generated_sources_are_pinned(file: &Path, text: &str) -> bool {
+    let hex = |value: Option<&Value>, length: usize| {
+        value.and_then(Value::as_str).is_some_and(|v| v.len() == length && v.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')))
+    };
+    let in_generated_folder = file.starts_with(packaging().join("flatpak").join("generated")) && file.extension().is_some_and(|e| e == "json");
+    let Ok(Value::Array(entries)) = serde_json::from_str::<Value>(text) else {
+        return false;
+    };
+    in_generated_folder
+        && !entries.is_empty()
+        && entries.iter().all(|entry| entry.get("url").is_some() && (hex(entry.get("sha256"), 64) || hex(entry.get("commit"), 40)))
+}
+
+/// The fetched addresses of `file` (with this `text`) that nothing allows: none for a generated sources file whose every entry
+/// is pinned, otherwise those that `allowed_source` does not list.
+fn unlisted_fetches(file: &Path, text: &str) -> Vec<String> {
+    if generated_sources_are_pinned(file, text) {
+        return Vec::new();
+    }
+    fetched_urls(text).into_iter().filter(|url| !allowed_source(url, text)).collect()
+}
+
 #[test]
 fn nothing_under_packaging_holds_a_signing_key_or_fetches_from_anywhere_but_the_zig_archive_and_the_pinned_rustup_init() {
     let mut files = Vec::new();
@@ -342,11 +369,11 @@ fn nothing_under_packaging_holds_a_signing_key_or_fetches_from_anywhere_but_the_
         for marker in ["BEGIN PGP", "PRIVATE KEY", "gpg-key", "gpg-sign", "gpg_key"] {
             assert!(!text.contains(marker), "{} mentions {marker}", file.display());
         }
-        for url in fetched_urls(&text) {
-            assert!(
-                allowed_source(&url, &text),
+        for url in unlisted_fetches(&file, &text) {
+            panic!(
                 "{} names {url}: only the Zig archive (and its index, in a comment), the pinned rustup-init of the server image \
-                 (with its version pin and sha256 check in the same file) and the project's page are allowed",
+                 (with its version pin and sha256 check in the same file), the project's page and the pinned sources of a JSON \
+                 file below packaging/flatpak/generated/ are allowed",
                 file.display()
             );
         }
@@ -372,6 +399,44 @@ fn only_fetches_are_scanned_and_an_unlisted_fetch_still_fails() {
     ] {
         assert!(!bad(text), "not a fetch: {text}");
     }
+}
+
+#[test]
+fn a_url_in_a_generated_sources_file_is_allowed_only_when_every_entry_is_pinned() {
+    let sha = "a".repeat(64);
+    let commit = "b".repeat(40);
+    let generated = packaging().join("flatpak/generated/zig-sources.json");
+    let archive = |extra: &str| format!("{{\"type\": \"archive\", \"url\": \"https://example.net/x.tar.gz\"{extra}}}");
+    let pinned_archive = archive(&format!(", \"sha256\": \"{sha}\""));
+    let pinned_git = format!("{{\"type\": \"git\", \"url\": \"https://example.net/x.git\", \"commit\": \"{commit}\"}}");
+    // Pinned archives and pinned git sources pass, whatever the host: the pin is the check.
+    assert!(generated_sources_are_pinned(&generated, &format!("[{pinned_archive}, {pinned_git}]")), "pinned entries");
+    // One entry without a pin fails the whole file, so does a pin of the wrong shape.
+    assert!(!generated_sources_are_pinned(&generated, &format!("[{pinned_archive}, {}]", archive(""))), "an unpinned entry");
+    assert!(!generated_sources_are_pinned(&generated, &format!("[{}]", archive(", \"sha256\": \"abc123\""))), "a short sha256");
+    assert!(!generated_sources_are_pinned(&generated, &format!("[{}]", archive(&format!(", \"sha256\": \"{}\"", "A".repeat(64))))), "an upper-case sha256");
+    let branch = "{\"type\": \"git\", \"url\": \"https://example.net/x.git\", \"branch\": \"main\"}";
+    assert!(!generated_sources_are_pinned(&generated, &format!("[{branch}]")), "a git source on a branch");
+    let short_commit = "{\"type\": \"git\", \"url\": \"https://example.net/x.git\", \"commit\": \"deadbee\"}";
+    assert!(!generated_sources_are_pinned(&generated, &format!("[{short_commit}]")), "a short commit");
+    // Not a list of entries, no entry, or invalid JSON: nothing is allowed.
+    assert!(!generated_sources_are_pinned(&generated, "[]"), "an empty list");
+    assert!(!generated_sources_are_pinned(&generated, &pinned_archive), "an object instead of a list");
+    assert!(!generated_sources_are_pinned(&generated, "[{\"url\": "), "invalid JSON");
+    // The rule is by context: the same pinned text elsewhere under packaging, or in a file that is not JSON, gets no pass.
+    let elsewhere = packaging().join("flatpak/zig-sources.json");
+    assert!(!generated_sources_are_pinned(&elsewhere, &format!("[{pinned_archive}]")), "a pinned file outside generated/");
+    let not_json = packaging().join("flatpak/generated/zig-sources.txt");
+    assert!(!generated_sources_are_pinned(&not_json, &format!("[{pinned_archive}]")), "a pinned file that is not JSON");
+    // The scan itself, on a file as the tool writes it (one field per line): a pinned file has no unlisted fetch, an unpinned
+    // entry puts every address of the file back under the host rules, and the same pinned text elsewhere is not excused.
+    let pretty = |entries: &[&str]| format!("[\n{}\n]", entries.join(",\n"));
+    let pinned_entry = format!("  {{\n    \"type\": \"archive\",\n    \"url\": \"https://example.net/x.tar.gz\",\n    \"sha256\": \"{sha}\"\n  }}");
+    let unpinned_entry = "  {\n    \"type\": \"archive\",\n    \"url\": \"https://example.net/y.tar.gz\"\n  }";
+    assert!(!fetched_urls(&pretty(&[&pinned_entry])).is_empty(), "the url field of an entry is a fetch");
+    assert!(unlisted_fetches(&generated, &pretty(&[&pinned_entry])).is_empty(), "a fully pinned generated file");
+    assert!(!unlisted_fetches(&generated, &pretty(&[&pinned_entry, unpinned_entry])).is_empty(), "one unpinned entry fails the scan");
+    assert!(!unlisted_fetches(&elsewhere, &pretty(&[&pinned_entry])).is_empty(), "the same file outside generated/ fails the scan");
 }
 
 #[test]
