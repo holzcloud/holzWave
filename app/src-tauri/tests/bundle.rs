@@ -664,3 +664,108 @@ fn the_label_scan_finds_the_shapes_it_is_meant_to_find() {
         assert_eq!(has_planning_label(fine), None, "the scan flags `{fine}`");
     }
 }
+
+// ---- the Android keystore script: the password reaches keytool on standard input and nowhere else -----------------------
+
+const ANDROID_KEYSTORE: &str = include_str!("../../../scripts/android-keystore.sh");
+const ANDROID_KEYSTORE_TEST: &str = include_str!("../../../scripts/test-android-keystore.sh");
+
+/// The words of a command line, split at everything that is not part of a name, so `gh` is found as a command and not inside
+/// `through`.
+fn words(line: &str) -> Vec<&str> {
+    line.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_' || c == '.')).filter(|w| !w.is_empty()).collect()
+}
+
+#[test]
+fn the_keystore_script_never_publishes_installs_traces_or_reaches_the_network() {
+    for line in commands(ANDROID_KEYSTORE) {
+        for forbidden in [
+            "set -x", "eval ", "git push", "git tag", "brew install", "cargo install", "npm install", "apt-get", "sudo ", "nc ",
+        ] {
+            assert!(!line.contains(forbidden), "android-keystore.sh runs `{forbidden}`: {line}");
+        }
+        for word in words(&line) {
+            assert!(!["curl", "wget", "gh", "ssh", "scp", "rsync", "ftp"].contains(&word), "android-keystore.sh runs `{word}`: {line}");
+        }
+    }
+    // It refuses to run while tracing is on, because a trace would print the password.
+    assert!(code_lines(ANDROID_KEYSTORE).iter().any(|l| l.starts_with(r#"case "$-" in *x*) fail "tracing is on"#)), "no refusal while tracing");
+}
+
+#[test]
+fn the_keystore_password_is_fed_on_standard_input_and_appears_nowhere_else() {
+    let raw = code_lines(ANDROID_KEYSTORE);
+    // A password on a command line shows in the process list.
+    for line in &raw {
+        for forbidden in ["-storepass", "-keypass", "-srcstorepass", "-deststorepass", "--ks-pass", "--key-pass", "pass:", "env:"] {
+            assert!(!line.contains(forbidden), "android-keystore.sh puts a password in an argument (`{forbidden}`): {line}");
+        }
+        assert!(!line.starts_with("export ") && !line.contains(" export "), "android-keystore.sh exports something: {line}");
+        assert!(!line.starts_with("read ") && !line.contains(" read -"), "android-keystore.sh reads from the terminal or a file: {line}");
+        assert!(!line.contains("set -x") && !line.contains("set -o xtrace"), "android-keystore.sh traces: {line}");
+    }
+    // The variable is expanded in three places only: the empty test and the two feeding functions.
+    for line in &raw {
+        if line.contains("$password") {
+            let tests_empty = line.starts_with(r#"[ -n "$password" ] || fail "#);
+            let once = *line == r#"feed_once() { printf '%s\n' "$password"; }"#;
+            let twice = *line == r#"feed_twice() { printf '%s\n' "$password"; printf '%s\n' "$password"; }"#;
+            assert!(tests_empty || once || twice, "android-keystore.sh expands the password outside the feeding functions: {line}");
+        }
+        for leak in ["echo \"$password", "echo $password", "printf \"$password", ">\"$password", ">>\"$password"] {
+            assert!(!line.contains(leak), "android-keystore.sh prints the password: {line}");
+        }
+    }
+    // keytool receives it from those functions through a pipe: once to read a store, twice to make one.
+    assert!(raw.iter().any(|l| l.starts_with("feed_twice | keytool -genkeypair ")), "the password does not go to keytool -genkeypair on standard input");
+    assert!(raw.iter().any(|l| l.contains("feed_once | keytool -list ")), "the password does not go to keytool -list on standard input");
+    assert_eq!(raw.iter().filter(|l| l.contains("-genkeypair")).count(), 1, "more than one line makes a key");
+    assert!(raw.iter().any(|l| l.starts_with("unset password")), "the password variable is not unset after use");
+    // It comes from the operating system's secret store, never from the environment.
+    assert!(raw.iter().any(|l| l.contains("security find-generic-password") && l.contains("-w")), "no macOS keychain lookup");
+    assert!(raw.iter().any(|l| l.contains("secret-tool lookup")), "no Linux secret store lookup");
+    assert!(ANDROID_KEYSTORE.contains("SECRET_SERVICE=holzwave-android-keystore"), "the secret store entry is not holzwave-android-keystore");
+    assert!(!ANDROID_KEYSTORE.contains("KEYSTORE_PASS") && !ANDROID_KEYSTORE.contains("KEY_PASSWORD"), "a password variable of the environment");
+}
+
+#[test]
+fn the_keystore_script_keeps_the_key_outside_the_repository_and_never_overwrites_it() {
+    let default = ANDROID_KEYSTORE
+        .lines()
+        .find(|l| l.trim_start().starts_with("ks=${HOLZWAVE_ANDROID_KEYSTORE:-"))
+        .expect("android-keystore.sh sets the keystore path from HOLZWAVE_ANDROID_KEYSTORE");
+    assert!(default.contains("${HOME") || default.contains("$HOME"), "the default keystore path is not under HOME: {default}");
+    assert!(default.contains("/.android-keys/holzwave-release.p12"), "the default keystore path is not $HOME/.android-keys/holzwave-release.p12: {default}");
+    assert!(ANDROID_KEYSTORE.contains("is inside the repository"), "android-keystore.sh does not refuse a keystore path inside the repository");
+    assert!(ANDROID_KEYSTORE.contains("a link into the repository"), "android-keystore.sh does not refuse a link into the repository");
+    assert!(ANDROID_KEYSTORE.contains("a key is never overwritten"), "android-keystore.sh does not refuse an existing keystore");
+    assert!(ANDROID_KEYSTORE.contains("pwd -P"), "android-keystore.sh does not resolve the real path of the keystore directory");
+    // The names every listing repeats.
+    for constant in ["ALIAS=holzwave-release", "SUBJECT='CN=holzcloud.ch, OU=holzWave'", "STORE_TYPE=PKCS12"] {
+        assert!(code_lines(ANDROID_KEYSTORE).contains(&constant), "android-keystore.sh lacks the constant `{constant}`");
+    }
+    // The script ends `create` with the backup instruction and prints the fingerprint a person can check an APK against.
+    assert!(ANDROID_KEYSTORE.contains("off-machine backup of the keystore file and of the keychain entry"), "create does not tell the owner to back up the key");
+    assert!(ANDROID_KEYSTORE.contains("apksigner verify --print-certs"), "the script does not name the command that shows an APK's certificate");
+
+    // No keystore, and no file that names its password, is tracked.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let out = std::process::Command::new("git").arg("-C").arg(&root).args(["ls-files", "-z"]).output().expect("git runs");
+    assert!(out.status.success(), "git ls-files failed: {}", String::from_utf8_lossy(&out.stderr));
+    let listing = String::from_utf8(out.stdout).expect("file names are UTF-8");
+    assert!(listing.split('\0').any(|p| p == "Cargo.toml"), "git ls-files lists no Cargo.toml: an empty index checks nothing");
+    for path in listing.split('\0').filter(|p| !p.is_empty()) {
+        for ext in [".jks", ".keystore", ".p12"] {
+            assert!(!path.ends_with(ext), "a keystore file is tracked: {path}");
+        }
+        assert!(!path.ends_with("keystore.properties"), "a file that holds a keystore password is tracked: {path}");
+    }
+}
+
+#[test]
+fn the_keystore_script_and_its_test_carry_no_label_of_the_planning_tree() {
+    for (name, text) in [("android-keystore.sh", ANDROID_KEYSTORE), ("test-android-keystore.sh", ANDROID_KEYSTORE_TEST)] {
+        assert_eq!(has_planning_label(text), None, "{name} carries a label of the planning tree");
+        assert!(!text.contains(".planning/"), "{name} names a path of the private planning tree");
+    }
+}
