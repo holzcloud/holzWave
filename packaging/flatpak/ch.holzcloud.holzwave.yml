@@ -1,7 +1,17 @@
-# Flatpak manifest of holzWave, built locally from this repository (scripts/build-flatpak.sh). Never built for Flathub.
+# Flatpak manifest of holzWave: a reference for the owner to read, and a local build recipe (scripts/build-flatpak.sh).
 #
-# Status: unverified. Flatpak ships in 0.0.1 only if it builds on the owner's Linux machine and row L10 of
-# docs/test-plan.md passes. See docs/flatpak.md.
+#   - It is not a submission. The owner writes and submits the Flathub manifest by hand; Flathub does not accept a manifest or a
+#     pull request written by an AI agent. holzWave is built with AI help and says so, and no agent opens, prepares or automates a
+#     submission to Flathub or touches a repository of Flathub. This file only shows what the build needs.
+#   - Unverified until the owner's run: it was built once in a container on arm64 (the architecture of the Docker VM of a Mac)
+#     and never started on any desktop. x86_64 is built only by Flathub and is untried here. Flatpak ships in 0.0.1 only if it
+#     builds on the owner's Linux machine and row L10 of docs/test-plan.md passes. See docs/flatpak.md.
+#
+# No build step has network access. Every source is declared and pinned by content: the Zig compiler (two archives, a sha256
+# each), the Ghostty checkout (a git source at one commit), the Zig packages of the terminal engine (generated/zig-sources.json),
+# the Cargo crates (generated/cargo-sources.json) and the npm packages (generated/node-sources.json). The three JSON files are
+# tool output: do not edit them, regenerate them with scripts/flatpak-zig-sources.sh and scripts/flatpak-generate-sources.sh.
+# The only network permission below is the one the running app asks for.
 #
 # Runtime: the newest stable GNOME runtime of Flathub when this was written (org.gnome.Platform and org.gnome.Sdk 51,
 # on org.freedesktop 26.08), with the Rust and the Node SDK extensions of that freedesktop version. Sources: `flatpak
@@ -40,9 +50,13 @@ finish-args:
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node26/bin
   env:
-    # Everything the build writes stays in the build directory, nothing in the user's home.
-    CARGO_HOME: /run/build/holzwave/.cargo
-    npm_config_cache: /run/build/holzwave/.npm
+    # Everything the build writes stays in the build directory, nothing in the user's home. The declared sources are laid out
+    # below these folders: the crates and the cargo configuration of cargo-sources.json in `cargo`, the npm packages of
+    # node-sources.json in the npm cache below `flatpak-node`, which is what `npm ci --offline` reads.
+    CARGO_HOME: /run/build/holzwave/cargo
+    CARGO_NET_OFFLINE: 'true'
+    npm_config_cache: /run/build/holzwave/flatpak-node/npm-cache
+    XDG_CACHE_HOME: /run/build/holzwave/flatpak-node/cache
     ZIG_GLOBAL_CACHE_DIR: /run/build/holzwave/.zig-cache
 
 modules:
@@ -67,17 +81,25 @@ modules:
         sha256: 9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
         only-arches: [aarch64]
 
-  # holzWave itself, from the sources of this repository, inside the SDK: a binary built outside the runtime could be
-  # ABI-incompatible with it. The build step needs the network (the crates of Cargo.lock, the npm packages of
-  # app/package-lock.json, and the Zig packages Ghostty fetches): a local build, never Flathub. The alternative of the
-  # Tauri guide (build the .deb elsewhere and unpack it into /app) carries that ABI risk and is not implemented here.
+  # holzWave itself, inside the SDK: a binary built outside the runtime could be ABI-incompatible with it. The build step has
+  # no network. The terminal engine (libghostty-vt) is built by Zig from the Ghostty checkout below, with the Zig packages of
+  # zig-sources.json as its only dependencies (GHOSTTY_ZIG_SYSTEM_DIR); Cargo reads its crates from the vendor folder that
+  # cargo-sources.json lays out; npm reads its packages from the cache that node-sources.json lays out. The page is built with
+  # `npm run build` and the app with the one cargo command of generated/app-build-command.txt (it is the command the Tauri CLI
+  # runs for a release build, without the CLI, and it embeds the page: it is not a development build).
   - name: holzwave
     buildsystem: simple
     build-options:
-      build-args:
-        - --share=network
       append-path: /app/opt/zig
+      env:
+        # The Ghostty checkout is writable: Zig unpacks its packages into it.
+        GHOSTTY_SOURCE_DIR: /run/build/holzwave/ghostty
+        GHOSTTY_ZIG_SYSTEM_DIR: /run/build/holzwave/zig-pkgs
+        ZIG: /app/opt/zig/zig
     sources:
+      # LOCAL RECIPE ONLY: this is the working tree of the repository, so that the recipe builds what is on disk. It is the one
+      # `dir` source of the manifest. For a submission the owner replaces it with a `git` source of this repository whose `tag`
+      # and `commit` fields name a release; no tag or commit is written here because none exists yet.
       - type: dir
         path: ../..
         skip:
@@ -89,9 +111,19 @@ modules:
           - .flatpak-builder
           - flatpak-build
           - flatpak-repo
+      # The Ghostty source that the engine crate pins (generated/ghostty-pin.txt): one commit, no branch.
+      - type: git
+        url: https://github.com/ghostty-org/ghostty.git
+        commit: 521cf2c5d30bd48028ca61546c64e7913764073d
+        dest: ghostty
+      # Tool output, see the header: the Zig packages, the Cargo crates and git dependency, the npm packages.
+      - generated/zig-sources.json
+      - generated/cargo-sources.json
+      - generated/node-sources.json
     build-commands:
-      - npm --prefix app ci --ignore-scripts --no-audit --no-fund
-      - npm --prefix app run tauri -- build --no-bundle -- --locked
+      - npm --prefix app ci --offline --ignore-scripts --no-audit --no-fund
+      - npm --prefix app run build
+      - cargo build --locked --bins --features tauri/custom-protocol --release --offline -p holzwave-app
       - install -Dm755 target/release/holzwave-app /app/bin/holzwave-app
       - install -Dm644 packaging/flatpak/ch.holzcloud.holzwave.desktop /app/share/applications/ch.holzcloud.holzwave.desktop
       - install -Dm644 packaging/flatpak/ch.holzcloud.holzwave.metainfo.xml /app/share/metainfo/ch.holzcloud.holzwave.metainfo.xml

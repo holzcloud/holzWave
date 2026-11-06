@@ -21,6 +21,7 @@ const SCRIPT: &str = include_str!("../../../scripts/build-flatpak.sh");
 const TAURI_CONF: &str = include_str!("../tauri.conf.json");
 const FLATPAK_PAGE: &str = include_str!("../../../docs/flatpak.md");
 const TEST_PLAN: &str = include_str!("../../../docs/test-plan.md");
+const GENERATOR_PIN: &str = include_str!("../../../packaging/flatpak/generated/generator-pin.txt");
 
 const HOST_PERMISSION: &str = "--talk-name=org.freedesktop.Flatpak";
 const NETWORK_PERMISSION: &str = "--share=network";
@@ -149,15 +150,15 @@ fn the_permissions_are_exactly_the_documented_ones_and_the_network_is_one_of_the
         ],
         "a permission was added or removed: that is a decision; update docs/flatpak.md and the AppStream text with it"
     );
-    // The network is named twice as an item: once for the running app and once as an argument of the build.
+    // The network is named once as an item, as a finish argument of the running app. It was named a second time as a build
+    // argument while the build fetched its sources; since every source is declared and hashed (see
+    // `no_build_step_has_network_access_and_every_source_is_declared_and_pinned`), no module asks for it.
     let items = network_items();
-    assert_eq!(items.len(), 2, "the network is named twice as an item (the running app and the build): {items:?}");
+    assert_eq!(items.len(), 1, "the network is named once, as a finish argument of the running app: {items:?}");
     let lines: Vec<&str> = MANIFEST.lines().collect();
     let finish = lines.iter().position(|l| *l == "finish-args:").expect("finish-args");
     let build_options = lines.iter().position(|l| *l == "build-options:").expect("the top-level build-options");
-    assert!(finish < items[0] && items[0] < build_options, "the first network item is not a finish argument");
-    let before = lines[..items[1]].iter().rev().find(|l| !l.trim().starts_with('#')).expect("a line above the item");
-    assert_eq!(before.trim(), "build-args:", "the second network item is not a build argument");
+    assert!(finish < items[0] && items[0] < build_options, "the network item is not a finish argument");
 }
 
 #[test]
@@ -224,17 +225,191 @@ fn the_runtime_the_extensions_and_the_zig_archive_are_pinned() {
         ["org.freedesktop.Sdk.Extension.rust-stable", "org.freedesktop.Sdk.Extension.node26"]
     );
     assert_eq!(manifest_scalar("command").as_deref(), Some("holzwave-app"), "the binary Tauri builds");
-    // Every archive is Zig 0.17.0 (the pinned Ghostty commit requires it), from ziglang.org, with its sha256 in the next line.
+    // Every archive is Zig 0.17.0 (the pinned Ghostty commit requires it), from ziglang.org, with its sha256 in the next line. The
+    // manifest names one more address, the Ghostty git source, which is pinned by a commit (checked below); every other
+    // source is a generated file that is included by name.
     let lines: Vec<&str> = MANIFEST.lines().collect();
     let urls: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].trim().starts_with("url:")).collect();
-    assert_eq!(urls.len(), 2, "one archive per architecture, nothing else is fetched by the manifest");
-    for i in urls {
+    let zig: Vec<usize> = urls.iter().copied().filter(|&i| lines[i].contains("ziglang.org")).collect();
+    assert_eq!(zig.len(), 2, "one Zig archive per architecture");
+    assert_eq!(urls.len(), 3, "the two Zig archives and the Ghostty checkout are the only addresses the manifest names");
+    for i in zig {
         let url = lines[i].trim().trim_start_matches("url:").trim();
         assert!(url.starts_with("https://ziglang.org/download/0.17.0/zig-"), "{url}");
         assert!(url.ends_with("-linux-0.17.0.tar.xz"), "{url}");
         let sha = lines[i + 1].trim().strip_prefix("sha256:").map(str::trim).expect("the sha256 follows the url");
         assert!(sha.len() == 64 && sha.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')), "{sha}");
     }
+    let arches: Vec<&str> = lines.iter().filter(|l| l.contains("only-arches:")).map(|l| l.trim()).collect();
+    assert_eq!(arches, ["only-arches: [x86_64]", "only-arches: [aarch64]"], "both architectures are declared, on the Zig archives only");
+}
+
+const GHOSTTY_PIN: &str = include_str!("../../../packaging/flatpak/generated/ghostty-pin.txt");
+const APP_COMMAND: &str = include_str!("../../../packaging/flatpak/generated/app-build-command.txt");
+
+/// The lines of the `holzwave` module (from its `- name: holzwave` line to the end of the file, it is the last module).
+fn holzwave_module() -> Vec<&'static str> {
+    let lines: Vec<&str> = MANIFEST.lines().collect();
+    let at = lines.iter().position(|l| *l == "  - name: holzwave").expect("the holzwave module");
+    lines[at..].to_vec()
+}
+
+/// The `- command` items of the `build-commands:` list of the `holzwave` module.
+fn holzwave_build_commands() -> Vec<String> {
+    let module = holzwave_module();
+    let at = module.iter().position(|l| l.trim() == "build-commands:").expect("the build commands");
+    module[at + 1..].iter().filter_map(|l| l.trim().strip_prefix("- ")).map(str::to_owned).collect()
+}
+
+/// The text of the `- type: <kind>` source blocks of the holzwave module: each block runs to the next `      - ` item or the
+/// end of the sources.
+fn holzwave_sources() -> Vec<Vec<&'static str>> {
+    let module = holzwave_module();
+    let start = module.iter().position(|l| l.trim() == "sources:").expect("the sources") + 1;
+    let end = module.iter().position(|l| l.trim() == "build-commands:").expect("the build commands");
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    for line in &module[start..end] {
+        if line.trim().is_empty() || line.trim().starts_with('#') {
+            continue;
+        }
+        if line.starts_with("      - ") {
+            blocks.push(vec![line]);
+        } else {
+            blocks.last_mut().expect("a block").push(line);
+        }
+    }
+    blocks
+}
+
+#[test]
+fn no_build_step_has_network_access_and_every_source_is_declared_and_pinned() {
+    // Test reason (this test replaces the old assertion that the build module asked for the network): no module of the
+    // manifest has build arguments at all, and the network appears once, as a finish argument of the running app.
+    assert!(!MANIFEST.contains("build-args"), "a module asks for build arguments (the build network is one of them)");
+    assert!(!MANIFEST.lines().any(|l| l.contains("--share=network") && !l.trim().starts_with('#') && l.trim() != "- --share=network"), "the network is named in another way");
+    assert_eq!(network_items().len(), 1, "the network is a finish argument and nothing else");
+    // Every source of the holzwave module is one of: the local directory (marked), the Ghostty git source at a commit, or a
+    // generated file included by name.
+    let blocks = holzwave_sources();
+    assert_eq!(blocks.len(), 5, "the directory, the Ghostty checkout and the three generated files: {blocks:?}");
+    let mut dirs = 0;
+    let mut gits = 0;
+    let mut included = Vec::new();
+    for block in &blocks {
+        let first = block[0].trim().trim_start_matches("- ");
+        if first == "type: dir" {
+            dirs += 1;
+        } else if first == "type: git" {
+            gits += 1;
+            let text = block.join("\n");
+            assert!(text.contains("url: https://github.com/ghostty-org/ghostty.git"), "the git source is the Ghostty repository: {text}");
+            let commit = block.iter().find_map(|l| l.trim().strip_prefix("commit:")).map(str::trim).expect("a commit");
+            assert!(commit.len() == 40 && commit.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')), "the git source is pinned by a full commit: {commit}");
+            assert!(!text.contains("branch:") && !text.contains("tag:"), "a git source is pinned by its commit, not a branch: {text}");
+        } else if let Some(file) = first.strip_prefix("generated/") {
+            included.push(file.to_owned());
+            assert!(first.ends_with(".json") && block.len() == 1, "an included source is a plain file name: {block:?}");
+            assert!(packaging().join("flatpak").join(first).is_file(), "{first} is included but does not exist");
+        } else {
+            panic!("a source that is neither the local directory, the Ghostty checkout nor a generated file: {block:?}");
+        }
+    }
+    assert_eq!((dirs, gits), (1, 1), "one local directory and one git source");
+    assert_eq!(included, ["zig-sources.json", "cargo-sources.json", "node-sources.json"], "the three generated files, in this order");
+    // The one `dir` source is the local recipe's and says what the owner replaces it with.
+    let at = MANIFEST.lines().position(|l| l.trim() == "- type: dir").expect("the dir source");
+    let comment = comment_above(at);
+    for word in ["local recipe only", "git", "submission", "tag", "commit", "no tag or commit is written here"] {
+        assert!(comment.contains(word), "the comment above the dir source does not say {word:?}: {comment}");
+    }
+    // The Zig compiler module has only archives with a sha256 each (the other test pins the version).
+    let lines: Vec<&str> = MANIFEST.lines().collect();
+    let archives = lines.iter().filter(|l| l.trim() == "- type: archive").count();
+    assert_eq!(archives, 2, "the Zig archives are the manifest's only archive sources");
+    // No generated source file is hand-written: each is covered by the tests of its own file, and the pin file names the tool.
+    assert!(GENERATOR_PIN.contains("flatpak-builder-tools-commit="), "the generated files come from a pinned tool");
+}
+
+#[test]
+fn the_holzwave_module_builds_with_the_recorded_command_offline_and_fetches_nothing() {
+    let commands = holzwave_build_commands();
+    // The cargo command is the one the earlier tracer recorded, character for character.
+    let recorded: Vec<&str> = APP_COMMAND.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#')).collect();
+    assert_eq!(recorded.len(), 1, "one recorded command");
+    assert!(commands.iter().any(|c| c == recorded[0]), "the manifest does not run the recorded command {:?}: {commands:?}", recorded[0]);
+    assert!(recorded[0].contains("cargo build --locked") && recorded[0].contains("--release") && recorded[0].contains("--offline") && recorded[0].contains("-p holzwave-app"));
+    assert!(recorded[0].contains("--features tauri/custom-protocol"), "the feature that embeds the page: without it the app is a development build");
+    // The page build and the package install read the declared sources only.
+    assert!(commands.iter().any(|c| c == "npm --prefix app ci --offline --ignore-scripts --no-audit --no-fund"), "the offline install without scripts: {commands:?}");
+    assert!(commands.iter().any(|c| c == "npm --prefix app run build"), "the page build");
+    let position = |wanted: &str| commands.iter().position(|c| c.starts_with(wanted)).unwrap_or_else(|| panic!("{wanted} is missing"));
+    assert!(
+        position("npm --prefix app ci") < position("npm --prefix app run build") && position("npm --prefix app run build") < position("cargo build"),
+        "the order: install the packages, build the page (the app embeds it), build the app"
+    );
+    // Nothing reaches for a registry.
+    for command in &commands {
+        assert!(!command.contains("npm install") && !command.contains("cargo fetch") && !command.contains("curl") && !command.contains("wget"), "a command that fetches: {command}");
+        if command.starts_with("npm ") && command.contains(" ci") {
+            assert!(command.contains("--offline"), "an npm install that may use the network: {command}");
+        }
+        if command.starts_with("cargo ") {
+            assert!(command.contains("--offline") && command.contains("--locked"), "a cargo command that may use the network or change the lock file: {command}");
+        }
+    }
+    // The environment names the app command file lists are all set, to folders that the declared sources fill.
+    let module = holzwave_module().join("\n");
+    let global = MANIFEST.split("\nmodules:").next().expect("the top of the manifest");
+    for (name, value) in [
+        ("GHOSTTY_SOURCE_DIR", "/run/build/holzwave/ghostty"),
+        ("GHOSTTY_ZIG_SYSTEM_DIR", "/run/build/holzwave/zig-pkgs"),
+        ("ZIG", "/app/opt/zig/zig"),
+    ] {
+        assert!(module.contains(&format!("{name}: {value}")), "the module does not set {name}: {value}");
+    }
+    assert!(global.contains("CARGO_HOME: /run/build/holzwave/cargo"), "the cargo home is where cargo-sources.json lays out the vendor folder and configuration");
+    assert!(global.contains("CARGO_NET_OFFLINE: 'true'"), "cargo is told to stay offline");
+    assert!(global.contains("npm_config_cache: /run/build/holzwave/flatpak-node/npm-cache"), "the npm cache is where node-sources.json lays it out");
+    // The destinations of the generated files lie below the folders the environment points at.
+    let dests = |text: &str, folder: &str| {
+        let entries: Vec<Value> = serde_json::from_str(text).expect("JSON");
+        entries.iter().filter(|e| e["type"] == "archive" || e["type"] == "git").all(|e| e["dest"].as_str().is_some_and(|d| d.starts_with(folder)))
+    };
+    assert!(dests(include_str!("../../../packaging/flatpak/generated/zig-sources.json"), "zig-pkgs/"), "the Zig packages go below zig-pkgs/");
+    // The Zig compiler is a build tool of its own module and does not stay in the app.
+    assert!(MANIFEST.contains("- /opt/zig"), "the Zig module is cleaned up");
+}
+
+#[test]
+fn the_ghostty_commit_of_the_manifest_is_the_one_of_the_pin_file() {
+    let pinned = GHOSTTY_PIN.lines().find_map(|l| l.strip_prefix("ghostty-commit=")).expect("a commit in ghostty-pin.txt");
+    let repository = GHOSTTY_PIN.lines().find_map(|l| l.strip_prefix("ghostty-repository=")).expect("a repository in ghostty-pin.txt");
+    assert!(MANIFEST.lines().any(|l| l.trim() == format!("commit: {pinned}")), "the manifest's Ghostty commit is not {pinned}");
+    assert!(MANIFEST.lines().any(|l| l.trim() == format!("url: {repository}")), "the manifest's Ghostty repository is not {repository}");
+}
+
+#[test]
+fn the_header_says_it_is_a_reference_and_not_a_submission() {
+    let header = squashed(&MANIFEST.lines().take_while(|l| l.starts_with('#')).map(|l| l.trim_start_matches('#')).collect::<Vec<_>>().join(" "));
+    for statement in [
+        "a reference for the owner to read",
+        "the owner writes and submits the flathub manifest by hand",
+        "does not accept a manifest or a pull request written by an ai agent",
+        "holzwave is built with ai help and says so",
+        "no agent opens, prepares or automates a submission",
+        "unverified until the owner's run",
+        "x86_64 is built only by flathub and is untried here",
+        "never started on any desktop",
+    ] {
+        assert!(header.contains(statement), "the header of the manifest does not say {statement:?}");
+    }
+    // No label of the private planning tree in this public file: no plan id, threat id or decision id.
+    for (at, _) in MANIFEST.match_indices("13-") {
+        let digits = MANIFEST[at + 3..].chars().take(2).all(|c| c.is_ascii_digit());
+        let before = MANIFEST[..at].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+        assert!(!digits || before, "a plan label in the manifest: {}", &MANIFEST[at..at + 5]);
+    }
+    assert!(!MANIFEST.contains("T-13-") && !MANIFEST.contains("D-0") && !MANIFEST.contains("D-1"), "a threat or decision label in the manifest");
 }
 
 #[test]
@@ -370,13 +545,51 @@ fn generated_sources_are_pinned(file: &Path, text: &str) -> bool {
     in_generated_folder && !entries.is_empty() && entries.iter().all(|entry| pinned_fetch(entry) || fetches_nothing(entry))
 }
 
+/// The addresses of the `git` sources of a manifest that are pinned by a full commit: a `- type: git` item whose fields hold a
+/// `url:` and a `commit:` of 40 lower-case hex digits and no `branch:` or `tag:`. A git source pinned in this way is fetched by
+/// content, as a hashed archive is. The scan is by the shape of the item, never by host.
+fn pinned_git_sources(text: &str) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let mut found = Vec::new();
+    for (at, line) in lines.iter().enumerate() {
+        if line.trim() != "- type: git" {
+            continue;
+        }
+        let (mut url, mut commit, mut floating) = (None, None, false);
+        for next in &lines[at + 1..] {
+            let t = next.trim();
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
+            if indent(next) <= indent(line) {
+                break;
+            }
+            if let Some(value) = t.strip_prefix("url:") {
+                url = Some(value.trim().to_owned());
+            } else if let Some(value) = t.strip_prefix("commit:") {
+                commit = Some(value.trim().to_owned());
+            } else if t.starts_with("branch:") || t.starts_with("tag:") {
+                floating = true;
+            }
+        }
+        let full = commit.as_deref().is_some_and(|c| c.len() == 40 && c.chars().all(|ch| matches!(ch, '0'..='9' | 'a'..='f')));
+        if let (Some(url), true, false) = (url, full, floating) {
+            found.push(url);
+        }
+    }
+    found
+}
+
 /// The fetched addresses of `file` (with this `text`) that nothing allows: none for a generated sources file whose every entry
-/// is pinned, otherwise those that `allowed_source` does not list.
+/// is pinned, otherwise those that `allowed_source` does not list and that are not a git source of a manifest pinned by a commit.
 fn unlisted_fetches(file: &Path, text: &str) -> Vec<String> {
     if generated_sources_are_pinned(file, text) {
         return Vec::new();
     }
-    fetched_urls(text).into_iter().filter(|url| !allowed_source(url, text)).collect()
+    let manifest = file.starts_with(packaging().join("flatpak")) && file.extension().is_some_and(|e| e == "yml");
+    let pinned_git = if manifest { pinned_git_sources(text) } else { Vec::new() };
+    fetched_urls(text).into_iter().filter(|url| !allowed_source(url, text) && !pinned_git.contains(url)).collect()
 }
 
 #[test]
@@ -482,6 +695,30 @@ fn a_url_in_a_generated_sources_file_is_allowed_only_when_every_entry_is_pinned(
     assert!(unlisted_fetches(&generated, &pretty(&[&pinned_entry])).is_empty(), "a fully pinned generated file");
     assert!(!unlisted_fetches(&generated, &pretty(&[&pinned_entry, unpinned_entry])).is_empty(), "one unpinned entry fails the scan");
     assert!(!unlisted_fetches(&elsewhere, &pretty(&[&pinned_entry])).is_empty(), "the same file outside generated/ fails the scan");
+}
+
+#[test]
+fn a_git_source_of_the_manifest_is_allowed_only_when_a_full_commit_pins_it() {
+    let manifest = packaging().join("flatpak/ch.holzcloud.holzwave.yml");
+    let commit = "d".repeat(40);
+    let source = |fields: &str| format!("    sources:\n      - type: git\n        url: https://example.net/x.git\n{fields}      - other.json\n");
+    let pinned = source(&format!("        commit: {commit}\n        dest: x\n"));
+    assert!(unlisted_fetches(&manifest, &pinned).is_empty(), "a git source pinned by a full commit");
+    let with_comment = source(&format!("        # why\n        commit: {commit}\n"));
+    assert!(unlisted_fetches(&manifest, &with_comment).is_empty(), "a comment between the fields");
+    assert!(!unlisted_fetches(&manifest, &source("        branch: main\n")).is_empty(), "a branch");
+    assert!(!unlisted_fetches(&manifest, &source(&format!("        commit: {commit}\n        tag: v1\n"))).is_empty(), "a tag next to the commit");
+    assert!(!unlisted_fetches(&manifest, &source("        commit: deadbee\n")).is_empty(), "a short commit");
+    assert!(!unlisted_fetches(&manifest, &source(&format!("        commit: {}\n", "D".repeat(40)))).is_empty(), "an upper-case commit");
+    assert!(!unlisted_fetches(&manifest, &source("        dest: x\n")).is_empty(), "no commit at all");
+    // The commit of another item does not pin this one.
+    let neighbour = format!("      - type: git\n        url: https://example.net/x.git\n      - type: git\n        url: https://example.net/y.git\n        commit: {commit}\n");
+    assert_eq!(unlisted_fetches(&manifest, &neighbour), ["https://example.net/x.git"], "only the pinned item is excused");
+    // The rule is by context: the same text in another kind of file, or outside packaging/flatpak, gets no pass.
+    assert!(!unlisted_fetches(&packaging().join("flatpak/x.txt"), &pinned).is_empty(), "not a manifest");
+    assert!(!unlisted_fetches(&packaging().join("other/x.yml"), &pinned).is_empty(), "not in packaging/flatpak");
+    // An archive with a sha256 is not excused here (the Zig archives are by the host rule), and a curl is not a git source.
+    assert!(!unlisted_fetches(&manifest, "      - type: archive\n        url: https://example.net/x.tar.xz\n        sha256: 00\n").is_empty());
 }
 
 #[test]
