@@ -36,4 +36,14 @@ cask "holzwave@preview" do
     "~/Library/Caches/ch.holzcloud.holzwave",
     "~/Library/WebKit/ch.holzcloud.holzwave",
   ]
+
+  caveats <<~EOS
+    holzWave is signed ad hoc only and is not notarized by Apple.
+    This cask removes the quarantine attribute after the install so that macOS opens the app:
+    that bypasses a protection of macOS. If you do not accept that, do not use this cask;
+    the DMG is on the releases page.
+    It is not in the official Homebrew cask repository, which does not take apps that fail Gatekeeper.
+    Apple Silicon only. Published by holzcloud.ch.
+    This is a pre-release.
+  EOS
 end

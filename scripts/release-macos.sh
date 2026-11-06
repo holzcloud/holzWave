@@ -81,9 +81,10 @@ if [ "$publish" = 1 ]; then
   {
     echo "holzWave $version for macOS (Apple Silicon)."
     echo
-    echo "- Unsigned: the app is signed ad hoc only. Install with Homebrew (the cask removes the quarantine attribute):"
+    echo "- Unsigned: the app is signed ad hoc only and is not notarized by Apple. Install with Homebrew (the cask removes the quarantine attribute, a bypass of a macOS protection):"
     echo "  \`brew tap holzcloud/holzwave https://github.com/holzcloud/holzWave, then brew install --cask holzcloud/holzwave/holzwave@preview\`"
     echo "- Or open the DMG, drag holzWave to Applications, then right-click and Open once."
+    echo "- Published by holzcloud.ch."
     echo "- SHA-256: \`$sum\`"
     echo "- Windows and Linux packages are built and attached by scripts/release-windows-cross.sh and scripts/release-linux-container.sh."
   } > "$notes"
@@ -93,6 +94,10 @@ if [ "$publish" = 1 ]; then
 fi
 
 if [ "$casks" = 1 ]; then
+  # A version with a hyphen is a pre-release; the caveats of its casks say so. The text of the caveats is pinned by
+  # app/src-tauri/tests/homebrew.rs and has to stay the same as in the committed Casks/holzwave@preview.rb.
+  pre_note=
+  case "$version" in *-*) pre_note=$(printf '\n    This is a pre-release.') ;; esac
   write_cask() { # <token> <file> <conflict>
     cat > "$2" <<CASK
 # $4
@@ -133,6 +138,15 @@ cask "$1" do
     "~/Library/Caches/ch.holzcloud.holzwave",
     "~/Library/WebKit/ch.holzcloud.holzwave",
   ]
+
+  caveats <<~EOS
+    holzWave is signed ad hoc only and is not notarized by Apple.
+    This cask removes the quarantine attribute after the install so that macOS opens the app:
+    that bypasses a protection of macOS. If you do not accept that, do not use this cask;
+    the DMG is on the releases page.
+    It is not in the official Homebrew cask repository, which does not take apps that fail Gatekeeper.
+    Apple Silicon only. Published by holzcloud.ch.$pre_note
+  EOS
 end
 CASK
   }
