@@ -22,26 +22,32 @@ pub enum Os {
     Macos,
     Windows,
     Linux,
+    /// Android: its own case because the system shell is `/system/bin/sh` (there is no `/bin/sh`) and the page
+    /// switches its layout on the name. Every other rule is the Linux one, written out below.
+    Android,
 }
 
 impl Os {
-    /// The OS this build runs on. Every Unix that is not macOS takes the Linux rules.
+    /// The OS this build runs on. Android is its own case; every other Unix that is not macOS takes the Linux rules.
     pub fn current() -> Self {
         if cfg!(target_os = "macos") {
             Self::Macos
         } else if cfg!(windows) {
             Self::Windows
+        } else if cfg!(target_os = "android") {
+            Self::Android
         } else {
             Self::Linux
         }
     }
 
-    /// The OS of a name as `std::env::consts::OS` and the app's `app_info` spell it. `macos` and `windows` are
-    /// known; every other name is read as Linux.
+    /// The OS of a name as `std::env::consts::OS` and the app's `app_info` spell it. `macos`, `windows` and `android`
+    /// are known; every other name is read as Linux.
     pub fn from_name(name: &str) -> Self {
         match name {
             "macos" => Self::Macos,
             "windows" => Self::Windows,
+            "android" => Self::Android,
             _ => Self::Linux,
         }
     }
@@ -52,6 +58,7 @@ impl Os {
             Self::Macos => "macos",
             Self::Windows => "windows",
             Self::Linux => "linux",
+            Self::Android => "android",
         }
     }
 }
@@ -71,7 +78,8 @@ pub struct ShellLaunch {
 ///
 /// The defaults:
 ///
-/// - macOS and Linux: `$SHELL` (unset or empty counts as unset), else `/bin/zsh` on macOS and `/bin/sh` on Linux.
+/// - macOS, Linux and Android: `$SHELL` (unset or empty counts as unset), else `/bin/zsh` on macOS, `/bin/sh` on Linux
+///   and `/system/bin/sh` on Android (the one shell of the system image; nothing is shipped with the app).
 /// - Windows, in this order: `%ProgramFiles%\PowerShell\7\pwsh.exe`, a `pwsh.exe` in a directory of `PATH`, Windows
 ///   PowerShell under `%SystemRoot%\System32`, `%ComSpec%`, and last the bare `cmd.exe`. Only files that exist
 ///   are taken, and only absolute directories are searched: an empty or relative `PATH` entry would start a
@@ -89,7 +97,12 @@ pub fn shell_launch(
     } else if os == Os::Windows {
         windows_shell(env, exists)
     } else {
-        let fallback = if os == Os::Macos { "/bin/zsh" } else { "/bin/sh" };
+        let fallback = match os {
+            Os::Macos => "/bin/zsh",
+            // Android has no /bin/sh; the system image's shell lives here.
+            Os::Android => "/system/bin/sh",
+            Os::Linux | Os::Windows => "/bin/sh",
+        };
         non_empty(env("SHELL")).unwrap_or_else(|| fallback.to_string())
     };
     let args = shell_args(os, &program);
@@ -370,7 +383,18 @@ pub fn utf8_locale(os: Os) -> Option<&'static str> {
     match os {
         Os::Macos => Some("en_US.UTF-8"),
         Os::Linux => Some("C.UTF-8"),
+        Os::Android => Some("C.UTF-8"),
         Os::Windows => None,
+    }
+}
+
+/// The `PATH` a child gets when its parent has none (unset or empty): on Android the two folders of the system image
+/// that hold programs. A plain value; nothing is looked up on disk. Every other OS keeps whatever the parent has, so
+/// there is no default for it.
+pub fn default_path(os: Os) -> Option<&'static str> {
+    match os {
+        Os::Android => Some("/system/bin:/system/xbin"),
+        Os::Macos | Os::Linux | Os::Windows => None,
     }
 }
 
@@ -380,7 +404,7 @@ pub fn utf8_locale(os: Os) -> Option<&'static str> {
 pub fn exit_poll(os: Os) -> Option<Duration> {
     match os {
         Os::Windows => Some(Duration::from_millis(250)),
-        Os::Macos | Os::Linux => None,
+        Os::Macos | Os::Linux | Os::Android => None,
     }
 }
 
@@ -389,7 +413,7 @@ pub fn exit_poll(os: Os) -> Option<Duration> {
 pub fn rename_retries(os: Os) -> u32 {
     match os {
         Os::Windows => 3,
-        Os::Macos | Os::Linux => 0,
+        Os::Macos | Os::Linux | Os::Android => 0,
     }
 }
 

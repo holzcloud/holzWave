@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use holzwave_core::platform::{
-    HOST_LOGIN_SHELL_SCRIPT, Os, ProgramCheck, ShellLaunch, exit_poll, host_command, host_shell_launch, in_flatpak,
-    rename_retries, resolve_shell, shell_launch, utf8_locale,
+    HOST_LOGIN_SHELL_SCRIPT, Os, ProgramCheck, ShellLaunch, default_path, exit_poll, host_command, host_shell_launch,
+    in_flatpak, rename_retries, resolve_shell, search_dirs, shell_launch, utf8_locale,
 };
 use holzwave_core::pty::SpawnOptions;
 use holzwave_core::winshell::{POWERSHELL_PROMPT_SCRIPT, encode_command, powershell_integration_args};
@@ -61,16 +61,19 @@ const WINDOWS_VARS: &[(&str, &str)] = &[
 
 #[test]
 fn os_names_round_trip_and_unknown_names_read_as_linux() {
-    for os in [Os::Macos, Os::Windows, Os::Linux] {
+    for os in [Os::Macos, Os::Windows, Os::Linux, Os::Android] {
         assert_eq!(Os::from_name(os.name()), os);
     }
     assert_eq!(Os::from_name("macos"), Os::Macos);
     assert_eq!(Os::from_name("windows"), Os::Windows);
     assert_eq!(Os::from_name("linux"), Os::Linux);
     // The names of std::env::consts::OS that are Unix and not macOS take the Linux rules.
-    for name in ["freebsd", "openbsd", "android", ""] {
+    for name in ["freebsd", "openbsd", "linux", ""] {
         assert_eq!(Os::from_name(name), Os::Linux, "{name:?}");
     }
+    // Android is its own case: `std::env::consts::OS` is `android` there and it is not Linux.
+    assert_eq!(Os::from_name("android"), Os::Android);
+    assert_eq!(Os::Android.name(), "android");
 }
 
 #[test]
@@ -79,6 +82,8 @@ fn the_current_os_is_the_one_this_build_targets() {
         Os::Macos
     } else if cfg!(windows) {
         Os::Windows
+    } else if cfg!(target_os = "android") {
+        Os::Android
     } else {
         Os::Linux
     };
@@ -180,7 +185,7 @@ fn a_comspec_that_is_not_cmd_gets_the_arguments_of_its_own_file() {
 
 #[test]
 fn unix_uses_shell_with_a_login_flag() {
-    for os in [Os::Linux, Os::Macos] {
+    for os in [Os::Linux, Os::Macos, Os::Android] {
         assert_eq!(launch(os, "", &[("SHELL", "/usr/bin/fish")], &[]), expect("/usr/bin/fish", &["-l"]), "{os:?}");
     }
 }
@@ -188,6 +193,26 @@ fn unix_uses_shell_with_a_login_flag() {
 #[test]
 fn linux_falls_back_to_bin_sh() {
     assert_eq!(launch(Os::Linux, "", &[], &[]), expect("/bin/sh", &["-l"]));
+}
+
+#[test]
+fn android_falls_back_to_the_system_shell_because_it_has_no_bin_sh() {
+    assert_eq!(launch(Os::Android, "", &[], &[]), expect("/system/bin/sh", &["-l"]));
+    assert_eq!(launch(Os::Android, "", &[], &["/system/bin/sh"]), expect("/system/bin/sh", &["-l"]));
+    assert_eq!(launch(Os::Android, "", &[("SHELL", "")], &[]), expect("/system/bin/sh", &["-l"]), "empty is unset");
+    assert_eq!(
+        launch(Os::Android, "", &[("SHELL", "/system/bin/sh")], &[]),
+        expect("/system/bin/sh", &["-l"]),
+        "the variable names the same shell"
+    );
+    // The setting still replaces the default, as on every OS.
+    assert_eq!(launch(Os::Android, "/system/bin/sh", &[], &[]), expect("/system/bin/sh", &["-l"]));
+    assert_eq!(launch(Os::Android, "/data/local/tmp/sh", &[], &[]), expect("/data/local/tmp/sh", &["-l"]));
+    // The Windows variables mean nothing there either.
+    assert_eq!(launch(Os::Android, "", WINDOWS_VARS, &[PWSH7, WINPS]), expect("/system/bin/sh", &["-l"]));
+    // The other Unix defaults are what they were.
+    assert_eq!(launch(Os::Linux, "", &[], &[]), expect("/bin/sh", &["-l"]));
+    assert_eq!(launch(Os::Macos, "", &[], &[]), expect("/bin/zsh", &["-l"]));
 }
 
 #[test]
@@ -312,6 +337,7 @@ fn exit_poll_exists_only_on_windows() {
     assert_eq!(exit_poll(Os::Windows), Some(Duration::from_millis(250)));
     assert_eq!(exit_poll(Os::Macos), None);
     assert_eq!(exit_poll(Os::Linux), None);
+    assert_eq!(exit_poll(Os::Android), None, "the rule of Linux, written out");
 }
 
 #[test]
@@ -319,6 +345,7 @@ fn rename_retries_exist_only_on_windows() {
     assert_eq!(rename_retries(Os::Windows), 3);
     assert_eq!(rename_retries(Os::Macos), 0);
     assert_eq!(rename_retries(Os::Linux), 0);
+    assert_eq!(rename_retries(Os::Android), 0, "the rule of Linux, written out");
 }
 
 // ---- the child's environment -------------------------------------------------------------------------
@@ -335,6 +362,7 @@ fn value(env: &[(String, String)], key: &str) -> Option<String> {
 fn the_utf8_fallback_locale_depends_on_the_os() {
     assert_eq!(utf8_locale(Os::Macos), Some("en_US.UTF-8"));
     assert_eq!(utf8_locale(Os::Linux), Some("C.UTF-8"));
+    assert_eq!(utf8_locale(Os::Android), Some("C.UTF-8"), "the rule of Linux, written out");
     assert_eq!(utf8_locale(Os::Windows), None);
 }
 
@@ -347,11 +375,12 @@ fn windows_children_get_no_locale_variable() {
 fn linux_and_macos_children_get_their_fallback_locale() {
     assert_eq!(value(&child_env(Os::Linux, &[]), "LC_CTYPE").as_deref(), Some("C.UTF-8"));
     assert_eq!(value(&child_env(Os::Macos, &[]), "LC_CTYPE").as_deref(), Some("en_US.UTF-8"));
+    assert_eq!(value(&child_env(Os::Android, &[]), "LC_CTYPE").as_deref(), Some("C.UTF-8"));
 }
 
 #[test]
 fn a_parent_locale_is_left_alone_on_every_os() {
-    for os in [Os::Macos, Os::Windows, Os::Linux] {
+    for os in [Os::Macos, Os::Windows, Os::Linux, Os::Android] {
         for key in ["LANG", "LC_ALL", "LC_CTYPE"] {
             let vars = child_env(os, &[(key, "de_CH.UTF-8")]);
             assert_eq!(value(&vars, "LC_CTYPE"), None, "{os:?} with {key}");
@@ -373,6 +402,35 @@ fn the_fixed_variables_and_the_callers_pairs_are_the_same_on_every_os() {
         assert_eq!(value(&vars, "TERM").as_deref(), Some("dumb"), "the caller's pair wins");
         assert_eq!(value(&vars, "TERM_PROGRAM_VERSION").as_deref(), Some(env!("CARGO_PKG_VERSION")));
     }
+}
+
+#[test]
+fn an_android_child_without_a_path_gets_the_two_system_folders_and_one_with_a_path_keeps_it() {
+    assert_eq!(default_path(Os::Android), Some("/system/bin:/system/xbin"));
+    for os in [Os::Macos, Os::Windows, Os::Linux] {
+        assert_eq!(default_path(os), None, "{os:?} keeps what the parent has");
+        assert_eq!(value(&child_env(os, &[]), "PATH"), None, "{os:?}");
+    }
+    let wanted = Some("/system/bin:/system/xbin".to_string());
+    assert_eq!(value(&child_env(Os::Android, &[]), "PATH"), wanted);
+    assert_eq!(value(&child_env(Os::Android, &[("PATH", "")]), "PATH"), wanted, "empty is unset");
+    // An inherited PATH is untouched: no variable of the list carries it.
+    let inherited = child_env(Os::Android, &[("PATH", "/system/bin:/vendor/bin")]);
+    assert_eq!(value(&inherited, "PATH"), None);
+    // The caller's own PATH wins over the default.
+    let options = SpawnOptions::new("shell", 80, 24).env("PATH", "/a:/b");
+    assert_eq!(value(&options.child_env_on(Os::Android, env(&[])), "PATH").as_deref(), Some("/a:/b"));
+}
+
+#[test]
+fn an_android_child_gets_the_terminal_variables_and_the_pairs_of_its_host() {
+    let options = SpawnOptions::new("shell", 80, 24).env("HOME", "/data/user/0/x/files/home").env("TMPDIR", "/data/user/0/x/cache");
+    let vars = options.child_env_on(Os::Android, env(&[("PATH", "/system/bin")]));
+    assert_eq!(value(&vars, "TERM").as_deref(), Some("xterm-256color"));
+    assert_eq!(value(&vars, "COLORTERM").as_deref(), Some("truecolor"));
+    assert_eq!(value(&vars, "LC_CTYPE").as_deref(), Some("C.UTF-8"));
+    assert_eq!(value(&vars, "HOME").as_deref(), Some("/data/user/0/x/files/home"));
+    assert_eq!(value(&vars, "TMPDIR").as_deref(), Some("/data/user/0/x/cache"));
 }
 
 #[test]
@@ -463,6 +521,39 @@ fn a_bare_name_is_looked_up_in_the_absolute_directories_of_path_and_started_by_i
     let cmd = r"C:\Windows\System32\cmd.exe";
     let (launch, note) = resolved(Os::Windows, "cmd", WINDOWS_VARS, &[], &[cmd], &[]);
     assert_eq!((launch, note), (expect(cmd, &[]), None));
+}
+
+#[test]
+fn a_missing_shell_setting_on_android_falls_back_to_the_system_shell_with_the_plain_sentence() {
+    let (launch, note) = resolved(Os::Android, "/bin/bash", &[], &[], &[], &[]);
+    assert_eq!(launch, expect("/system/bin/sh", &["-l"]));
+    let note = note.expect("a sentence");
+    assert!(note.contains("/bin/bash") && note.contains("was not found") && note.contains("/system/bin/sh"), "{note}");
+    // The sentence has the form the desktop gives.
+    let (_, desktop) = resolved(Os::Linux, "/bin/bash", &[], &[], &[], &[]);
+    assert_eq!(
+        note,
+        desktop.expect("a sentence").replace("/bin/sh is used instead", "/system/bin/sh is used instead")
+    );
+    // A usable absolute setting is kept.
+    let (launch, note) = resolved(Os::Android, "/system/bin/sh", &[], &[], &["/system/bin/sh"], &[]);
+    assert_eq!((launch, note), (expect("/system/bin/sh", &["-l"]), None));
+    // A bare name is looked up in the absolute directories of PATH only.
+    let vars = [("PATH", "/system/bin:/vendor/bin:relative:")];
+    let (launch, note) = resolved(Os::Android, "sh", &vars, &[], &["/system/bin/sh", "sh", "relative/sh"], &[]);
+    assert_eq!((launch, note), (expect("/system/bin/sh", &["-l"]), None));
+}
+
+#[test]
+fn android_searches_the_absolute_entries_of_path_in_order_and_drops_relative_and_empty_ones() {
+    let vars = [("PATH", "/system/bin:/vendor/bin:relative:")];
+    let wanted = vec!["/system/bin".to_string(), "/vendor/bin".to_string()];
+    assert_eq!(search_dirs(Os::Android, &env(&vars)), wanted);
+    assert_eq!(search_dirs(Os::Linux, &env(&vars)), wanted, "exactly as Linux does");
+    assert_eq!(search_dirs(Os::Android, &env(&[("PATH", "")])), Vec::<String>::new());
+    assert_eq!(search_dirs(Os::Android, &env(&[])), Vec::<String>::new());
+    // The Windows system folder is never added.
+    assert_eq!(search_dirs(Os::Android, &env(&[("SystemRoot", r"C:\Windows")])), Vec::<String>::new());
 }
 
 #[test]

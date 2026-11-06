@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
-use crate::platform::{Os, utf8_locale};
+use crate::platform::{Os, default_path, utf8_locale};
 use crate::{Error, Result};
 
 fn pty<E: std::fmt::Display>(e: E) -> Error {
@@ -110,7 +110,8 @@ impl SpawnOptions {
     ///    this crate's version;
     /// 2. a UTF-8 `LC_CTYPE` ([`utf8_locale`]: none on Windows), only when the parent has none of `LANG`, `LC_ALL`
     ///    and `LC_CTYPE` (unset or empty); a parent that has one is left alone;
-    /// 3. the caller's pairs from [`env`](Self::env), which therefore win.
+    /// 3. a default `PATH` ([`default_path`]: Android only), only when the parent has none (unset or empty);
+    /// 4. the caller's pairs from [`env`](Self::env), which therefore win.
     ///
     /// The rules are those of the OS this build runs on, see [`child_env_on`](Self::child_env_on).
     pub fn child_env(&self, parent: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
@@ -131,6 +132,9 @@ impl SpawnOptions {
         match utf8_locale(os) {
             Some(locale) if !has_locale => env.push(("LC_CTYPE".into(), locale.into())),
             _ => {}
+        }
+        if let Some(path) = default_path(os).filter(|_| parent("PATH").is_none_or(|value| value.is_empty())) {
+            env.push(("PATH".into(), path.into()));
         }
         env.extend(self.env.iter().cloned());
         env
@@ -175,9 +179,10 @@ fn pty_size(cols: u16, rows: u16, px_w: u32, px_h: u32) -> PtySize {
 
 /// The current working directory of the process with this id, when it can be read.
 ///
-/// Linux reads the `/proc/<pid>/cwd` link. macOS runs `/usr/sbin/lsof -a -p <pid> -d cwd -Fn` by absolute path,
+/// Linux and Android read the `/proc/<pid>/cwd` link. macOS runs `/usr/sbin/lsof -a -p <pid> -d cwd -Fn` by absolute path,
 /// as an argument vector without a shell, and takes the `n` line; the result is only ever used as a [`PathBuf`].
-/// A process that does not exist, one that belongs to someone else, or any other platform gives `None`. Windows has
+/// A process that does not exist, one that belongs to someone else (on Android: any process that is not a child of the
+/// app, because every app runs as its own user), or any other platform gives `None`. Windows has
 /// no lookup: a PowerShell does not even change its own process directory when it changes directory, so a pane
 /// there learns where its shell is from the shell's own OSC 7 report.
 pub fn process_cwd(pid: u32) -> Option<PathBuf> {
@@ -185,7 +190,7 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     if pid == 0 || i32::try_from(pid).is_err() {
         return None;
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
     }
@@ -198,7 +203,7 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
         command.args(["-b", "-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"]).env_clear();
         parse_lsof_cwd(&output_within(command, LOOKUP_DEADLINE)?)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
     {
         None
     }
