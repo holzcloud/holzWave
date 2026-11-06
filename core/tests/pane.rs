@@ -153,6 +153,31 @@ fn a_notice_is_the_first_output_of_the_pane_and_never_reaches_the_shell() {
 }
 
 #[test]
+fn the_notice_of_the_spec_is_drawn_in_the_warn_colour_and_the_shell_output_is_not() {
+    let probe = Probe::default();
+    let spec = PaneSpec { notice: Some("holzWave: this pane runs inside the Flatpak sandbox.".into()), ..spec_sh("printf shell-output; sleep 3") };
+    let pane = spawn(spec, &probe);
+
+    assert!(wait_until(WAIT, || probe.has_text("shell-output")), "{:?}", probe.events());
+    // The colour of the run that holds `needle` in the last frame that has it.
+    let fg_of = |needle: &str| {
+        probe
+            .frames()
+            .iter()
+            .flat_map(|f| f.changed.iter())
+            .flat_map(|r| r.runs.iter())
+            .filter(|run| run.0.contains(needle))
+            .map(|run| run.2)
+            .next_back()
+    };
+    let notice = fg_of("Flatpak sandbox").expect("the notice is on the screen");
+    let shell = fg_of("shell-output").expect("the shell output is on the screen");
+    assert_ne!(notice, shell, "the notice has its own colour and the colour ends before the shell's output");
+    pane.close();
+    assert!(pane.join(Duration::from_secs(3)));
+}
+
+#[test]
 fn the_pane_shows_a_notice_line_that_never_reaches_the_shell() {
     let probe = Probe::default();
     // The shell reads one line and prints it: whatever the pane wrongly gave the shell would be in that line.

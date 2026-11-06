@@ -1299,9 +1299,11 @@ where
     }
     if let Some(notice) = &spec.notice {
         // Before the shell exists, so before anything it prints. Control characters are made harmless: the line is
-        // text, never an escape sequence.
+        // text, never an escape sequence. It is drawn in the warn colour, as the line of `PaneHandle::notice` is (the
+        // design record 6.32 says so for the line that tells a Flatpak pane runs in the sandbox); the colour is reset
+        // before the shell's own output.
         let line: String = notice.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
-        engine.feed(format!("{line}\r\n").as_bytes());
+        engine.feed(format!("\x1b[33m{line}\x1b[0m\r\n").as_bytes());
     }
     if spec.blank {
         return Ok((engine, Box::new(crate::conn::NullLink::new())));
