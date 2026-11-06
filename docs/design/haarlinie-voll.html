@@ -645,6 +645,33 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .tb-acc{padding:4px 8px;gap:6px}
 .tb-acc span{flex:none;width:72px;height:44px;display:flex;align-items:center;justify-content:center;font-size:12px;padding:0}
 .tb-acc span.locked{flex:none}
+/* Lock, notice and hand-over (docs/design.md 6.6). A phone is drawn at half scale, so 22 px here stand for 44 px. The three chip states differ by a glyph (a closed padlock, an open one, one with a bar) and a word,
+   and the one without a lock has a dashed border. The system notification is drawn as the system draws it (shaded, rounded), not in the flat style of the product, and is captioned so. */
+.lk-chip{display:inline-flex;align-items:center;gap:3px;height:22px;padding:0 6px;margin-left:auto;border:1px solid var(--edge);border-radius:999px;color:var(--ink3);font:500 8px var(--mono);letter-spacing:.1em;text-transform:uppercase;white-space:nowrap}
+.lk-chip svg{width:9px;height:10px;flex:none}
+.lk-chip[data-state=locked]{border-color:var(--rose);color:var(--rose)}
+.lk-chip[data-state=none]{border-style:dashed}
+.lk-strip{margin:0 0 6px}.lk-strip .t{border-top:1px solid var(--edge);border-radius:0}
+.lk-box{padding:7px 8px;font-size:8px;line-height:1.4;color:var(--ink2)}
+.lk-box b{display:block;margin:0 0 3px;color:var(--ink);font-size:9px}
+.lk-box p{margin:0 0 5px}
+.lk-acts{display:flex;gap:5px;flex-wrap:wrap;margin-top:4px}
+.lk-btn{display:inline-flex;align-items:center;justify-content:center;min-height:22px;min-width:22px;padding:0 8px;border:1px solid var(--edge);border-radius:5px;color:var(--ink2);font:500 8px var(--mono);letter-spacing:.06em;white-space:nowrap}
+.lk-btn.p{background:var(--rose-deep);border-color:var(--rose-deep);color:#fff;font-weight:700}
+.lk-btn.q{border-color:transparent}
+.lk-quiet{display:block;color:var(--ink3);font-size:7.5px;line-height:1.4;margin-top:3px}
+.lk-note{padding:5px 7px;font-size:8px;line-height:1.4;color:var(--ink2);border-radius:8px;margin:0 0 6px;overflow-wrap:anywhere}
+.lk-note[data-tone=warn]{color:var(--warn);text-decoration:underline}.lk-note[data-tone=warn]::before{content:"! ";font-weight:700}
+.lk-sw{display:inline-flex;align-items:center;gap:3px;height:22px;min-width:34px;padding:0 4px 0 6px;border:1px solid var(--rose);border-radius:11px;background:var(--wash);color:var(--rose);font:700 7px var(--mono)}
+.lk-sw i{width:10px;height:10px;border-radius:50%;background:var(--rose)}
+.lk-set{display:flex;align-items:center;justify-content:space-between;gap:6px;min-height:22px}
+.lk-pause{display:inline-block;margin-right:3px;font-weight:700}
+.ho-row{min-height:22px;padding:2px 14px;font-size:8px;white-space:normal;align-items:center}
+.ho-ent{min-height:22px;padding:2px 10px;font-size:8px;white-space:normal;align-items:center}
+.lk-sys{--sys-bg:#E8E5EA;--sys-ink:#1C1B1F;--sys-dim:#625D66;margin:6px 4px 0;padding:8px 10px;border-radius:14px;background:var(--sys-bg);color:var(--sys-ink);box-shadow:0 1px 5px rgba(0,0,0,.45);font:400 8px/1.4 var(--sys-font,system-ui,sans-serif)}
+.lk-sys .h{display:flex;align-items:center;gap:4px;color:var(--sys-dim);font-size:7px;margin-bottom:3px}.lk-sys .h i{width:8px;height:8px;border-radius:2px;background:var(--sys-dim)}
+.lk-sys b{display:block;font-size:9px}
+.lk-sys .a{display:inline-flex;align-items:center;min-height:22px;margin-top:3px;font-weight:700;color:#7B2D55;text-transform:uppercase;letter-spacing:.05em;font-size:7.5px}
 .tblwrap{overflow-x:auto;border:1px solid var(--edge);border-radius:10px}
 table{border-collapse:collapse;width:100%;font-size:13px}
 th{font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink3);text-align:left;padding:8px 12px;border-bottom:1px solid var(--edge);background:var(--ground2)}
@@ -744,6 +771,14 @@ td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
   <h2>Selection, pinch and panes on a phone</h2>
   <p class="lead">A long press selects a word and shows two 44 px handles and a menu with Copy and Paste. A pinch changes the UI scale of this device and the text with it, and a label in the top strip says the value. The sheet lists the panes of a tab, 44 px high, with the one that has the focus marked. The rings in the middle picture are the fingers and are drawn for this page only. Shown at the scale of the mock (about half).</p>
   <div class="phones" id="phones-select"></div>
+
+  <h2>Lock, notice and preferences on a phone</h2>
+  <p class="lead">The chip in the top strip says whether the secrets can be used: a closed padlock and LOCKED, an open one and OPEN, a padlock with a bar and NO LOCK on a dashed border. The unlock sheet only starts the system prompt; it has no password field. The notice for a device without a screen lock, the preferences row with the dialog for turning it off, and the dialog for a lost key over the paused sync line follow. Captions under the phones and in the strips are part of this page only. Shown at the scale of the mock (about half).</p>
+  <div class="phones" id="phones-lock"></div>
+
+  <h2>File hand-over and the notification</h2>
+  <p class="lead">Two sheet rows and two palette entries hand over one file at a time between the phone and the shell's own folder. The lines after a copy and the refusal of a file over 256 MiB are shown, and the notification that Android requires while shells or connections run. The notification is drawn by Android; the product fixes only its words and its action. Shown at the scale of the mock (about half).</p>
+  <div class="phones" id="phones-handover"></div>
 
   <h2>Features and where they live</h2>
   <div class="tblwrap"><table id="cov"></table></div>
@@ -1696,6 +1731,32 @@ const tbViews={tablet:()=>`<div class="titlebar row tb-bar">${tbT('<span class="
   <div class="tabrow tb-row row">${tbTabs()}<span class="fill"></span></div>
   <div class="body"><div class="tb-area">${tbPane('','❯','shell','pane 1 · ~/holzWave',shell(''),{f:1})}${tbPane('wa','⌁','holzkube','ssh · talos-2',ssh(1))}<i class="tb-hit"></i></div></div>
   <div class="acc tb-acc"><span data-target>esc</span><span data-target>tab</span><span data-target>ctrl</span><span data-target>alt</span><span data-target>↑</span><span data-target>↓</span></div>${status()}`};
+
+/* Lock, notice and preferences (docs/design.md 6.6). The glyph of the chip is its own svg, one for each state, so the states differ by shape and by word. */
+const LKG={closed:'<path d="M3 6V4a3 3 0 0 1 6 0v2"/>',open:'<path d="M3 6V4a3 3 0 0 1 6 0"/>',barred:'<path d="M3 6V4a3 3 0 0 1 6 0v2"/><line x1="0.5" y1="13.5" x2="11.5" y2="0.5"/>'};
+const lkChip=(state)=>{const [g,w]={locked:['closed','LOCKED'],open:['open','OPEN'],none:['barred','NO LOCK']}[state];return `<span class="lk-chip" data-target data-state="${state}"><svg data-glyph="${g}" viewBox="0 0 12 14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1" y="6" width="10" height="7" rx="1.2"/>${LKG[g]}</svg>${w}</span>`};
+const lkTop=(state)=>`<span class="wd">◆</span> main${lkChip(state)}<span class="ro">✦ ⌘</span>`;
+const lkBtn=(t,c='')=>`<span class="lk-btn ${c}" data-target>${t}</span>`;
+const lkStrip=(state,cap)=>`<div class="lk-strip"><div class="cap">${cap}</div><div class="t">${lkTop(state)}</div></div>`;
+const lkSheet=`<div class="scrim" style="border-radius:22px"></div><div class="c-sheet float lk-box" style="border-radius:12px 12px 0 0;padding-bottom:12px"><b>Secrets are locked</b><p>Unlock with your fingerprint, face or screen lock to use saved passwords, keys and the AI key.</p><div class="lk-acts">${lkBtn('Unlock','p')}${lkBtn('Not now','q')}</div><span class="lk-quiet">Not unlocked</span></div>`;
+const lkNotice=(btns)=>`<div class="float lk-box" style="border-radius:8px;margin:0 0 6px"><p>This device has no screen lock. holzWave still keeps your secrets encrypted with a key of this device, but anyone who can open the phone can use them. Set a screen lock in the system settings to protect them.</p><div class="lk-acts">${btns}</div></div>`;
+const lkDlg=(top,inner)=>`<div class="float lk-box" role="alertdialog" style="position:absolute;z-index:6;left:10px;right:10px;top:${top}px;border-radius:8px">${inner}</div>`;
+$('#phones-lock').innerHTML=
+ phc('Chip states','<span class="lbl">Top strip</span>',`<div style="padding:8px 0 0">${lkStrip('locked','Tap: unlock sheet')}${lkStrip('open','Tap: lock now')}${lkStrip('none','Tap: the notice')}</div>`,'',{raw:1})
++phc('Unlock sheet',lkTop('locked'),`<span class="ro">❯</span> ssh talos-1
+<span class="dim">Locked: unlock to connect</span>`,BN,{over:lkSheet})
++phc('No screen lock',lkTop('none'),`<div style="padding:8px"><div class="cap" style="margin:0 0 3px">At start</div>${lkNotice(lkBtn('Dismiss','q'))}<div class="cap" style="margin:0 0 3px">After a lock was set</div>${lkNotice(lkBtn('Use protected mode','p')+lkBtn('Dismiss','q'))}</div>`,'',{raw:1})
++phc('Turn protection off','<span class="lbl">Settings</span>',`<div style="padding:8px 10px"><div class="cap" style="margin:0 0 4px">Security</div><div class="lk-set"><span>Protect secrets with the screen lock</span><span class="lk-sw" data-target role="switch" aria-checked="true">ON<i></i></span></div><span class="lk-quiet">Asked once when you open holzWave and again after 5 minutes in the background. Live connections keep running while locked.</span></div><div class="scrim" style="border-radius:22px"></div>${lkDlg(168,`<p>Anyone who can open this phone can then use your saved passwords and keys.</p><span class="lk-quiet">This applies to this device only</span><div class="lk-acts">${lkBtn('Turn off','p')}${lkBtn('Keep on','q')}</div>`)}`,'',{raw:1})
++phc('Vault lost',lkTop('locked'),`<div class="float lk-box" style="position:absolute;z-index:4;left:10px;right:10px;top:38px;border-radius:8px"><b>Nextcloud</b><span><span class="lk-pause">‖</span>Paused: secrets are locked</span></div><div class="scrim" style="border-radius:22px"></div>${lkDlg(106,`<b>Saved secrets can no longer be read</b><p>The key that protected them is gone from this device. Your passwords, keys and the AI key have to be entered again.</p><span class="lk-quiet">Nothing else is lost: layouts, history and settings stay.</span><div class="lk-acts">${lkBtn('Start fresh','p')}${lkBtn('Not now','q')}</div>`)}`,'',{raw:1});
+
+/* File hand-over and the notification (docs/design.md 6.6). */
+const hoRow=(t)=>`<div class="it ho-row" data-target><span>${t}</span></div>`;
+const hoNote=(cap,t,tone)=>`<div class="cap" style="margin:0 0 2px;font-size:8px">${cap}</div><div class="float lk-note"${tone?` data-tone="${tone}"`:''}>${t}</div>`;
+$('#phones-handover').innerHTML=
+ phc('Sheet rows','<span class="lbl">Workspaces</span>',`<div class="fill" style="padding:10px"><div class="row" style="gap:6px;flex-wrap:wrap"><div class="ws on" style="font-size:10px">◆ main</div><div class="ws" style="font-size:10px">◇ infra</div></div><div class="cap" style="margin-top:12px">Tabs in main</div><div class="it on"><span>1 shell</span></div><div class="it"><span>2 holzkube</span></div><div class="cap" style="margin-top:12px">Files</div>${hoRow('Copy a file into the shell folder')}${hoRow('Copy a file out of the shell folder')}</div>`,`<div class="bn"><span class="on">Sheet</span></div>`,{raw:1})
++phc('Palette entries',lkTop('open'),KEYTXT,BN,{over:`<div class="scrim" style="border-radius:22px"></div><div class="ov float" style="left:8px;right:8px;top:38px;border-radius:10px"><div class="row" style="padding:6px 8px;gap:6px;border-bottom:1px solid var(--edge);font-size:8px"><span class="ro">❯</span>copy a file<span class="cur"></span></div><div class="grp lbl" style="font-size:8px">Files</div><div class="it on ho-ent" data-target><span>Copy a file into the shell folder</span></div><div class="it ho-ent" data-target><span>Copy a file out of the shell folder</span></div></div><div class="ov float" style="left:8px;right:8px;top:190px;border-radius:10px"><div class="cap" style="margin:4px 8px 0;font-size:8px">Out asks for the path first</div><div class="row" style="padding:6px 8px;gap:6px;font-size:8px"><span class="ro">❯</span><span class="dim">File to copy out, from the shell folder</span></div></div>`})
++phc('Lines after a copy',lkTop('open'),`<div style="padding:8px">${hoNote('Into the shell folder','Copied report.pdf (1.2 MB) to ~/handover/report.pdf')}${hoNote('The name was taken','Copied report.pdf (1.2 MB) to ~/handover/report-2.pdf')}${hoNote('Out of the shell folder','Copied report.pdf (1.2 MB) out')}${hoNote('Too large','report.pdf is 612 MB; the limit is 256 MB','warn')}</div>`,'',{raw:1})
++phc('Drawn by Android',`<span class="dim">12:41</span><span class="dim" style="margin-left:auto">87 %</span>`,`<div style="padding:8px 6px"><div class="lk-sys"><div class="h"><i></i><span>holzWave · now</span></div><b>holzWave is running</b><div>3 shells, 1 connection</div><span class="a" data-target>Stop all</span></div><div class="cap" style="margin:8px 4px 0;font-size:8px">Channel: Running sessions. No sound, no badge. Shaded and rounded because the system draws it.</div></div>`,'',{raw:1});
 
 /* Feature list */
 const B='<span class="ph-tag built">built</span>',pl=n=>`<span class="ph-tag">Phase ${n}</span>`;

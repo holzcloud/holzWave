@@ -273,9 +273,64 @@ async function check(file) {
     const band = await page.$eval('#stage .tb-hit', (n) => n.getBoundingClientRect().width).catch(() => 0);
     if (Math.round(band) !== 24) failures.push(`the divider touch area of the view tablet is ${Math.round(band)} px wide, not 24`);
   }
+  // Lock, notice and hand-over (docs/design.md 6.6): two rows of phones, the three chip states told apart by a glyph and a word, and the exact words of the spec.
+  const lockPhones = await page.$$eval('#phones-lock .ph1', (n) => n.length);
+  if (lockPhones !== 5) failures.push(`#phones-lock holds ${lockPhones} phones, not 5`);
+  const handoverPhones = await page.$$eval('#phones-handover .ph1', (n) => n.length);
+  if (handoverPhones !== 4) failures.push(`#phones-handover holds ${handoverPhones} phones, not 4`);
+  const chips = await page.$$eval('#phones-lock > div:first-child .lk-chip', (ns) =>
+    ns.map((n) => ({ state: n.dataset.state, label: n.textContent.trim(), glyph: n.querySelector('svg[data-glyph]')?.dataset.glyph, shape: n.querySelector('svg')?.innerHTML, border: getComputedStyle(n).borderTopStyle })),
+  );
+  if (chips.length !== 3) failures.push(`the first phone of #phones-lock draws ${chips.length} chip states, not 3`);
+  else {
+    const labels = chips.map((c) => c.label);
+    if (labels.join('|') !== 'LOCKED|OPEN|NO LOCK') failures.push(`the chip labels are ${labels.join('|')}, not LOCKED|OPEN|NO LOCK`);
+    if (new Set(chips.map((c) => c.glyph)).size !== 3 || new Set(chips.map((c) => c.shape)).size !== 3) failures.push('the three chip states do not each have a glyph of their own');
+    if (chips[2].border !== 'dashed') failures.push('the chip Not protected has no dashed border');
+    if (chips[0].border === 'dashed' || chips[1].border === 'dashed') failures.push('a chip other than Not protected has a dashed border');
+  }
+  // Every touch target of both rows is 22 px at the half scale of the mock; the unlock sheet's Unlock button, the chip, the switch and both hand-over rows are among them.
+  for (const [row, wanted] of [['phones-lock', ['.lk-chip', '.lk-sw', '.lk-btn']], ['phones-handover', ['.ho-row', '.ho-ent']]]) {
+    const small = await page.$$eval(`#${row} [data-target]`, (ns) => ns.map((n) => n.getBoundingClientRect()).filter((r) => r.width < 21.5 || r.height < 21.5).map((r) => `${Math.round(r.width)} by ${Math.round(r.height)}`));
+    if (small.length > 0) failures.push(`#${row} draws ${small.length} touch targets under 22 px (${small.join(', ')})`);
+    for (const sel of wanted) if ((await page.$$eval(`#${row} ${sel}[data-target]`, (n) => n.length)) === 0) failures.push(`#${row} draws no ${sel} target`);
+  }
+  if ((await page.$$eval('#phones-handover .ho-row[data-target]', (n) => n.length)) !== 2) failures.push('#phones-handover does not draw exactly two sheet rows');
+  if ((await page.$$eval('#phones-handover .ho-ent[data-target]', (n) => n.length)) !== 2) failures.push('#phones-handover does not draw exactly two palette entries');
+  // The words of the spec, each in the spec and in the page, so the two stay in step. No password field anywhere (the app only starts the system prompt).
+  const spec = fs.readFileSync(path.join(__dirname, '..', 'design.md'), 'utf8');
+  const lockText = (await page.$eval('#phones-lock', (n) => n.textContent)).replace(/\s+/g, ' ');
+  const handoverText = (await page.$eval('#phones-handover', (n) => n.textContent)).replace(/\s+/g, ' ');
+  const words = {
+    lock: [
+      'Secrets are locked', 'Unlock with your fingerprint, face or screen lock to use saved passwords, keys and the AI key.', 'Not now', 'Not unlocked',
+      'Locked: unlock to connect',
+      'Paused: secrets are locked',
+      'This device has no screen lock. holzWave still keeps your secrets encrypted with a key of this device, but anyone who can open the phone can use them. Set a screen lock in the system settings to protect them.', 'Use protected mode', 'Dismiss',
+      'Protect secrets with the screen lock', 'Asked once when you open holzWave and again after 5 minutes in the background. Live connections keep running while locked.', 'Anyone who can open this phone can then use your saved passwords and keys.', 'This applies to this device only', 'Turn off', 'Keep on',
+      'Saved secrets can no longer be read', 'The key that protected them is gone from this device. Your passwords, keys and the AI key have to be entered again.', 'Start fresh', 'Nothing else is lost: layouts, history and settings stay.',
+    ],
+    handover: [
+      'Copy a file into the shell folder', 'Copy a file out of the shell folder', 'Copied report.pdf (1.2 MB) to ~/handover/report.pdf', 'Copied report.pdf (1.2 MB) to ~/handover/report-2.pdf', 'Copied report.pdf (1.2 MB) out',
+      'report.pdf is 612 MB; the limit is 256 MB', 'File to copy out, from the shell folder',
+      'holzWave is running', '3 shells, 1 connection', 'Stop all',
+    ],
+  };
+  const specText = spec.replace(/\s+/g, ' ');
+  for (const [name, list, text] of [['lock', words.lock, lockText], ['handover', words.handover, handoverText]]) {
+    for (const w of list) {
+      if (!specText.includes(w)) failures.push(`docs/design.md does not hold the words: ${w}`);
+      if (!text.includes(w)) failures.push(`#phones-${name} does not show: ${w}`);
+    }
+  }
+  if ((await page.$$eval('#phones-lock input, #phones-lock [type="password"]', (n) => n.length)) !== 0) failures.push('#phones-lock draws an input or a password field');
+  // Nothing is drawn for what is not built: no file browser, no folder mirror, no all-files permission, no account screen.
+  for (const [name, text] of [['lock', lockText], ['handover', handoverText]]) {
+    for (const bad of ['All files', 'Mirror', 'Browse', 'Sign in', 'Enter password', 'PIN']) if (text.includes(bad)) failures.push(`#phones-${name} names a feature that is not built: ${bad}`);
+  }
   failures.push(...problems.filter((p) => !failures.includes(p)));
   await browser.close();
-  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} + ${approvalPhones} + ${writePhones} + ${commandPhones} + ${sidePhones} + ${actionPhones} + ${wshPhones} + ${attnPhones} + ${keyPhones} + ${selectPhones} phones, ${refused.length} requests refused (the web font host)`);
+  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} + ${approvalPhones} + ${writePhones} + ${commandPhones} + ${sidePhones} + ${actionPhones} + ${wshPhones} + ${attnPhones} + ${keyPhones} + ${selectPhones} + ${lockPhones} + ${handoverPhones} phones, ${refused.length} requests refused (the web font host)`);
   if (failures.length > 0) {
     for (const f of failures) console.error(`FAIL ${f}`);
     process.exit(1);
