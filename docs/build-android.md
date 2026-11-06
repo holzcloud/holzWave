@@ -4,10 +4,11 @@ For the owner's own Mac (Apple silicon). Everything here is built and run locall
 here costs money. The toolchain, the SDK, the NDK, the emulator and the system images are free downloads from their vendors.
 
 > [!IMPORTANT]
-> **Status.** The Android app is being built in stages. When this page was written **nothing of the Android app had been built
-> or run**: this page covers only the toolchain (what to install and how to check it), and the stand-in test of the check runs on
-> a fake SDK tree. The sections for building the project, running it on an emulator and checking the APK are added when the
-> scripts that do those things exist.
+> **Status.** The Android app is being built in stages, and this is an early one. What exists: the toolchain and its check, a
+> compile gate for the Rust code, a script that builds a debug APK, scripts that create and start an arm64 emulator, and one
+> end to end check on that emulator (see [the end to end check](#the-end-to-end-check)). It was run on **one** arm64 emulator image
+> of **one** Android version, and on no phone. Everything that only a real phone shows is **not run**: see
+> [what was not tried](#what-was-not-tried).
 
 ## What to install, all free
 
@@ -107,9 +108,119 @@ emulator 37.2.13). A newer stable release may exist by the time you read this; a
 To prove the check script without any Android software, `sh scripts/test-android-env.sh` runs it against a fake SDK tree with
 stand-in programs, and asserts that no install, add, update or licence command is ever called.
 
-## Not covered yet
+## Compile the Rust code for Android
 
-Building the project, running it on an emulator and checking the APK are not described here, because the scripts for them do
-not exist yet; they are added to this page together with those scripts. Everything that only a real phone shows (the soft and
-hardware keyboard, biometrics, background kills, mobile networks, touch feel, real WebView versions) is not run: there is no
-test device, only arm64 emulator images.
+```sh
+sh scripts/android-check.sh
+```
+
+This runs `cargo check --locked --offline --target aarch64-linux-android` for the engine, the host, the local socket and the app
+shell, with the pinned NDK. It compiles; it does not link an app or run anything. The last line is `android-check: ok`. Exit
+status 1 means a check failed and 2 means a tool or the Rust target is missing (the line it prints for the target is text for
+you to run, it does not run it). `scripts/android-env.sh` exports `CC_aarch64_linux_android`, `CXX_aarch64_linux_android`,
+`AR_aarch64_linux_android`, `RANLIB_aarch64_linux_android` and the cargo linker and archiver of that target, pointing into the
+pinned NDK at API level 31 (the minimum SDK), because the C build scripts of the engine's dependencies need a compiler for the
+target. Without them a direct `cargo check --target aarch64-linux-android` stops with `ToolNotFound: aarch64-linux-android-clang`.
+
+Every build passes `--target aarch64`, and the scripts never name another target.
+
+## Build the debug APK
+
+```sh
+sh scripts/android-build.sh debug      # or: release
+```
+
+This runs `npm --prefix app run tauri -- android build --ci --target aarch64 --apk --debug` after sourcing the environment,
+and prints the path of the APK as its last line
+(`app/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`; the flavour is called `universal` but holds the one ABI, arm64-v8a). The debug build has the application id
+`ch.holzcloud.holzwave.debug`, is debuggable and may use cleartext HTTP (so that an emulator can reach the host machine); the
+release build is neither.
+
+`release` builds the APK **without a signature** and says so. Signing is your own step with your own key: the script never signs,
+never creates a key and never calls `keytool` or `apksigner`, and no key belongs in the repository.
+
+The first build downloads the Android Gradle plugin, Kotlin and the AndroidX libraries that the generated project names from
+Google's and Maven Central's repositories. That is Gradle's own job. The script itself installs and downloads nothing, and the
+build runs the page's own `npm run build` first, which clears and rewrites `app/dist`.
+
+## The emulator
+
+```sh
+sh scripts/android-emulator.sh create   # once: the virtual device holzwave-arm64
+sh scripts/android-emulator.sh start    # headless, waits for the boot
+sh scripts/android-emulator.sh install  # adb install -r of the debug APK
+sh scripts/android-emulator.sh shot out.png
+sh scripts/android-emulator.sh stop
+```
+
+`create` uses the system image `system-images;android-37.0;default;arm64-v8a` from the install line above (set
+`HOLZWAVE_ANDROID_IMAGE` for another arm64 image, for example the Android 31 one). It **refuses** an image that is not arm64-v8a and
+a host that is not arm64, and it never installs a system image: a missing one is exit 2 with the `sdkmanager` line printed as
+text. `start` boots without a window (`-no-window -no-audio -no-snapshot -gpu swiftshader_indirect`; set
+`HOLZWAVE_EMULATOR_GPU=host` for `-gpu host` if the first does not draw). The scripts talk to one device only, the emulator on
+console port 5554 (`emulator-5554`; `HOLZWAVE_EMULATOR_PORT` changes it), never to a phone on the cable.
+
+**Why arm64 only.** The emulator on an Apple silicon Mac cannot run an x86_64 system image, because that would need x86 hardware
+support that the Mac does not have, and an x86_64 build would be built and never run. The terminal engine does not build for 32-bit
+ARM or 32-bit x86 at all.
+
+## The end to end check
+
+```sh
+sh scripts/android-e2e.sh tracer
+```
+
+It starts the emulator if none runs (and stops it at the end only if it started it), builds and installs the debug APK, starts
+the app, waits until the app has started a shell, taps the screen, types three lines with the real Android key path (`adb shell
+input text` and the Enter key), and reads the results back with `run-as`:
+
+| Typed | The file must hold |
+|---|---|
+| `pwd>e2e-pwd` | the folder `home` inside the app's private storage |
+| `echo hello>e2e-echo` | `hello` |
+| `readlink /proc/$$/exe>e2e-sh` | a path under `/system/bin/` |
+
+It prints one line per check and `e2e tracer: ok` at the end (exit 1 when a check failed, 2 when a tool is missing); it removes the
+three files and the temporary directory on every way out. `HOLZWAVE_E2E_SKIP_BUILD=1` reuses the APK that is already built.
+
+**What it proves:** on one emulator image the page loads in the Android WebView, the page asks the core for its layout through the
+bridge, a pane starts the system shell in the app's own folder, and key events from the Android input path reach it.
+
+**What it does not prove:** anything on a real phone. The soft keyboard is never opened (`input text` sends key events), the WebView
+is the one of the emulator image (the script prints it), and the shell is the one of that image, not the shell of a phone maker.
+
+The shell's own folder is `home` inside the app's data folder: a folder of its own, kept apart from the app's settings and layout
+files, with mode 0700. A program a person starts in a pane does not find those files next to its own, and a later hand-over of files
+can be limited to it. The shell's `TMPDIR` is the app's cache folder.
+
+## The committed project
+
+`app/src-tauri/gen/android` is the Android project that `tauri android init` writes, committed so that a plain Gradle build and Android
+Studio build the same thing. What it pins (read from the files, not from memory):
+
+| What | Value |
+|---|---|
+| Application id | `ch.holzcloud.holzwave` (the debug build adds `.debug`) |
+| Gradle | 9.6.1 (wrapper) |
+| Android Gradle plugin | 9.3.1 |
+| Kotlin Gradle plugin | 2.2.10 |
+| Compile SDK and target SDK | 37 |
+| Minimum SDK | 31 (Android 12), also set in `tauri.android.conf.json` |
+| ABI | arm64-v8a only, fixed in `app/build.gradle.kts` (`defaultConfig.ndk.abiFilters`) and in the Rust plugin under `buildSrc` (one ABI, one flavour, one target) |
+
+Run `sh scripts/android-build.sh debug` once before opening the project in Android Studio or running Gradle by hand: the Tauri command line writes `tauri.settings.gradle` (ignored by git, because it holds this machine's paths) and the native library that Gradle packages.
+
+The generated template lists four ABIs; the committed project lists one, so no command line, Android Studio run or plain Gradle
+build can add another. `local.properties`, the build folders, the generated Tauri settings and every key file are ignored by the
+project's own `.gitignore`, and `cargo test -p holzwave-app --test android_project` reads the committed files to check the id, the
+minimum SDK, the one ABI, that no machine path, key, Google service or installer permission is in them, that the manifest asks for the
+`INTERNET` permission only, and that only the debug build is debuggable and may use cleartext.
+
+## What was not tried
+
+- Any real phone or tablet: the soft keyboard and hardware keyboards, biometrics and the hardware keystore, background kills, the
+  limit on background processes, real storage providers, mobile networks, touch feel, the WebView version of a phone, and the system
+  shell of a phone maker.
+- Any Android version other than the emulator image the check ran on (the default is Android 37, arm64).
+- x86_64 and 32-bit images or builds, which are refused by design.
+- A signed release APK, installing from F-Droid or Obtainium, and a 16 KB page device other than the emulator image with that page size.
