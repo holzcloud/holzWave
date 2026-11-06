@@ -159,6 +159,11 @@ function onPointer(e: PointerEvent, hit: Hit | null): boolean {
 
 function down(e: PointerEvent, hit: Hit | null): void {
   stopFling();
+  if (e.isPrimary) {
+    // The primary pointer is the first touch with no other touch active: a finger whose lift was never seen (it left the window) is not one.
+    fingers.clear();
+    pinch = null;
+  }
   fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   if (fingers.size >= 2) {
     startPinch();
