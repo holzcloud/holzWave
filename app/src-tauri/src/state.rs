@@ -36,6 +36,7 @@ mod protocol {
     use serde_json::{Value, json};
 
     use holzwave_host::ai_device::{DeviceState, DeviceView};
+    use holzwave_host::host_shell::HostShellView;
     use holzwave_host::local_network::LocalNetworkView;
     use holzwave_core::local_network::State as LnState;
     use holzwave_host::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, RemovalView, TicketView};
@@ -702,6 +703,12 @@ mod protocol {
                     to_value(&LocalNetworkView { supported: true, notice_due: false, state: LnState::Denied.as_str() }),
                     to_value(&LocalNetworkView { supported: true, notice_due: false, state: LnState::Unknown.as_str() }),
                     to_value(&LocalNetworkView::unsupported()),
+                ],
+                "host_shell": [
+                    to_value(&HostShellView { applies: false, state: "unavailable" }),
+                    to_value(&HostShellView { applies: true, state: "off" }),
+                    to_value(&HostShellView { applies: true, state: "on" }),
+                    to_value(&HostShellView { applies: true, state: "unavailable" }),
                 ],
                 "integration": integration_samples(),
                 "ai": {

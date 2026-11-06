@@ -87,6 +87,8 @@
     "allow-local-network-status",
     "allow-local-network-answer",
     "allow-local-network-open-settings",
+    "allow-host-shell-status",
+    "allow-host-shell-set",
     "allow-monitor-sample",
     "allow-wsh-install",
     "allow-history-search",

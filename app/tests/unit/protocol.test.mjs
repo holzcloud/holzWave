@@ -162,6 +162,16 @@ test("the app info and the pointer commands are pinned", () => {
   assert.deepEqual(golden.commands.local_network_status, []);
   assert.deepEqual(golden.commands.local_network_answer, ["allow"]);
   assert.deepEqual(golden.commands.local_network_open_settings, []);
+  // The host shell switch of a Flatpak: the page asks the view and sends one boolean. The view holds `applies` and one of
+  // three state words; the page treats any other word as `unavailable`.
+  assert.deepEqual(golden.commands.host_shell_status, []);
+  assert.deepEqual(golden.commands.host_shell_set, ["enabled"]);
+  for (const view of golden.answers.host_shell) {
+    assert.deepEqual(keys(view), ["applies", "state"]);
+    assert.equal(typeof view.applies, "boolean");
+  }
+  assert.deepEqual([...new Set(golden.answers.host_shell.map((v) => v.state))].sort(), ["off", "on", "unavailable"]);
+  assert.ok(golden.answers.host_shell.some((v) => !v.applies), "the view outside a Flatpak is in the samples");
   assert.deepEqual(golden.commands.mouse, ["pane", "action", "button", "x", "y", "mods"]);
   assert.deepEqual(golden.commands.wheel, ["pane", "rows", "x", "y", "mods"]);
   for (const name of ["note_window", "placement"]) {
@@ -1006,6 +1016,6 @@ test("the two image commands are pinned: a pixel read by pane, image, generation
   // Motion is a property of the person's window, not of one pane.
   assert.deepEqual(golden.commands.set_image_animation, ["enabled"]);
   assert.ok(!golden.commands.set_image_animation.includes("pane"));
-  // The golden has every command once: 122 with these two.
-  assert.equal(Object.keys(golden.commands).length, 122);
+  // The golden has every command once: 124 with the two host shell commands.
+  assert.equal(Object.keys(golden.commands).length, 124);
 });

@@ -147,6 +147,24 @@
         "yanked": "text"
       }
     ],
+    "host_shell": [
+      {
+        "applies": false,
+        "state": "unavailable"
+      },
+      {
+        "applies": true,
+        "state": "off"
+      },
+      {
+        "applies": true,
+        "state": "on"
+      },
+      {
+        "applies": true,
+        "state": "unavailable"
+      }
+    ],
     "integration": {
       "card": {
         "argv": [
@@ -1173,6 +1191,10 @@
       "query",
       "limit"
     ],
+    "host_shell_set": [
+      "enabled"
+    ],
+    "host_shell_status": [],
     "image_data": [
       "pane",
       "image",

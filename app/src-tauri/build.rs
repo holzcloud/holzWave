@@ -100,6 +100,8 @@ fn main() {
     "local_network_status",
     "local_network_answer",
     "local_network_open_settings",
+    "host_shell_status",
+    "host_shell_set",
     "monitor_sample",
     "wsh_install",
     "history_search",
