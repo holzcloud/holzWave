@@ -18,6 +18,7 @@
 //! - [`conn`]: the [`conn::Link`] trait a pane talks to, and the state of a connection.
 //! - [`profiles`]: `connections.json`, the saved SSH, WSL and Docker connections.
 //! - [`secrets`]: the [`secrets::SecretStore`] trait over the OS keychain.
+//! - [`vault`]: the secret store of Android: one encrypted file, its data key wrapped by a device key behind the [`vault::Keystore`] trait.
 //! - [`connections`]: the connection manager the app shell holds: profiles, secrets, which pane runs which.
 //! - [`integrate`]: the person's own command-line tools (Kubernetes, Talos, Azure, GAM), with names validated by kind.
 //! - [`files`]: the file browser's source of files, local and over SFTP, with bounded reads and atomic writes.
@@ -69,6 +70,7 @@ pub mod ssh;
 pub mod sync;
 pub mod textread;
 pub mod theme;
+pub mod vault;
 pub mod widgets;
 pub mod wire;
 pub mod winshell;
