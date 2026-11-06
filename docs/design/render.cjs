@@ -214,9 +214,68 @@ async function check(file) {
   if (wshPhones !== 2) failures.push(`#phones-wsh holds ${wshPhones} phones, not 2`);
   const attnPhones = await page.$$eval('#phones-attn .ph1', (n) => n.length);
   if (attnPhones !== 2) failures.push(`#phones-attn holds ${attnPhones} phones, not 2`);
+  // Touch (docs/design.md 6.6): the key row states, the selection, pinch and pane list rows, and the tablet view.
+  const keyPhones = await page.$$eval('#phones-keys .ph1', (n) => n.length);
+  if (keyPhones !== 4) failures.push(`#phones-keys holds ${keyPhones} phones, not 4`);
+  const selectPhones = await page.$$eval('#phones-select .ph1', (n) => n.length);
+  if (selectPhones !== 3) failures.push(`#phones-select holds ${selectPhones} phones, not 3`);
+  // The three states of ctrl differ by a shape (an underline, a mark before the label), not by colour alone; alt stays idle in the locked phone.
+  const sticky = await page.$$eval('#phones-keys .ph1', (phones) =>
+    phones.map((ph) => {
+      const shape = (k) => {
+        if (!k) return null;
+        const underline = getComputedStyle(k).textDecorationLine.includes('underline');
+        const content = getComputedStyle(k, '::before').content;
+        return { underline, mark: content !== 'none' && content !== 'normal' };
+      };
+      return { row: ph.querySelectorAll('.acc').length, ctrl: shape(ph.querySelector('[data-key="ctrl"]')), alt: shape(ph.querySelector('[data-key="alt"]')) };
+    }),
+  );
+  if (sticky.length === 4) {
+    const [idle, armed, locked, hardware] = sticky;
+    if (!idle.ctrl || idle.ctrl.underline || idle.ctrl.mark) failures.push('#phones-keys: the idle ctrl key shows an underline or a mark');
+    if (!armed.ctrl || !armed.ctrl.underline || armed.ctrl.mark) failures.push('#phones-keys: the armed ctrl key is not an underline without a mark');
+    if (!locked.ctrl || !locked.ctrl.underline || !locked.ctrl.mark) failures.push('#phones-keys: the locked ctrl key does not show an underline and a mark');
+    if (!locked.alt || locked.alt.underline || locked.alt.mark) failures.push('#phones-keys: alt in the locked phone is not idle');
+    if (hardware.row !== 0) failures.push('#phones-keys: the phone with a hardware keyboard still draws the key row');
+    for (const [i, ph] of [idle, armed, locked].entries()) if (ph.row !== 1) failures.push(`#phones-keys: phone ${i + 1} draws ${ph.row} key rows, not 1`);
+  }
+  // Every touch target drawn in these rows is 22 px at the half scale of the mock, which stands for 44 px.
+  for (const row of ['phones-keys', 'phones-select']) {
+    const small = await page.$$eval(`#${row} .acc span, #${row} .bn span, #${row} .it, #${row} .ws, #${row} .sm-h, #${row} .sm-menu span`, (ns) =>
+      ns.map((n) => n.getBoundingClientRect()).filter((r) => r.width > 0 && (r.width < 21.5 || r.height < 21.5)).map((r) => `${Math.round(r.width)} by ${Math.round(r.height)}`),
+    );
+    if (small.length > 0) failures.push(`#${row} draws ${small.length} touch targets under 22 px (${small.join(', ')})`);
+  }
+  const selectText = await page.$eval('#phones-select', (n) => n.textContent);
+  for (const words of ['UI scale 125 %', 'Copy', 'Paste']) if (!selectText.includes(words)) failures.push(`#phones-select does not show ${words}`);
+  const handles = await page.$$eval('#phones-select .sm-h', (n) => n.length);
+  if (handles !== 2) failures.push(`#phones-select draws ${handles} selection handles, not 2`);
+  const paneRows = await page.$$eval('#phones-select .it .sm-pn', (n) => n.length);
+  if (paneRows !== 3) failures.push(`#phones-select lists ${paneRows} panes, not 3`);
+  if (!views.includes('tablet')) failures.push('the view tablet is missing');
+  else {
+    await show(page, 'tablet');
+    const tablet = await page.$$eval('#stage [data-target]', (ns) => ns.map((n) => n.getBoundingClientRect()).filter((r) => r.width > 0 || r.height > 0));
+    const tabletSmall = tablet.filter((r) => r.width < 43.5 || r.height < 43.5);
+    if (tablet.length < 20) failures.push(`the view tablet draws ${tablet.length} touch targets, fewer than 20`);
+    if (tabletSmall.length > 0) failures.push(`the view tablet draws ${tabletSmall.length} touch targets under 44 px`);
+    const tabletParts = await page.$eval('#stage', (n) => ({
+      keyRow: n.querySelectorAll('.acc').length,
+      panes: n.querySelectorAll('.tb-area .pane').length,
+      band: n.querySelectorAll('.tb-hit').length,
+      windowButtons: [...n.querySelectorAll('.wc')].filter((w) => getComputedStyle(w).display !== 'none').length,
+    }));
+    if (tabletParts.keyRow !== 1) failures.push(`the view tablet draws ${tabletParts.keyRow} key rows, not 1`);
+    if (tabletParts.panes !== 2) failures.push(`the view tablet draws ${tabletParts.panes} panes, not 2`);
+    if (tabletParts.band !== 1) failures.push(`the view tablet draws ${tabletParts.band} divider touch areas, not 1`);
+    if (tabletParts.windowButtons !== 0) failures.push('the view tablet draws window buttons');
+    const band = await page.$eval('#stage .tb-hit', (n) => n.getBoundingClientRect().width).catch(() => 0);
+    if (Math.round(band) !== 24) failures.push(`the divider touch area of the view tablet is ${Math.round(band)} px wide, not 24`);
+  }
   failures.push(...problems.filter((p) => !failures.includes(p)));
   await browser.close();
-  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} + ${approvalPhones} + ${writePhones} + ${commandPhones} + ${sidePhones} + ${actionPhones} + ${wshPhones} + ${attnPhones} phones, ${refused.length} requests refused (the web font host)`);
+  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} + ${approvalPhones} + ${writePhones} + ${commandPhones} + ${sidePhones} + ${actionPhones} + ${wshPhones} + ${attnPhones} + ${keyPhones} + ${selectPhones} phones, ${refused.length} requests refused (the web font host)`);
   if (failures.length > 0) {
     for (const f of failures) console.error(`FAIL ${f}`);
     process.exit(1);

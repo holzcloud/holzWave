@@ -617,6 +617,34 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .bn{display:flex;border-top:1px solid var(--edge);background:var(--ground2);flex:none}
 .bn span{flex:1;text-align:center;padding:8px 0;color:var(--ink3);font-size:9px}.bn span.on{color:var(--rose);box-shadow:inset 0 2px var(--rose)}
 .cap{color:var(--ink3);font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase;margin-top:6px}
+/* Touch (docs/design.md 6.6): the sticky keys of the key row, the selection handles and menu, the pinch label, the list of panes, the tablet.
+   A phone is drawn at half scale, so 22 px here stand for 44 px; the tablet is drawn at full scale. */
+.acc span.armed,.acc span.locked{background:var(--wash);color:var(--rose);text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:3px}
+.acc span.locked{flex:1.4;white-space:nowrap}
+.acc span.locked::before{content:"";display:inline-block;width:5px;height:5px;background:currentColor;margin-right:3px;vertical-align:1px}
+.sm-note{display:block;margin-top:10px;color:var(--ink3);white-space:normal}
+.sm-h{position:absolute;width:22px;height:22px;z-index:3}
+.sm-h::before{content:"";position:absolute;left:10px;top:0;width:2px;height:9px;background:var(--rose)}
+.sm-h::after{content:"";position:absolute;left:6px;top:9px;width:10px;height:10px;background:var(--rose);border-radius:50%}
+.sm-h.s::after{border-top-right-radius:0}.sm-h.e::after{border-top-left-radius:0}
+.sm-menu{position:absolute;z-index:4;display:flex;border-radius:8px;overflow:hidden;height:24px}
+.sm-menu span{height:22px;padding:0 10px;display:flex;align-items:center;color:var(--ink)}
+.sm-menu span+span{border-left:1px solid var(--edge)}
+.sm-scale{margin-left:auto;font-size:9px;padding:0 6px;color:var(--ink)}
+.sm-fingers{position:absolute;inset:0;pointer-events:none;z-index:3}
+.dot.o{background:none;box-shadow:inset 0 0 0 1px var(--ok)}.dot.o.wa{box-shadow:inset 0 0 0 1px var(--warn)}.dot.o.in{box-shadow:inset 0 0 0 1px var(--info)}
+.it .sm-pn{display:inline-flex;align-items:center;gap:6px}
+.tb-bar{height:45px}.tb-row{height:45px}
+.tb-t{height:44px;min-width:44px;padding:0 8px;display:flex;align-items:center;justify-content:center;flex:none}
+.tb-bar .ws,.tb-bar .tbtn{height:28px}
+.tb-row .tab{min-width:44px}.tb-row .tab .tb-x{width:44px;height:44px;display:flex;align-items:center;justify-content:center;margin:0 -12px 0 4px;opacity:.7}
+.tb-area{display:flex;flex:1;min-width:0;background:var(--edge);gap:1px;position:relative}.tb-area .pane{flex:1}
+.tb-area .ph{height:44px;padding:0 0 0 10px}
+.tb-act{display:flex;gap:0;letter-spacing:0;margin-left:0}.tb-act span{width:44px;height:44px;display:flex;align-items:center;justify-content:center}
+.tb-hit{position:absolute;top:0;bottom:0;left:calc(50% - 12px);width:24px;background:repeating-linear-gradient(135deg,rgba(246,239,230,.12) 0 2px,transparent 2px 6px);pointer-events:none;z-index:3}
+.tb-acc{padding:4px 8px;gap:6px}
+.tb-acc span{flex:none;width:72px;height:44px;display:flex;align-items:center;justify-content:center;font-size:12px;padding:0}
+.tb-acc span.locked{flex:none}
 .tblwrap{overflow-x:auto;border:1px solid var(--edge);border-radius:10px}
 table{border-collapse:collapse;width:100%;font-size:13px}
 th{font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink3);text-align:left;padding:8px 12px;border-bottom:1px solid var(--edge);background:var(--ground2)}
@@ -708,6 +736,14 @@ td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
   <h2>Attention marks on a phone</h2>
   <p class="lead">The mark follows the name in the bottom tab strip and in the rows of the sheet. The rows, the tabs and the Sheet opener are at least 44 px high, and the opener shows the kinds of everything that is out of view, once each. Left, the strip; right, the sheet with the pills and the tabs of the shown workspace. Shown at the scale of the mock (about half).</p>
   <div class="phones" id="phones-attn"></div>
+
+  <h2>Key row on a phone</h2>
+  <p class="lead">The six keys are at least 44 px high and wide (22 px at the scale of the mock). ctrl and alt are sticky and told apart by shape: one tap arms the next key (underline and wash), a second tap within 350 ms locks it (filled square, underline and wash). With a hardware keyboard attached the row is not drawn. Shown at the scale of the mock (about half).</p>
+  <div class="phones" id="phones-keys"></div>
+
+  <h2>Selection, pinch and panes on a phone</h2>
+  <p class="lead">A long press selects a word and shows two 44 px handles and a menu with Copy and Paste. A pinch changes the UI scale of this device and the text with it, and a label in the top strip says the value. The sheet lists the panes of a tab, 44 px high, with the one that has the focus marked. The rings in the middle picture are the fingers and are drawn for this page only. Shown at the scale of the mock (about half).</p>
+  <div class="phones" id="phones-select"></div>
 
   <h2>Features and where they live</h2>
   <div class="tblwrap"><table id="cov"></table></div>
@@ -821,6 +857,7 @@ function previewArea(){return `<div class="area">${P('','▦','files','sftp · t
 
 function base(v){
   if(wbViews[v])return wbViews[v]();
+  if(tbViews[v])return tbViews[v]();
   if(lkViews[v])return lkViews[v]();
   const searchBar=v==='search'?`<div class="ov float row" style="left:150px;top:125px;padding:4px 8px;gap:8px;border-radius:8px"><span class="ro">⌕</span><span>layout<span class="cur"></span></span><span class="dim">3/12</span><span class="kbd">Aa</span><span class="kbd">.*</span><span class="kbd">ab</span><span class="dim">▲ ▼ ✕</span></div>`:'';
   const copyBar=v==='copy'?`<div class="ov row" style="left:0;right:0;bottom:0;height:22px;background:var(--rose-deep);color:#fff;padding:0 10px;gap:14px;font-weight:700;letter-spacing:.06em"><span>COPY MODE</span><span style="font-weight:400">v select · y yank · / search · f hints · q quit</span></div>`:'';
@@ -1495,7 +1532,8 @@ const views=[
   ['links','Links','Links the program marked, in a shell pane (docs/design.md 6.31): two at rest with a dotted underline, one under the pointer with a solid underline and its target in the LINK segment of the status line (cut in the middle) with the notice beside it that says why a click could not open it (the host\u2019s own sentence, here an opener that cannot be started), one with the open gesture held in solid rose, one in text the program underlined itself, and an address with a scheme that is not allowed, which stays plain text. The pointer cursor is the system\u2019s and is not drawn.'],
   ['link-ask','Link dialog','The question Open this link? for a link whose text names one site and whose target is another: the text and the full target in mono, Cancel focused with the 2 px ring, Open the solid rose button. It has the shape of the close confirmation and is a floating layer.'],
   ['images','Images','Pictures in a shell pane: one in each of the three layers (below the cell backgrounds, between the backgrounds and the text, above the text), pictures clipped at the top and bottom edge of the pane body, a picture made of placeholder cells, and the cursor and a selection drawn over a picture. An animated picture does not move under reduced motion: its first frame if it was never started, else the frame it shows.'],
-  ['drag','Drag','Reorder panes by drag and drop, drop them as a tab, drag them out into a new window. On Wayland use the palette.']
+  ['drag','Drag','Reorder panes by drag and drop, drop them as a tab, drag them out into a new window. On Wayland use the palette.'],
+ ['tablet','Tablet','The tablet layout of docs/design.md section 6.6, for a window of at least 840 px with a short screen side of at least 480 px: the two-row bar and the tiled panes of the desktop, every control 44 px, no window buttons and no drag region, a divider whose 24 px touch area is the faint hatched band (drawn for this page only), and the key row at the bottom while no hardware keyboard is attached.']
 ];
 const vb=$('#views');let cur='alltag';
 function render(){
@@ -1618,6 +1656,46 @@ $('#phones-attn').innerHTML=
 <span class="ro">❯</span> <span class="cur"></span>`,`<div class="acc"><span>esc</span><span>tab</span><span>ctrl</span><span>alt</span><span>↑</span><span>↓</span></div><div class="bn"><span class="on">shell</span><span style="flex:1.4">kube${mks(['ask','bell','fail','done'])}</span><span>notes${mks(['bell'])}</span><span style="flex:1.5">Sheet${mks(['ask','bell','fail','done'])}</span></div>`)
 +`<div><div class="ph1"><div class="t"><span class="lbl">Workspaces</span></div><div class="fill" style="padding:10px"><div class="row" style="gap:6px;flex-wrap:wrap"><div class="ws on" style="font-size:10px">◆ main</div><div class="ws" style="font-size:10px">◇ infra${mks(['fail','done'])}</div><div class="ws" style="font-size:10px">◇ docs${mks(['done'])}</div></div>
  <div class="cap" style="margin-top:14px">Tabs in main</div><div class="it on"><span>1 shell</span></div><div class="it"><span>2 holzkube <span class="cy">⌁</span>${mks(['ask','bell','fail','done'])}</span></div><div class="it"><span>3 notes.md${mks(['bell'])}</span></div><div class="it dim"><span>＋ New block</span></div></div><div class="bn"><span class="on">Sheet${mks(['ask','bell','fail','done'])}</span></div></div></div>`;
+
+/* Touch (docs/design.md 6.6). `phc` puts a caption of this page under a phone; the caption is not part of the product. */
+const phc=(cap,...a)=>ph(...a).replace(/<\/div>$/,`<div class="cap">${cap}</div></div>`);
+const KEYROW=(ctrl='',alt='')=>`<div class="acc"><span>esc</span><span>tab</span><span data-key="ctrl" class="${ctrl}">ctrl</span><span data-key="alt" class="${alt}">alt</span><span>↑</span><span>↓</span></div>`;
+const BN=`<div class="bn"><span class="on">shell</span><span>kube</span><span>notes</span><span>＋</span></div>`;
+const KEYTOP='<span class="wd">◆</span> main <span class="dim">· 1 shell</span><span class="ro" style="margin-left:auto">✦ ⌘</span>';
+const KEYTXT=`<span class="ro">❯</span> cargo test
+test layout ... <span class="ok">ok</span>
+test unicode ... <span class="ok">ok</span>
+test result: <span class="ok">ok</span>
+<span class="ro">❯</span> <span class="cur"></span>`;
+$('#phones-keys').innerHTML=
+ phc('Idle',KEYTOP,KEYTXT,KEYROW()+BN)
++phc('ctrl armed: the next key only',KEYTOP,KEYTXT,KEYROW('armed')+BN)
++phc('ctrl locked: stays on',KEYTOP,KEYTXT,KEYROW('locked')+BN)
++phc('Hardware keyboard',KEYTOP,KEYTXT+`<span class="sm-note">Hardware keyboard attached. The key row is not drawn.</span>`,BN);
+
+/* Selection, pinch and the list of panes. A tab of three panes: the second has the focus, so the top strip says 2/3 after the tab name. */
+const KUBE=(size)=>`<div style="font-size:${size}px;line-height:1.5"><span class="ro">❯</span> kubectl get nodes
+NAME     STATUS
+talos-1  <span class="ok">Ready</span>
+talos-3  <span class="SEL">NotReady</span>
+<span class="ro">❯</span> <span class="cur"></span></div>`;
+const SELTOP='<span class="wd">◆</span> main <span class="dim">· 2 holzkube 2/3</span><span class="ro" style="margin-left:auto">✦ ⌘</span>';
+const pnRow=(on,hollow,state,name,ctx)=>`<div class="it ${on?'on':''}"><span class="sm-pn"><i class="dot ${hollow?'o ':''}${state}"></i>${name}</span><span class="dim">${ctx}</span></div>`;
+$('#phones-select').innerHTML=
+ phc('Selection: two handles and the menu',SELTOP,KUBE(10).replace('SEL','sel'),KEYROW()+BN,{over:`<div class="sm-menu float" style="left:46px;top:57px"><span>Copy</span><span>Paste</span></div><div class="sm-h s" style="left:53px;top:98px"></div><div class="sm-h e" style="left:101px;top:98px"></div>`})
++phc('Pinch: the label and the larger text','<span class="wd">◆</span> main<span class="chip sm-scale">UI scale 125 %</span><span class="ro" style="margin-left:8px">✦ ⌘</span>',KUBE(12.5).replace('SEL','sel'),KEYROW()+BN,{over:`<svg class="sm-fingers" viewBox="0 0 200 400" aria-hidden="true"><line x1="62" y1="262" x2="138" y2="198" stroke="var(--ink3)" stroke-width="1" stroke-dasharray="3 3"/><circle cx="62" cy="262" r="9" fill="none" stroke="var(--ink3)"/><circle cx="138" cy="198" r="9" fill="none" stroke="var(--ink3)"/></svg>`})
++phc('Sheet: the panes of a tab',`<span class="lbl">Workspaces</span>`,`<div class="fill" style="padding:10px"><div class="row" style="gap:6px;flex-wrap:wrap"><div class="ws on" style="font-size:10px">◆ main</div><div class="ws" style="font-size:10px">◇ infra</div><div class="ws" style="font-size:10px">◇ docs</div></div>
+ <div class="cap" style="margin-top:12px">Tabs in main</div><div class="it"><span>1 shell</span></div><div class="it on"><span>2 holzkube <span class="cy">⌁</span> 2/3</span></div><div class="it"><span>3 notes.md</span></div>
+ <div class="cap" style="margin-top:12px">Panes in holzkube</div>${pnRow(0,1,'wa','holzkube','ssh · talos-2')}${pnRow(1,0,'','logs','ssh · talos-2')}${pnRow(0,1,'in','system','local')}</div>`,`<div class="bn"><span class="on">Sheet</span></div>`,{raw:1});
+
+/* The tablet (docs/design.md 6.6): the desktop window with 44 px controls, no window buttons, a divider with a 24 px touch area (the hatched band is for this page only) and the key row at the bottom. */
+const tbTabs=()=>['1 shell','2 holzkube','3 notes.md','4 layout.rs','5 sysmon'].map((t,i)=>`<div class="tab ${i===0?'on':''}" data-target>${t}${i===1?' <span class="cy">⌁</span>':''}${i===0?'<span class="x tb-x" data-target>×</span>':''}</div>`).join('')+'<div class="tab dim" data-target style="border:0;justify-content:center">＋</div>';
+const tbPane=(dot,ico,t,ctx,body,o={})=>`<div class="pane ${o.f?'f':''}"><div class="ph"><i class="dot ${dot}"></i><span class="dim">${ico}</span><b class="lbl">${t}</b><span class="ctx">${ctx}</span><span class="act tb-act"><span data-target>⊞</span><span data-target>⤢</span><span data-target>✕</span></span></div>${body}</div>`;
+const tbT=(inner,w)=>`<span class="tb-t" data-target${w?` style="width:${w}px"`:''}>${inner}</span>`;
+const tbViews={tablet:()=>`<div class="titlebar row tb-bar">${tbT('<span class="ws on">◆ main <span class="n">5</span></span>')}${tbT('<span class="ws">◇ infra <span class="n">3</span></span>')}${tbT('<span class="ws">◇ docs <span class="n">1</span></span>')}${tbT('<span class="ws plus">＋</span>')}<span class="fill"></span>${tbT('<span class="tbtn"><span class="ok">☁</span> synced</span>')}${tbT('<span class="tbtn">✦ AI</span>')}${tbT('<span class="tbtn">▥ Sidebar</span>')}${tbT('<span class="tbtn">Ctrl+Shift+P</span>')}</div>
+  <div class="tabrow tb-row row">${tbTabs()}<span class="fill"></span></div>
+  <div class="body"><div class="tb-area">${tbPane('','❯','shell','pane 1 · ~/holzWave',shell(''),{f:1})}${tbPane('wa','⌁','holzkube','ssh · talos-2',ssh(1))}<i class="tb-hit"></i></div></div>
+  <div class="acc tb-acc"><span data-target>esc</span><span data-target>tab</span><span data-target>ctrl</span><span data-target>alt</span><span data-target>↑</span><span data-target>↓</span></div>${status()}`};
 
 /* Feature list */
 const B='<span class="ph-tag built">built</span>',pl=n=>`<span class="ph-tag">Phase ${n}</span>`;
