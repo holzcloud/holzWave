@@ -1738,9 +1738,17 @@ fn ai_json_and_ai_accounts_stay_out_of_the_sync() {
 fn the_shipped_app_enables_the_keychain_backend() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("the workspace root");
     let app = fs::read_to_string(root.join("app/src-tauri/Cargo.toml")).expect("the app manifest");
-    let line =
-        app.lines().find(|line| line.trim_start().starts_with("holzwave-core")).expect("the app depends on the core");
-    assert!(line.contains("keyring"), "the app does not enable the keychain feature: {line}");
+    // The desktop build enables the feature in its own target table (Android has no keychain backend and builds the core
+    // without it, with a store that stays locked), so the line to read is the one that names the feature.
+    let lines: Vec<&str> = app.lines().filter(|line| line.trim_start().starts_with("holzwave-core")).collect();
+    assert!(!lines.is_empty(), "the app depends on the core");
+    let line = lines.iter().find(|line| line.contains("keyring")).expect("the app does not enable the keychain feature");
+    let before = &app[..app.find(*line).expect("the line")];
+    let table = before.lines().rev().find(|l| l.trim_start().starts_with('[')).expect("a table");
+    assert!(
+        table.contains("not(target_os = \"android\")"),
+        "the keychain feature is enabled for every target, Android included: {table}"
+    );
 
     let core = fs::read_to_string(root.join("core/Cargo.toml")).expect("the core manifest");
     let default = core.lines().find(|line| line.trim_start().starts_with("default")).expect("the default features");
