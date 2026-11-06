@@ -584,3 +584,76 @@ fn the_password_rules_of_the_signing_script_hold_for_the_second_set() {
     // sign_one is called for every file and for the list of either architecture, with no password argument.
     assert!(code_lines(SIGN_LINUX).iter().any(|l| l.starts_with(r#"sign_one "$dir/$sumsfile" "holzWave $version $sumsfile" || die 1"#)), "the list is not signed through sign_one");
 }
+
+// ---- the pages about the aarch64 set say what ran and what did not -------------------------------------------------
+
+const SIGNING_DOC: &str = include_str!("../../../docs/signing.md");
+
+/// The first label of the private planning tree in a public text: a decision id `D-0..`, a plan id `13-0..` or a threat id
+/// `T-13..`, each at the start of a word (so a date such as `2026-11-03` is not one).
+fn has_planning_label(text: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    for i in 0..chars.len() {
+        if i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '-') {
+            continue;
+        }
+        let rest: String = chars[i..chars.len().min(i + 5)].iter().collect();
+        if ["D-0", "13-0", "T-13"].iter().any(|p| rest.starts_with(p)) {
+            return Some(rest);
+        }
+    }
+    None
+}
+
+#[test]
+fn the_pages_describe_the_aarch64_set_and_its_limits() {
+    for (name, page) in [("docs/signing.md", SIGNING_DOC), ("docs/build-linux.md", BUILD_LINUX_DOC)] {
+        let text = squash(page);
+        assert!(text.contains("SHA256SUMS-aarch64") || name.ends_with("build-linux.md"), "{name} does not name SHA256SUMS-aarch64");
+        assert!(text.contains("never started on real ARM Linux hardware"), "{name} does not say the aarch64 packages never ran on real hardware");
+        assert!(text.contains("release-linux-arm64.sh"), "{name} does not name release-linux-arm64.sh");
+        assert!(text.contains("--arch aarch64"), "{name} does not name the aarch64 signing and verifying command");
+        assert!(text.contains("container"), "{name} does not say the packages come from a container");
+        assert_eq!(has_planning_label(page), None, "{name} carries a label of the planning tree");
+        assert!(!page.contains(".planning/"), "{name} names a path of the private planning tree");
+    }
+    let signing = squash(SIGNING_DOC);
+    // Nothing is signed yet, and the status box still says so: the key does not exist.
+    assert!(signing.contains("No release has been signed yet"), "docs/signing.md no longer says that no release has been signed");
+    assert!(signing.contains("the real key does not exist"), "docs/signing.md no longer says that the key does not exist");
+    assert!(signing.contains("SHA256SUMS") && signing.contains("six files in two sets"), "the table row does not describe the two sets");
+    assert!(signing.contains("the list of **your own architecture**"), "docs/signing.md does not tell a person to check the list of their own architecture");
+    assert!(signing.contains("The container cannot start the AppImage"), "docs/signing.md does not say the AppImage was not started");
+    // The aarch64 AppImage is built on ARM only; the page says why, and what is not covered.
+    let build = squash(BUILD_LINUX_DOC);
+    for said in [
+        "built only on ARM",
+        "does not cross-compile ARM AppImages",
+        "FUSE 2",
+        "libfuse2t64",
+        "The container has no FUSE and no display",
+        "no release has been signed yet",
+        "Not covered:** any run on real ARM Linux hardware; every desktop",
+    ] {
+        assert!(build.contains(said), "docs/build-linux.md does not say `{said}`");
+    }
+}
+
+#[test]
+fn the_second_wave_is_not_marked_done_by_the_pages() {
+    // The pages describe tools, not a release: no page says the aarch64 packages were released or signed.
+    for page in [SIGNING_DOC, BUILD_LINUX_DOC] {
+        let text = squash(page).to_lowercase();
+        assert!(!text.contains("aarch64 packages are signed") && !text.contains("aarch64 release is signed"), "a page claims a signed aarch64 release");
+    }
+}
+
+#[test]
+fn the_label_scan_finds_the_shapes_it_is_meant_to_find() {
+    for bad in ["see plan 13-07 for it", "decision D-03 says", "threat T-13-16 covers", "(13-07)"] {
+        assert!(has_planning_label(bad).is_some(), "the scan misses a label in `{bad}`");
+    }
+    for fine in ["on 2026-11-03 it", "sha256 of 0.0.1-beta2", "x86-64 and aarch64", "glibc 2.39", "ELF 64-bit LSB"] {
+        assert_eq!(has_planning_label(fine), None, "the scan flags `{fine}`");
+    }
+}

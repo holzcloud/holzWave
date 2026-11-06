@@ -11,7 +11,7 @@
 
 | Platform and file | Signed? | What there is to check |
 |---|---|---|
-| Linux `.deb`, `.rpm` and `.AppImage` | **Can be, by minisign; none has been yet.** A signed release carries `<file>.minisig` for each of the three, a `SHA256SUMS` of the three files and `SHA256SUMS.minisig` | the minisign signature, against the public key `packaging/minisign/holzwave.pub` |
+| Linux `.deb`, `.rpm` and `.AppImage` | **Can be, by minisign; none has been yet.** There are six files in two sets, x86_64 and aarch64. A signed release carries, for each set, `<file>.minisig` for each of its three files, a list of the three (`SHA256SUMS` for x86_64, `SHA256SUMS-aarch64` for aarch64) and the signature of that list (`SHA256SUMS.minisig`, `SHA256SUMS-aarch64.minisig`) | the minisign signature, against the public key `packaging/minisign/holzwave.pub` |
 | Windows installer (`holzWave_<version>_x64-setup.exe`) | **No.** It is not signed with Authenticode or in any other way | only the `.sha256` file beside it. It says the download is whole; it is not proof of who made the file |
 | macOS app and DMG | **Ad hoc only, not notarised.** The signature is the one the build makes for itself; it names no developer and Gatekeeper does not accept it as one. The Homebrew cask removes the quarantine attribute so the app opens | nothing a user can check against a publisher |
 | Flatpak | **No bundle is built, so nothing is signed.** See [flatpak.md](flatpak.md) | not applicable |
@@ -43,9 +43,11 @@ This works only for a release that carries signature files. At the time of writi
 
 1. Install minisign from your package manager (Ubuntu packages it as `minisign`; the project is
    <https://github.com/jedisct1/minisign>).
-2. Download the package, its `.minisig`, `SHA256SUMS` and `SHA256SUMS.minisig` from the release, and take `holzwave.pub` from
-   the repository at the release's tag (`packaging/minisign/holzwave.pub`).
-3. Check the file and then the list, and check the file against the list:
+2. Download the package, its `.minisig`, the list of your own architecture and that list's `.minisig` from the release, and take
+   `holzwave.pub` from the repository at the release's tag (`packaging/minisign/holzwave.pub`). Check the list of **your own
+   architecture** (`uname -m` prints `x86_64` or `aarch64`): the x86_64 list names the x86_64 files only and the aarch64 list the
+   aarch64 files only, so the list of the other architecture says nothing about your file.
+3. Check the file and then the list, and check the file against the list. On x86_64:
 
 ```sh
 minisign -Vm holzWave_<version>_amd64.deb -p holzwave.pub
@@ -53,15 +55,26 @@ minisign -Vm SHA256SUMS -p holzwave.pub
 sha256sum -c SHA256SUMS --ignore-missing
 ```
 
-Each `minisign` command prints `Signature and comment signature verified` when it holds, and exits with a non-zero status when it
-does not. Or, with this repository checked out, check everything in the directory at once:
+On aarch64 the files are `holzWave_<version>_arm64.deb`, `holzWave_<version>_aarch64.rpm` and
+`holzWave_<version>_aarch64.AppImage`, and the list is `SHA256SUMS-aarch64`:
 
 ```sh
-sh scripts/verify-release.sh <directory>
+minisign -Vm holzWave_<version>_arm64.deb -p holzwave.pub
+minisign -Vm SHA256SUMS-aarch64 -p holzwave.pub
+sha256sum -c SHA256SUMS-aarch64 --ignore-missing
 ```
 
-The script checks the signature of `SHA256SUMS`, then each file that list names against its signature and its hash, and fails on
-a signature that the list does not cover. It reads files and changes nothing.
+Each `minisign` command prints `Signature and comment signature verified` when it holds, and exits with a non-zero status when it
+does not. Or, with this repository checked out, check everything in the directory at once, once per list:
+
+```sh
+sh scripts/verify-release.sh <directory>                  # the x86_64 list, SHA256SUMS
+sh scripts/verify-release.sh <directory> --arch aarch64   # the aarch64 list, SHA256SUMS-aarch64
+```
+
+The script checks the signature of the list, then each file that list names against its signature and its hash, and fails on
+a signature that no list of the folder names. A signature of a file that only the other architecture's list names is covered by
+that list and is checked when that list is verified. It reads files and changes nothing.
 
 The public key and the packages come from the same place (this repository and its release page). An attacker who could replace
 the packages could replace the key too. A user who needs more than that compares the key's id (the text after
@@ -90,13 +103,17 @@ Everything is local. There is no CI and nothing is uploaded by a script.
    ```
 
    On Linux the equivalent is `secret-tool store --label holzWave service holzwave-minisign`.
-3. Build the packages: `sh scripts/release-linux-container.sh <version>` (see [build-linux.md](build-linux.md)).
-4. Sign: `sh scripts/sign-linux.sh <version>`. It signs the three packages, writes and signs `SHA256SUMS`, checks all four
-   signatures against the public key, and prints the `gh release upload` command for the eight files. It refuses to run, and
-   touches nothing, if the key is missing or lies inside the repository, if the key file can be read by group or others, if the public key is
-   missing, or if the password cannot be read from the secret store.
-5. Check it as a user would: `sh scripts/verify-release.sh target/release-cross`.
-6. Upload by hand with the command the script printed.
+3. Build the packages: `sh scripts/release-linux-container.sh <version>` for x86_64 and `sh scripts/release-linux-arm64.sh <version>`
+   for aarch64 (see [build-linux.md](build-linux.md)); both write into `target/release-cross`.
+4. Sign, once per architecture: `sh scripts/sign-linux.sh <version>` (x86_64) and `sh scripts/sign-linux.sh <version> --arch aarch64`.
+   Each run signs the three packages of its architecture, writes and signs its list, checks all four signatures against the public
+   key, and prints the `gh release upload` command for the eight files. A run touches nothing of the other architecture. It
+   refuses to run, and touches nothing, if the key is missing or lies inside the repository, if the key file can be read by group or
+   others, if the public key is missing, if a package of that architecture is missing, or if the password cannot be read from the
+   secret store.
+5. Check it as a user would: `sh scripts/verify-release.sh target/release-cross` and
+   `sh scripts/verify-release.sh target/release-cross --arch aarch64`.
+6. Upload by hand with the commands the scripts printed.
 7. Back up the key file and its password somewhere that is not this computer. Without them no later release can be signed with
    this key.
 
@@ -124,6 +141,10 @@ This is what has not been tried. It is listed here so that no reader assumes it 
   It did not run on the owner's Mac, and the real macOS keychain lookup (`security find-generic-password`) and the real
   `secret-tool` lookup have not been called by the tests.
 - The packages that the container build makes have not been signed.
+- The aarch64 packages were built and inspected in a native arm64 container on an Apple Silicon Mac and were never started on
+  real ARM Linux hardware. The container cannot start the AppImage, so no aarch64 AppImage was started at all.
+- The signing of the aarch64 set was tested with stand-ins and once with minisign 0.12 and a throwaway key in a Linux container,
+  for both architectures in one folder. No aarch64 file has been signed with the real key, because the key has not been created.
 - No Azure Artifact Signing run was made, and no Windows certificate of any kind was tried.
 - How Windows SmartScreen treats a signed installer has not been seen, because no signed installer exists.
 - macOS notarisation has not been tried, and Gatekeeper with a Developer ID has not been seen.

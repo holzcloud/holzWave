@@ -1,10 +1,10 @@
 # Building holzWave on Linux
 
 For the owner's own Linux machines (a Debian family and a Fedora family distribution, X11 and Wayland). Everything here
-is built and run locally: no step here uses GitHub to build, creates a tag or a release (Phase 2 D-04). The one GitHub build is the manual
+is built and run locally: no step here uses GitHub to build, creates a tag or a release. The one GitHub build is the manual
 `linux-packages.yml` workflow that made the `0.0.1-beta2` packages on an amd64 runner.
-The result is a `.deb`, an `.rpm` and an AppImage. The container script leaves them unsigned; `scripts/sign-linux.sh` can add a
-minisign signature to each, but no release has been signed yet. What is signed, how to check it and what is untested is in
+The result is a `.deb`, an `.rpm` and an AppImage, for x86_64 and for aarch64. The container scripts leave them unsigned;
+`scripts/sign-linux.sh` can add a minisign signature to each, but no release has been signed yet. What is signed, how to check it and what is untested is in
 [signing.md](signing.md).
 
 > [!IMPORTANT]
@@ -24,7 +24,8 @@ minisign signature to each, but no release has been signed yet. What is signed, 
   npm, git, the system libraries.
 - **Build only locally**, on your own machine.
 - x86_64 for 0.0.1. The container route below is arm64 on an Apple Silicon Mac, a stand-in for structure and tests; the
-  preview packages of the next-but-one section are built in an emulated amd64 container.
+  preview packages of the next-but-one section are built in an emulated amd64 container, and the aarch64 preview packages in
+  the native arm64 one (the section after it).
 
 ## Packages
 
@@ -209,6 +210,7 @@ created: `gh release upload v<version> target/release-cross/holzWave_<version>_*
 
 Before the upload, `sh scripts/sign-linux.sh <version>` signs the three packages with minisign, writes and signs `SHA256SUMS`, and
 prints the upload command for all eight files. It needs the owner's key; the steps and what has not been tried are in [signing.md](signing.md).
+The aarch64 packages are built and signed by their own commands, in the next section.
 
 > [!WARNING]
 > **What these packages are not.** They were built in a container whose amd64 code is **emulated** on an Apple Silicon Mac
@@ -217,7 +219,7 @@ prints the upload command for all eight files. It needs the owner's key; the ste
 > 4.1 (the base image is Ubuntu 24.04): Ubuntu 24.04 or newer, Debian 13 or newer, Fedora 40 or newer and the like; an
 > older distribution cannot install them and must build from source as described above.
 
-What the script does, and why (details in `.planning/phases/02.2-windows-linux/02.2-RESEARCH-10.md`):
+What the script does, and why:
 
 - It runs `scripts/linux-container-bundle.sh` with `HOLZWAVE_LINUX_ARCH=amd64` and `HOLZWAVE_BUNDLE_APPIMAGE=required`,
   which builds the images `holzwave-linux-test-amd64` and `holzwave-linux-bundle-amd64` (own volumes, own output folder
@@ -235,6 +237,38 @@ What the script does, and why (details in `.planning/phases/02.2-windows-linux/0
 
 The first run builds the images and compiles everything in the emulated container (minutes for the images and the
 compile of the application, measured in the research document); later runs reuse the docker volumes.
+
+## The aarch64 preview packages built from a Mac (native arm64 container)
+
+On an Apple Silicon Mac the owner builds the aarch64 packages in the **native** arm64 container (no emulation):
+
+```sh
+sh scripts/release-linux-arm64.sh <version>        # clean tree; the version of tauri.conf.json
+```
+
+| Format | Name in `target/release-cross/` |
+|---|---|
+| deb | `holzWave_<version>_arm64.deb` |
+| rpm | `holzWave_<version>_aarch64.rpm` |
+| AppImage | `holzWave_<version>_aarch64.AppImage` |
+
+each with a `.sha256` file, beside the x86_64 files, which the script leaves alone. It runs `scripts/linux-container-bundle.sh` (no
+architecture variable, so the arm64 container) with the AppImage required, then reads each package back in the container: the deb
+must say `arm64`, the rpm `aarch64`, and the program inside the AppImage must be an aarch64 ELF file with `AppRun` and the bundled
+WebKitGTK. Any other answer fails the script. It signs nothing and publishes nothing; to sign them, `sh scripts/sign-linux.sh
+<version> --arch aarch64` (see [signing.md](signing.md)).
+
+- **The aarch64 AppImage is built only on ARM**, here in the arm64 container, because the AppImage tool (linuxdeploy) does not
+  cross-compile ARM AppImages. On an Intel Mac the script stops and says so; an emulated arm64 build was not tried.
+- The AppImage needs FUSE 2 on the person's machine (`libfuse2t64` on current Ubuntu), as in the section on packages above.
+- The packages need a current glibc and WebKitGTK 4.1, like the x86_64 ones.
+
+> [!WARNING]
+> **What these packages are not.** They were built in a container on an Apple Silicon Mac and were
+> never started on real ARM Linux hardware. The container has no FUSE and no display, so the AppImage was not started in it
+> either. They are unsigned: no release has been signed yet, and none can be until the owner has created the signing key.
+
+**Not covered:** any run on real ARM Linux hardware; every desktop (GNOME, KDE and the rest) on aarch64; starting the AppImage.
 
 ## Graphics: a blank, white or flickering window
 
@@ -314,11 +348,13 @@ Zig 0.17.0.
 | `scripts/env.sh` sourced by dash, bash and zsh finds `$HOME/.holzwave/zig-0.17.0` and `$HOLZWAVE_ZIG_DIR`, never exits, and leaves the macOS `PATH` exactly as it was | run in the container and on the Mac |
 | The release build, a deb, an rpm and an AppImage; the deb and rpm have the right dependencies, files, icons, categories, keywords and no install script | `sh scripts/linux-container-bundle.sh` |
 | The same for x86_64: the release build, deb, rpm and AppImage in an amd64 container (Ubuntu 24.04, emulated); each is read back as x86_64 and the AppImage is opened without being run | `sh scripts/release-linux-container.sh <version>` |
+| The same for aarch64: the release build, deb, rpm and AppImage in the native arm64 container; each is read back as aarch64 and the AppImage is opened without being run | `sh scripts/release-linux-arm64.sh <version>` |
 | The Debian family package names exist on Ubuntu 26.04; the Fedora family names exist on Fedora 44 | `apt-cache policy`, `dnf repoquery` in containers |
 | The commands that unpack Zig have the shape of the container image's own (checksum from the published index, `tar --strip-components=1`) | the image build of `scripts/linux-container-test.sh` |
 | The graphics section's symptoms, variables and their order | the Tauri documentation page "Linux Graphics Issues" (<https://v2.tauri.app/develop/debug/linux-graphics/>), read on 2026-10-12 |
 
 **Not covered by the container checks:** every graphics statement as seen on a screen; X11 and Wayland runs; GNOME and
-KDE; installs on a real Debian family and Fedora family machine; any run on real x86_64 hardware; that the AppImage starts;
+KDE; installs on a real Debian family and Fedora family machine; any run on real x86_64 hardware; any run on real ARM Linux
+hardware (the aarch64 packages were never started there); that the AppImage starts;
 the `NO_STRIP` and FUSE remedies; `update-desktop-database` and the `Exec=env ...` override. The author has run the
 packages on real Linux machines (the rpm and the AppImage on Fedora KDE); the rows of Part 4 are the record.
