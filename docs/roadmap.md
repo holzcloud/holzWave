@@ -1,6 +1,6 @@
 # Roadmap
 
-holzWave is a terminal emulator for macOS, Windows, Linux and Android, written from scratch around one shared
+holzWave is a terminal emulator for macOS, Windows, Linux, Android and the browser, written from scratch around one shared
 Rust core. [Wave Terminal](https://github.com/wavetermdev/waveterm) is the UX reference, not the code base. If code is
 ever taken over, its Apache-2.0 licence is checked first and the notices are kept.
 
@@ -23,6 +23,8 @@ ever taken over, its Apache-2.0 licence is checked first and the notices are kep
 The `wsh`, K8s, Talos, Azure and GAM7 row means built and tested against fake tools and recorded fixtures. The integrations
 did not run on Windows or Linux hardware, the Flatpak build does not run them, and a real cluster or account is open on
 macOS too (Part 9 of [test-plan.md](test-plan.md)).
+
+The browser is a platform too, through the web build (phase 11): the same window served by one container, built and tested in containers, with its rows open (Part 10 of [test-plan.md](test-plan.md), [server.md](server.md)). It is not a column above because the table lists what each desktop or mobile app does; the browser build has its own limits (see the web build lines in [status.md](status.md)).
 
 Not included on any platform: a web browser block. iOS is not planned (no Apple developer account).
 

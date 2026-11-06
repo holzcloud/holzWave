@@ -13,7 +13,7 @@ or on Windows and Linux hardware, and the rows of Part 9 are the owner's run.
 
 **Goals**
 
-- One terminal core for macOS, Windows, Linux and Android. Platform shells stay thin.
+- One terminal core for macOS, Windows, Linux, Android and the browser (served by `holzwave-server`). Platform shells stay thin.
 - Fast and small: one draw call per pane and frame, a few MiB of RAM per pane, input latency below one frame.
 - Replaceable parts: the VT engine, the connection type, the renderer, the AI provider and the sync backend each sit
   behind a narrow interface.

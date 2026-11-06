@@ -71,7 +71,7 @@
 | Core | One Rust crate shared by every platform |
 | Terminal engine | `libghostty-vt` behind a `TerminalEngine` trait, `alacritty_terminal` as fallback |
 | PTY / SSH | `portable-pty` / `russh` |
-| App shell | Tauri 3 (alpha) for desktop and Android |
+| App shell | Tauri 3 (alpha) for desktop and Android; the browser build is served by `holzwave-server` |
 | UI | TypeScript, no framework, no bundler |
 | Rendering | WebGL2 glyph atlas, one instanced draw per pane, Canvas 2D fallback |
 | Persistence | JSON today, SQLite for settings and history |

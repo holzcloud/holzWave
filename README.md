@@ -11,7 +11,7 @@
 </div>
 
 **holzWave** is an open-source terminal emulator written from scratch in Rust, built on Tauri 3 and
-[libghostty](https://github.com/ghostty-org/ghostty). It aims to run on macOS, Windows, Linux and Android with one
+[libghostty](https://github.com/ghostty-org/ghostty). It aims to run on macOS, Windows, Linux, Android and in a browser with one
 look: tiled panes, tabs and workspaces, a WebGL2 renderer, SSH that reconnects, settings that sync through your own
 Nextcloud, and an AI chat that sees your terminal only after you share that pane. On a Mac with Apple Intelligence the AI runs
 **completely offline**, on the device, with no account and no key. Website: [holzcloud.ch/holzwave](https://holzcloud.ch/holzwave).
