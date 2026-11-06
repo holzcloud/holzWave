@@ -318,7 +318,9 @@ impl Config {
         self.binding_notes = binding_notes;
     }
 
-    fn view(&self) -> SettingsView {
+    /// The view of the settings. `on_host` is whether new panes start on the host (a Flatpak with Host shell on): then the
+    /// `shell` setting names a program of the host and is not looked up here.
+    fn view(&self, on_host: bool) -> SettingsView {
         let mut warnings = self.file_notes.clone();
         if !self.themes.contains(&self.settings.theme) {
             // The choice is kept as it is: a theme file that is missing for a moment must not rewrite it.
@@ -331,7 +333,7 @@ impl Config {
         warnings.extend(self.binding_notes.iter().cloned());
         if !self.settings.shell.is_empty() {
             // Looked at each time the view is made: a program that appears or disappears changes the sentence.
-            warnings.extend(resolve_system_shell(&ShellSpec::System, &self.settings.shell).unusable);
+            warnings.extend(resolve_system_shell(&ShellSpec::System, &self.settings.shell, on_host).unusable);
         }
         SettingsView::new(&self.settings, &self.themes, &self.keybindings, warnings)
     }
@@ -652,7 +654,10 @@ impl ShellSpec {
 
     /// The program and arguments of a pane's shell, and the reason when the `shell` setting could not be used and the
     /// platform default stands in. `configured` is the `shell` setting; `os`, `env`, `exists` and `check` are the
-    /// facts [`resolve_shell`] decides from, passed in so that every platform is tested on any host.
+    /// facts [`resolve_shell`] decides from, passed in so that every platform is tested on any host. `on_host` is true only
+    /// when this is a Flatpak whose person turned Host shell on and which has the permission
+    /// ([`holzwave_core::host_shell::State::On`]); in every other case, a Flatpak without it included, the shell is
+    /// resolved where the process runs, as on any Linux.
     fn launch(
         &self,
         configured: &str,
@@ -660,11 +665,13 @@ impl ShellSpec {
         env: &dyn Fn(&str) -> Option<String>,
         exists: &dyn Fn(&str) -> bool,
         check: &dyn Fn(&str) -> ProgramCheck,
+        on_host: bool,
     ) -> ShellResolved {
         match self {
-            // Inside a Flatpak the shell is the host's: its program is not in the sandbox, so the setting is not looked
-            // up here and nothing is wrong with a program the sandbox cannot see (`PaneSpec::host_spawn`).
-            Self::System if os == Os::Linux && in_flatpak(env, exists) => {
+            // On the host (a Flatpak with Host shell on) the shell is the host's: its program is not in the sandbox, so the
+            // setting is not looked up here and nothing is wrong with a program the sandbox cannot see
+            // (`PaneSpec::host_spawn`).
+            Self::System if on_host && os == Os::Linux && in_flatpak(env, exists) => {
                 ShellResolved { launch: host_shell_launch(configured), unusable: None }
             }
             Self::System => resolve_shell(os, configured, env, exists, check),
@@ -693,13 +700,14 @@ fn check_program_on_disk(path: &str) -> ProgramCheck {
 
 /// The shell of the platform and the `shell` setting as this machine resolves it: the one place that reads the process
 /// environment and the file system for the shell's sake.
-fn resolve_system_shell(spec: &ShellSpec, configured: &str) -> ShellResolved {
+fn resolve_system_shell(spec: &ShellSpec, configured: &str, on_host: bool) -> ShellResolved {
     spec.launch(
         configured,
         Os::current(),
         &|key| std::env::var(key).ok(),
         &|path| Path::new(path).is_file(),
         &check_program_on_disk,
+        on_host,
     )
 }
 
@@ -923,6 +931,9 @@ pub struct AppCore {
     ai: AiHost,
     /// The Local Network permission of macOS: the person's stored choice and the probe of the system. Inert elsewhere.
     local_network: crate::local_network::LocalNetworkHost,
+    /// Whether a Flatpak starts a pane on the host or in the sandbox: the person's stored choice and the permission of this
+    /// Flatpak. Inert outside a Flatpak.
+    host_shell: crate::host_shell::HostShellHost,
     /// The exec primitive of each saved connection a command ran on, kept for the life of the connection list.
     remote_execs: RemoteExecs<SshExec>,
     /// The questions of keyboard-interactive logins that wait for the person (see [`crate::login_prompt`]). Also the
@@ -1162,10 +1173,15 @@ impl AppCore {
         let sync = crate::sync::SyncRuntime::new(dir.clone(), secrets.clone());
         let ai_host = AiHost::new(&dir, sink.clone(), ai);
         let local_network = crate::local_network::LocalNetworkHost::new(&dir, Some(host.local_network()));
+        let host_shell = crate::host_shell::HostShellHost::new(&dir);
         let integrations = {
             let parts = integration.unwrap_or_else(|| {
                 let configured = lock(&config).settings.shell.clone();
-                IntegrationParts::system(&dir, resolve_system_shell(&shell, &configured).launch, secrets.clone())
+                IntegrationParts::system(
+                    &dir,
+                    resolve_system_shell(&shell, &configured, host_shell.state().spawns_on_host()).launch,
+                    secrets.clone(),
+                )
             });
             let live = lock(&windows).all_panes();
             IntegrationHost::new(&dir, sink.clone(), parts, &live)
@@ -1212,6 +1228,7 @@ impl AppCore {
                 ai: ai_host,
                 host,
                 local_network,
+                host_shell,
                 remote_execs: RemoteExecs::new(),
                 prompts,
                 integrations,
@@ -1430,6 +1447,18 @@ impl AppCore {
     /// The Local Network permission of macOS: the stored choice and the probe.
     pub fn local_network(&self) -> &crate::local_network::LocalNetworkHost {
         &self.local_network
+    }
+
+    /// Whether a Flatpak starts panes on the host: the stored choice, the permission of this Flatpak and the two commands
+    /// of the page.
+    pub fn host_shell(&self) -> &crate::host_shell::HostShellHost {
+        &self.host_shell
+    }
+
+    /// Whether a new pane starts on the host through `flatpak-spawn --host`: only in a Flatpak with the permission whose
+    /// person turned Host shell on.
+    fn shell_on_host(&self) -> bool {
+        self.host_shell.state().spawns_on_host()
     }
 
     /// Opens System Settings at Privacy & Security, Local Network. One fixed program with one fixed argument and nothing
@@ -2839,7 +2868,7 @@ impl AppCore {
 
     /// The settings, themes and key bindings in force.
     pub fn get_settings(&self) -> SettingsView {
-        lock(&self.config).view()
+        lock(&self.config).view(self.shell_on_host())
     }
 
     /// Set one setting: validated by the core (type, range, theme name), written to `settings.json` atomically,
@@ -2857,7 +2886,7 @@ impl AppCore {
                 return Err(format!("there is no theme called {:?}", next.theme.chars().take(40).collect::<String>()));
             }
             if next == cfg.settings {
-                return Ok(cfg.view());
+                return Ok(cfg.view(self.shell_on_host()));
             }
             next
         };
@@ -2869,7 +2898,7 @@ impl AppCore {
             let before = cfg.look();
             cfg.set_settings(next, self.host.platform().chord_table());
             cfg.stamps.settings = saved;
-            (cfg.view(), before, cfg.look())
+            (cfg.view(self.shell_on_host()), before, cfg.look())
         };
         self.push_to_panes(&before, &after);
         self.sink.send(Target::All, Out::Settings(view.clone()));
@@ -2915,7 +2944,7 @@ impl AppCore {
             };
             notes.extend(theme_notes);
             *cfg = Config::new(settings, themes, notes, now, self.host.platform().chord_table());
-            (cfg.view(), before, cfg.look())
+            (cfg.view(self.shell_on_host()), before, cfg.look())
         };
         self.push_to_panes(&before, &after);
         self.sink.send(Target::All, Out::Settings(view.clone()));
@@ -2957,8 +2986,10 @@ impl AppCore {
     }
 
     /// [`pane_spec`](Self::pane_spec) with the facts it decides from passed in. Inside a Flatpak (Linux with
-    /// `/.flatpak-info` or `FLATPAK_ID`) the pane's shell runs on the host and its directory comes from OSC 7 only; the
-    /// two flags are set exactly then, and everywhere else the spec is what it always was.
+    /// `/.flatpak-info` or `FLATPAK_ID`) the pane starts in the sandbox, as on any Linux, unless the person turned Host shell
+    /// on and the Flatpak has the permission: only then the pane's shell runs on the host and its directory comes from OSC 7
+    /// only, and the two flags are set exactly then. A sandbox pane in a Flatpak says so on its first line. Everywhere else
+    /// the spec is what it always was.
     fn pane_spec_on(
         &self,
         cols: u16,
@@ -2970,14 +3001,18 @@ impl AppCore {
     ) -> PaneSpec {
         let cfg = lock(&self.config);
         // An unusable `shell` never leaves the pane without a terminal: the default starts, and the pane says so first.
+        let state = self.host_shell.state_for_pane(os == Os::Linux && in_flatpak(env, exists));
         let ShellResolved { launch, unusable } =
-            self.shell.launch(&cfg.settings.shell, os, env, exists, &check_program_on_disk);
+            self.shell.launch(&cfg.settings.shell, os, env, exists, &check_program_on_disk, state.spawns_on_host());
         let mut spec = PaneSpec::new(launch.program, cols, rows).args(launch.args);
-        if os == Os::Linux && in_flatpak(env, exists) {
+        if state.spawns_on_host() {
             spec.host_spawn = true;
             spec.cwd_lookup = false;
         }
-        spec.notice = unusable.map(|note| format!("holzWave: {note}"));
+        spec.notice = crate::host_shell::compose_notice(
+            unusable.map(|note| format!("holzWave: {note}")),
+            crate::host_shell::notice_for(state),
+        );
         spec.cell_px = cell;
         spec.scrollback = cfg.settings.scrollback_lines as usize;
         let limits = self.host.limits();
@@ -3391,8 +3426,19 @@ impl AppCore {
     /// `Debug` prints its values.
     fn apply_connection(&self, pane: PaneId, spec: &mut PaneSpec) {
         match self.connections.apply(pane, spec) {
-            Err(e) => spec.notice = Some(format!("holzWave: cannot open the connection: {e}")),
+            // The pane is a local shell then, so what it was already told (its sandbox) stays after the new line.
+            Err(e) => {
+                let earlier = spec.notice.take();
+                spec.notice = crate::host_shell::compose_notice(
+                    Some(format!("holzWave: cannot open the connection: {e}")),
+                    earlier.as_deref(),
+                );
+            }
             Ok(()) if spec.ssh_connection.is_some() => {
+                // A saved SSH connection starts no local shell: nothing of it is wrapped for the host, and the sentence
+                // about the sandbox of a local shell is not true of it.
+                spec.host_spawn = false;
+                spec.notice = crate::host_shell::without_sandbox_notice(spec.notice.take());
                 // Where the connection points now is where this pane is: recorded before anything can be asked of it.
                 if let Some(profile) = self.connections.profile_of(pane) {
                     lock(&self.pane_targets).insert(pane, crate::wsh_tunnel::Target::of(&profile));
@@ -5988,8 +6034,21 @@ mod tests {
         env: &[(&str, &str)],
         files: &[&str],
     ) -> (String, Vec<String>) {
+        launch_of_on(spec, configured, os, env, files, false)
+    }
+
+    /// [`launch_of`] with the host shell decided: `on_host` is true only for a Flatpak whose Host shell is on and which
+    /// has the permission.
+    fn launch_of_on(
+        spec: &ShellSpec,
+        configured: &str,
+        os: Os,
+        env: &[(&str, &str)],
+        files: &[&str],
+        on_host: bool,
+    ) -> (String, Vec<String>) {
         let (env, exists, check) = facts(env, files);
-        let launch = spec.launch(configured, os, &env, &exists, &check).launch;
+        let launch = spec.launch(configured, os, &env, &exists, &check, on_host).launch;
         (launch.program, launch.args)
     }
 
@@ -6051,25 +6110,46 @@ mod tests {
     }
 
     #[test]
-    fn in_a_flatpak_the_system_shell_is_the_host_login_shell_and_the_setting_is_not_looked_up_in_the_sandbox() {
+    fn in_a_flatpak_with_the_host_shell_on_the_system_shell_is_the_host_login_shell_and_the_setting_is_not_looked_up_in_the_sandbox() {
         use holzwave_core::platform::HOST_LOGIN_SHELL_SCRIPT;
         let system = ShellSpec::default();
         let flatpak = [("FLATPAK_ID", "ch.holzcloud.holzwave"), ("SHELL", "/bin/sh")];
+        let on = |configured: &str, env: &[(&str, &str)], files: &[&str]| launch_of_on(&system, configured, Os::Linux, env, files, true);
         assert_eq!(
-            launch_of(&system, "", Os::Linux, &flatpak, &[]),
+            on("", &flatpak, &[]),
             ("sh".to_owned(), vec!["-c".to_owned(), HOST_LOGIN_SHELL_SCRIPT.to_owned()]),
             "no setting: one constant script finds the host's login shell, $SHELL of the sandbox is not asked"
         );
         // The setting names a program of the host: the sandbox does not have it, and that is no defect.
-        assert_eq!(launch_of(&system, "/usr/bin/fish", Os::Linux, &flatpak, &[]), ("/usr/bin/fish".to_owned(), vec!["-l".to_owned()]));
-        assert_eq!(unusable_of("/usr/bin/fish", Os::Linux, &flatpak, &[]), None);
+        assert_eq!(on("/usr/bin/fish", &flatpak, &[]), ("/usr/bin/fish".to_owned(), vec!["-l".to_owned()]));
+        let (env, exists, check) = facts(&flatpak, &[]);
+        assert_eq!(system.launch("/usr/bin/fish", Os::Linux, &env, &exists, &check, true).unusable, None);
         // The info file alone is enough.
-        assert_eq!(launch_of(&system, "", Os::Linux, &[], &["/.flatpak-info"]).0, "sh");
+        assert_eq!(on("", &[], &["/.flatpak-info"]).0, "sh");
         // A fixed shell (what the tests inject) stays what it is.
+        assert_eq!(launch_of_on(&ShellSpec::new("/bin/cat", &[]), "", Os::Linux, &flatpak, &[], true).0, "/bin/cat");
+        // Not in a Flatpak, or another OS: the host shell is not asked for, whatever the flag says.
+        assert_eq!(on("", &[("SHELL", "/usr/bin/fish")], &[]).0, "/usr/bin/fish");
+        assert_eq!(launch_of_on(&system, "", Os::Macos, &flatpak, &[], true).0, "/bin/sh", "$SHELL of the environment, as on a Mac");
+    }
+
+    #[test]
+    fn in_a_flatpak_with_the_host_shell_off_or_not_available_the_shell_is_resolved_in_the_sandbox() {
+        let system = ShellSpec::default();
+        let flatpak = [("FLATPAK_ID", "ch.holzcloud.holzwave"), ("SHELL", "/usr/bin/fish")];
+        // As on any Linux: $SHELL of the sandbox with the login flag, never the script of the host.
+        assert_eq!(launch_of(&system, "", Os::Linux, &flatpak, &[]), ("/usr/bin/fish".to_owned(), vec!["-l".to_owned()]));
+        assert_eq!(launch_of(&system, "", Os::Linux, &[("FLATPAK_ID", "x")], &[]), ("/bin/sh".to_owned(), vec!["-l".to_owned()]), "no $SHELL");
+        assert_eq!(launch_of(&system, "", Os::Linux, &[], &["/.flatpak-info"]).0, "/bin/sh", "the info file alone is a Flatpak too");
+        // The `shell` setting is looked up in the sandbox now: a program that is there is used, one that is not is reported.
+        assert_eq!(
+            launch_of(&system, "/usr/bin/zsh", Os::Linux, &flatpak, &["/usr/bin/zsh"]),
+            ("/usr/bin/zsh".to_owned(), vec!["-l".to_owned()])
+        );
+        assert!(unusable_of("/usr/bin/fish", Os::Linux, &flatpak, &[]).is_some(), "the sandbox does not have it, so it is reported");
+        // A fixed shell stays what it is.
         assert_eq!(launch_of(&ShellSpec::new("/bin/cat", &[]), "", Os::Linux, &flatpak, &[]).0, "/bin/cat");
-        // No Flatpak, or another OS: nothing changes.
-        assert_eq!(launch_of(&system, "", Os::Linux, &[("SHELL", "/usr/bin/fish")], &[]).0, "/usr/bin/fish");
-        assert_eq!(launch_of(&system, "", Os::Macos, &flatpak, &[]).0, "/bin/sh", "$SHELL of the environment, as on a Mac");
+        // Nothing changes outside a Flatpak.
         assert_eq!(
             unusable_of("/usr/bin/fish", Os::Linux, &[("SHELL", "/bin/sh")], &[]).is_some(),
             true,
@@ -6077,31 +6157,163 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_host_spawn_and_lookup_flags_follow_the_environment() {
-        let dir = Scratch::new("flatpak-flags");
+    const FLATPAK_ENV: &[(&str, &str)] = &[("FLATPAK_ID", "ch.holzcloud.holzwave"), ("SHELL", "/usr/bin/fish")];
+
+    /// A core that behaves as a Flatpak (or not) with or without the permission, whatever machine the test runs on.
+    fn core_as(tag: &str, in_flatpak: bool, permission: bool) -> (Scratch, Arc<AppCore>) {
+        let dir = Scratch::new(tag);
         let core = AppCore::new(dir.0.clone(), Arc::new(Recorder::default()), ShellSpec::default());
         dir.attach(&core);
-        let spec = |os: Os, vars: &'static [(&'static str, &'static str)], files: &'static [&'static str]| {
-            let (env, exists, _) = facts(vars, files);
-            core.pane_spec_on(80, 24, (9, 18), os, &env, &exists)
-        };
+        core.host_shell().use_facts(in_flatpak, permission);
+        (dir, core)
+    }
 
-        let inside = spec(Os::Linux, &[("FLATPAK_ID", "ch.holzcloud.holzwave")], &[]);
-        assert!(inside.host_spawn && !inside.cwd_lookup, "a Flatpak: spawn on the host, no lookup of the process directory");
-        assert_eq!(inside.program, "sh");
-        let by_file = spec(Os::Linux, &[], &["/.flatpak-info"]);
-        assert!(by_file.host_spawn && !by_file.cwd_lookup, "the info file alone");
+    /// The spec of a new pane on `os` with the given environment and files.
+    fn spec_on(core: &AppCore, os: Os, vars: &[(&str, &str)], files: &[&str]) -> PaneSpec {
+        let (env, exists, _) = facts(vars, files);
+        core.pane_spec_on(80, 24, (9, 18), os, &env, &exists)
+    }
 
+    #[test]
+    fn in_a_flatpak_with_the_permission_and_the_switch_off_a_pane_starts_in_the_sandbox_and_says_so() {
+        let (_dir, core) = core_as("hs-off", true, true);
+        assert_eq!(core.host_shell().view().state, "off");
+        let spec = spec_on(&core, Os::Linux, FLATPAK_ENV, &[]);
+        assert!(!spec.host_spawn && spec.cwd_lookup, "the sandbox: nothing wrapped, the directory looked up from the process");
+        assert_eq!((spec.program.as_str(), spec.args.as_slice()), ("/usr/bin/fish", ["-l".to_owned()].as_slice()), "as on any Linux");
+        assert_eq!(spec.notice.as_deref(), Some(crate::host_shell::NOTICE_OFF));
+        let by_file = spec_on(&core, Os::Linux, &[], &["/.flatpak-info"]);
+        assert!(!by_file.host_spawn && by_file.cwd_lookup && by_file.notice.is_some(), "the info file alone is a Flatpak");
+    }
+
+    #[test]
+    fn in_a_flatpak_with_the_permission_and_the_switch_on_a_pane_starts_on_the_host_without_a_notice() {
+        use holzwave_core::platform::host_shell_launch;
+        let (_dir, core) = core_as("hs-on", true, true);
+        core.host_shell().set(true).expect("allowed with the permission");
+        assert_eq!(core.host_shell().view().state, "on");
+
+        let spec = spec_on(&core, Os::Linux, FLATPAK_ENV, &[]);
+        let expected = host_shell_launch("");
+        assert!(spec.host_spawn && !spec.cwd_lookup, "the host: wrapped, and the directory comes from OSC 7 only");
+        assert_eq!((spec.program, spec.args), (expected.program, expected.args), "exactly the launch of before");
+        assert!(spec.notice.is_none(), "{:?}", spec.notice);
+
+        // The `shell` setting names a program of the host and is not looked up in the sandbox.
+        core.set_setting("shell", json!("/usr/bin/fish")).expect("a string");
+        let spec = spec_on(&core, Os::Linux, FLATPAK_ENV, &[]);
+        let expected = host_shell_launch("/usr/bin/fish");
+        assert_eq!((spec.program, spec.args), (expected.program, expected.args));
+        assert!(spec.notice.is_none() && spec.host_spawn, "a program the sandbox cannot see is no defect on the host");
+    }
+
+    #[test]
+    fn in_a_flatpak_without_the_permission_a_pane_starts_in_the_sandbox_whatever_the_file_says() {
+        let dir = Scratch::new("hs-unavailable");
+        // The person's file says on, from a time when the permission was there.
+        std::fs::write(dir.0.join("host_shell.json"), "{\"version\": 1, \"host_shell\": true}\n").unwrap();
+        let core = AppCore::new(dir.0.clone(), Arc::new(Recorder::default()), ShellSpec::default());
+        dir.attach(&core);
+        core.host_shell().use_facts(true, false);
+        assert!(core.host_shell().enabled(), "the choice is kept");
+        assert_eq!(core.host_shell().view().state, "unavailable");
+
+        let spec = spec_on(&core, Os::Linux, FLATPAK_ENV, &[]);
+        assert!(!spec.host_spawn && spec.cwd_lookup, "the choice cannot grant the permission");
+        assert_eq!(spec.program, "/usr/bin/fish");
+        assert_eq!(spec.notice.as_deref(), Some(crate::host_shell::NOTICE_UNAVAILABLE));
+
+        // And with the choice off, the same.
+        std::fs::write(dir.0.join("host_shell.json"), "{\"version\": 1, \"host_shell\": false}\n").unwrap();
+        core.host_shell().use_facts(true, false);
+        let spec = spec_on(&core, Os::Linux, FLATPAK_ENV, &[]);
+        assert!(!spec.host_spawn && spec.notice.as_deref() == Some(crate::host_shell::NOTICE_UNAVAILABLE));
+    }
+
+    #[test]
+    fn outside_a_flatpak_the_spec_is_what_it_was_whatever_the_file_says() {
+        let dir = Scratch::new("hs-outside");
+        std::fs::write(dir.0.join("host_shell.json"), "{\"version\": 1, \"host_shell\": true}\n").unwrap();
+        let core = AppCore::new(dir.0.clone(), Arc::new(Recorder::default()), ShellSpec::default());
+        dir.attach(&core);
+        // The file says on and the permission is there: still no Flatpak, no sandbox.
+        core.host_shell().use_facts(true, true);
+        assert!(core.host_shell().enabled());
+        let (_plain_dir, plain) = core_as("hs-outside-plain", false, false);
         for (os, vars, files) in [
             (Os::Linux, &[("SHELL", "/bin/sh")][..], &[][..]),
             (Os::Linux, &[("FLATPAK_ID", "")][..], &[][..]),
             (Os::Macos, &[("FLATPAK_ID", "x")][..], &["/.flatpak-info"][..]),
             (Os::Windows, &[("FLATPAK_ID", "x")][..], &[][..]),
         ] {
-            let spec = spec(os, vars, files);
-            assert!(!spec.host_spawn && spec.cwd_lookup, "{os:?} {vars:?}: nothing is wrapped and the directory is looked up");
+            let with_file = spec_on(&core, os, vars, files);
+            let without = spec_on(&plain, os, vars, files);
+            assert!(!with_file.host_spawn && with_file.cwd_lookup, "{os:?} {vars:?}: nothing is wrapped and the directory is looked up");
+            assert!(with_file.notice.is_none(), "{os:?} {vars:?}: no sandbox sentence outside a Flatpak: {:?}", with_file.notice);
+            assert_eq!(format!("{with_file:?}"), format!("{without:?}"), "{os:?} {vars:?}: byte for byte what it was");
         }
+    }
+
+    #[test]
+    fn an_unusable_shell_setting_and_the_sandbox_give_one_notice_with_the_shell_sentence_first() {
+        let (_dir, core) = core_as("hs-both", true, true);
+        core.set_setting("shell", json!("/nonexistent/holzwave-no-shell")).expect("a string");
+        let off = spec_on(&core, Os::Linux, FLATPAK_ENV, &[]).notice.expect("a notice");
+        let unusable = off.strip_suffix(crate::host_shell::NOTICE_OFF).and_then(|rest| rest.strip_suffix(' ')).expect("the sandbox sentence ends it");
+        assert!(unusable.starts_with("holzWave: ") && unusable.contains("holzwave-no-shell"), "{off:?}");
+        assert!(!unusable.contains("sandbox"), "the shell sentence comes alone and first: {off:?}");
+        assert!(!off.contains('\n') && !off.contains('\r'), "one line");
+
+        core.host_shell().use_facts(true, false);
+        let without = spec_on(&core, Os::Linux, FLATPAK_ENV, &[]).notice.expect("a notice");
+        assert_eq!(without, format!("{unusable} {}", crate::host_shell::NOTICE_UNAVAILABLE));
+
+        // On the host the setting is not looked up, so there is neither sentence.
+        core.host_shell().use_facts(true, true);
+        core.host_shell().set(true).expect("allowed");
+        assert_eq!(spec_on(&core, Os::Linux, FLATPAK_ENV, &[]).notice, None);
+    }
+
+    #[test]
+    fn a_saved_ssh_connection_is_no_sandbox_pane_and_is_not_wrapped_for_the_host() {
+        let t = ticked(&[]);
+        for (permission, on) in [(true, false), (true, true), (false, false)] {
+            t.core.host_shell().use_facts(true, permission);
+            if on {
+                t.core.host_shell().set(true).expect("allowed");
+            }
+            let (env, exists, _) = facts(FLATPAK_ENV, &[]);
+            let mut spec = t.core.pane_spec_on(80, 24, (9, 18), Os::Linux, &env, &exists);
+            assert_eq!(spec.host_spawn, on, "a local pane before the connection is applied");
+            assert_eq!(spec.notice.is_some(), !on, "the sandbox sentence belongs to a local shell");
+
+            t.core.apply_connection(t.remote, &mut spec);
+
+            assert!(spec.ssh_connection.is_some(), "permission {permission} on {on}: the connection was applied");
+            assert!(!spec.host_spawn, "permission {permission} on {on}: an SSH pane starts no local shell");
+            assert!(spec.notice.is_none(), "permission {permission} on {on}: {:?}", spec.notice);
+        }
+        // A local pane keeps its sentence: only a connection takes it away.
+        t.core.host_shell().use_facts(true, true);
+        t.core.host_shell().set(false).expect("allowed");
+        let (env, exists, _) = facts(FLATPAK_ENV, &[]);
+        let mut local = t.core.pane_spec_on(80, 24, (9, 18), Os::Linux, &env, &exists);
+        t.core.apply_connection(t.local, &mut local);
+        assert_eq!(local.notice.as_deref(), Some(crate::host_shell::NOTICE_OFF));
+    }
+
+    #[test]
+    fn changing_the_switch_changes_no_pane_that_is_already_made_and_the_next_one_follows() {
+        let (_dir, core) = core_as("hs-next", true, true);
+        let before = spec_on(&core, Os::Linux, FLATPAK_ENV, &[]);
+        core.host_shell().set(true).expect("allowed");
+        let after = spec_on(&core, Os::Linux, FLATPAK_ENV, &[]);
+        core.host_shell().set(false).expect("allowed");
+        let back = spec_on(&core, Os::Linux, FLATPAK_ENV, &[]);
+        assert!(!before.host_spawn && after.host_spawn && !back.host_spawn);
+        assert_eq!(before.program, "/usr/bin/fish", "a spec made earlier keeps its shell");
+        assert_eq!(format!("{before:?}"), format!("{back:?}"));
+        assert!(before.notice.is_some() && after.notice.is_none());
     }
 
     #[cfg(unix)]
@@ -6145,7 +6357,7 @@ mod tests {
     /// The notice and the warning that an unusable `shell` setting gives, as a resolution on `os` says it.
     fn unusable_of(configured: &str, os: Os, env: &[(&str, &str)], files: &[&str]) -> Option<String> {
         let (env, exists, check) = facts(env, files);
-        ShellSpec::default().launch(configured, os, &env, &exists, &check).unusable
+        ShellSpec::default().launch(configured, os, &env, &exists, &check, false).unusable
     }
 
     #[test]
@@ -6180,7 +6392,7 @@ mod tests {
         let long = format!("/{}", "x".repeat(200));
         let said = unusable_of(&long, Os::Linux, &env, &[]).expect("a sentence");
         assert!(said.len() < 200 && said.contains("..."), "{said}");
-        assert!(ShellSpec::new("/bin/cat", &[]).launch("/nonexistent", Os::Linux, &|_| None, &|_| false, &|_| ProgramCheck::Missing).unusable.is_none());
+        assert!(ShellSpec::new("/bin/cat", &[]).launch("/nonexistent", Os::Linux, &|_| None, &|_| false, &|_| ProgramCheck::Missing, false).unusable.is_none());
     }
 
     #[cfg(unix)]
@@ -6203,7 +6415,7 @@ mod tests {
         assert_eq!(check_program_on_disk(root.join("nothing").to_str().unwrap()), ProgramCheck::Missing);
         let said = |path: &std::path::Path| {
             let (env, exists, _) = facts(&[("SHELL", "/bin/sh")], &[]);
-            ShellSpec::default().launch(path.to_str().unwrap(), Os::Linux, &env, &exists, &check_program_on_disk).unusable
+            ShellSpec::default().launch(path.to_str().unwrap(), Os::Linux, &env, &exists, &check_program_on_disk, false).unusable
         };
         assert!(said(&root).expect("a directory").contains("is not a file"));
         assert!(said(&plain).expect("no x bit").contains("is not executable"));

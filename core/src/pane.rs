@@ -156,7 +156,8 @@ pub struct PaneSpec {
     pub notice: Option<String>,
     /// Start the shell on the host through `flatpak-spawn --host` ([`platform::host_command`]): the program, the
     /// arguments and the directory of the spec are wrapped, and the child process's own working directory is not set.
-    /// `false` (the default) everywhere except inside a Flatpak.
+    /// `false` (the default) everywhere except inside a Flatpak, and there only when the person turned Host shell on and
+    /// the Flatpak has the permission to run commands on the host: in every other case a Flatpak pane starts in the sandbox.
     pub host_spawn: bool,
     /// Ask the operating system for the shell's working directory ([`process_cwd`]). `true` (the default) everywhere
     /// except in host-spawn mode, where the process in the sandbox is `flatpak-spawn` and its directory means
