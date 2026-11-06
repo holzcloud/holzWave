@@ -1,0 +1,65 @@
+/* Touch gestures on the phone and tablet layouts (docs/design.md section 6.6): the selection handles, the menu with Copy and Paste, and the label
+   of a pinch. Loaded with `loadStyles("./touch.css")` by touch.ts on the Android classes only, so a desktop never fetches it. Every colour is a
+   `--hw-*` token, every size is in rem (the UI scale moves it) except what makes up a 44 px touch target. Nothing here moves, so there is no
+   motion to reduce; the menu is the one floating layer, so it alone has the shadow. */
+
+/* ---- touch behaviour of the page ----------------------------------------------------------------------- */
+
+/* The terminal takes every touch itself (a drag scrolls, a pinch scales, a long press selects), so the browser does nothing with one there:
+   no scroll, no zoom, no text callout, no selection. The rest of the page keeps taps and scrolls but loses the double-tap zoom. */
+:root.layout-phone,
+:root.layout-tablet { touch-action: manipulation; }
+:root.layout-phone #term,
+:root.layout-tablet #term {
+  touch-action: none; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent;
+}
+:root.layout-phone #overlay,
+:root.layout-tablet #overlay { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+
+/* ---- handles and menu -------------------------------------------------------------------------------- */
+
+.touch-layer { position: absolute; inset: 0; pointer-events: none; }
+
+/* The handle is a 44 px target (touch.ts sets its box). Its drop is a small rose teardrop on a stem that reaches the text, so the end of the
+   selection is told by a line and a shape, not by colour alone; in higher contrast the stem is a pixel wider. */
+.touch-handle { --touch-stem: calc(var(--hw-focus-w) + 1px); position: absolute; box-sizing: border-box; pointer-events: auto; touch-action: none; }
+.touch-handle[hidden], .touch-menu[hidden] { display: none; }
+.touch-stem { position: absolute; top: 0; left: calc(50% - var(--touch-stem) / 2); width: var(--touch-stem); height: 18px; background: var(--hw-rose); }
+.touch-drop { position: absolute; top: 18px; left: calc(50% - 10px); width: 20px; height: 20px; background: var(--hw-rose); border-radius: 50%; }
+.touch-handle[data-role="start"] .touch-drop { border-top-right-radius: 0; }
+.touch-handle[data-role="end"] .touch-drop { border-top-left-radius: 0; }
+
+.touch-menu {
+  position: absolute; display: flex; pointer-events: auto; overflow: hidden; background: var(--hw-ground-2); color: var(--hw-ink);
+  border: 1px solid var(--hw-line); border-radius: 8px; box-shadow: 0 12px 40px rgb(0 0 0 / .5);
+}
+.touch-button {
+  -webkit-appearance: none; appearance: none; box-sizing: border-box; flex: none; margin: 0; padding: 0 1.25rem; border: 0; border-radius: 0;
+  min-width: max(44px, calc(44rem / 12)); min-height: max(44px, calc(44rem / 12)); background: none; color: var(--hw-ink); font: inherit;
+  font-size: calc(16rem / 12); cursor: pointer; touch-action: manipulation; -webkit-user-select: none; user-select: none;
+}
+.touch-button + .touch-button { border-left: 1px solid var(--hw-line); }
+.touch-button:active { background: var(--hw-rose-wash); }
+.touch-button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
+
+/* ---- the pinch label ------------------------------------------------------------------------------- */
+
+/* In the top strip it takes the place of the status chip; the words say the value, so it needs no colour. */
+.touch-scale {
+  box-sizing: border-box; display: inline-flex; align-items: center; flex: none; min-height: 1.833rem; padding: 0 .667rem; color: var(--hw-ink);
+  border: 1px solid var(--hw-line); border-radius: 999px; font-size: calc(14rem / 12); white-space: nowrap; pointer-events: none;
+}
+/* On the tablet there is no strip: it floats at the top of the stage, so it is a floating layer with the one shadow. */
+.touch-scale-float {
+  position: absolute; z-index: 5; top: .667rem; left: 50%; transform: translateX(-50%); padding: 0 1rem; min-height: 2.333rem;
+  background: var(--hw-ground-2); box-shadow: 0 12px 40px rgb(0 0 0 / .5);
+}
+
+/* ---- forced colours ----------------------------------------------------------------------------------- */
+
+/* The browser replaces backgrounds; the stem and the drop are backgrounds, so they keep their shape in a system colour. */
+@media (forced-colors: active) {
+  .touch-stem, .touch-drop { forced-color-adjust: none; background: Highlight; }
+  .touch-menu, .touch-scale { border-color: CanvasText; }
+  .touch-button + .touch-button { border-left-color: CanvasText; }
+}

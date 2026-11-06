@@ -14,6 +14,9 @@
 // without this file knowing them. The wheel always goes to the core as a `wheel` command for the pane under the
 // pointer: only the core sees the live modes and decides between reports, arrow keys and scrollback. Also owns
 // `edit.copy`.
+//
+// On the phone and tablet layouts a touch pointer is not a mouse: touch.ts takes every touch event first (a finger scrolls through
+// the same `wheel` command, a long press selects a word), and this file keeps handling the mouse and the pen as it always did.
 import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
 import type { PxRect } from "./frame.js";
@@ -22,6 +25,7 @@ import { gridPoint, modifierBits, wheelRows } from "./mouse.js";
 import { canvas as sceneCanvas } from "./scene.js";
 import { copyOnSelectAfter, copySelection } from "./selection.js";
 import { state } from "./state.js";
+import { initTouch } from "./touch.js";
 import type { UnitRect, View } from "./types.js";
 
 // ---- handler stack -------------------------------------------------------------------------------
@@ -317,6 +321,20 @@ export function initPointer(applyView: (v: View) => void): void {
     title: "Copy",
     run: () => {
       copySelection();
+    },
+  });
+
+  // The touch layouts: what touch.ts needs of this file, handed over so the two files do not import each other.
+  const unitOf = (pane: number): UnitRect | null => state.view?.panes.find(([id]) => id === pane)?.[1] ?? null;
+  initTouch({
+    push: pushPointerHandler,
+    applyView,
+    select,
+    tracking,
+    sendMouse,
+    devicePoint: (e, pane) => {
+      const unit = unitOf(pane);
+      return unit ? devicePoint(e, canvas, pane, unit) : null;
     },
   });
 

@@ -29,6 +29,11 @@ export interface SettingsApi {
   editBindings(): void;
   /** The person asked for the AI providers dialog: called as the dialog closes, which then opens that dialog. */
   editAi(): void;
+  /**
+   * The person committed a UI scale in the preferences: the pinch value of this device (if there is one) goes, so the value they
+   * chose applies here. Called before the request, also when the number equals the shared one.
+   */
+  forgetDeviceScale?(): void;
 }
 
 /** One control: the setting it shows, how to read what was entered and how to show the setting's value. */
@@ -109,6 +114,7 @@ async function show(api: SettingsApi): Promise<void> {
         render();
         return;
       }
+      if (c.key === "ui_scale") api.forgetDeviceScale?.();
       if (typed === current || typed === c.pending) {
         render();
         return;

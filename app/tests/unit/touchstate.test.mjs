@@ -192,6 +192,9 @@ test("the menu sits 8 px above the selection, below when there is no room, and i
   assert.equal(menuPlacement({ x: 380, y: 200, w: 10, h: 20 }, stage, menu).x, 390 - 120, "inside on the right");
   assert.equal(menuPlacement(sel, { ...stage, y: 100 }, menu).y, 200 - 8 - 44, "room above is measured from the stage's top");
   assert.equal(menuPlacement({ x: 100, y: 140, w: 60, h: 20 }, { ...stage, y: 100 }, menu).y, 140 + 20 + 8);
+  assert.deepEqual(menuPlacement({ x: 0, y: 0, w: 390, h: 700 }, stage, menu), { x: 135, y: 8 }, "a selection that fills the stage: inside, at the top");
+  assert.equal(menuPlacement({ x: 0, y: 0, w: 390, h: 690 }, { ...stage, h: 700 }, menu).y, 8, "no room below the handles either");
+  assert.equal(menuPlacement({ x: 0, y: 0, w: 10, h: 10 }, { x: 0, y: 0, w: 100, h: 30 }, menu).y, 0, "a stage lower than the menu: at its top edge");
 });
 
 test("the words and the label are the design record's", () => {

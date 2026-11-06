@@ -204,13 +204,17 @@ export function handleTarget(finger: { x: number; y: number }, grab: { dx: numbe
 }
 
 /**
- * Where the menu goes: centred over the selection, `MENU_GAP_PX` above it, below it when the stage has no room above, and
- * always inside the stage horizontally. `selection` is the box of the selected rows (give it the handles' height when the
- * menu may land below them).
+ * Where the menu goes: centred over the selection, `MENU_GAP_PX` above it, below it when the stage has no room above, and always inside
+ * the stage. `selection` is the box of the selected rows (give it the handles' height when the menu may land below them). A selection
+ * that fills the stage leaves no room on either side: the menu then sits at the top of the stage, over the text.
  */
 export function menuPlacement(selection: Box, stage: Box, menu: { w: number; h: number }): { x: number; y: number } {
   const above = selection.y - MENU_GAP_PX - menu.h;
-  const y = above >= stage.y ? above : selection.y + selection.h + MENU_GAP_PX;
+  const below = selection.y + selection.h + MENU_GAP_PX;
+  let y: number;
+  if (above >= stage.y) y = above;
+  else if (below + menu.h <= stage.y + stage.h) y = below;
+  else y = within(stage.y + MENU_GAP_PX, stage.y, stage.y + stage.h - menu.h);
   const centred = selection.x + selection.w / 2 - menu.w / 2;
   const x = within(centred, stage.x, stage.x + stage.w - menu.w);
   return { x, y };

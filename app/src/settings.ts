@@ -3,6 +3,7 @@
 // (D-06): the page sends `set_setting` and then shows what the core answered, never what it asked for. The pure
 // rules (colour validation, reading the view) are in settings-model.ts, which node can import.
 import { effectiveUiScale, osTextScaleOf, refresh as refreshPreferences, watch as watchPreferences } from "./a11y.js";
+import { effectiveScale, getDeviceScale, setDeviceScale, terminalFontPx } from "./devicescale.js";
 import { registerAction, replaceAction, unregisterAction } from "./actions.js";
 import { call, listen } from "./bridge.js";
 import { CURSOR_COLOR, FONT_PX, setFontPx } from "./frame.js";
@@ -66,7 +67,7 @@ export function applyTheme(view: SettingsView): void {
 
 // ---- font size and UI scale ----------------------------------------------------------------------
 
-/** The look the metrics were last taken for. */
+/** The look the metrics were last taken for: what the settings say. The scale a touch layout actually uses is `scaleInForce`. */
 let look: Look = { fontPx: FONT_PX, uiScale: 100 };
 
 /** The text size the OS asks for, in percent (100: none). Only the root font size reads it, never the grid. */
@@ -75,13 +76,51 @@ let osPercent = 100;
 /** The effective UI scale the root font size was last set for. */
 let rootScale = 100;
 
+/** The terminal font size the renderer was last told: the setting, or on a touch layout the setting times the scale. */
+let terminalPx = FONT_PX;
+
+// ---- the scale of this device ---------------------------------------------------------------------
+
+/** The page's own storage; a web view that refuses it (a security error on access) has none. */
+function deviceStorage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the page is in a phone or a tablet layout (the root classes phone.ts sets before anything measures). The scale of this
+ * device and the terminal's follow of the UI scale exist there and nowhere else.
+ */
+function onTouchLayout(): boolean {
+  const classes = document.documentElement.classList;
+  return classes.contains("layout-phone") || classes.contains("layout-tablet");
+}
+
+/** The pinch value of this device, or null. */
+export const currentDeviceScale = (): number | null => getDeviceScale(deviceStorage());
+
+/** Keep (a multiple of 5 from 75 to 200) or forget (null) the pinch value of this device. It is never sent to the core. */
+export function storeDeviceScale(percent: number | null): void {
+  setDeviceScale(percent, deviceStorage());
+}
+
+/** The UI scale in force before the OS text size: this device's on a touch layout when there is one, else the shared one. */
+export function scaleInForce(): number {
+  const touch = onTouchLayout();
+  // The storage is read on a touch layout only: a desktop never looks at it.
+  return effectiveScale({ shared: look.uiScale, device: touch ? currentDeviceScale() : null, touch });
+}
+
 /**
  * Set the root font size for the user's UI scale times the OS text size (12 px at 100 %): every chrome size is in
  * rem and the pane header is derived from it, so one change moves chrome, headers and grid together. Returns whether
  * the root font size changed.
  */
 function applyRootScale(): boolean {
-  const next = effectiveUiScale(look.uiScale, osPercent);
+  const next = effectiveUiScale(scaleInForce(), osPercent);
   if (next === rootScale) return false;
   rootScale = next;
   const root = document.documentElement;
@@ -90,15 +129,33 @@ function applyRootScale(): boolean {
   return true;
 }
 
+/** Tell the renderer the terminal font size for the setting and, on a touch layout, the scale. Returns whether it changed. */
+function applyTerminalFont(): boolean {
+  const touch = onTouchLayout();
+  const next = terminalFontPx({ fontPx: look.fontPx, scale: scaleInForce(), touch });
+  if (next === terminalPx) return false;
+  terminalPx = next;
+  setFontPx(next);
+  return true;
+}
+
 /**
  * Follow the font size and the UI scale of the view. A value that is not in the core's range keeps the previous one.
  * A change after start-up asks the scene to measure again, which sends `resize` to every visible pane.
  */
 function applyLook(view: SettingsView): void {
-  const next = lookOf(view.settings, look);
-  const fontChanged = next.fontPx !== look.fontPx;
-  look = next;
-  if (fontChanged) setFontPx(next.fontPx);
+  look = lookOf(view.settings, look);
+  const fontChanged = applyTerminalFont();
+  const scaleChanged = applyRootScale();
+  if ((fontChanged || scaleChanged) && live) host?.refit();
+}
+
+/**
+ * The scale of this device changed (a pinch, a preference that removed it) or the layout class did: make the root font size and
+ * the terminal font size the ones now in force and measure again. On a desktop nothing changes and nothing is measured.
+ */
+export function refreshScale(): void {
+  const fontChanged = applyTerminalFont();
   const scaleChanged = applyRootScale();
   if ((fontChanged || scaleChanged) && live) host?.refit();
 }
@@ -244,6 +301,10 @@ function openDialog(): void {
     editAi: () => {
       next = "ai";
     },
+    forgetDeviceScale: () => {
+      storeDeviceScale(null);
+      refreshScale();
+    },
   }).then(() => {
     if (next === "bindings") openBindings();
     else if (next === "ai") openAiProviders();
@@ -289,6 +350,9 @@ export async function initSettings(h: SettingsHost): Promise<void> {
   } catch {
     // A core that cannot answer leaves the built-in look and the default sizes; the page still works.
   }
+  refreshScale(); // a device scale that is stored applies even when the core could not answer (no refit before `live`)
   live = true;
   window.addEventListener("focus", reloadOnFocus);
+  // A turn between the layouts changes whether the device scale and the terminal's follow of it exist.
+  document.addEventListener("hw:layout", refreshScale);
 }
