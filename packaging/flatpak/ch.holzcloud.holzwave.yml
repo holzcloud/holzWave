@@ -1,11 +1,12 @@
-# Flatpak manifest of holzWave: a reference for the owner to read, and a local build recipe (scripts/build-flatpak.sh).
+# Flatpak manifest of holzWave: a reference for the owner to read, and a build recipe that works offline (scripts/build-flatpak.sh).
 #
 #   - It is not a submission. The owner writes and submits the Flathub manifest by hand; Flathub does not accept a manifest or a
 #     pull request written by an AI agent. holzWave is built with AI help and says so, and no agent opens, prepares or automates a
 #     submission to Flathub or touches a repository of Flathub. This file only shows what the build needs.
 #   - Unverified until the owner's run: it was built once in a container on arm64 (the architecture of the Docker VM of a Mac)
 #     and never started on any desktop. x86_64 is built only by Flathub and is untried here. Flatpak ships in 0.0.1 only if it
-#     builds on the owner's Linux machine and row L10 of docs/test-plan.md passes. See docs/flatpak.md.
+#     builds on the owner's Linux machine and the Flatpak rows of docs/test-plan.md (L10 and FPK1 to FPK7) pass. See docs/flatpak.md
+#     for the permissions and docs/flathub-submission.md for the steps that are the owner's.
 #
 # No build step has network access. Every source is declared and pinned by content: the Zig compiler (two archives, a sha256
 # each), the Ghostty checkout (a git source at one commit), the Zig packages of the terminal engine (generated/zig-sources.json),
@@ -29,23 +30,39 @@ finish-args:
   - --socket=wayland
   - --socket=fallback-x11
   - --share=ipc
-  # The network, for the app itself; the shells of the panes run on the host and have the host's network anyway. The SSH
-  # connections you start, the sync you set up and the AI chat (when you send a message to a provider you set up) need
-  # it, and a model server on this computer is reached through it. Nothing connects at launch on a fresh install.
-  # Flatpak has no narrower network permission (no rule per host or per port), so the sandbox does not limit what is
+  # The network, for the app itself: a pane that runs in the sandbox has it too, and a pane that runs on the host has the host's
+  # network anyway. The SSH connections you start, the sync you set up and the AI chat (when you send a message to a provider
+  # you set up) need it, and a model server on this computer is reached through it. Nothing connects at launch on a fresh
+  # install. Flatpak has no narrower network permission (no rule per host or per port), so the sandbox does not limit what is
   # contacted: the app's own rules do (saved addresses only, Local only, consent per pane). docs/flatpak.md lists when
   # holzWave connects and how to take this away again: flatpak override --user --unshare=network ch.holzcloud.holzwave
   - --share=network
   - --device=dri
-  # The home folder is open, so that `~`, the directories of panes and "reveal in the file manager" resolve to the real
-  # ones. The sandbox is already open through the next permission, so this costs nothing more.
+  # The home folder is open, so that `~`, the directories of panes and "reveal in the file manager" resolve to the real ones,
+  # also in a pane that runs in the sandbox. The host permission below already lets the app do anything this one allows, so
+  # this costs nothing more.
   - --filesystem=home
   # SANDBOX ESCAPE BY DESIGN. This permission lets the app run any command on the host with the user's rights
-  # (`flatpak-spawn --host`). A terminal in a sandbox sees only the runtime's /bin/sh and none of the user's tools,
-  # so it cannot be useful without it. The only host command holzWave starts is the user's login shell (or the
-  # program of the `shell` setting). The metainfo description and docs/flatpak.md say so too. If this is not
-  # acceptable, Flatpak is not for this app: it is then moved out of 0.0.1 (docs/flatpak.md).
+  # (`flatpak-spawn --host`). A terminal in a sandbox sees only the runtime's /bin/sh and none of the user's tools, so it
+  # cannot be very useful without it. It is shipped, but panes start in the sandbox by default: the app setting `Host shell`
+  # (off by default, never synced to another computer, shown only in a Flatpak) is the person's choice to start panes on the
+  # host instead. The only host command holzWave then starts is the user's login shell (or the program of the `shell`
+  # setting). The setting cannot grant this permission, only use it; if a Flatpak tool revokes it the setting reads `not
+  # available`. While the permission is present the sandbox does not protect the rest of the system from this app, whatever
+  # the setting says. The integrations (Kubernetes, Talos, Azure CLI, GAM7) do not run in a Flatpak at all. The metainfo
+  # description and docs/flatpak.md say so too. If reviewers do not accept this permission, docs/flathub-submission.md lists
+  # the fallbacks.
   - --talk-name=org.freedesktop.Flatpak
+  # The SSH agent. The in-process SSH client finds the agent of the user through SSH_AUTH_SOCK, as `ssh` does; with this socket
+  # a Flatpak gets the host's agent forwarded into the sandbox and sets that variable. Without it a connection that signs in
+  # with an agent key fails with "no ssh-agent is running". It costs no extra sandbox: the host permission above already
+  # removes it, which is why a reviewer will ask about that one first.
+  - --socket=ssh-auth
+  # The keychain. The passwords, passphrases and provider keys of SSH, sync and the AI chat are kept in the system keychain,
+  # which on Linux is the Secret Service (org.freedesktop.secrets) on the session bus. holzWave talks to it directly, and that
+  # name is not covered by the Secret portal, so the sandbox must be allowed to talk to it. Without it saving a secret
+  # fails, and the app does not fall back to a file. It costs no extra sandbox: the host permission above already removes it.
+  - --talk-name=org.freedesktop.secrets
 
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node26/bin

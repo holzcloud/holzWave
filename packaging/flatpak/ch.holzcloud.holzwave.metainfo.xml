@@ -1,19 +1,42 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream file of holzWave: a reference for the owner to read, with a description that says what is true. It is not a
+  submission. The owner writes the file that goes to Flathub by hand (docs/flathub-submission.md). Everything here that a
+  store needs and only the owner can supply is left out on purpose: the screenshots (see the block below), and a release
+  that does not exist yet.
+
+  An XML comment cannot hold two hyphens in a row, so the permissions and tokens named in the comments are written in plain
+  words or without their leading hyphens.
+-->
 <component type="desktop-application">
   <id>ch.holzcloud.holzwave</id>
   <name>holzWave</name>
   <summary>A terminal emulator</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-only</project_license>
+  <!-- The developer is holzcloud.ch in every channel. The id is the reverse domain of the domain that Flathub verifies. -->
   <developer id="ch.holzcloud">
-    <name>holzcloud</name>
+    <name>holzcloud.ch</name>
   </developer>
   <url type="homepage">https://holzcloud.ch/holzwave</url>
+  <url type="bugtracker">https://github.com/holzcloud/holzWave/issues</url>
+  <url type="vcs-browser">https://github.com/holzcloud/holzWave</url>
+  <!--
+    Branding: the colour behind the icon in a store listing, a light and a dark variant. These are listing colours, not a UI
+    colour. Both are tokens of docs/design.md section 2: the light one is hw-rose (#FF8FB8), the dark one is hw-rose-deep
+    (#C23B72), the darker of the two rose tokens, as the store guidelines ask of the dark variant. How they look next to the
+    icon was not checked on the store's banner preview.
+  -->
+  <branding>
+    <color type="primary" scheme_preference="light">#FF8FB8</color>
+    <color type="primary" scheme_preference="dark">#C23B72</color>
+  </branding>
   <description>
-    <p>holzWave is a terminal emulator written from scratch in Rust, with tiled panes and a layout that is restored on the next start.</p>
-    <p>A terminal is only useful when it runs the programs of the user's own system. In this Flatpak the shell therefore runs on the host, outside the sandbox: holzWave asks for permission to run commands on the host (flatpak-spawn --host, the permission org.freedesktop.Flatpak) and the only command it starts that way is your login shell. This removes the sandbox for this application. It also has access to your home folder.</p>
-    <p>holzWave also asks for the network (--share=network). It uses it for the SSH connections you start, for the sync you set up and, for the AI chat, for the messages you send to a provider you set up. It connects to nothing when it starts on a fresh install, and it has no telemetry, no account and no update check. The shells you open run on the host and use the host's network.</p>
-    <p>This is a local build, not a Flathub package.</p>
+    <p>Beta. holzWave is a terminal emulator written from scratch in Rust, with tiled panes and a layout that is restored on the next start. This is an early preview: this Flatpak was built in a container and has never been started on a Linux desktop, so how it behaves on GNOME, KDE Plasma and the other desktops is not known.</p>
+    <p>Panes start in the sandbox by default. A terminal in a sandbox sees only the runtime's tools and none of yours, so this Flatpak also ships the permission to run commands on the host (flatpak-spawn --host, the permission org.freedesktop.Flatpak). Using it is your choice: you can switch it on in Settings, in the group Host shell. It is off by default and is never synced to another computer. With it on, new panes start your login shell on the host, outside the sandbox and with your rights. Because the permission is shipped, the sandbox does not protect the rest of your system from this application, whatever the setting says. If you remove the permission with a Flatpak tool, the setting reads not available and panes stay in the sandbox.</p>
+    <p>It also asks for your home folder; for the SSH agent socket (--socket=ssh-auth), because the built-in SSH client signs in with the keys in your agent; and for the Secret Service on the session bus (--talk-name=org.freedesktop.secrets), because the passwords, passphrases and provider keys it keeps live in the system keychain and never in a file. Neither costs more sandbox than the permission to run commands on the host already does.</p>
+    <p>holzWave also asks for the network (--share=network). It uses it for the SSH connections you start, for the sync you set up and, for the AI chat, for the messages you send to a provider you set up. It connects to nothing when it starts on a fresh install, and it has no telemetry, no account and no update check. A pane in the sandbox uses the network of the app, a pane on the host uses the host's network.</p>
+    <p>The integrations (the Kubernetes, Talos, Azure CLI and GAM7 blocks) are not available in a Flatpak. The directory of a pane on the host is tracked only when the shell announces it. Whether a host shell has job control and sudo, whether the SSH agent and the keychain work through the sandbox, and how the window looks on each desktop have not been tested.</p>
   </description>
   <launchable type="desktop-id">ch.holzcloud.holzwave.desktop</launchable>
   <provides>
@@ -24,9 +47,28 @@
     <category>TerminalEmulator</category>
   </categories>
   <content_rating type="oars-1.1"/>
+  <!--
+    Screenshots: none are listed, because none exist of this Flatpak. The owner adds real screenshots of the running Flatpak
+    at the release tag that the submission points at: a screenshots element with one default screenshot and an image address
+    that resolves at that tag, each with a caption that says what it shows. Do not use the pictures of docs/design: they are
+    renders of the design page, not of the running app. No address is written here because none can be checked yet.
+  -->
+  <!-- Every release so far is a pre-release, so each one is marked as a development release. -->
   <releases>
-    <release version="0.0.1-beta2" date="2026-11-01"/>
-    <release version="0.0.1-beta1" date="2026-10-19"/>
-    <release version="0.0.1-alpha3" date="2026-10-15"/>
+    <release version="0.0.1-beta2" date="2026-11-01" type="development">
+      <description>
+        <p>Preview release. The terminal engine moved to Ghostty 1.4 and keeps all the scrollback lines it is given. The Linux packages were built on a runner and have not been started on a desktop.</p>
+      </description>
+    </release>
+    <release version="0.0.1-beta1" date="2026-10-19" type="development">
+      <description>
+        <p>Preview release, from before this Flatpak existed. What it contained is on the releases page of the project on GitHub.</p>
+      </description>
+    </release>
+    <release version="0.0.1-alpha3" date="2026-10-15" type="development">
+      <description>
+        <p>Early preview release, from before this Flatpak existed. What it contained is on the releases page of the project on GitHub.</p>
+      </description>
+    </release>
   </releases>
 </component>

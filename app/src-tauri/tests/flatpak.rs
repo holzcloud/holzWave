@@ -25,6 +25,8 @@ const GENERATOR_PIN: &str = include_str!("../../../packaging/flatpak/generated/g
 
 const HOST_PERMISSION: &str = "--talk-name=org.freedesktop.Flatpak";
 const NETWORK_PERMISSION: &str = "--share=network";
+const SSH_PERMISSION: &str = "--socket=ssh-auth";
+const SECRETS_PERMISSION: &str = "--talk-name=org.freedesktop.secrets";
 
 fn identifier() -> String {
     let conf: Value = serde_json::from_str(TAURI_CONF).expect("tauri.conf.json is JSON");
@@ -82,6 +84,38 @@ fn a_section(page: &str, heading: &str) -> String {
     lines.take_while(|line| !line.starts_with("## ")).collect::<Vec<_>>().join("\n")
 }
 
+/// The comment block directly above the manifest item `- arg`, squashed.
+fn comment_above_item(arg: &str) -> String {
+    let at = MANIFEST.lines().position(|l| l.trim() == format!("- {arg}")).unwrap_or_else(|| panic!("{arg} is not a finish argument"));
+    comment_above(at)
+}
+
+/// The AppStream file without its XML comments (what a validator and a store read; the comments are for the owner).
+fn metainfo_elements() -> String {
+    let mut out = String::new();
+    let mut rest = METAINFO;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        let end = rest[start..].find("-->").expect("an XML comment is closed");
+        rest = &rest[start + end + 3..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The XML comments of the AppStream file, squashed into one string.
+fn metainfo_comments() -> String {
+    let mut out = String::new();
+    let mut rest = METAINFO;
+    while let Some(start) = rest.find("<!--") {
+        let end = rest[start..].find("-->").expect("an XML comment is closed");
+        out.push(' ');
+        out.push_str(&rest[start + 4..start + end]);
+        rest = &rest[start + end + 3..];
+    }
+    squashed(&out)
+}
+
 /// The text of the `<description>` element of the AppStream file.
 fn description() -> &'static str {
     METAINFO.split("<description>").nth(1).and_then(|d| d.split("</description>").next()).expect("a description")
@@ -137,6 +171,9 @@ fn the_manifest_asks_for_the_host_command_permission_and_says_what_it_costs() {
 
 #[test]
 fn the_permissions_are_exactly_the_documented_ones_and_the_network_is_one_of_them() {
+    // Nine permissions. The last two are the SSH agent socket (the in-process SSH client reads it) and the Secret Service on the
+    // session bus (the keychain of the Linux build speaks it); each is disclosed next to its line, in the AppStream text and in
+    // the table of docs/flatpak.md (`every_finish_argument_is_in_the_page_table`).
     assert_eq!(
         manifest_list("finish-args"),
         [
@@ -146,9 +183,11 @@ fn the_permissions_are_exactly_the_documented_ones_and_the_network_is_one_of_the
             NETWORK_PERMISSION,
             "--device=dri",
             "--filesystem=home",
-            HOST_PERMISSION
+            HOST_PERMISSION,
+            SSH_PERMISSION,
+            SECRETS_PERMISSION
         ],
-        "a permission was added or removed: that is a decision; update docs/flatpak.md and the AppStream text with it"
+        "a permission was added or removed: that is a decision; the Flatpak page (docs/flatpak.md) and the AppStream text must change with it"
     );
     // The network is named once as an item, as a finish argument of the running app. It was named a second time as a build
     // argument while the build fetched its sources; since every source is declared and hashed (see
@@ -752,5 +791,130 @@ fn the_build_script_has_its_modes_and_never_publishes() {
     // No publishing, signing, tagging or pushing of any kind.
     for forbidden in ["git push", "git tag", "gh release", "--gpg-sign", "--repo=", "build-bundle", "build-export", "flatpak-builder --export"] {
         assert!(!SCRIPT.contains(forbidden), "the script contains {forbidden}");
+    }
+}
+
+#[test]
+fn the_two_added_permissions_say_why_and_what_they_cost_and_the_host_permission_names_the_setting() {
+    // The SSH agent socket: the in-process client reads the agent from SSH_AUTH_SOCK.
+    let ssh = comment_above_item(SSH_PERMISSION);
+    for word in ["ssh_auth_sock", "agent", "in-process", "cost", "host permission"] {
+        assert!(ssh.contains(word), "the comment above {SSH_PERMISSION} does not say {word:?}: {ssh}");
+    }
+    // The Secret Service: the keychain of the Linux build speaks it on the session bus, and the Secret portal does not cover it.
+    let secrets = comment_above_item(SECRETS_PERMISSION);
+    for word in ["secret service", "session bus", "keychain", "secret portal", "cost", "host permission"] {
+        assert!(secrets.contains(word), "the comment above {SECRETS_PERMISSION} does not say {word:?}: {secrets}");
+    }
+    // The host permission is still a sandbox escape by design, and now says that a setting decides whether panes use it.
+    let host = comment_above_item(HOST_PERMISSION);
+    for word in [
+        "sandbox escape by design",
+        "host",
+        "panes start in the sandbox by default",
+        "host shell",
+        "off by default",
+        "never synced",
+        "only in a flatpak",
+        "integrations",
+    ] {
+        assert!(host.contains(word), "the comment above {HOST_PERMISSION} does not say {word:?}: {host}");
+    }
+    // The old statements that every pane runs on the host are gone from the manifest.
+    let manifest = squashed(MANIFEST);
+    for stale in ["the shells of the panes run on the host", "the shell is not started in the sandbox", "moved out of 0.0.1 (docs/flatpak.md)"] {
+        assert!(!manifest.contains(stale), "the manifest still says {stale:?}");
+    }
+}
+
+#[test]
+fn the_description_says_what_is_true_now_and_none_of_the_old_sentences() {
+    let text = squashed(description());
+    for (what, phrase) in [
+        ("it starts with the word beta", "beta"),
+        ("panes start in the sandbox by default", "panes start in the sandbox by default"),
+        ("the permission to run commands on the host is shipped", "permission to run commands on the host"),
+        ("the permission is named", "org.freedesktop.flatpak"),
+        ("the person switches it on in settings", "switch it on in settings"),
+        ("the setting is off by default", "off by default"),
+        ("it is never synced", "never synced"),
+        ("a removed permission reads not available", "not available"),
+        ("the ssh agent is asked for", "--socket=ssh-auth"),
+        ("and why", "the keys in your agent"),
+        ("the secret service is asked for", "--talk-name=org.freedesktop.secrets"),
+        ("and why", "system keychain"),
+        ("the network is asked for", "--share=network"),
+        ("the integrations are not available", "integrations"),
+        ("what is untested", "have not been tested"),
+        ("it was never started on a desktop", "never been started on a linux desktop"),
+    ] {
+        assert!(text.contains(phrase), "the AppStream description does not say ({what}) {phrase:?}: {text}");
+    }
+    // `Beta` is the first word of the first paragraph.
+    let first = description().split("<p>").nth(1).expect("a first paragraph").trim_start();
+    assert!(first.starts_with("Beta"), "the first paragraph does not start with Beta: {first}");
+    // The sentences that are no longer true.
+    for stale in [
+        "the shell therefore runs on the host",
+        "local build, not a flathub package",
+        "this is a local build",
+        "the shells you open run on the host and use the host's network",
+    ] {
+        assert!(!text.contains(stale), "the AppStream description still says {stale:?}");
+    }
+}
+
+#[test]
+fn the_metainfo_names_the_developer_the_links_the_brand_colours_and_the_releases() {
+    let xml = metainfo_elements();
+    // The developer is the same string in every channel; its id is the reverse domain of the verified domain.
+    assert!(xml.contains("<developer id=\"ch.holzcloud\">"), "the developer id");
+    assert!(xml.contains("<name>holzcloud.ch</name>"), "the developer name is holzcloud.ch");
+    assert_eq!(xml.matches("<developer ").count(), 1, "one developer element");
+    assert!(xml.contains("<url type=\"homepage\">https://holzcloud.ch/holzwave</url>"), "homepage");
+    assert!(xml.contains("<url type=\"bugtracker\">https://github.com/holzcloud/holzWave/issues</url>"), "bug tracker");
+    assert!(xml.contains("<url type=\"vcs-browser\">https://github.com/holzcloud/holzWave</url>"), "source");
+    // Branding: a light and a dark primary colour, each a token of the design spec (a comment names them).
+    let rose = "#FF8FB8";
+    let rose_deep = "#C23B72";
+    assert!(xml.contains(&format!("<color type=\"primary\" scheme_preference=\"light\">{rose}</color>")), "light brand colour");
+    assert!(xml.contains(&format!("<color type=\"primary\" scheme_preference=\"dark\">{rose_deep}</color>")), "dark brand colour");
+    let design = include_str!("../../../docs/design.md");
+    assert!(design.contains(&format!("`{rose}`")) && design.contains(&format!("`{rose_deep}`")), "the colours are tokens of docs/design.md");
+    let comments = metainfo_comments();
+    // An XML comment cannot hold two hyphens, so the comment writes the token names without their leading pair.
+    for word in ["hw-rose", "hw-rose-deep", "listing", "not a ui colour"] {
+        assert!(comments.contains(word), "no comment says {word:?} about the brand colours: {comments}");
+    }
+    assert!(xml.contains("<content_rating type=\"oars-1.1\"/>"), "OARS");
+    // Releases: every one has a date and notes; a beta is a development release; none is invented.
+    let releases = xml.split("<releases>").nth(1).and_then(|r| r.split("</releases>").next()).expect("releases");
+    assert_eq!(releases.matches("<release ").count(), 3, "the three releases that exist: {releases}");
+    for version in ["0.0.1-beta2", "0.0.1-beta1", "0.0.1-alpha3"] {
+        let entry = releases.split(&format!("<release version=\"{version}\"")).nth(1).unwrap_or_else(|| panic!("release {version}"));
+        let tag = entry.split('>').next().expect("a tag");
+        assert!(tag.contains("date=\"2026-"), "{version} has a date: {tag}");
+        assert!(tag.contains("type=\"development\""), "{version} is a pre-release: {tag}");
+        assert!(entry.contains("<description>"), "{version} has release notes");
+    }
+}
+
+#[test]
+fn the_metainfo_has_no_screenshot_and_no_invented_address_and_says_the_owner_adds_real_ones() {
+    let xml = metainfo_elements();
+    assert!(!xml.contains("<screenshot"), "an element for a screenshot: none exists, the owner takes them");
+    assert!(!xml.contains(".png") && !xml.contains(".jpg") && !xml.contains(".webp"), "an image address");
+    let comments = metainfo_comments();
+    for word in ["screenshots", "real", "running flatpak", "release tag", "owner"] {
+        assert!(comments.contains(word), "the comment block for the screenshots does not say {word:?}: {comments}");
+    }
+    // Every address in the elements is one that the project owns or that exists in the repository's other pages.
+    let allowed = [
+        "https://holzcloud.ch/holzwave",
+        "https://github.com/holzcloud/holzWave/issues",
+        "https://github.com/holzcloud/holzWave",
+    ];
+    for url in urls_in(&xml) {
+        assert!(allowed.contains(&url.as_str()), "an address that nothing in the project backs: {url}");
     }
 }
