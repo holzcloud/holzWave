@@ -6,6 +6,8 @@
 #   sh scripts/test-release-signing.sh                the stand-in checks, then the real round trip on the host when
 #                                                     `minisign` is installed, else in the container
 #
+# Both architectures are covered: the default (x86_64) set, the `--arch aarch64` set, and a folder that holds both.
+#
 # Exit status: 0 everything ran and held, 1 a check failed, 3 the stand-in checks held and the real round trip could not
 # run (no minisign and no Docker, or the container could not install it): that is the word for `untested`.
 #
@@ -72,6 +74,11 @@ RPM="holzWave_${VERSION}_x86_64.rpm"
 APPIMAGE="holzWave_${VERSION}_x86_64.AppImage"
 # The order the script signs and lists them in: by name in the C locale (capital letters first).
 NAMES="$DEB $APPIMAGE $RPM"
+# The aarch64 set, in the order of the C locale as well ("aarch64" before "arm64", capital A before lower-case r).
+ARM_DEB="holzWave_${VERSION}_arm64.deb"
+ARM_RPM="holzWave_${VERSION}_aarch64.rpm"
+ARM_APPIMAGE="holzWave_${VERSION}_aarch64.AppImage"
+ARM_NAMES="$ARM_APPIMAGE $ARM_RPM $ARM_DEB"
 
 random_hex() { od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'; }
 
@@ -210,6 +217,30 @@ run_sign() { # <fixture> <args...>
   ) >"$f/log/out.log" 2>"$f/log/err.log"
 }
 
+add_arm_packages() { # <fixture>: the three aarch64 packages beside whatever is in pkgs
+  for n in $ARM_NAMES; do head -c 2048 /dev/urandom >"$1/pkgs/$n"; done
+}
+only_arm_packages() { # <fixture>: pkgs holds the aarch64 packages and nothing else
+  for n in $NAMES; do rm -f "$1/pkgs/$n"; done
+  add_arm_packages "$1"
+}
+snap() { # <dir> <names...>: name and sha256 of each file, to compare before and after
+  d=$1
+  shift
+  (cd "$d" && for n in "$@"; do printf '%s %s\n' "$n" "$(sha256_of "$n")"; done)
+}
+# Every file one signed set leaves in the folder (packages, their signatures, the list and its signature).
+set_files() { # <x86_64|aarch64>
+  if [ "$1" = aarch64 ]; then
+    for n in $ARM_NAMES; do printf '%s %s ' "$n" "$n.minisig"; done
+    printf '%s %s' SHA256SUMS-aarch64 SHA256SUMS-aarch64.minisig
+  else
+    for n in $NAMES; do printf '%s %s ' "$n" "$n.minisig"; done
+    printf '%s %s' SHA256SUMS SHA256SUMS.minisig
+  fi
+}
+count_files() { ls "$1" | wc -l | tr -d ' '; }
+
 # ---- the success path: three packages signed, the password on standard input only -------------------------------------------
 
 stand_in_checks() {
@@ -275,6 +306,142 @@ stand_in_checks() {
   check "the last line says that the script did not run it" test "$r" -eq 1
 }
 
+
+# ---- the aarch64 set: signed beside the x86_64 set, without touching it --------------------------------------------------------
+
+arm_sign_checks() {
+  echo "release-signing: the aarch64 set"
+
+  fixture a-only
+  only_arm_packages "$F"
+  before=$(snap "$F/pkgs" $ARM_NAMES)
+  : >"$F/pkgs/$ARM_DEB.sha256" # what release-linux-arm64.sh also leaves there
+  echo "not a package" >"$F/pkgs/README"
+  rc=0
+  run_sign "$F" "$VERSION" --arch aarch64 --dir "$F/pkgs" --pubkey "$F/pub" || rc=$?
+  check "--arch aarch64: signing the three aarch64 packages exits 0 (no x86_64 file is needed)" test "$rc" -eq 0
+  [ "$rc" -eq 0 ] || { cat "$F/log/err.log" >&2; return; }
+  for n in $ARM_NAMES; do
+    check "--arch aarch64: $n has a detached signature" test -s "$F/pkgs/$n.minisig"
+  done
+  check "--arch aarch64: SHA256SUMS-aarch64 is signed" test -s "$F/pkgs/SHA256SUMS-aarch64.minisig"
+  check "--arch aarch64: no SHA256SUMS (the x86_64 list) is written" test ! -e "$F/pkgs/SHA256SUMS" -a ! -e "$F/pkgs/SHA256SUMS.minisig"
+  expected=$(cd "$F/pkgs" && for n in $ARM_NAMES; do printf '%s  %s\n' "$(sha256_of "$n")" "$n"; done)
+  check "--arch aarch64: SHA256SUMS-aarch64 has the three lines <64 hex>  <name>, matching shasum" test "$(cat "$F/pkgs/SHA256SUMS-aarch64")" = "$expected"
+  sorted=$(printf '%s\n' $ARM_NAMES | LC_ALL=C sort | tr '\n' ' ')
+  check "--arch aarch64: the list is sorted by name in the C locale" test "$(cut -d' ' -f3 "$F/pkgs/SHA256SUMS-aarch64" | tr '\n' ' ')" = "$sorted"
+  check "--arch aarch64: the directory holds 3 packages, 3 signatures, the list and its signature, and the two files it had" test "$(count_files "$F/pkgs")" -eq 10
+  check "--arch aarch64: the .sha256 and README are neither signed nor listed" test ! -e "$F/pkgs/README.minisig" -a ! -e "$F/pkgs/$ARM_DEB.sha256.minisig" -a "$(wc -l <"$F/pkgs/SHA256SUMS-aarch64" | tr -d ' ')" -eq 3
+  check "--arch aarch64: signing did not change a package" test "$before" = "$(snap "$F/pkgs" $ARM_NAMES)"
+  sign_lines=$(grep '^minisign -S ' "$F/log/args.log")
+  check "--arch aarch64: four signing calls, the list last" test "$(printf '%s\n' "$sign_lines" | wc -l | tr -d ' ')" -eq 4 -a "$(printf '%s\n' "$sign_lines" | tail -n 1 | sed 's/.* -m \([^ ]*\) .*/\1/')" = "$F/pkgs/SHA256SUMS-aarch64"
+  bad_form=0
+  for n in $ARM_NAMES SHA256SUMS-aarch64; do
+    printf '%s\n' "$sign_lines" | grep -q -e "^minisign -S -s $F/key -m $F/pkgs/$n -x $F/pkgs/$n.minisig -t " || bad_form=1
+  done
+  check "--arch aarch64: each signing call names the key with -s, the file with -m and the signature with -x" test "$bad_form" -eq 0
+  want_pw="CANARY-$CANARY_HEX"' a%sb\n$HOME "q"'
+  check "--arch aarch64: the password reached minisign on standard input once per signing call (four), and nothing else did" test "$(grep -c -x -F "$want_pw" "$F/log/stdin.log")" -eq 4 -a "$(wc -l <"$F/log/stdin.log" | tr -d ' ')" -eq 4
+  found=$(grep -rli -F "$CANARY_HEX" "$F" | grep -v '/seed$' | sort | tr '\n' ' ')
+  check "--arch aarch64: the canary is in stdin.log and in no other file of the run" test "$found" = "$F/log/stdin.log "
+  check "--arch aarch64: the script says nothing about the password, and no signing call carries one in an argument" test "$(cat "$F/log/out.log" "$F/log/err.log" | grep -c -i -e canary -e password)" -eq 0 -a "$(grep -c -i -e canary "$F/log/args.log")" -eq 0
+  check "--arch aarch64: the script ran no gh" test ! -e "$F/log/gh-called"
+  last=$(tail -n 1 "$F/log/out.log")
+  all=1
+  for n in $ARM_NAMES; do
+    case "$last" in *"$F/pkgs/$n "*) ;; *) all=0 ;; esac
+    case "$last" in *"$F/pkgs/$n.minisig"*) ;; *) all=0 ;; esac
+  done
+  case "$last" in *"$F/pkgs/SHA256SUMS-aarch64 "*"$F/pkgs/SHA256SUMS-aarch64.minisig"*) ;; *) all=0 ;; esac
+  case "$last" in *"gh release upload v$VERSION"*"not run"* | *"not run"*"gh release upload v$VERSION"*) ;; *) all=0 ;; esac
+  check "--arch aarch64: the last line names gh release upload with all eight files and says it was not run" test "$all" -eq 1
+
+  # An x86_64 default run does not know the aarch64 names.
+  fixture a-default-still
+  add_arm_packages "$F"
+  rc=0
+  run_sign "$F" "$VERSION" --arch x86_64 --dir "$F/pkgs" --pubkey "$F/pub" || rc=$?
+  check "--arch x86_64 is the default: it signs the x86_64 set and leaves the aarch64 packages unsigned" test "$rc" -eq 0 -a -s "$F/pkgs/SHA256SUMS.minisig" -a ! -e "$F/pkgs/SHA256SUMS-aarch64" -a ! -e "$F/pkgs/$ARM_DEB.minisig"
+}
+
+arm_refusal_checks() {
+  echo "release-signing: aarch64 refusals"
+  fixture ar-missing
+  add_arm_packages "$F"
+  rm -f "$F/pkgs/$ARM_RPM"
+  echo old >"$F/pkgs/$ARM_DEB.minisig"
+  rc=0
+  run_sign "$F" "$VERSION" --arch aarch64 --dir "$F/pkgs" --pubkey "$F/pub" || rc=$?
+  check "--arch aarch64 with a missing aarch64 package: exit status 2, and the reason names the file" test "$rc" -eq 2 -a "$(grep -c -F "$ARM_RPM" "$F/log/err.log")" -eq 1
+  check "--arch aarch64 with a missing package: an old signature is not removed by a refused run, and minisign was never called" test "$(cat "$F/pkgs/$ARM_DEB.minisig")" = old -a "$(wc -c <"$F/log/args.log" | tr -d ' ')" -eq 0
+  rm -f "$F/pkgs/$ARM_DEB.minisig"
+
+  fixture ar-x86only
+  refusal "--arch aarch64 in a folder that holds only the x86_64 packages" "a package of version $VERSION is missing" "$F" "$VERSION" --arch aarch64 --dir "$F/pkgs" --pubkey "$F/pub"
+
+  fixture ar-unknown
+  add_arm_packages "$F"
+  refusal "--arch with an unknown value (armv7)" "unknown architecture" "$F" "$VERSION" --arch armv7 --dir "$F/pkgs" --pubkey "$F/pub"
+  refusal "--arch with a value that is a path" "unknown architecture" "$F" "$VERSION" --arch ../x86_64 --dir "$F/pkgs" --pubkey "$F/pub"
+  refusal "--arch with no value" "needs x86_64 or aarch64" "$F" "$VERSION" --arch
+  refusal "--arch aarch64 with an unknown extra option" "unknown argument" "$F" "$VERSION" --arch aarch64 --upload --dir "$F/pkgs"
+}
+
+# ---- both sets in one folder ----------------------------------------------------------------------------------------------
+
+mixed_sign_checks() {
+  echo "release-signing: both sets in one folder"
+  fixture m-both
+  add_arm_packages "$F"
+  run_sign "$F" "$VERSION" --dir "$F/pkgs" --pubkey "$F/pub" || { bad "x86_64 signing in a mixed folder"; cat "$F/log/err.log" >&2; return; }
+  x86_before=$(snap "$F/pkgs" $(set_files x86_64))
+  arm_pkgs_before=$(snap "$F/pkgs" $ARM_NAMES)
+  rc=0
+  run_sign "$F" "$VERSION" --arch aarch64 --dir "$F/pkgs" --pubkey "$F/pub" || rc=$?
+  check "mixed folder: signing aarch64 after x86_64 exits 0" test "$rc" -eq 0
+  [ "$rc" -eq 0 ] || { cat "$F/log/err.log" >&2; return; }
+  check "mixed folder: signing aarch64 did not touch one file of the x86_64 set (packages, signatures, list)" test "$x86_before" = "$(snap "$F/pkgs" $(set_files x86_64))"
+  check "mixed folder: the aarch64 packages did not change, and the folder holds the two sets and nothing more (16 files)" test "$arm_pkgs_before" = "$(snap "$F/pkgs" $ARM_NAMES)" -a "$(count_files "$F/pkgs")" -eq 16
+  check "mixed folder: the x86_64 list names the x86_64 packages only and the aarch64 list the aarch64 packages only" test "$(grep -c -e _amd64.deb -e _x86_64 "$F/pkgs/SHA256SUMS")" -eq 3 -a "$(grep -c -e _arm64 -e _aarch64 "$F/pkgs/SHA256SUMS")" -eq 0 -a "$(grep -c -e _arm64 -e _aarch64 "$F/pkgs/SHA256SUMS-aarch64")" -eq 3 -a "$(grep -c -e _amd64 -e _x86_64 "$F/pkgs/SHA256SUMS-aarch64")" -eq 0
+  want_pw="CANARY-$CANARY_HEX"' a%sb\n$HOME "q"'
+  check "mixed folder: the password reached minisign on standard input eight times (four calls for each architecture) and nothing else did" test "$(grep -c -x -F "$want_pw" "$F/log/stdin.log")" -eq 8 -a "$(wc -l <"$F/log/stdin.log" | tr -d ' ')" -eq 8
+  found=$(grep -rli -F "$CANARY_HEX" "$F" | grep -v '/seed$' | sort | tr '\n' ' ')
+  check "mixed folder: the canary is in stdin.log and in no other file of the run" test "$found" = "$F/log/stdin.log "
+
+  # A run of the other architecture again: the aarch64 set is not touched.
+  arm_before=$(snap "$F/pkgs" $(set_files aarch64))
+  rc=0
+  run_sign "$F" "$VERSION" --dir "$F/pkgs" --pubkey "$F/pub" || rc=$?
+  check "mixed folder: signing x86_64 again exits 0 and leaves every file of the aarch64 set as it was" test "$rc" -eq 0 -a "$arm_before" = "$(snap "$F/pkgs" $(set_files aarch64))"
+
+  # A failed run removes what that run made and nothing of the other set.
+  fixture m-fail-arm
+  add_arm_packages "$F"
+  run_sign "$F" "$VERSION" --dir "$F/pkgs" --pubkey "$F/pub" || bad "x86_64 signing before the failing aarch64 run"
+  x86_before=$(snap "$F/pkgs" $(set_files x86_64))
+  echo 6 >"$F/bin/fail-at" # the call count of the stand-in is per fixture: four x86_64 calls, then the second aarch64 call fails
+  rc=0
+  run_sign "$F" "$VERSION" --arch aarch64 --dir "$F/pkgs" --pubkey "$F/pub" || rc=$?
+  check "mixed folder: a failing aarch64 run exits 1" test "$rc" -eq 1
+  check "mixed folder: a failing aarch64 run removes its own signatures and list" test -z "$(ls "$F/pkgs" | grep -e '_aarch64.*minisig' -e '_arm64.*minisig' -e SHA256SUMS-aarch64 || true)"
+  check "mixed folder: a failing aarch64 run leaves the x86_64 set exactly as it was, and the three aarch64 packages" test "$x86_before" = "$(snap "$F/pkgs" $(set_files x86_64))" -a "$(count_files "$F/pkgs")" -eq 11
+
+  fixture m-fail-x86
+  add_arm_packages "$F"
+  run_sign "$F" "$VERSION" --arch aarch64 --dir "$F/pkgs" --pubkey "$F/pub" || bad "aarch64 signing before the failing x86_64 run"
+  arm_before=$(snap "$F/pkgs" $(set_files aarch64))
+  echo 6 >"$F/bin/fail-at"
+  rc=0
+  run_sign "$F" "$VERSION" --dir "$F/pkgs" --pubkey "$F/pub" || rc=$?
+  check "mixed folder: a failing x86_64 run exits 1, removes its own files and leaves the aarch64 set exactly as it was" test "$rc" -eq 1 -a -z "$(ls "$F/pkgs" | grep -e '_x86_64.*minisig' -e '_amd64.*minisig' -e '^SHA256SUMS$' -e '^SHA256SUMS.minisig$' || true)" -a "$arm_before" = "$(snap "$F/pkgs" $(set_files aarch64))"
+
+  fixture m-wrongpub
+  add_arm_packages "$F"
+  printf 'STANDIN-PUBLIC %s\n' "$(random_hex 4)" >"$F/otherpub"
+  rc=0
+  run_sign "$F" "$VERSION" --arch aarch64 --dir "$F/pkgs" --pubkey "$F/otherpub" || rc=$?
+  check "--arch aarch64 with signatures that do not verify against the public key: exit status 1, nothing left behind" test "$rc" -eq 1 -a "$(grep -c 'does not verify' "$F/log/err.log")" -eq 1 -a -z "$(ls "$F/pkgs" | grep -e minisig -e SHA256SUMS || true)"
+}
 
 # ---- the refusals: exit 2, one line that names the cause, nothing signed ----------------------------------------------------
 
@@ -502,6 +669,105 @@ verify_checks() {
   check "no minisign: exit status 2, and the reason says how to get it" test "$rc" -eq 2 -a "$(grep -c 'minisign is not on the PATH' "$F/log/verr.log")" -eq 1
 }
 
+signed_both() { # <name>: a folder with both sets, each signed by its own run
+  fixture "$1"
+  add_arm_packages "$F"
+  run_sign "$F" "$VERSION" --dir "$F/pkgs" --pubkey "$F/pub" || { bad "fixture $1: x86_64 could not be signed"; cat "$F/log/err.log" >&2; }
+  run_sign "$F" "$VERSION" --arch aarch64 --dir "$F/pkgs" --pubkey "$F/pub" || { bad "fixture $1: aarch64 could not be signed"; cat "$F/log/err.log" >&2; }
+}
+
+verify_arm_checks() {
+  echo "release-signing: verify-release.sh, both architectures"
+
+  signed_both v-both
+  for sel in "" "--arch x86_64" "--arch aarch64" "--sums SHA256SUMS" "--sums SHA256SUMS-aarch64"; do
+    rc=0
+    # shellcheck disable=SC2086 # $sel is a flag list on purpose
+    run_verify "$F" "$F/pkgs" $sel --pubkey "$F/pub" || rc=$?
+    check "a folder with both sets verifies with [$sel]: exit status 0" test "$rc" -eq 0
+    check "a folder with both sets, [$sel]: seven ok lines (the list's signature, then signature and hash of each of its three packages), and the other set's signatures are not flagged" test "$(grep -c '^verify-release: ok ' "$F/log/vout.log")" -eq 7 -a "$(tail -n 1 "$F/log/vout.log")" = "verify-release: ok" -a ! -s "$F/log/verr.log"
+  done
+  rc=0
+  run_verify "$F" "$F/pkgs" --arch aarch64 --pubkey "$F/pub" || rc=$?
+  check "--arch aarch64 names the aarch64 files in its ok lines and none of the x86_64 ones" test "$(grep -c -e _aarch64 -e _arm64 "$F/log/vout.log")" -eq 6 -a "$(grep -c -e _amd64 -e _x86_64 "$F/log/vout.log")" -eq 0
+
+  signed_fixture v-armonly-x86
+  only_arm_packages "$F"
+  rm -f "$F/pkgs/SHA256SUMS" "$F/pkgs/SHA256SUMS.minisig"
+  for n in $NAMES; do rm -f "$F/pkgs/$n.minisig"; done
+  run_sign "$F" "$VERSION" --arch aarch64 --dir "$F/pkgs" --pubkey "$F/pub" || bad "fixture v-armonly: aarch64 could not be signed"
+  rc=0
+  run_verify "$F" "$F/pkgs" --arch aarch64 --pubkey "$F/pub" || rc=$?
+  check "a folder with the aarch64 set only verifies with --arch aarch64" test "$rc" -eq 0
+  rc=0
+  run_verify "$F" "$F/pkgs" --pubkey "$F/pub" || rc=$?
+  check "the same folder without --arch fails: SHA256SUMS is missing" test "$rc" -eq 1 -a "$(grep -c 'SHA256SUMS is missing' "$F/log/verr.log")" -eq 1
+
+  signed_both v-armbyte
+  flip_byte "$F/pkgs/$ARM_RPM"
+  rc=0
+  run_verify "$F" "$F/pkgs" --arch aarch64 --pubkey "$F/pub" || rc=$?
+  check "a changed byte in an aarch64 package: exit status 1, and both its signature and its hash fail, nothing else does" test "$rc" -eq 1 -a "$(grep -c "^verify-release: FAILED $ARM_RPM" "$F/log/verr.log")" -eq 2 -a "$(grep -c '^verify-release: FAILED holzWave' "$F/log/verr.log")" -eq 2
+  rc=0
+  run_verify "$F" "$F/pkgs" --pubkey "$F/pub" || rc=$?
+  check "...and the x86_64 list of the same folder still verifies (the other set is its own list's business)" test "$rc" -eq 0
+
+  signed_both v-armnosig
+  rm -f "$F/pkgs/$ARM_DEB.minisig"
+  rc=0
+  run_verify "$F" "$F/pkgs" --arch aarch64 --pubkey "$F/pub" || rc=$?
+  check "a deleted .minisig of an aarch64 package: exit status 1, and the reason names it" test "$rc" -eq 1 -a "$(grep -c "$ARM_DEB: no signature" "$F/log/verr.log")" -eq 1
+
+  signed_both v-armwrongkey
+  printf 'STANDIN-PUBLIC %s\n' "$(random_hex 4)" >"$F/otherpub"
+  rc=0
+  run_verify "$F" "$F/pkgs" --arch aarch64 --pubkey "$F/otherpub" || rc=$?
+  check "a wrong public key with --arch aarch64: exit status 1" test "$rc" -eq 1
+
+  signed_both v-armsums
+  flip_first_hash "$F/pkgs/SHA256SUMS-aarch64" >"$F/sums.new"
+  cp "$F/sums.new" "$F/pkgs/SHA256SUMS-aarch64"
+  rc=0
+  run_verify "$F" "$F/pkgs" --arch aarch64 --pubkey "$F/pub" || rc=$?
+  check "an aarch64 list with a changed hash (not re-signed): exit status 1, and its signature fails" test "$rc" -eq 1 -a "$(grep -c 'SHA256SUMS-aarch64: the signature does not verify' "$F/log/verr.log")" -eq 1
+
+  signed_both v-stranger2
+  cp "$F/pkgs/$ARM_DEB" "$F/pkgs/other.bin"
+  cp "$F/pkgs/$ARM_DEB.minisig" "$F/pkgs/other.bin.minisig"
+  for sel in "" "--arch aarch64"; do
+    rc=0
+    # shellcheck disable=SC2086
+    run_verify "$F" "$F/pkgs" $sel --pubkey "$F/pub" || rc=$?
+    check "a signature that no list of a two-set folder names fails with [$sel], and the other set's signatures are not what fails" test "$rc" -eq 1 -a "$(grep -c 'other.bin.minisig: ' "$F/log/verr.log")" -eq 1 -a "$(grep -c 'minisig: ' "$F/log/verr.log")" -eq 1
+  done
+
+  signed_both v-nolist
+  rm -f "$F/pkgs/SHA256SUMS-aarch64" "$F/pkgs/SHA256SUMS-aarch64.minisig"
+  rc=0
+  run_verify "$F" "$F/pkgs" --pubkey "$F/pub" || rc=$?
+  check "the aarch64 signatures of a folder whose aarch64 list is gone are covered by no list: the x86_64 verification fails on each of the three" test "$rc" -eq 1 -a "$(grep -c -e "_aarch64.AppImage.minisig: " -e "_aarch64.rpm.minisig: " -e "_arm64.deb.minisig: " "$F/log/verr.log")" -eq 3
+  rc=0
+  run_verify "$F" "$F/pkgs" --arch aarch64 --pubkey "$F/pub" || rc=$?
+  check "and the aarch64 verification of it fails because its list is missing" test "$rc" -eq 1 -a "$(grep -c 'SHA256SUMS-aarch64 is missing' "$F/log/verr.log")" -eq 1
+
+  signed_both v-armpath
+  echo "0000000000000000000000000000000000000000000000000000000000000000  ../evil" >>"$F/pkgs/SHA256SUMS-aarch64"
+  rc=0
+  run_verify "$F" "$F/pkgs" --arch aarch64 --pubkey "$F/pub" || rc=$?
+  check "a name with a path part in SHA256SUMS-aarch64 is refused, never opened" test "$rc" -eq 1 -a "$(grep -c 'path part' "$F/log/verr.log")" -eq 1
+  rc=0
+  run_verify "$F" "$F/pkgs" --pubkey "$F/pub" || rc=$?
+  check "...and that line of the other list does not cover a file named ../evil (the x86_64 verification is unaffected)" test "$rc" -eq 0
+
+  signed_both v-args
+  for sel in "--sums ../SHA256SUMS" "--sums -x" "--sums /etc/passwd" "--sums SHA256SUMS/../x" "--sums SHA256SUMS.minisig" "--sums other.txt" "--sums" "--arch armv7" "--arch ../aarch64" "--arch" "--arch aarch64 --sums SHA256SUMS" "--sums SHA256SUMS --arch aarch64"; do
+    rc=0
+    # shellcheck disable=SC2086
+    run_verify "$F" "$F/pkgs" $sel --pubkey "$F/pub" || rc=$?
+    check "verify-release.sh [$sel] is refused: exit status 2, one line, nothing was verified" test "$rc" -eq 2 -a "$(wc -l <"$F/log/verr.log" | tr -d ' ')" -eq 1 -a ! -s "$F/log/vout.log"
+  done
+}
+
 # ---- the real tool, with a throwaway key -----------------------------------------------------------------------------------
 
 # Runs where the real minisign is: on the host, or inside the throwaway container (see run_container).
@@ -532,21 +798,21 @@ real_body() {
   for n in $NAMES; do head -c 4096 /dev/urandom >"$rt/pkgs/$n"; done
   cp -R "$rt/pkgs" "$rt/orig"
 
-  signit() { # <key> <pub> <extra>: run sign-linux.sh with the real minisign on the PATH and the stand-in secret store first
+  signit() { # <key> <pub> [<arch>]: run sign-linux.sh with the real minisign on the PATH and the stand-in secret store first
     (
       PATH="$rt/bin:$PATH"
       USER=tester
       HOME="$rt/home"
       HOLZWAVE_MINISIGN_KEY="$1"
       export PATH USER HOME HOLZWAVE_MINISIGN_KEY
-      exec "$SH" "$sign" "$VERSION" --dir "$rt/pkgs" --pubkey "$2"
+      exec "$SH" "$sign" "$VERSION" ${3:+--arch "$3"} --dir "$rt/pkgs" --pubkey "$2"
     ) >"$rt/log/out" 2>"$rt/log/err"
   }
-  verifyit() { # <pub>
+  verifyit() { # <pub> [<arch>]
     (
       PATH="$rt/bin:$PATH"
       export PATH
-      exec "$SH" "$verify" "$rt/pkgs" --pubkey "$1"
+      exec "$SH" "$verify" "$rt/pkgs" ${2:+--arch "$2"} --pubkey "$1"
     ) >"$rt/log/vout" 2>"$rt/log/verr"
   }
 
@@ -605,6 +871,38 @@ real_body() {
   check "real stat: a key with mode 644 is refused with status 2" test "$rc" -eq 2 -a "$(grep -c 'readable by group or others' "$rt/log/err")" -eq 1
   chmod 600 "$rt/a.key"
 
+  # The aarch64 set beside the x86_64 set, both signed with the real tool and the same key.
+  for n in $ARM_NAMES; do head -c 4096 /dev/urandom >"$rt/pkgs/$n"; done
+  cp "$rt/pkgs/$ARM_RPM" "$rt/orig/$ARM_RPM"
+  rc=0
+  signit "$rt/a.key" "$rt/a.pub" || rc=$?
+  [ "$rc" -eq 0 ] || cat "$rt/log/err" >&2
+  rca=0
+  signit "$rt/a.key" "$rt/a.pub" aarch64 || rca=$?
+  [ "$rca" -eq 0 ] || cat "$rt/log/err" >&2
+  check "real minisign: sign-linux.sh signs the x86_64 set and then the aarch64 set into one folder" test "$rc" -eq 0 -a "$rca" -eq 0 -a "$(ls "$rt/pkgs" | wc -l | tr -d ' ')" -eq 16
+  rc=0
+  verifyit "$rt/a.pub" || rc=$?
+  rca=0
+  verifyit "$rt/a.pub" aarch64 || rca=$?
+  check "real minisign: verify-release.sh passes once per list for the folder that holds both sets" test "$rc" -eq 0 -a "$rca" -eq 0
+  user_arm() { minisign -V -m "$rt/pkgs/$ARM_APPIMAGE" -p "$rt/a.pub" -x "$rt/pkgs/$ARM_APPIMAGE.minisig" >"$rt/log/user" 2>&1 && grep -q "holzWave $VERSION $ARM_APPIMAGE" "$rt/log/user" && minisign -V -m "$rt/pkgs/SHA256SUMS-aarch64" -p "$rt/a.pub" >/dev/null 2>&1; }
+  check "real minisign: a user's check of an aarch64 file and of SHA256SUMS-aarch64 passes" user_arm
+  flip_byte "$rt/pkgs/$ARM_RPM"
+  rc=0
+  verifyit "$rt/a.pub" aarch64 || rc=$?
+  rcx=0
+  verifyit "$rt/a.pub" || rcx=$?
+  check "real minisign: one changed byte in an aarch64 package fails the aarch64 list and not the x86_64 one" test "$rc" -eq 1 -a "$rcx" -eq 0
+  cp "$rt/orig/$ARM_RPM" "$rt/pkgs/$ARM_RPM"
+  rc=0
+  verifyit "$rt/a.pub" aarch64 || rc=$?
+  check "real minisign: restoring the aarch64 byte makes it pass again" test "$rc" -eq 0
+  rc=0
+  verifyit "$rt/b.pub" aarch64 || rc=$?
+  check "real minisign: a wrong public key fails the aarch64 list" test "$rc" -eq 1
+  check "real minisign: the password is in no file of the folder or the logs after the aarch64 run either" test "$(grep -rlF "$pw1" "$rt/pkgs" "$rt/log" | wc -l | tr -d ' ')" -eq 0
+
   finish "real minisign, $where"
 }
 
@@ -639,9 +937,13 @@ case "$mode" in
     ;;
   shims | container | default)
     stand_in_checks
+    arm_sign_checks
     refusal_checks
+    arm_refusal_checks
     failure_checks
+    mixed_sign_checks
     verify_checks
+    verify_arm_checks
     finish "stand-ins"
     case "$mode" in
       shims) exit 0 ;;

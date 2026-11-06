@@ -1,14 +1,21 @@
 #!/bin/sh
-# Sign the three Linux packages of a release with minisign, locally (POL-03, D-10, D-12). Nothing is uploaded: the script
-# prints the `gh release upload` command and the owner runs it. There is no CI.
+# Sign the three Linux packages of one architecture of a release with minisign, locally (POL-03, D-10, D-12). Nothing is
+# uploaded: the script prints the `gh release upload` command and the owner runs it. There is no CI.
 #
-#   sh scripts/sign-linux.sh <version> [--dir <dir>] [--pubkey <file>]
+#   sh scripts/sign-linux.sh <version> [--arch <x86_64|aarch64>] [--dir <dir>] [--pubkey <file>]
 #
-# It signs, from `scripts/release-linux-container.sh`, in <dir> (default target/release-cross):
+# Without --arch (the same as `--arch x86_64`) it signs, from `scripts/release-linux-container.sh`, in <dir> (default
+# target/release-cross):
 #   holzWave_<version>_amd64.deb, holzWave_<version>_x86_64.rpm, holzWave_<version>_x86_64.AppImage
 # each with a detached `<file>.minisig`, then writes `SHA256SUMS` of those three files and signs it (`SHA256SUMS.minisig`),
 # then checks all four signatures against the public key (default packaging/minisign/holzwave.pub). Nothing else in <dir> is
 # signed or listed. --dir and --pubkey exist for the tests and for an owner who keeps the files elsewhere.
+#
+# With `--arch aarch64` it signs, from `scripts/release-linux-arm64.sh`:
+#   holzWave_<version>_arm64.deb, holzWave_<version>_aarch64.rpm, holzWave_<version>_aarch64.AppImage
+# and writes and signs `SHA256SUMS-aarch64` (`SHA256SUMS-aarch64.minisig`). One run signs one architecture and touches
+# nothing of the other: its files, its signatures and its list stay as they are, and a failed run removes only what that run
+# made.
 #
 # The secret key is an encrypted file outside the repository (HOLZWAVE_MINISIGN_KEY, default $HOME/.minisign/holzwave.key).
 # Its password comes from the operating system's secret store and from nowhere else (no file, no prompt, no environment
@@ -38,12 +45,21 @@ fail() { die 2 "$1"; } # a refusal: nothing was touched
 case "$-" in *x*) fail "tracing is on (sh -x): it would print the password; run the script without it" ;; esac
 
 version=${1:-}
-[ $# -gt 0 ] || fail "usage: sh scripts/sign-linux.sh <version> [--dir <dir>] [--pubkey <file>]"
+[ $# -gt 0 ] || fail "usage: sh scripts/sign-linux.sh <version> [--arch <x86_64|aarch64>] [--dir <dir>] [--pubkey <file>]"
 shift
 dir=$root/target/release-cross
 pubkey=$root/packaging/minisign/holzwave.pub
+arch=x86_64
 while [ $# -gt 0 ]; do
   case "$1" in
+    --arch)
+      [ $# -ge 2 ] || fail "--arch needs x86_64 or aarch64"
+      case "$2" in
+        x86_64 | aarch64) arch=$2 ;;
+        *) fail "unknown architecture for --arch: $2 (x86_64 or aarch64)" ;;
+      esac
+      shift
+      ;;
     --dir) [ $# -ge 2 ] || fail "--dir needs a directory"; dir=$2; shift ;;
     --pubkey) [ $# -ge 2 ] || fail "--pubkey needs a file"; pubkey=$2; shift ;;
     *) fail "unknown argument: $1" ;;
@@ -61,11 +77,25 @@ esac
 printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$' \
   || fail "the version argument is not a version (like 0.0.1 or 0.0.1-alpha1): $version"
 
-deb="holzWave_${version}_amd64.deb"
-rpm="holzWave_${version}_x86_64.rpm"
-appimage="holzWave_${version}_x86_64.AppImage"
-# Sorted by name in the C locale, the order of the signatures and of SHA256SUMS.
-files="$deb $appimage $rpm"
+case "$arch" in
+  aarch64)
+    deb="holzWave_${version}_arm64.deb"
+    rpm="holzWave_${version}_aarch64.rpm"
+    appimage="holzWave_${version}_aarch64.AppImage"
+    sumsfile=SHA256SUMS-aarch64
+    # Sorted by name in the C locale (the capital A of the AppImage before the lower-case r, and "aarch64" before "arm64"),
+    # the order of the signatures and of the list.
+    files="$appimage $rpm $deb"
+    ;;
+  *)
+    deb="holzWave_${version}_amd64.deb"
+    rpm="holzWave_${version}_x86_64.rpm"
+    appimage="holzWave_${version}_x86_64.AppImage"
+    sumsfile=SHA256SUMS
+    # Sorted by name in the C locale, the order of the signatures and of the list.
+    files="$deb $appimage $rpm"
+    ;;
+esac
 
 # 2. the tools
 command -v minisign >/dev/null 2>&1 || fail "minisign is not on the PATH (macOS: brew install minisign)"
@@ -114,14 +144,14 @@ esac
 # Every precondition holds. From here on the files this run makes are removed if it does not finish.
 finished=0
 partial() {
-  [ "$finished" -eq 1 ] || for n in $files SHA256SUMS; do rm -f "$dir/$n.minisig"; done
-  [ "$finished" -eq 1 ] || rm -f "$dir/SHA256SUMS"
+  [ "$finished" -eq 1 ] || for n in $files $sumsfile; do rm -f "$dir/$n.minisig"; done
+  [ "$finished" -eq 1 ] || rm -f "$dir/$sumsfile"
 }
 trap partial EXIT
 trap 'exit 130' INT
 trap 'exit 143' HUP TERM
-for n in $files SHA256SUMS; do rm -f "$dir/$n.minisig"; done
-rm -f "$dir/SHA256SUMS"
+for n in $files $sumsfile; do rm -f "$dir/$n.minisig"; done
+rm -f "$dir/$sumsfile"
 
 sums() { # <names...>: sha256 lines, names only
   if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$@"; else sha256sum "$@"; fi
@@ -134,18 +164,18 @@ sign_one() { # <file> <comment>: the password goes in on standard input only
 for n in $files; do
   sign_one "$dir/$n" "holzWave $version $n" || die 1 "minisign failed signing $n"
 done
-(cd "$dir" && sums $files >SHA256SUMS) || die 1 "could not write SHA256SUMS"
-sign_one "$dir/SHA256SUMS" "holzWave $version SHA256SUMS" || die 1 "minisign failed signing SHA256SUMS"
+(cd "$dir" && sums $files >"$sumsfile") || die 1 "could not write $sumsfile"
+sign_one "$dir/$sumsfile" "holzWave $version $sumsfile" || die 1 "minisign failed signing $sumsfile"
 unset password
 
-for n in $files SHA256SUMS; do
+for n in $files $sumsfile; do
   minisign -V -p "$pubkey" -m "$dir/$n" -x "$dir/$n.minisig" >/dev/null 2>&1 \
     || die 1 "the signature of $n does not verify against $pubkey (wrong key pair?)"
 done
 finished=1
 
 upload=
-for n in $files SHA256SUMS; do upload="$upload $dir/$n $dir/$n.minisig"; done
-echo "sign-linux: signed and verified ${version}: the three packages and SHA256SUMS"
+for n in $files $sumsfile; do upload="$upload $dir/$n $dir/$n.minisig"; done
+echo "sign-linux: signed and verified ${version}: the three packages and $sumsfile"
 # (the verb is an argument so that no line of this script reads as a command that publishes: it only prints it)
 printf 'sign-linux: not run (the owner uploads): gh %s upload v%s%s\n' release "$version" "$upload"

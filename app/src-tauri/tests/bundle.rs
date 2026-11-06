@@ -501,3 +501,86 @@ fn the_arm64_script_signs_and_publishes_nothing_and_says_what_it_is() {
         assert!(text.contains(said), "release-linux-arm64.sh does not say `{said}`");
     }
 }
+
+#[test]
+fn the_signing_script_signs_one_architecture_per_run_and_keeps_the_default() {
+    let text = squash(SIGN_LINUX);
+    // The default is the x86_64 set and `SHA256SUMS`, as before.
+    assert!(text.contains("arch=x86_64"), "the default architecture is not x86_64");
+    for kept in [
+        r#"deb="holzWave_${version}_amd64.deb""#,
+        r#"rpm="holzWave_${version}_x86_64.rpm""#,
+        r#"appimage="holzWave_${version}_x86_64.AppImage""#,
+        "sumsfile=SHA256SUMS\n",
+    ] {
+        assert!(SIGN_LINUX.contains(kept), "the x86_64 set changed: `{kept}` is gone");
+    }
+    // --arch aarch64: the names the build script writes, and a list of their own.
+    for name in [
+        r#"deb="holzWave_${version}_arm64.deb""#,
+        r#"rpm="holzWave_${version}_aarch64.rpm""#,
+        r#"appimage="holzWave_${version}_aarch64.AppImage""#,
+        "sumsfile=SHA256SUMS-aarch64",
+    ] {
+        assert!(text.contains(name), "sign-linux.sh does not know `{name}`");
+    }
+    for name in ["_arm64.deb", "_aarch64.rpm", "_aarch64.AppImage"] {
+        assert!(LINUX_ARM64.contains(name) && SIGN_LINUX.contains(name), "the build and the signing script disagree on {name}");
+    }
+    // An unknown architecture is a refusal (fail = exit 2) in the argument loop, before anything is read.
+    assert!(text.contains("--arch) [ $# -ge 2 ] || fail") && text.contains("unknown architecture for --arch"), "--arch is not validated");
+    // The cleanup removes only this run's list and signatures, which are named by the variable and never by a glob.
+    assert!(text.contains(r#"for n in $files $sumsfile; do rm -f "$dir/$n.minisig"; done"#), "the cleanup does not name this architecture's files");
+    for line in code_lines(SIGN_LINUX) {
+        assert!(!line.contains("*.minisig") && !line.contains("SHA256SUMS*"), "a glob in sign-linux.sh could remove the other set: {line}");
+    }
+}
+
+#[test]
+fn the_verify_script_checks_either_list_and_treats_the_other_one_as_covering_its_own_files() {
+    let text = squash(VERIFY_RELEASE);
+    for needed in [
+        "SHA256SUMS-aarch64",
+        "--arch)",
+        "--sums)",
+        "no other list of the folder names it",
+        "not a list name",
+        "give --arch or --sums once, not both",
+    ] {
+        assert!(text.contains(needed), "verify-release.sh does not say `{needed}`");
+    }
+    // A list name given on the command line has no path part and no leading dash: the pattern anchors on SHA256SUMS and allows
+    // only name characters, never a slash.
+    assert!(VERIFY_RELEASE.contains(r#"grep -Eq '^SHA256SUMS[A-Za-z0-9._+-]*$'"#), "a list name is not checked against a strict pattern");
+    // The names read out of the other lists are untrusted too: only lines of the strict shape are used, nothing is opened by them.
+    assert!(VERIFY_RELEASE.contains("[0-9a-f]{64}  [A-Za-z0-9_][A-Za-z0-9._+-]*$"), "the names read from a list are not checked against the strict pattern");
+    // It reads files and runs minisign and a checksum tool only (the existing rule of the two scripts, stated for the new lines).
+    for line in commands(VERIFY_RELEASE) {
+        for forbidden in ["curl", "wget", "eval ", "rm ", "mv ", "cp "] {
+            assert!(!line.contains(forbidden), "verify-release.sh runs `{forbidden}`: {line}");
+        }
+    }
+}
+
+#[test]
+fn the_password_rules_of_the_signing_script_hold_for_the_second_set() {
+    // The same lines as before and no more: the password is fetched once, held in one unexported variable, expanded in the
+    // printf that feeds minisign on standard input and in the empty test, and unset. `--arch` added no line that mentions it.
+    let uses: Vec<&str> = code_lines(SIGN_LINUX).into_iter().filter(|l| l.contains("password")).collect();
+    let feeds = uses.iter().filter(|l| l.starts_with(r#"printf '%s\n' "$password" | minisign -S "#)).count();
+    assert_eq!(feeds, 1, "the password is fed to minisign on more or fewer than one line: {uses:?}");
+    for line in &uses {
+        let allowed = line.starts_with("password=$(security find-generic-password")
+            || line.starts_with("*) password=$(secret-tool lookup")
+            || line.starts_with(r#"[ -n "$password" ] || fail "#)
+            || line.starts_with(r#"printf '%s\n' "$password" | minisign -S "#)
+            || line.starts_with("unset password")
+            || line.starts_with("Darwin) password=$(security find-generic-password")
+            || (line.starts_with("|| fail ") && !line.contains("$password"))
+            || line.starts_with("sign_one()")
+            || line.contains("the password");
+        assert!(allowed, "an unexpected line mentions the password: {line}");
+    }
+    // sign_one is called for every file and for the list of either architecture, with no password argument.
+    assert!(code_lines(SIGN_LINUX).iter().any(|l| l.starts_with(r#"sign_one "$dir/$sumsfile" "holzWave $version $sumsfile" || die 1"#)), "the list is not signed through sign_one");
+}
