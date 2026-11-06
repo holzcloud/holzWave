@@ -390,6 +390,25 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .ln-btns{display:flex;flex:1 0 100%;flex-wrap:wrap;gap:6px 8px;margin:0 0 4px}
 .ln-btn{display:inline-flex;flex:none;align-items:center;white-space:nowrap;min-height:24px;padding:0 10px;border:1px solid var(--edge);border-radius:5px;color:var(--ink2);font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase}
 .ln-line{min-height:17px;margin:0;color:var(--ink3);font:400 10.5px/1.35 var(--mono)}
+/* The group Host shell of a Flatpak (docs/design.md 6.32). `host-shell` is the Settings dialog on the Linux window with the group off; `host-shell-states` is the group in its three states
+   and the notice a new pane shows while it is off or not available, on the ad-* grid. The state is words first; on is warn, underlined and marked !, not available is marked ?, so no
+   state rests on colour. The notice is the pane's existing line in the warn colour. */
+.hs-row{display:flex;flex-wrap:wrap;align-items:center;gap:0 10px;min-height:22px;font:400 12px/1.4 var(--mono)}
+.hs-name{display:inline-flex;align-items:center;gap:8px;min-height:22px;color:var(--ink)}
+.hs-box{display:inline-block;width:12px;height:12px;box-sizing:border-box;border:1px solid var(--ink3);border-radius:2px;background:var(--ground);line-height:9px;text-align:center;font-size:10px;color:var(--ground)}
+.hs-row[data-state=on] .hs-box{background:var(--rose);border-color:var(--rose)}
+.hs-row[data-state=unavailable] .hs-box{border-style:dashed;opacity:.5}
+.hs-row[data-state=unavailable] .hs-name{color:var(--ink3)}
+.hs-meta{color:var(--ink3)}
+.hs-state{margin-left:auto;color:var(--ink3);text-align:right}
+.hs-row[data-tone=warn] .hs-state{color:var(--warn);text-decoration:underline}
+.hs-row[data-tone=warn] .hs-state::before{content:"! ";font-weight:700}
+.hs-row[data-state=unavailable] .hs-state::before{content:"? ";font-weight:700}
+.hs-adv{flex:1 0 100%;margin:2px 0 4px;color:var(--ink3);font:400 10.5px/1.35 var(--mono)}
+.hs-pane{display:flex;flex-direction:column;border:1px solid var(--edge);border-radius:8px;overflow:hidden;background:var(--pane)}
+.hs-pane .pane{background:transparent}.hs-pane .term{flex:none;padding:6px 10px 8px;font:400 10.5px/1.45 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}
+.hs-pane .ph .ctx{font-size:10px}
+.hs-grid{grid-template-columns:repeat(2,480px)}.hs-grid .ad-frame{width:480px}
 /* The screens of the browser build (docs/design.md 6.28 to 6.30). The page before a person is signed in is a ground with one box; the box is the dialog box of the Settings
    (hairline, 8 px radius, the one shadow). The web platform has no window buttons and no drag region, so the bar starts at the left edge. Errors are danger, underlined and marked !,
    a disabled button is dim with its reason in words, and nothing moves. */
@@ -810,7 +829,7 @@ function base(v){
     <span class="fill"></span>
     <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='kiexplain'||v==='kidescribe'||v==='ki'||v==='kichats'||v==='kisidecards'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?'on':''}">✦ AI${v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kicommand'||v==='kisidecards'?' <span class="ax-n">· 1</span>':''}</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'||v==='kiactions'?'on':''}">${v.startsWith('web-')?'Ctrl+Shift+P':'⌘K'}</div>${wcR}</div>
   <div class="tabrow row">${v==='attn'?tabs(0,{1:['ask','bell','fail','done'],2:['bell'],3:['fail'],4:['done']}):tabs(v==='blocks'?1:v==='kimon'||v==='kimonstates'?4:v==='kint'||v==='kintstates'||v==='kintconfirm'||v==='kintconfirmstates'?5:0)}<span class="fill"></span><span class="dim" style="padding-right:12px">${v.startsWith('web-')?'Alt+Shift+1–9':'⌘1–9'} tab · click a pill to switch workspace</span></div>
-  <div class="body">${v==='web-window'?wbArea():v==='preview'?previewArea():v==='kimon'?monitorArea():v==='kimonstates'?moStates():v==='kint'?igArea():v==='kintstates'?igStates():v==='kintconfirm'?icArea():v==='kintconfirmstates'?icStates():v==='kintctx'?cxArea():v==='kiwsh'?awArea():v==='kiwshstates'?awStates():v==='kidevicestates'?adStates():v==='lanstates'?lnStates():v==='kiexplain'||v==='kidescribe'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?chatArea(v):`<div class="area">
+  <div class="body">${v==='web-window'?wbArea():v==='preview'?previewArea():v==='kimon'?monitorArea():v==='kimonstates'?moStates():v==='kint'?igArea():v==='kintstates'?igStates():v==='kintconfirm'?icArea():v==='kintconfirmstates'?icStates():v==='kintctx'?cxArea():v==='kiwsh'?awArea():v==='kiwshstates'?awStates():v==='kidevicestates'?adStates():v==='lanstates'?lnStates():v==='host-shell-states'?hsStates():v==='kiexplain'||v==='kidescribe'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?chatArea(v):`<div class="area">
     ${P('','❯','shell','pane 1 · ~/holzWave',shell(v==='search'?'search':v==='copy'?'copy':''),{f:1,s:'grid-row:1/2',chip:phChip('⎈ talos-prod')})}
     ${P('wa','⌁','holzkube','ssh · talos-2',ssh(1))}
     ${P('in','✎','layout.rs','sftp · talos-1',editor)}
@@ -818,7 +837,7 @@ function base(v){
       ${P('in','◧','notes.md','preview',md)}
       ${P('','◔','system','local · 1 s',sysmon)}
     </div>${searchBar}
-  </div>`}${v==='kiwsh'?side:v==='web-window'||v==='kiwshstates'||v==='kidevicestates'||v==='lanstates'||v==='kimonstates'||v==='kint'||v==='kintstates'||v==='kintconfirm'||v==='kintconfirmstates'?'':v==='kintctx'?cxSideCtx:v==='ki'||v==='kichats'||v==='kisidecards'?sideAI(v):side}</div>${copyBar||(v==='kintctx'?status('',cseg('⎈ prod-eu/payments',{prod:1})):v==='web-window'?wbStatus():status())}${awOver(v)}${icOver(v)}${v==='web-window'?wbNotif():''}`;
+  </div>`}${v==='kiwsh'?side:v==='web-window'||v==='kiwshstates'||v==='kidevicestates'||v==='lanstates'||v==='host-shell-states'||v==='kimonstates'||v==='kint'||v==='kintstates'||v==='kintconfirm'||v==='kintconfirmstates'?'':v==='kintctx'?cxSideCtx:v==='ki'||v==='kichats'||v==='kisidecards'?sideAI(v):side}</div>${copyBar||(v==='kintctx'?status('',cseg('⎈ prod-eu/payments',{prod:1})):v==='web-window'?wbStatus():status())}${awOver(v)}${icOver(v)}${v==='web-window'?wbNotif():''}`;
 }
 /* The chat pane (docs/design.md 6.12). Two states of one conversation: `kipane` streams a reply, `kistates` shows the picker, a stopped
    reply, a failed turn and a long draft. The words are the ones of the page: the status words, the end row, the count. */
@@ -1059,6 +1078,36 @@ const lnStates=()=>`<div class="ad-grid">${[
  ['Not asked yet',lnFrame(lnRow('not_asked','plain','not asked yet','macOS has not been asked. Choose Allow and macOS shows its own question.',['Open System Settings','Allow'],'&nbsp;'))],
  ['Not known',lnFrame(lnRow('unknown','plain','not known','holzWave could not tell. macOS may still be waiting for your answer. Choose Check again.',['Open System Settings','Check again'],'Asked. Answer the macOS question, then choose Check again.'))]
 ].map(([cap,frame])=>`<div class="ad-cell"><div class="cap">${cap}</div>${frame}</div>`).join('')}</div>`;
+
+/* The group Host shell (docs/design.md 6.32): one switch, only inside a Flatpak, off by default. The words, tones, marks and sentences are the design record's; the host's state words are off, on and unavailable. */
+const hsAdvice={
+ off:'New panes start inside the Flatpak sandbox. Your own tools and the files outside it are not reachable from them.',
+ on:'New panes start on this computer through flatpak-spawn, with your rights and outside the sandbox. Panes that are already open keep running where they are.',
+ unavailable:'This Flatpak was started without the permission to run commands on the host (org.freedesktop.Flatpak), so panes can only start in the sandbox. See the Flatpak page of the documentation.'
+};
+const hsWords={off:'off',on:'on',unavailable:'not available'};
+const hsNotice={
+ off:'holzWave: this pane runs inside the Flatpak sandbox. To use the tools on this computer, turn on Host shell in Settings.',
+ unavailable:'holzWave: this pane runs inside the Flatpak sandbox. This Flatpak has no permission to run commands on the host; see the Flatpak page of the documentation.'
+};
+const hsRow=state=>`<div class="hs-row" data-state="${state}" data-tone="${state==='on'?'warn':'plain'}"><span class="hs-name"><span class="hs-box" aria-hidden="true">${state==='on'?'✓':''}</span>Run panes on the host</span><span class="hs-meta">Flatpak</span><span class="hs-state">${hsWords[state]}</span><p class="hs-adv">${hsAdvice[state]}</p></div>`;
+const hsFrame=state=>`<div class="ad-frame"><div class="ap">${apG('Host shell',hsRow(state))}</div></div>`;
+const hsPane=state=>`<div class="hs-pane">${P('','❯','shell','pane 1 · local',`<div class="term pre"><span class="wa">${hsNotice[state]}</span>
+<span class="ro">❯</span> <span class="cur"></span></div>`)}</div>`;
+const hsStates=()=>`<div class="ad-grid hs-grid">${[
+ ['Off (the default)',hsFrame('off')],
+ ['On',hsFrame('on')],
+ ['Not available',hsFrame('unavailable')],
+ ['A new local pane while it is off',hsPane('off')],
+ ['A new local pane while it is not available',hsPane('unavailable')]
+].map(([cap,frame])=>`<div class="ad-cell"><div class="cap">${cap}</div>${frame}</div>`).join('')}</div>`;
+const hsDialog=()=>`<div class="scrim"></div><div class="ov float modal" role="dialog" aria-label="Settings" style="left:170px;top:50px;width:780px;height:580px;display:flex;overflow:hidden">
+  <div style="width:190px;border-right:1px solid var(--edge);padding:16px 0"><div class="it"><span>Appearance</span></div><div class="it"><span>Terminal</span></div><div class="it"><span>Shortcuts</span></div><div class="it on"><span>Accessibility</span></div><div class="it"><span>Sync</span></div><div class="it"><span>AI</span></div><div class="it"><span>Integrations</span></div><div class="it"><span>Privacy</span></div></div>
+  <div class="fill col" style="padding:20px 24px"><div class="grp lbl" style="padding:0">Accessibility</div>
+   <div class="field"><span class="dim">Motion</span><span class="seg" style="border-radius:6px"><button aria-pressed="true">System</button><button aria-pressed="false">On</button><button aria-pressed="false">Off</button></span></div><div class="field"><span class="dim">Contrast</span><span class="seg"><button aria-pressed="true">System</button><button aria-pressed="false">High</button><button aria-pressed="false">Normal</button></span></div>
+   <div class="ap" style="padding:6px 0 0">${apG('Host shell',hsRow('off'))}</div>
+   <span class="fill"></span>
+   <div class="row" style="gap:8px;justify-content:flex-end"><span class="btn">Reload from file</span><span class="btn">Key bindings</span><span class="btn">AI providers</span><span class="btn p">Close</span></div></div></div>`;
 
 /* The screens of the browser build (docs/design.md 6.28 to 6.30). The page before sign-in is a ground with one box, with no window around it. */
 const wbHead='<div class="wb-brand"><b class="wb-mark">holzWave</b><span class="wb-host dim" title="The server">holz.example.net</span></div>';
@@ -1388,6 +1437,7 @@ const lkViews={
  images:()=>lkChrome()+lkBody(imScene())+status()
 };
 ovl['link-ask']=lkAsk();
+ovl['host-shell']=hsDialog();
 const views=[
  ['alltag','Daily','Every level at a glance: workspaces as pills, tabs below, panes inside. Panes: local shell, SSH with Kubernetes context (reconnecting here), SFTP editor, Markdown preview, system monitor. Hosts, context, history and widgets on the right.'],
  ['palette','Palette ⌘K','Every action by name: layout, connect, switch, themes. The way to reach anything without its own button. With the Browser platform the tear-off entry is gone and Toggle full screen is listed, without a chord.'],
@@ -1399,6 +1449,8 @@ const views=[
  ['login','Login prompt','The server of a saved connection asks a question to log in (a one-time code, a PAM prompt). The title and the host line are your own saved connection; everything the server wrote sits in the bordered block under the fixed sentence that says where it comes from. A hidden field is a password or a code, a shown field echoes; Enter sends, Esc cancels, and nothing is stored.'],
  ['lan','Local network notice','The notice of the first start on a Mac with macOS 15 or later: why holzWave needs the local network (SSH, AI servers on other computers, a Nextcloud) and that macOS asks next. Allow is the only button that touches the network; Not now, Escape and a click outside end it for good. Text only, the box of the Settings dialog.'],
  ['lanstates','Local network states','The group Local network of the Settings dialog in four states: allowed, denied (underlined and marked !), not asked yet, and not known (marked ?). The state is words first; the buttons are Open System Settings always, Allow when macOS has not been asked, Check again when the state is denied or not known. macOS only.'],
+ ['host-shell','Host shell','The group Host shell of the Settings dialog on the Linux window, inside a Flatpak, in its default state: off. It sits after Accessibility and before the buttons, one switch with the name Run panes on the host, the dim meta Flatpak, the state word at the right and one sentence of advice. Outside a Flatpak the group is absent, not disabled.'],
+ ['host-shell-states','Host shell states','The group Host shell in its three states and the line a new local pane shows while the switch is off: off (the word), on (warn, underlined and marked !, the box ticked) and not available (marked ?, the box dashed and disabled), each with its advice; and a local pane for the off state and one for the not available state, whose first line says it runs inside the Flatpak sandbox and names the setting or the missing permission. Every state has a word besides its colour.'],
  ['settings','Settings','Themes (including custom), font, UI scale, accessibility (system or explicit), key binding editor, sync, AI, privacy.'],
  ['keys','Shortcuts','The key binding editor. Grouped by pane, tab, workspace and tools. Always shows the keys of the running platform (see the platform switch). Capture, conflicts and fixed shortcuts are visible.'],
  ['preview','Previews','File browser (local and SFTP) with image, PDF and video as panes of their own. Markdown and the editor are in Daily. Space in the browser opens the preview beside it.'],
@@ -1448,7 +1500,7 @@ const views=[
 const vb=$('#views');let cur='alltag';
 function render(){
   const st=$('#stage');
-  st.innerHTML=`<div class="m${cur.startsWith('web-')?' web':''}">${base(cur)}${(cur==='keys'?keysModal($('#root').dataset.os):cur==='kiactions'?aiPalette($('#root').dataset.os):ovl[cur==='kint'||cur==='kintstates'||cur==='kintctx'||cur==='kiwsh'||cur==='kiwshstates'||cur==='kidevice'||cur==='kidevicestates'||cur==='lanstates'||cur==='kiexplain'||cur==='kidescribe'||cur==='alltag'||cur==='search'||cur==='copy'||cur==='ki'||cur==='kichats'||cur==='kisidecards'||cur==='kipane'||cur==='kistates'||cur==='kiask'||cur==='kioffer'||cur==='kiapprove'||cur==='kiapprovestates'||cur==='kiwrite'||cur==='kiwritestates'||cur==='kicommand'||cur==='kicommandstates'||cur==='preview'?'':cur]||'')}</div>`;
+  st.innerHTML=`<div class="m${cur.startsWith('web-')?' web':''}">${base(cur)}${(cur==='keys'?keysModal($('#root').dataset.os):cur==='kiactions'?aiPalette($('#root').dataset.os):ovl[cur==='kint'||cur==='kintstates'||cur==='kintctx'||cur==='kiwsh'||cur==='kiwshstates'||cur==='kidevice'||cur==='kidevicestates'||cur==='lanstates'||cur==='host-shell-states'||cur==='kiexplain'||cur==='kidescribe'||cur==='alltag'||cur==='search'||cur==='copy'||cur==='ki'||cur==='kichats'||cur==='kisidecards'||cur==='kipane'||cur==='kistates'||cur==='kiask'||cur==='kioffer'||cur==='kiapprove'||cur==='kiapprovestates'||cur==='kiwrite'||cur==='kiwritestates'||cur==='kicommand'||cur==='kicommandstates'||cur==='preview'?'':cur]||'')}</div>`;
   $('#note').textContent=views.find(v=>v[0]===cur)[2];
   vb.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.v===cur));
 }
