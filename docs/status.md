@@ -57,6 +57,24 @@
 - Tauri 3 and `libghostty-vt` are pre-release; their APIs move and the build pins exact versions.
 - A single maintainer. Everything is built and tested locally; the one exception is a manual GitHub workflow (`linux-packages.yml`) that builds the Linux packages on an amd64 runner, because Zig 0.17 crashes in the Mac's emulated container. It never runs on a push.
 
+## Distribution
+
+Every release is a beta, and no build checks for or announces a new version. The state of each channel, in the one set of
+words that [distribution.md](distribution.md) defines (that page is the source; a test of the repository fails when this list
+differs from it):
+
+- **GitHub downloads:** `available`
+- **Homebrew:** `available`
+- **Flathub:** `not submitted`
+- **Microsoft Store:** `on hold`
+- **Obtainium:** `not built`
+- **F-Droid:** `not built`
+
+Builds that were never run: the Linux desktops (GNOME, KDE Plasma, Xfce, Cinnamon, MATE, Sway, Hyprland, i3), Linux aarch64
+on real hardware, Windows ARM64, the Flatpak on any machine, the Microsoft Store package (it was never built into an installed
+package), and Android (no app exists). No release has been signed with a real key; the rows that will hold the results are in
+Part 12 of [test-plan.md](test-plan.md).
+
 ## What it aims to do differently
 
 - One Rust core for desktop and mobile, so the same layout and sync work on a phone.

@@ -23,6 +23,11 @@ Nextcloud, and an AI chat that sees your terminal only after you share that pane
 > The author has run it on macOS (Apple Silicon) and Windows. The Linux packages of `0.0.1-beta2` were built on a GitHub runner
 > and were not started on a Linux desktop by the author for this release (earlier alphas and betas were run on Linux). The window in the images below is the
 > design for the release; the table [What works today](#what-works-today) says what is built and what is tested.
+>
+> **Where to get it.** Two ways are available today: the downloads on the releases page and the Homebrew tap, both below.
+> Every other channel (Flathub, the Microsoft Store, Obtainium, F-Droid) is not available: the state of each, with one
+> word, is on the [distribution page](docs/distribution.md), together with the builds that were never run (Linux desktops,
+> Linux aarch64, Windows ARM64, the Flatpak and the Microsoft Store package on any machine, Android).
 
 ## Install (macOS, Apple Silicon)
 
@@ -157,7 +162,7 @@ Built and tested by the author on macOS and Windows, and on Linux up to `0.0.1-b
 | **The web build:** holzWave in a browser from one container, with sign-in by passkey, password and authenticator code or single sign-on, one user of its own for every person, and the Compose and Helm files | built, tested against a test identity provider, virtual authenticators, the container tests and a Pebble certificate authority, not yet against a real cluster, a real identity provider, hardware authenticators or real networks; Linux container only, one replica, a restart ends every pane ([Server guide](docs/server.md), Part 10 of the test plan) |
 | Pictures (the Kitty graphics protocol, all three levels) and hyperlinks (OSC 8) in a pane: a link the page treats as one is dotted at rest and shows its address in the status line, a link it refuses has no dots, a click it refuses is answered in words, and a link whose text names another place asks first; only the schemes on your list open, and the page keeps its picture memory within your setting for each pane and four times it for all panes | built, tested against the terminal engine, a real server in WebKit and Chromium and a page with a mock core; not tried with a real program that sends pictures or links, not by an automated test of the desktop window, not with a real SSH pane or a real opener of Linux or Windows, and not on Windows |
 | A recorded performance baseline and a guard (`sh scripts/perf-check.sh`) for the core, the server and the page in two browsers | built, recorded on the author's Mac and in a Linux container, judged by the recorded numbers and no fixed target; Windows is not measured and the desktop window's key to glass is not measured |
-| Android | planned; iOS is not planned (no Apple developer account) |
+| Android | planned and not built, so no Android package exists and no Android channel is open; when it is built it will not be registered with Google's developer verification (a paid account), so from the 2027 rollout it installs only through Android's advanced flow or ADB ([distribution.md](docs/distribution.md)). iOS is not planned (no Apple developer account) |
 
 Per-phase detail: [docs/status.md](docs/status.md).
 
