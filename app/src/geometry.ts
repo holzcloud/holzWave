@@ -1,6 +1,7 @@
 // Pure geometry: where panes and grids are on the canvas and which pane or cell is under a point.
 // No DOM, no state: everything arrives as an argument, so node can import and test this module.
 import type { Metrics, PxRect } from "./frame.js";
+import type { Layout } from "./layoutclass.js";
 import type { CellSize, Divider, UnitRect, View } from "./types.js";
 
 /** CSS px between a pane's edge and its grid on the left, right and bottom (the header covers the top). */
@@ -9,21 +10,29 @@ export const PAD = 6;
 /** The height of a pane's header strip in root font sizes: 24 px at the base size of 12 px (docs/design.md section 6.1). */
 export const HEADER_REM = 24 / 12;
 
+/** The pane header's height on the tablet layout in root font sizes: 44 px at the base size of 12 px, the size of a finger's target. */
+export const TABLET_HEADER_REM = 44 / 12;
+
 /** The root font size at UI scale 100 %: what `headerHeight` assumes for a size that is not a size. */
 const BASE_ROOT_PX = 12;
 
 /**
  * The header height in CSS px for a root font size: `HEADER_REM` root sizes, snapped to whole device pixels so the
  * grid below it starts on a pixel edge. The UI scale changes the root size, so header and chrome scale together.
+ * The tablet layout has a taller strip (`TABLET_HEADER_REM`); any other layout, or none, gives the desktop's.
  */
-export function headerHeight(rootFontPx: number, dpr: number): number {
+export function headerHeight(rootFontPx: number, dpr: number, layout?: Layout): number {
   const root = Number.isFinite(rootFontPx) && rootFontPx > 0 ? rootFontPx : BASE_ROOT_PX;
   const ratio = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
-  return Math.max(1, Math.round(HEADER_REM * root * ratio)) / ratio;
+  const rem = layout === "tablet" ? TABLET_HEADER_REM : HEADER_REM;
+  return Math.max(1, Math.round(rem * root * ratio)) / ratio;
 }
 
 /** CSS px of a divider's hit area across its axis. */
 export const DIVIDER_HIT = 8;
+
+/** CSS px of a divider's hit area across its axis on the tablet layout: wide enough for a finger, while the drawn line stays 1 px. */
+export const TABLET_DIVIDER_HIT = 24;
 
 /** The pane rectangle in CSS pixels inside the canvas. */
 export function paneRect(m: Metrics, r: UnitRect): PxRect {
@@ -69,12 +78,15 @@ export function fitCells(m: Metrics, r: UnitRect, headerPx: number): CellSize {
   };
 }
 
-/** The hit area of a divider in CSS pixels: `DIVIDER_HIT` wide across its axis, the whole area along it. */
-export function dividerRect(m: Metrics, d: Divider): PxRect {
+/**
+ * The hit area of a divider in CSS pixels: `hit` wide across its axis (`DIVIDER_HIT` unless the layout asks for more),
+ * centred on the line, the whole area along it.
+ */
+export function dividerRect(m: Metrics, d: Divider, hit: number = DIVIDER_HIT): PxRect {
   const a = paneRect(m, d.area);
   return d.axis === "Row"
-    ? { x: a.x + a.w * d.ratio - DIVIDER_HIT / 2, y: a.y, w: DIVIDER_HIT, h: a.h }
-    : { x: a.x, y: a.y + a.h * d.ratio - DIVIDER_HIT / 2, w: a.w, h: DIVIDER_HIT };
+    ? { x: a.x + a.w * d.ratio - hit / 2, y: a.y, w: hit, h: a.h }
+    : { x: a.x, y: a.y + a.h * d.ratio - hit / 2, w: a.w, h: hit };
 }
 
 /**
