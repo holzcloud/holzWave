@@ -41,6 +41,7 @@ EM_MIN=$(pin HOLZWAVE_EMULATOR_MIN)
 ZIG=$(pin HOLZWAVE_ZIG)
 TARGET=$(pin HOLZWAVE_RUST_ANDROID_TARGET)
 JDK=$(pin HOLZWAVE_JDK_MAJOR)
+API=$(pin HOLZWAVE_ANDROID_API)
 
 n=0
 # mkcase: build the fake machine in $c. Variables (defaults in brackets) shape it:
@@ -52,6 +53,14 @@ mkcase() {
   mkdir -p "$c/bin" "$c/home" "$c/brew" "$c/jdk/bin" "$c/repo/scripts" "$sdk/ndk/$NDK" "$sdk/build-tools/$BUILD_TOOLS" \
     "$sdk/platform-tools" "$sdk/emulator" "$sdk/cmdline-tools/latest/bin"
   [ "${C_PLATFORM:-yes}" = yes ] && mkdir -p "$sdk/platforms/$PLATFORM"
+  if [ "${C_TOOLCHAIN:-yes}" = yes ]; then
+    tbin="$sdk/ndk/$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin"
+    mkdir -p "$tbin"
+    for t in "aarch64-linux-android$API-clang" "aarch64-linux-android$API-clang++" llvm-ar llvm-ranlib; do
+      : > "$tbin/$t"
+      chmod +x "$tbin/$t"
+    done
+  fi
   printf 'Pkg.Revision = %s\n' "${C_NDK_REV:-$NDK}" > "$sdk/ndk/$NDK/source.properties"
   printf 'Pkg.Revision=%s\n' "$PT_MIN" > "$sdk/platform-tools/source.properties"
   printf 'Pkg.Revision=%s\n' "$EM_MIN" > "$sdk/emulator/source.properties"
@@ -183,6 +192,31 @@ fi
 real_once=$(cd "$root" && env -i HOME="$HOME" PATH="/usr/bin:/bin" sh -c '. scripts/android-env.sh; printf %s "$PATH"')
 real_twice=$(cd "$root" && env -i HOME="$HOME" PATH="/usr/bin:/bin" sh -c '. scripts/android-env.sh; . scripts/android-env.sh; printf %s "$PATH"')
 [ "$real_once" = "$real_twice" ] && ok "the same in the repository root (with scripts/env.sh)" || bad "PATH changed in the repository root"
+
+echo "test 7: the NDK compiler and linker of the one target are exported"
+mkcase
+exports=$(cd "$c/repo" && env -i HOME="$c/home" HOMEBREW_PREFIX="$c/brew" PATH="/usr/bin:/bin" HOLZWAVE_ANDROID_HOME="$sdk" HOLZWAVE_JAVA_HOME="$c/jdk" \
+  sh -c '. scripts/android-env.sh; env' | grep -E '^(CC|CXX|AR|RANLIB)_aarch64_linux_android=|^CARGO_TARGET_[A-Z0-9_]+=' | sort)
+want_exports() { # the six variables, sorted, for the NDK of the current case
+  tbin="$sdk/ndk/$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin"
+  printf '%s\n' "AR_aarch64_linux_android=$tbin/llvm-ar" "CARGO_TARGET_AARCH64_LINUX_ANDROID_AR=$tbin/llvm-ar" \
+    "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$tbin/aarch64-linux-android$API-clang" \
+    "CC_aarch64_linux_android=$tbin/aarch64-linux-android$API-clang" "CXX_aarch64_linux_android=$tbin/aarch64-linux-android$API-clang++" \
+    "RANLIB_aarch64_linux_android=$tbin/llvm-ranlib"
+}
+[ "$exports" = "$(want_exports)" ] && ok "CC, CXX, AR, RANLIB and the cargo linker and archiver point into the pinned NDK (API level $API)" \
+  || bad "compiler exports: $exports"
+others=$(cd "$c/repo" && env -i HOME="$c/home" HOMEBREW_PREFIX="$c/brew" PATH="/usr/bin:/bin" HOLZWAVE_ANDROID_HOME="$sdk" HOLZWAVE_JAVA_HOME="$c/jdk" \
+  sh -c '. scripts/android-env.sh; env' | grep -Ei 'x86_64_linux_android|armv7|i686|thumbv7' | head -n 1)
+[ -z "$others" ] && ok "no variable names another Android target" || bad "another target in the environment: $others"
+C_TOOLCHAIN=no; mkcase; unset C_TOOLCHAIN
+none=$(cd "$c/repo" && env -i HOME="$c/home" HOMEBREW_PREFIX="$c/brew" PATH="/usr/bin:/bin" HOLZWAVE_ANDROID_HOME="$sdk" HOLZWAVE_JAVA_HOME="$c/jdk" \
+  sh -c '. scripts/android-env.sh; env' | grep -cE '_aarch64_linux_android=|CARGO_TARGET_AARCH64')
+[ "$none" = 0 ] && ok "an NDK without the compiler gets no variable (the check scripts say why)" || bad "variables exported without a compiler: $none"
+mkcase
+twice=$(cd "$c/repo" && env -i HOME="$c/home" HOMEBREW_PREFIX="$c/brew" PATH="/usr/bin:/bin" HOLZWAVE_ANDROID_HOME="$sdk" HOLZWAVE_JAVA_HOME="$c/jdk" \
+  sh -c '. scripts/android-env.sh; . scripts/android-env.sh; env' | grep -E '_aarch64_linux_android=|CARGO_TARGET_AARCH64' | sort)
+[ "$twice" = "$(want_exports)" ] && ok "sourcing twice leaves the same compiler variables" || bad "compiler variables after sourcing twice: $twice"
 
 echo "test 4: nothing was installed, added, updated or downloaded"
 if grep -Eq '^(brew|curl|avdmanager|sdkmanager) ' "$LOG"; then

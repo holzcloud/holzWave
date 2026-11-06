@@ -3,7 +3,9 @@
 #   . scripts/android-env.sh
 #
 # What it does: sources scripts/env.sh (Rust and Zig) when that file exists, names the Android toolchain pins in one
-# place, and exports JAVA_HOME, ANDROID_HOME, ANDROID_NDK_HOME and NDK_HOME and extends PATH. Each directory is added to
+# place, and exports JAVA_HOME, ANDROID_HOME, ANDROID_NDK_HOME and NDK_HOME, the NDK compiler, archiver and linker of the one
+# Rust target (so that a plain `cargo check --target aarch64-linux-android` finds a C compiler for build scripts) and extends
+# PATH. Each directory is added to
 # PATH only when it exists and is not on PATH yet, so sourcing the file twice changes nothing. It installs nothing and
 # writes nothing: the JDK, the SDK packages, the NDK and the Rust target are installed by the owner (docs/build-android.md),
 # and `sh scripts/android-env-check.sh` reads the machine against the pins below.
@@ -19,6 +21,7 @@
 #   platform-tools, emulator: a minimum, not an exact version (what the SDK manager offered on 2026-11-06)
 #   Zig 0.17.1           exactly, as in docs/building.md
 #   one Rust Android target: aarch64-linux-android (ABI arm64-v8a); nothing else is built, listed or documented
+#   API level 31        the level of the NDK compiler wrapper (aarch64-linux-android31-clang): the app's minSdk
 #
 # Where the SDK is looked for, the first one winning: $HOLZWAVE_ANDROID_HOME; $HOME/Library/Android/sdk on macOS or
 # $HOME/Android/Sdk elsewhere (the Android Studio place) when that directory exists; Homebrew's
@@ -39,6 +42,7 @@ HOLZWAVE_PLATFORM_TOOLS_MIN=37.0.1
 HOLZWAVE_EMULATOR_MIN=37.2.13
 HOLZWAVE_ZIG=0.17.1
 HOLZWAVE_RUST_ANDROID_TARGET=aarch64-linux-android
+HOLZWAVE_ANDROID_API=31
 
 if [ -f scripts/env.sh ]; then
     . scripts/env.sh
@@ -75,6 +79,32 @@ fi
 # The NDK is set explicitly, by path, for the reason in the header.
 ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$HOLZWAVE_NDK_VERSION"
 NDK_HOME="$ANDROID_NDK_HOME"
+
+# The NDK's own LLVM toolchain, for the one Rust target. Cargo's `cc` crate and the linker setting look the compiler up by
+# these names; without them a build script that compiles C stops with `ToolNotFound: aarch64-linux-android-clang`. The
+# `tauri android build` command sets the same variables itself for its own runs, so these only serve a direct `cargo`. The
+# prebuilt directory is named after the host (darwin-x86_64 also runs on Apple silicon); the first one that exists is used.
+# The variables are exported only when the compiler is there, so a machine without the NDK gets none and the check says why.
+unset HOLZWAVE_NDK_BIN
+for _hw_host in darwin-x86_64 linux-x86_64 windows-x86_64; do
+    if [ -d "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$_hw_host/bin" ]; then
+        HOLZWAVE_NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$_hw_host/bin"
+        break
+    fi
+done
+unset _hw_host
+if [ -n "${HOLZWAVE_NDK_BIN:-}" ] && [ -x "$HOLZWAVE_NDK_BIN/aarch64-linux-android${HOLZWAVE_ANDROID_API}-clang" ]; then
+    CC_aarch64_linux_android="$HOLZWAVE_NDK_BIN/aarch64-linux-android${HOLZWAVE_ANDROID_API}-clang"
+    CXX_aarch64_linux_android="$HOLZWAVE_NDK_BIN/aarch64-linux-android${HOLZWAVE_ANDROID_API}-clang++"
+    AR_aarch64_linux_android="$HOLZWAVE_NDK_BIN/llvm-ar"
+    RANLIB_aarch64_linux_android="$HOLZWAVE_NDK_BIN/llvm-ranlib"
+    CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
+    CARGO_TARGET_AARCH64_LINUX_ANDROID_AR="$AR_aarch64_linux_android"
+    export HOLZWAVE_NDK_BIN CC_aarch64_linux_android CXX_aarch64_linux_android AR_aarch64_linux_android \
+        RANLIB_aarch64_linux_android CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER CARGO_TARGET_AARCH64_LINUX_ANDROID_AR
+else
+    unset HOLZWAVE_NDK_BIN
+fi
 
 # The JDK.
 if [ -n "${HOLZWAVE_JAVA_HOME:-}" ]; then
