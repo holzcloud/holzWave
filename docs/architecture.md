@@ -191,7 +191,7 @@ thread and is driven over a channel (section 5). This shapes the whole concurren
 
 ## 6. The app protocol
 
-The webview talks to the core through a deny-by-default set of 124 commands and 17 events. The tables below list the
+The webview talks to the core through a deny-by-default set of 130 commands and 17 events. The tables below list the
 commands of the terminal core, of the AI chat and of the integrations; the golden lists every command. The Rust types are the
 source of truth; `app/tests/fixtures/protocol.json` is the golden written from them (`UPDATE_FIXTURES=1`) and read by
 the TypeScript tests too, so a renamed argument or a changed payload fails on both sides at once. Arguments are
@@ -220,6 +220,7 @@ snake_case everywhere (`cell_w`, `allow_unsafe`).
 | Integrations: programs | `integration_binary_set(tool, path)`, `integration_binary_clear(tool)` | the four tools again; a program is accepted only when its file name is one of the tool's own, it is an absolute path and the core finds it usable |
 | Integrations: profiles and secrets | `integration_profiles`, `integration_profile_save(profile)`, `integration_profile_remove(id)`, `integration_secret_set(profile, name, value)`, `integration_secret_clear(profile, name)` | the profiles and the notes about the files that could not be used, where a secret variable is a name with `has_value` and never the value (saving and removing a profile answer them again); nothing for the two secret commands: a value goes in and never comes out |
 | `wsh` on a host | `wsh_install(pane)` | the sentence the pane also shows; the page names the pane, never a host |
+| Secret vault (Android) | `vault_status`, `vault_unlock`, `vault_lock`, `vault_protect(on)`, `vault_reset`, `vault_hidden(hidden)` | `{state, protection, has_screen_lock, strongbox, can_protect, notice, reason}` in words (`state` is `none` on a host that has no vault); a failure is one of the words `cancelled`, `lost`, `no_screen_lock`, `failed`, or the sentence `no secret vault on this device`; never a key, a secret or the text of the keystore. The browser build does not have them |
 
 Every refusal of the AI commands is an object with `code`, `reason` and `text` (the page words its own sentence from the
 code and the reason and shows the text only as the core's plain sentence); a plain string is the shape of the older commands. The

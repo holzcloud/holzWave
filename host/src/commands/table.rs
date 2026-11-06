@@ -787,6 +787,42 @@ macro_rules! host_commands {
                 answers: (), fails: IntegrationFault,
                 run: integrations::integration_secret_clear, web: same
             }
+            {
+                name: vault_status, shell: generated, group: vault, scope: none, mode: sync, cap: CAP_DEFAULT,
+                args: [],
+                answers: VaultStatusMsg,
+                run: vault::vault_status, web: unavailable
+            }
+            {
+                name: vault_unlock, shell: generated, group: vault, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: VaultStatusMsg, fails: String,
+                run: vault::vault_unlock, web: unavailable
+            }
+            {
+                name: vault_lock, shell: generated, group: vault, scope: none, mode: sync, cap: CAP_DEFAULT,
+                args: [],
+                answers: VaultStatusMsg, fails: String,
+                run: vault::vault_lock, web: unavailable
+            }
+            {
+                name: vault_protect, shell: generated, group: vault, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [on: bool],
+                answers: VaultStatusMsg, fails: String,
+                run: vault::vault_protect, web: unavailable
+            }
+            {
+                name: vault_reset, shell: generated, group: vault, scope: none, mode: sync, cap: CAP_DEFAULT,
+                args: [],
+                answers: VaultStatusMsg, fails: String,
+                run: vault::vault_reset, web: unavailable
+            }
+            {
+                name: vault_hidden, shell: generated, group: vault, scope: none, mode: sync, cap: CAP_DEFAULT,
+                args: [hidden: bool],
+                answers: (), fails: String,
+                run: vault::vault_hidden, web: unavailable
+            }
         }
     };
 }

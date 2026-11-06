@@ -14,8 +14,9 @@ use std::sync::Arc;
 use holzwave_core::secrets::SecretStore;
 use holzwave_core::{Error, Result};
 
-/// What a locked store says, and what the page shows for it. The text of the server's store error is exactly this.
-pub const SECRETS_LOCKED: &str = "secrets are locked";
+/// What a locked store says, and what the page shows for it. The text of the server's store error is exactly this, and it
+/// is the text of the Android vault's error ([`holzwave_core::vault::LOCKED_TEXT`]), so one test of [`is_locked`] covers both.
+pub const SECRETS_LOCKED: &str = holzwave_core::vault::LOCKED_TEXT;
 
 thread_local! {
     /// Whether a call to a watched store on this thread failed because the store is locked, since the last [`watching`].

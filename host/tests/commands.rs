@@ -1562,7 +1562,8 @@ fn the_commands_that_need_the_desktop_answer_one_sentence_and_run_nothing() {
 #[test]
 fn the_unavailable_rows_of_this_group_are_exactly_these_seven() {
     let rows: BTreeSet<&str> =
-        COMMANDS.iter().filter(|row| row.web == Web::Unavailable && !FIRST_GROUPS.contains(&row.group)).map(|row| row.name).collect();
+        COMMANDS.iter().filter(|row| row.web == Web::Unavailable && !FIRST_GROUPS.contains(&row.group) && row.group != "vault").map(|row| row.name).collect();
+    // The group `vault` has its six unavailable rows pinned in `vault_commands.rs`.
     let named: BTreeSet<&str> = UNAVAILABLE_BROWSER.iter().map(|(name, _)| *name).collect();
     assert_eq!(rows, named);
 }
@@ -1924,8 +1925,9 @@ fn rows_expected() -> usize {
     golden_commands().len()
 }
 
-/// The 15 commands the browser build does not have: eight of the first table plan, seven of the second.
-const THE_UNAVAILABLE: [&str; 15] = [
+/// The 21 commands the browser build does not have: eight of the first table plan, seven of the second, and the six that
+/// drive the vault of a phone.
+const THE_UNAVAILABLE: [&str; 21] = [
     "attach_pane",
     "attach_tab",
     "clipboard_text",
@@ -1941,6 +1943,12 @@ const THE_UNAVAILABLE: [&str; 15] = [
     "reveal_path",
     "tear_off_pane",
     "tear_off_tab",
+    "vault_hidden",
+    "vault_lock",
+    "vault_protect",
+    "vault_reset",
+    "vault_status",
+    "vault_unlock",
 ];
 
 /// The four commands that carry a document or a long typed message and so take a larger argument text.
@@ -2175,12 +2183,12 @@ fn total_cover_the_table_is_the_golden_and_the_recorded_surface_and_nothing_else
 }
 
 #[test]
-fn the_groups_of_the_table_are_exactly_the_nine_the_table_plans_made() {
+fn the_groups_of_the_table_are_exactly_the_ten_the_table_plans_made() {
     let groups: BTreeSet<&str> = COMMANDS.iter().map(|row| row.group).collect();
 
     assert_eq!(
         groups.into_iter().collect::<Vec<_>>(),
-        ["ai", "blocks", "connections", "files", "history_sync", "integrations", "layout", "settings", "terminal"]
+        ["ai", "blocks", "connections", "files", "history_sync", "integrations", "layout", "settings", "terminal", "vault"]
     );
 }
 
@@ -2220,7 +2228,7 @@ fn surface_file_lists_every_golden_command() {
     let lines = surface_lines();
     let surface_names: BTreeSet<&str> = lines.iter().map(|(name, _)| *name).collect();
 
-    assert_eq!(lines.len(), 124, "one line for each command that was declared");
+    assert_eq!(lines.len(), 130, "one line for each command that was declared");
     assert_eq!(surface_names.len(), lines.len(), "no command twice");
     assert_eq!(surface_names, golden_names);
     for (_, line) in &lines {

@@ -1852,6 +1852,21 @@ impl AppCore {
         self.sync.background();
     }
 
+    /// The vault was unlocked: a sync that was paused for it starts one run at once, on a thread of its own, so the
+    /// command that unlocked answers without waiting for the network.
+    pub fn vault_unlocked(&self) {
+        if !self.sync.resume_due() {
+            return;
+        }
+        let me = self.me.clone();
+        let started = std::thread::Builder::new().name("sync-resume".into()).spawn(move || {
+            if let Some(core) = me.upgrade() {
+                let _ = core.sync.run();
+            }
+        });
+        drop(started);
+    }
+
     /// The saved connections, each with whether a secret is saved for it. Asks the keychain, so not on the main thread.
     pub fn connections_list(&self) -> Vec<ProfileView> {
         self.connections.list()
@@ -1875,6 +1890,16 @@ impl AppCore {
         }
         // Refused before a tab is made for it (a WSL connection off Windows).
         self.connections.ensure_opens_here(id).map_err(|e| e.to_string())?;
+        // A connection that needs a saved password or key passphrase is refused while the secret store is locked, before a
+        // tab is made for it; it says the one sentence the page knows and offers the unlock. A login that asks the store
+        // for nothing (an agent, a question the person answers) does not read it and is not held back. Any other refusal of
+        // the store (a secret that is missing) is said where it always was, when the pane starts.
+        if self.connections.kind_of(id) == Some(ConnectionKind::Ssh)
+            && let Err(error) = self.connections.ssh_target(id)
+            && crate::locked::is_locked(&error)
+        {
+            return Err(crate::locked::SECRETS_LOCKED.to_owned());
+        }
         let view = self.new_tab_in(label)?;
         self.connections.assign(view.focus, id).map_err(|e| e.to_string())?;
         Ok(view)

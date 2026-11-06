@@ -132,6 +132,12 @@
     "allow-integration-profile-save",
     "allow-integration-profile-remove",
     "allow-integration-secret-set",
-    "allow-integration-secret-clear"
+    "allow-integration-secret-clear",
+    "allow-vault-status",
+    "allow-vault-unlock",
+    "allow-vault-lock",
+    "allow-vault-protect",
+    "allow-vault-reset",
+    "allow-vault-hidden"
   ]
 }

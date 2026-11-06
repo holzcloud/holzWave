@@ -12,6 +12,8 @@ use holzwave_core::sync::engine::{ConfigSource, Promoted, Report, Syncer, is_uno
 use holzwave_core::sync::webdav::WebDav;
 use serde::{Deserialize, Serialize};
 
+use crate::locked::{SECRETS_LOCKED, is_locked};
+
 const FILE: &str = "sync.json";
 const PASSWORD: &str = "sync:password";
 const PASSPHRASE: &str = "sync:passphrase";
@@ -33,7 +35,9 @@ pub struct SyncView {
     pub configured: bool,
     pub endpoint: String,
     pub user: String,
-    /// `off`, `idle`, `syncing` or `error`.
+    /// `off`, `idle`, `syncing`, `paused` or `error`. `paused` is a locked secret store: the app password and the
+    /// passphrase cannot be read until the person unlocks it, no run is made and there is no error text; the first
+    /// unlock starts one run at once.
     pub state: &'static str,
     /// Seconds since the epoch of the last successful run.
     pub last: Option<i64>,
@@ -55,6 +59,28 @@ fn now() -> i64 {
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Why a run could not be made.
+enum Fault {
+    /// The secret store is locked: the run waits for the unlock and is not an error.
+    Locked,
+    /// Anything else, as the text the page shows.
+    Failed(String),
+}
+
+impl Fault {
+    /// The fault of a failure of the core: a locked store is its own case, everything else is its text.
+    fn of(error: impl Into<holzwave_core::Error>) -> Fault {
+        let error = error.into();
+        if is_locked(&error) { Fault::Locked } else { Fault::Failed(error.to_string()) }
+    }
+}
+
+impl From<&str> for Fault {
+    fn from(text: &str) -> Fault {
+        Fault::Failed(text.to_owned())
+    }
 }
 
 /// Clears the flag of a run in progress when it goes out of scope.
@@ -121,9 +147,20 @@ impl SyncRuntime {
             return Err("The app password is empty.".into());
         }
         WebDav::new(endpoint, user, password).map_err(|e| e.to_string())?;
+        // A locked store is said before anything is written: no account file, no secret, no state change.
+        if self.locked() {
+            return Err(SECRETS_LOCKED.to_owned());
+        }
         let before = (self.secrets.get(PASSWORD).ok().flatten(), self.secrets.get(PASSPHRASE).ok().flatten(), Self::read_account(&self.dir));
         self.secrets.set(PASSWORD, password).map_err(|e| e.to_string())?;
-        self.secrets.set(PASSPHRASE, passphrase).map_err(|e| e.to_string())?;
+        if let Err(e) = self.secrets.set(PASSPHRASE, passphrase) {
+            // The first write went through and the second did not (the store locked in between): put the first back.
+            let _ = match &before.0 {
+                Some(old) => self.secrets.set(PASSWORD, old),
+                None => self.secrets.delete(PASSWORD),
+            };
+            return Err(e.to_string());
+        }
         let account = Account { endpoint: endpoint.to_owned(), user: user.to_owned() };
         write_atomic(&self.dir.join(FILE), &serde_json::to_vec_pretty(&account).unwrap_or_default()).map_err(|e| e.to_string())?;
         self.set(|v| {
@@ -175,6 +212,11 @@ impl SyncRuntime {
     /// One run now. Blocks; call it off the main thread. A run that is already going is not doubled.
     pub fn run(&self) -> Result<SyncView, String> {
         let account = Self::read_account(&self.dir).ok_or("Sync is not set up.")?;
+        // A locked store pauses the sync without a run, a network call or a state that flickers through `syncing`.
+        if self.locked() {
+            self.pause();
+            return Ok(self.view());
+        }
         if self.running.swap(true, Ordering::AcqRel) {
             return Ok(self.view());
         }
@@ -185,7 +227,12 @@ impl SyncRuntime {
         let result = match outcome {
             // `running` stays set until the apply is done, so no second run stages a file while this one moves them.
             Ok(report) => Ok(self.complete(&report)),
-            Err(e) => {
+            // The store locked between the check above and the read of the password: the same pause, not an error.
+            Err(Fault::Locked) => {
+                self.pause();
+                Ok(self.view())
+            }
+            Err(Fault::Failed(e)) => {
                 self.set(|v| {
                     v.state = "error";
                     v.error = Some(e.clone());
@@ -194,6 +241,25 @@ impl SyncRuntime {
             }
         };
         result
+    }
+
+    /// Whether the secret store is locked now: the app password cannot be read because of it.
+    fn locked(&self) -> bool {
+        matches!(self.secrets.get(PASSWORD), Err(error) if is_locked(&error))
+    }
+
+    /// The state of a sync that waits for the unlock: no error text, and what the last run reported stays as it was.
+    fn pause(&self) {
+        self.set(|v| {
+            v.state = "paused";
+            v.error = None;
+        });
+    }
+
+    /// Whether a run is due now because the store was unlocked: sync is set up and its state is `paused`.
+    pub fn resume_due(&self) -> bool {
+        let view = lock(&self.view);
+        view.configured && view.state == "paused"
     }
 
     /// After a successful run: what the running app does not own is moved into place now, the rest stays staged for
@@ -219,23 +285,31 @@ impl SyncRuntime {
             if v.error.is_some() {
                 v.state = "error";
             }
+            // Every file that failed failed because the store locked during the run: the run waits for the unlock.
+            if !report.errors.is_empty() && report.errors.iter().all(|(_, why)| why == SECRETS_LOCKED) {
+                v.state = "paused";
+                v.error = None;
+            }
         });
     }
 
-    fn once(&self, account: &Account) -> Result<Report, String> {
-        let password = self.secrets.get(PASSWORD).map_err(|e| e.to_string())?.ok_or("The app password is missing from the keychain.")?;
-        let passphrase = self.secrets.get(PASSPHRASE).map_err(|e| e.to_string())?.ok_or("The passphrase is missing from the keychain.")?;
-        let backend = WebDav::new(&account.endpoint, &account.user, &password).map_err(|e| e.to_string())?;
+    fn once(&self, account: &Account) -> Result<Report, Fault> {
+        let password = self.secrets.get(PASSWORD).map_err(Fault::of)?.ok_or("The app password is missing from the keychain.")?;
+        let passphrase = self.secrets.get(PASSPHRASE).map_err(Fault::of)?.ok_or("The passphrase is missing from the keychain.")?;
+        let backend = WebDav::new(&account.endpoint, &account.user, &password).map_err(Fault::of)?;
         let source = ConfigSource::new(&self.dir, self.secrets.clone());
-        let mut syncer = Syncer::connect(backend, source, &self.dir, &passphrase).map_err(|e| e.to_string())?;
-        syncer.sync_once().map_err(|e| e.to_string())
+        let mut syncer = Syncer::connect(backend, source, &self.dir, &passphrase).map_err(Fault::of)?;
+        syncer.sync_once().map_err(Fault::of)
     }
 
-    /// The scheduled run: nothing when sync is off, and no complaint beyond the state the page shows.
+    /// The scheduled run: nothing when sync is off, and no complaint beyond the state the page shows. While the sync is
+    /// paused and the store still answers locked it does nothing at all, so the state does not move.
     pub fn background(&self) {
-        if self.view().configured {
-            let _ = self.run();
+        let view = self.view();
+        if !view.configured || (view.state == "paused" && self.locked()) {
+            return;
         }
+        let _ = self.run();
     }
 }
 
@@ -369,6 +443,34 @@ mod tests {
         assert_eq!(view.conflicts, 2, "the run's conflict and the kept copy: {view:?}");
         assert_eq!(view.files, 3, "the apply does not change the count of files");
         assert!(!view.restart);
+    }
+
+    #[test]
+    fn a_run_whose_files_all_failed_because_the_store_locked_is_paused_and_any_other_failure_is_an_error() {
+        let (rt, _calls, _dir) = applying("lk", Promoted::default());
+        let failed = |pairs: &[(&str, &str)]| Report {
+            errors: pairs.iter().map(|(name, why)| ((*name).to_owned(), (*why).to_owned())).collect(),
+            ..Report::default()
+        };
+        let view = rt.complete(&failed(&[("secrets.json", SECRETS_LOCKED)]));
+        assert_eq!((view.state, view.error.as_deref()), ("paused", None));
+        // One file that failed for another reason makes the run an error, and the text is the first failure's.
+        let view = rt.complete(&failed(&[("secrets.json", SECRETS_LOCKED), ("themes/a.json", "no space left")]));
+        assert_eq!((view.state, view.error.as_deref()), ("error", Some("secrets.json: secrets are locked")));
+        // A run with no failure is idle again.
+        assert_eq!(rt.complete(&Report::default()).state, "idle");
+    }
+
+    #[test]
+    fn only_a_configured_sync_in_the_paused_state_is_due_for_a_run_at_the_unlock() {
+        let (rt, secrets, dir) = runtime("due");
+        assert!(!rt.resume_due(), "a sync that is off has nothing to resume");
+        write_atomic(&dir.join(FILE), br#"{"endpoint":"http://127.0.0.1:1/dav","user":"u"}"#).unwrap();
+        let rt = SyncRuntime::new(dir.clone(), secrets);
+        assert!(!rt.resume_due(), "idle is not paused");
+        rt.pause();
+        assert!(rt.resume_due());
+        assert_eq!((rt.view().state, rt.view().error), ("paused", None));
     }
 
     #[test]

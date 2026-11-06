@@ -122,3 +122,9 @@ integration_profile_save|none|async|profile|ProfilesView|IntegrationFault
 integration_profile_remove|none|async|id|ProfilesView|IntegrationFault
 integration_secret_set|none|async|profile,name,value|()|IntegrationFault
 integration_secret_clear|none|async|profile,name|()|IntegrationFault
+vault_status|none|sync||VaultStatusMsg|-
+vault_unlock|none|async||VaultStatusMsg|String
+vault_lock|none|sync||VaultStatusMsg|String
+vault_protect|none|async|on|VaultStatusMsg|String
+vault_reset|none|sync||VaultStatusMsg|String
+vault_hidden|none|sync|hidden|()|String

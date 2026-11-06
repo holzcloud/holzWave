@@ -1435,6 +1435,16 @@
       "pane",
       "text"
     ],
+    "vault_hidden": [
+      "hidden"
+    ],
+    "vault_lock": [],
+    "vault_protect": [
+      "on"
+    ],
+    "vault_reset": [],
+    "vault_status": [],
+    "vault_unlock": [],
     "wheel": [
       "pane",
       "rows",
