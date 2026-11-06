@@ -1,0 +1,27 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+key.properties
+keystore.properties
+
+# Written by the Tauri command line on every build, with this machine's absolute paths.
+/.tauri
+/tauri.settings.gradle
+
+# The owner's signing material never goes into the repository.
+*.jks
+*.keystore
+*.p12
+*.pem
