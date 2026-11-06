@@ -60,13 +60,35 @@ function modsOf(e: KeyLike): number {
   return (m.shift ? SHIFT : 0) | (m.alt ? ALT : 0) | (m.ctrl ? CTRL : 0) | (m.meta ? SUPER : 0);
 }
 
+/** Keys whose `code` is their `key` name (the core encodes these from the code). */
+const NAMED_KEYS: ReadonlySet<string> = new Set([
+  "Enter", "Backspace", "Tab", "Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown",
+  "Delete", "Insert", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+]);
+
+/**
+ * The physical key code of an event. Android's WebView reports an empty `code` for a key event that carries no scan code
+ * (a key injected with `adb shell input`, some input methods' keys), and the core encodes Enter, Backspace, the arrows and
+ * the Ctrl letters from the code, so an empty one is derived from `key`: a named key is its own code, a letter is `KeyX`, a
+ * digit is `DigitN`, a space is `Space`. A key with no such code (punctuation) stays empty and the core uses its text.
+ */
+export function codeOf(e: KeyLike): string {
+  if (e.code !== "") return e.code;
+  const key = e.key;
+  if (NAMED_KEYS.has(key)) return key;
+  if (key === " ") return "Space";
+  if (/^[a-zA-Z]$/.test(key)) return `Key${key.toUpperCase()}`;
+  if (/^[0-9]$/.test(key)) return `Digit${key}`;
+  return "";
+}
+
 /**
  * The key event as the core's `key` command takes it. `release` is the caller's: a `keyup` is the same facts with
  * the flag set. `key` is passed through untouched, so an emoji (one code point, two UTF-16 units) arrives whole.
  */
 export function keyPayload(e: KeyLike, release = false): KeyPayload {
   return {
-    code: e.code,
+    code: codeOf(e),
     key: e.key,
     mods: modsOf(e),
     repeat: e.repeat === true,

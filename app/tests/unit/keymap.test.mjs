@@ -2,7 +2,7 @@
 // (facts only) and which canonical chords an event can stand for. No DOM, so node imports it.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chordsOf, isComposingKey, isModifierKey, keyPayload, primaryChord } from "../../dist/keymap.js";
+import { chordsOf, codeOf, isComposingKey, isModifierKey, keyPayload, primaryChord } from "../../dist/keymap.js";
 
 /** A KeyboardEvent-like object; every modifier is off unless `extra` turns it on. */
 const ev = (code, key, extra = {}) => ({
@@ -10,6 +10,27 @@ const ev = (code, key, extra = {}) => ({
 });
 
 // ---- the payload ------------------------------------------------------------------------------------
+
+test("an empty code (an Android key without a scan code) is derived from the key", () => {
+  for (const key of ["Enter", "Backspace", "Tab", "Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End",
+    "PageUp", "PageDown", "Delete", "Insert", "F1", "F12"]) {
+    assert.equal(codeOf(ev("", key)), key, key);
+  }
+  assert.equal(codeOf(ev("", " ")), "Space");
+  assert.equal(codeOf(ev("", "a")), "KeyA");
+  assert.equal(codeOf(ev("", "Z")), "KeyZ");
+  assert.equal(codeOf(ev("", "7")), "Digit7");
+  assert.equal(codeOf(ev("", ">")), "", "punctuation has no code: the core uses the text");
+  assert.equal(codeOf(ev("", "é")), "");
+  assert.equal(codeOf(ev("", "Unidentified")), "");
+  assert.equal(keyPayload(ev("", "Enter")).code, "Enter");
+});
+
+test("a code the browser reported is never replaced", () => {
+  assert.equal(codeOf(ev("KeyQ", "a")), "KeyQ", "a layout that puts a on the Q key");
+  assert.equal(codeOf(ev("NumpadEnter", "Enter")), "NumpadEnter");
+  assert.equal(keyPayload(ev("Digit1", "!", { shiftKey: true })).code, "Digit1");
+});
 
 test("keyPayload of a plain ArrowUp carries code, key and zero modifier bits", () => {
   assert.deepEqual(keyPayload(ev("ArrowUp", "ArrowUp")), {
