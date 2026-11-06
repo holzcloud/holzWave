@@ -918,3 +918,185 @@ fn the_metainfo_has_no_screenshot_and_no_invented_address_and_says_the_owner_add
         assert!(allowed.contains(&url.as_str()), "an address that nothing in the project backs: {url}");
     }
 }
+
+// ---- the page, the test plan rows ------------------------------------------------------------------------------------------
+
+/// The labels of a private planning tree that must not appear in a public page: a plan id (two digits of a phase, a hyphen, two
+/// digits), a threat id and the name of a phase directory. Built from pieces so that this file holds none.
+fn planning_labels(text: &str) -> Vec<String> {
+    let phases = ["07", "08", "10", "11", "13"];
+    let directories = [
+        String::from("07-") + "extras",
+        String::from("08-") + "native" + "-integrationen",
+        String::from("10-") + "politur",
+        String::from("11-") + "web",
+        String::from("13-") + "verteilung",
+    ];
+    let chars: Vec<char> = text.chars().collect();
+    let mut found = Vec::new();
+    for i in 0..chars.len() {
+        let at = |pattern: &str| pattern.chars().enumerate().all(|(k, c)| chars.get(i + k) == Some(&c));
+        for phase in phases {
+            if at(&format!("{phase}-")) {
+                let before_ok = i == 0 || !(chars[i - 1].is_alphanumeric() || matches!(chars[i - 1], '-' | '_' | '.'));
+                let digits = chars.get(i + 3).is_some_and(char::is_ascii_digit) && chars.get(i + 4).is_some_and(char::is_ascii_digit);
+                let after_ok = !chars.get(i + 5).is_some_and(char::is_ascii_digit);
+                if before_ok && digits && after_ok {
+                    found.push(chars[i..i + 5].iter().collect());
+                }
+            }
+            if at(&format!("T-{phase}-")) && chars.get(i + 5).is_some_and(char::is_ascii_digit) {
+                found.push(chars[i..i + 6].iter().collect());
+            }
+        }
+        for directory in &directories {
+            if at(directory) {
+                found.push(directory.clone());
+            }
+        }
+    }
+    found
+}
+
+/// True when `text` has a letter that only German uses or a word that only German has: the files of the repository are English.
+fn looks_german(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.chars().any(|c| matches!(c, 'ä' | 'ö' | 'ü' | 'ß'))
+        || [" und ", " nicht ", " ist ", " herausgenommen", " bauen lokal"].iter().any(|w| lower.contains(w))
+}
+
+#[test]
+fn the_label_scan_of_these_tests_sees_ids_and_skips_dates() {
+    assert_eq!(planning_labels(&format!("see ({}-{})", "13", "12")), [format!("{}-{}", "13", "12")]);
+    assert_eq!(planning_labels(&format!("T-{}-{}", "13", "55")), [format!("T-{}-{}", "13", "5")]);
+    assert!(planning_labels(&format!("on 2026-{}-{}", "10", "12")).is_empty(), "inside a date");
+    assert!(planning_labels("rows FPK1 to FPK7 and 0.0.1-beta2").is_empty());
+    assert!(looks_german("das ist nicht gut") && looks_german("Größe") && !looks_german("this is English"));
+}
+
+#[test]
+fn the_page_has_a_status_box_that_says_not_submitted_and_never_started() {
+    let head = squashed(&FLATPAK_PAGE.lines().take(12).collect::<Vec<_>>().join(" "));
+    for phrase in [
+        "status: not submitted to flathub, never started on a machine",
+        "built once in a container on arm64",
+        "nobody has started it",
+        "every desktop is untried",
+        "x86_64 build was not run",
+        "it is a beta",
+    ] {
+        assert!(head.contains(phrase), "the status box of docs/flatpak.md does not say {phrase:?}: {head}");
+    }
+    assert!(FLATPAK_PAGE.lines().nth(2).is_some_and(|l| l.starts_with("> **Status:")), "the status box is the first thing under the title");
+}
+
+#[test]
+fn every_finish_argument_is_in_the_page_table() {
+    let section = a_section(FLATPAK_PAGE, "## What it costs in sandboxing");
+    let rows: Vec<&str> = section.lines().filter(|l| l.starts_with('|')).collect();
+    let args = manifest_list("finish-args");
+    assert_eq!(args.len(), 9, "the manifest has nine permissions: {args:?}");
+    for arg in &args {
+        let row = rows
+            .iter()
+            .find(|row| row.split('|').nth(1).is_some_and(|cell| cell.trim() == format!("`{arg}`")))
+            .unwrap_or_else(|| panic!("{arg} has no row in the permission table of docs/flatpak.md"));
+        // Three cells: the permission, what it is for, what it costs; none of them empty.
+        let cells: Vec<&str> = row.split('|').map(str::trim).collect();
+        assert_eq!(cells.len(), 5, "a row has a permission, a purpose and a cost: {row}");
+        assert!(cells[2].len() > 10 && cells[3].len() > 10, "the row of {arg} does not say what it is for and what it costs: {row}");
+    }
+    // The table has no row that the manifest does not have.
+    let table: Vec<&str> =
+        rows.iter().filter(|r| !r.starts_with("|---") && !r.starts_with("| Permission")).copied().collect();
+    assert_eq!(table.len(), args.len(), "the table and the manifest list the same permissions");
+    // The text under the table says what the setting does and cannot do.
+    let text = squashed(&section);
+    for phrase in [
+        "removes the sandbox for this app",
+        "`host shell` is off by default",
+        "never synced",
+        "cannot grant the permission",
+        "reads `not available`",
+        "does not protect the rest of your system",
+        "integrations",
+        "do not run in a flatpak",
+        "--no-talk-name=org.freedesktop.flatpak",
+    ] {
+        assert!(text.contains(phrase), "the permission section of docs/flatpak.md does not say {phrase:?}");
+    }
+}
+
+#[test]
+fn the_page_says_where_the_data_is_how_to_take_the_network_away_and_what_wsh_is_in_each_kind_of_pane() {
+    let page = squashed(FLATPAK_PAGE);
+    for phrase in [
+        "~/.var/app/ch.holzcloud.holzwave/",
+        "app data directory",
+        "flatpak override --user --unshare=network ch.holzcloud.holzwave",
+        "flatpak override --user --reset ch.holzcloud.holzwave",
+    ] {
+        assert!(page.contains(phrase), "docs/flatpak.md does not say {phrase:?}");
+    }
+    let wsh = squashed(&a_section(FLATPAK_PAGE, "## What the Flatpak does not carry: `wsh`"));
+    for phrase in ["in a sandbox pane", "no `wsh`", "in a host pane", "cannot see `/app/bin`", "wsh-linux.sh"] {
+        assert!(wsh.contains(phrase), "the wsh section of docs/flatpak.md does not say {phrase:?}: {wsh}");
+    }
+    // Two modes of starting a shell, the default first, and the two notice sentences of the design spec.
+    let shell = squashed(&a_section(FLATPAK_PAGE, "## How the shell is started"));
+    assert!(shell.find("**sandbox (the default).**") < shell.find("**host (`host shell` on).**"), "the sandbox comes first: {shell}");
+    for phrase in [
+        "holzwave: this pane runs inside the flatpak sandbox. to use the tools on this computer, turn on host shell in settings.",
+        "this flatpak has no permission to run commands on the host",
+        "osc 7",
+        "is an assumption",
+        "flatpak-spawn --host --watch-bus",
+    ] {
+        assert!(shell.contains(phrase), "the shell section of docs/flatpak.md does not say {phrase:?}");
+    }
+}
+
+#[test]
+fn the_page_has_none_of_the_old_claims_and_no_label_of_the_planning_tree_and_no_german() {
+    let page = squashed(FLATPAK_PAGE);
+    for stale in [
+        "started **on the host**",
+        "flathub submission is not planned",
+        "would not accept this permission",
+        "it is a local build from this repository, never a flathub package",
+        "its panes run on the host through `flatpak-spawn --host`, and a shell on the host cannot see",
+        "with the network allowed in the build step",
+        "(`--share=network` as a build argument",
+        "the manifest does not ask for its d-bus name",
+        "roadmap",
+        "desk-31",
+    ] {
+        assert!(!page.contains(stale), "docs/flatpak.md still says {stale:?}");
+    }
+    assert_eq!(planning_labels(FLATPAK_PAGE), Vec::<String>::new(), "labels of the private planning tree in docs/flatpak.md");
+    assert!(!looks_german(FLATPAK_PAGE), "docs/flatpak.md is English only");
+}
+
+#[test]
+fn the_test_plan_has_the_seven_flatpak_rows_and_every_result_is_empty() {
+    let words: [(&str, &[&str]); 7] = [
+        ("FPK1", &["`off`", "runs inside the flatpak sandbox", "/.flatpak-info", "sandbox"]),
+        ("FPK2", &["run panes on the host", "`on`", "host_shell.json"]),
+        ("FPK3", &["--no-talk-name=org.freedesktop.flatpak", "not available", "--reset"]),
+        ("FPK4", &["ctrl+z", "sudo", "tty", "job control"]),
+        ("FPK5", &["ssh_auth_sock", "ssh-add -l", "no ssh-agent is running"]),
+        ("FPK6", &["secret service", "keychain", "grep -r"]),
+        ("FPK7", &["dsk1 to dsk10", "gnome", "kde plasma", "xfce", "cinnamon", "mate", "sway", "hyprland", "i3", "untried"]),
+    ];
+    for (id, needles) in words {
+        let row = TEST_PLAN.lines().find(|l| l.starts_with(&format!("| {id} |"))).unwrap_or_else(|| panic!("row {id} of docs/test-plan.md"));
+        assert_eq!(row.matches('|').count(), 6, "{id} has five cells and no pipe character inside one: {row}");
+        assert!(row.trim_end().ends_with("|  |") || row.trim_end().ends_with("| |"), "the Result cell of {id} is not empty: nothing was run");
+        let text = squashed(row);
+        for needle in needles {
+            assert!(text.contains(needle), "row {id} does not say {needle:?}");
+        }
+    }
+    // Neither the rows nor the page they belong to carry a plan label.
+    assert_eq!(planning_labels(TEST_PLAN.split("## Part 12").nth(1).expect("part 12")), Vec::<String>::new());
+}
