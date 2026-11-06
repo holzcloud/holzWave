@@ -112,3 +112,47 @@ fn the_committed_cask_keeps_its_release_fields() {
     assert!(PREVIEW_CASK.contains("depends_on arch: :arm64"), "the cask no longer depends on arm64");
     assert!(PREVIEW_CASK.contains("conflicts_with cask: \"holzwave\""), "the preview cask lost its conflict");
 }
+
+const HOMEBREW_PAGE: &str = include_str!("../../../docs/homebrew.md");
+
+#[test]
+fn the_page_says_why_the_official_repository_is_out_of_reach() {
+    let page = squash(HOMEBREW_PAGE);
+    for phrase in [
+        "Homebrew/homebrew-cask",
+        "holzcloud.ch",
+        "2026-11-05",
+        "not notarized",
+        "pre-release",
+        "2026-09-01",
+        "Notability",
+        "3 problems in 1 cask detected",
+        "GitHub repository not notable enough",
+        "Intel Macs",
+        "has not been made by anyone",
+    ] {
+        assert!(page.contains(phrase), "docs/homebrew.md does not contain {phrase:?}");
+    }
+    assert!(
+        page.contains("No pull request to `Homebrew/homebrew-cask` is opened"),
+        "the page does not say that no pull request is opened"
+    );
+}
+
+#[test]
+fn the_page_does_not_state_the_apple_price_as_fact() {
+    let page = squash(HOMEBREW_PAGE);
+    let at = page.find("$99").expect("the page names the price of the Apple program");
+    let around = &page[at.saturating_sub(40)..(at + 60).min(page.len())];
+    assert!(around.contains("about $99"), "the price must be written as about $99: {around:?}");
+    assert!(around.contains("as far as the author knows"), "the price must be marked as the author's belief: {around:?}");
+}
+
+#[test]
+fn the_page_carries_no_label_of_the_planning_tree() {
+    for (name, text) in [("docs/homebrew.md", HOMEBREW_PAGE), ("Casks/holzwave@preview.rb", PREVIEW_CASK), ("scripts/release-macos.sh", RELEASE_SCRIPT)] {
+        assert!(!text.contains("T-13-"), "{name} carries a threat id");
+        assert!(!text.contains("13-verteilung"), "{name} carries a phase directory name");
+        assert!(!text.contains("D-18") && !text.contains("D-13"), "{name} carries a decision id");
+    }
+}
