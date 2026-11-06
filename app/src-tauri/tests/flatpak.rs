@@ -742,6 +742,13 @@ fn the_build_script_has_its_modes_and_never_publishes() {
         assert!(SCRIPT.contains(validator), "{validator} is not run");
     }
     assert!(SCRIPT.contains("--user --install --force-clean"), "the owner's mode builds and installs for the user");
+    // The container build proves the build step had no network: it inspects the log of the holzwave module for any download
+    // and prints its own line only when there is none. The script never gives a build the network.
+    assert!(SCRIPT.contains("flatpak-container-build: offline"), "the container build's offline line");
+    for word in ["Downloading", "Fetching", "Updating crates", "Updating git repository"] {
+        assert!(SCRIPT.contains(word), "the container build does not look for {word:?} in the log of the holzwave module");
+    }
+    assert!(!SCRIPT.contains("--share=network") && !SCRIPT.contains("--network host"), "the script gives a build the network");
     // No publishing, signing, tagging or pushing of any kind.
     for forbidden in ["git push", "git tag", "gh release", "--gpg-sign", "--repo=", "build-bundle", "build-export", "flatpak-builder --export"] {
         assert!(!SCRIPT.contains(forbidden), "the script contains {forbidden}");

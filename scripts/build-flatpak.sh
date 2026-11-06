@@ -28,11 +28,18 @@
 # the two extensions from Flathub into the Docker volume `holzwave-flatpak-data` (about 3 GB, kept between runs), builds the
 # manifest with the working tree as source (without target, .git, node_modules, .planning) into the volume
 # `holzwave-flatpak-build`, and checks the result: the binary and the three desktop files are installed, Zig is not, and
-# `ldd` finds every library of the binary inside the runtime. It prints `flatpak-container-build: ok` as its last line only
-# then. The container has the architecture of the Docker VM (arm64 on an Apple Silicon Mac), so it builds with the aarch64
-# Zig archive of the manifest: it proves the manifest, the runtime and the SDK extensions, the network use and the
-# source build, not the x86_64 archive and not a run (no display, no host to spawn on). The build takes a quarter of an
-# hour; `docker volume rm holzwave-flatpak-build holzwave-flatpak-data` forgets everything.
+# `ldd` finds every library of the binary inside the runtime. The build step has NO network: flatpak-builder first downloads
+# every declared source (the Zig archive, the Ghostty checkout, the Zig packages, the Cargo crates and the npm packages, each
+# pinned by a hash or a commit) on the host side, and then runs each module in a sandbox that has no network, because no module
+# asks for it. A build that succeeds shows that nothing in the build step needed the network; one more inspection looks at the
+# log: between the start of the holzwave module and the end of its build there must be no line of cargo or npm that downloads
+# (`Downloading`, `Fetching`, `Updating crates.io index`, `Updating git repository`), and only then is `flatpak-container-build:
+# offline` printed. The script prints `flatpak-container-build: ok` as its last line only when every inspection passed. The
+# container has the architecture of the Docker VM (arm64 on an Apple Silicon Mac), so it builds with the aarch64 Zig archive of
+# the manifest: it proves the manifest, the runtime and the SDK extensions, the offline sources and the source build, not the
+# x86_64 archive (Flathub builds that) and not a run (no display, no host to spawn on). Nothing is exported, signed or published.
+# The build takes a quarter of an hour or more on a cold cache; `docker volume rm holzwave-flatpak-build holzwave-flatpak-data`
+# forgets everything.
 #
 # --engine-offline is the proof that the one part of the build that Flathub cannot fetch, the Zig-built terminal engine
 # (libghostty-vt, built by Zig from a pinned Ghostty commit), builds with no network at all. Flathub forbids network access
@@ -71,8 +78,8 @@
 #
 # The default mode is for the owner's Linux machine: it checks that `flatpak` and `flatpak-builder` exist and that the
 # GNOME runtime, SDK and the two SDK extensions of the manifest are installed (and says how to install them), then
-# builds with `flatpak-builder --user --install --force-clean` and prints how to run the result. The build needs the
-# network (crates, npm packages, the Zig archive and the Zig packages of Ghostty): it is a local build. It writes only
+# builds with `flatpak-builder --user --install --force-clean` and prints how to run the result. flatpak-builder downloads the
+# declared sources first (that is the only use of the network); the build steps themselves have none. It writes only
 # below target/ (the build directory and flatpak-builder's state directory) and into the user's Flatpak installation;
 # it pushes, signs, tags and publishes nothing.
 #
@@ -200,8 +207,12 @@ mkdir -p /work && tar -x --no-same-owner -C /work 2>/dev/null || fail "unpacking
 echo "+ flatpak install (the runtime and the SDK extensions; kept in the volume)"
 flatpak install --system -y --noninteractive flathub "org.gnome.Platform//$gnome" "org.gnome.Sdk//$gnome" \
     "org.freedesktop.Sdk.Extension.rust-stable//$ext" "org.freedesktop.Sdk.Extension.node26//$ext" </dev/null || fail "installing the runtime and the extensions"
-echo "+ flatpak-builder (a quarter of an hour on a cold cache)"
-flatpak-builder --disable-rofiles-fuse --state-dir=/build/state --force-clean /build/out "/work/packaging/flatpak/$id.yml" || fail "flatpak-builder"
+echo "+ flatpak-builder (the declared sources are downloaded first; the build steps have no network; a quarter of an hour on a cold cache)"
+{
+    flatpak-builder --disable-rofiles-fuse --state-dir=/build/state --force-clean /build/out "/work/packaging/flatpak/$id.yml"
+    echo $? >/tmp/flatpak-builder.status
+} 2>&1 | tee /build/build.log
+[ "$(cat /tmp/flatpak-builder.status)" = 0 ] || fail "flatpak-builder (the last lines of its output are above)"
 
 echo "== the result"
 out=/build/out/files
@@ -214,6 +225,16 @@ ls -l "$out/bin/holzwave-app"
 missing=$(flatpak-builder --disable-rofiles-fuse --state-dir=/build/state --run /build/out "/work/packaging/flatpak/$id.yml" ldd /app/bin/holzwave-app 2>&1 | grep 'not found')
 [ -z "$missing" ] || fail "libraries the runtime does not have: $missing"
 echo "ldd: every library of the binary is in the runtime"
+
+# The log of the holzwave module, from its start to the end of its build commands: cargo and npm must not have downloaded
+# anything there. (The sources were downloaded before, by flatpak-builder; those lines lie outside this part of the log.)
+awk '/^Building module holzwave in /{on=1} on{print} on&&/^Cleaning up|^Committing stage build|^Pruning cache/{exit}' /build/build.log >/tmp/holzwave-module.log
+[ -s /tmp/holzwave-module.log ] || fail "the log has no part for the holzwave module"
+grep -q 'cargo build' /tmp/holzwave-module.log || fail "the log of the holzwave module shows no cargo build (is the log complete?)"
+downloads=$(grep -E '(^|[[:space:]])(Downloading|Fetching|Updating crates\.io index|Updating git repository)([[:space:]]|$)' /tmp/holzwave-module.log || true)
+[ -z "$downloads" ] || fail "the holzwave module downloaded during its build: $downloads"
+echo "the log of the holzwave module ($(wc -l </tmp/holzwave-module.log | tr -d ' ') lines) has no download line"
+echo "flatpak-container-build: offline"
 BUILD
 )
 
@@ -672,7 +693,7 @@ build() {
     state="$root/target/flatpak-state"
     out="$root/target/flatpak-build"
     mkdir -p "$state" || exit 1
-    echo "+ flatpak-builder --user --install --force-clean (the build needs the network and takes a while)"
+    echo "+ flatpak-builder --user --install --force-clean (the declared sources are downloaded first; the build steps have no network)"
     flatpak-builder --user --install --force-clean --state-dir="$state" "$out" "$manifest" || {
         echo "flatpak: the build failed: see the message above; if the Flatpak cannot be built, it moves out of 0.0.1 (docs/flatpak.md)" >&2
         exit 1
