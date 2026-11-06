@@ -1,0 +1,46 @@
+# The tool that wrote cargo-sources.json and node-sources.json, and what it ran with. Plain `key=value` lines, read by
+# scripts/flatpak-generate-sources.sh. Each Python package below was approved by the owner at exactly this version; nothing
+# else is installed. The hash lines are the SHA-256 of the files that PyPI lists for that version (the wheels for Python 3.14
+# on Linux, x86_64 and aarch64, and the pure Python wheels), so pip refuses any other file.
+flatpak-builder-tools-repository=https://github.com/flatpak/flatpak-builder-tools.git
+flatpak-builder-tools-commit=9d86d336a39b9af38b86f114b6ce5820fe260f91
+python-package=aiohttp==3.14.5
+python-package=PyYAML==6.0.3
+python-package=tomlkit==0.15.2
+python-package=aiohappyeyeballs==2.7.1
+python-package=aiosignal==1.4.0
+python-package=attrs==26.1.0
+python-package=frozenlist==1.8.0
+python-package=multidict==7.2.1
+python-package=propcache==0.5.4
+python-package=yarl==1.25.1
+python-package=idna==3.20
+python-package=typing-extensions==4.16.0
+python-hash=aiohttp sha256:1eb8167961ec4dfcc8cb9dd50bd0ee72519f7ef496be95203e49e27b01618382 aiohttp-3.14.5-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl
+python-hash=aiohttp sha256:94684b879ac1d71e4238850c99b62dc1b28d9086b156a2555f082010b85a865c aiohttp-3.14.5-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+python-hash=aiohttp sha256:efc21a454892828368b11c2c780de0ff8bc991f73f6b99c6b66e56205470929b aiohttp-3.14.5-py3-none-any.whl
+python-hash=PyYAML sha256:501a031947e3a9025ed4405a168e6ef5ae3126c59f90ce0cd6f2bfc477be31b7 pyyaml-6.0.3-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl
+python-hash=PyYAML sha256:c458b6d084f9b935061bc36216e8a69a7e293a2f1e68bf956dcd9e6cbcd143f5 pyyaml-6.0.3-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+python-hash=tomlkit sha256:05562412163a3037b94497385fb7f9204c637bc605af7a48199e41cf2272f437 tomlkit-0.15.2-py3-none-any.whl
+python-hash=aiohappyeyeballs sha256:9243213661e29250eb41368e5daa826fc017156c3b8a11440826b2e3ed376472 aiohappyeyeballs-2.7.1-py3-none-any.whl
+python-hash=aiosignal sha256:053243f8b92b990551949e63930a839ff0cf0b0ebbe0597b0f3fb19e1a0fe82e aiosignal-1.4.0-py3-none-any.whl
+python-hash=attrs sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309 attrs-26.1.0-py3-none-any.whl
+python-hash=frozenlist sha256:cba69cb73723c3f329622e34bdbf5ce1f80c21c290ff04256cff1cd3c2036ed2 frozenlist-1.8.0-cp314-cp314-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl
+python-hash=frozenlist sha256:778a11b15673f6f1df23d9586f83c4846c471a8af693a22e066508b77d201ec8 frozenlist-1.8.0-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl
+python-hash=frozenlist sha256:0c18a16eab41e82c295618a77502e17b195883241c563b00f0aa5106fc4eaa0d frozenlist-1.8.0-py3-none-any.whl
+python-hash=multidict sha256:6efdeed2723431999cf3bcbc84c72dbe0f65d16bb1f84e15a657f5b60ff18ca6 multidict-7.2.1-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl
+python-hash=multidict sha256:822a7fcd33f6922b650e1b26594f09d53c5d011fe655fea7ded27b2728ce2a1b multidict-7.2.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+python-hash=multidict sha256:08ea94663d9e7c25d14d78222f7aee906c472d4837766bec62477c38f6e419dc multidict-7.2.1-py3-none-any.whl
+python-hash=propcache sha256:251c63dd46a0659bb875cb254dc4c1e79ee91a847c737cd62373295afc2235dc propcache-0.5.4-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl
+python-hash=propcache sha256:cc07876cfb079b6f6f36d21ce75784ad6c2c6b563eeac0ed26c2fa2669b85df9 propcache-0.5.4-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+python-hash=propcache sha256:62c60aec739ed00124573cce1178138fd690c7676352d67a37328c1cf51d7468 propcache-0.5.4-py3-none-any.whl
+python-hash=yarl sha256:77e5099b99b37f3cf79c246998ca9f7313a78054cd1809ec46bc1afad47e1c4c yarl-1.25.1-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl
+python-hash=yarl sha256:30eec96e8a91bd588ce897c9543f6d5d8d34b28fbcba28a4dedf20ebeae9fe57 yarl-1.25.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+python-hash=yarl sha256:681c758b0490f9e96b78e5fa8e8dc6e648e9185bb6eaebe73183c33ea0c445f3 yarl-1.25.1-py3-none-any.whl
+python-hash=idna sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c idna-3.20-py3-none-any.whl
+python-hash=typing-extensions sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8 typing_extensions-4.16.0-py3-none-any.whl
+python-interpreter=Python 3.14.4 (python3 and python3-venv) from the Ubuntu 26.04 archive, installed inside the container only (not a PyPI package)
+lock-file=Cargo.lock
+lock-file=app/package-lock.json
+generated-on=2026-11-06
+These files are tool output; regenerate with scripts/flatpak-generate-sources.sh

