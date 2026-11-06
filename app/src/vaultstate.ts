@@ -36,6 +36,8 @@ export const STRINGS = {
   // The preferences row and the dialog that turns protection off.
   group: "Security",
   rowLabel: "Protect secrets with the screen lock",
+  switchOn: "ON",
+  switchOff: "OFF",
   rowHelp:
     "Asked once when you open holzWave and again after 5 minutes in the background. Live connections keep running while locked.",
   offLine: "Anyone who can open this phone can then use your saved passwords and keys.",
@@ -169,6 +171,9 @@ export function failureWord(failure: unknown): FailureWord {
   const text = typeof failure === "string" ? failure : failure instanceof Error ? failure.message : "";
   return text === "cancelled" || text === "lost" || text === "no_screen_lock" || text === "failed" ? text : "other";
 }
+
+/** The event on `document` that the vault module fires when an action waits for an unlock; `detail` is `{ action, args }`. */
+export const LOCKED_EVENT = "hw:locked";
 
 /** The action a command stands for when it fails locked: a connection that opens, or a send to an AI. Other commands have none. */
 export function actionOf(cmd: string): "connect" | "ai" | null {

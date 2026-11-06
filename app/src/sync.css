@@ -34,3 +34,7 @@
 .sync .dlg-actions { margin-top: .833rem; }
 .sync button:disabled { opacity: .5; cursor: default; }
 .sync .sy-off[data-armed="true"] { color: var(--hw-danger); border-color: var(--hw-danger); }
+
+/* A sync that waits for the secrets to be unlocked is not an error: its line is quiet, with a pause mark before it (docs/design.md 6.6). */
+.sync .set-status[data-quiet="true"] { color: var(--hw-dim); }
+.sync .sy-pause { margin-right: .5ch; font-weight: 700; }

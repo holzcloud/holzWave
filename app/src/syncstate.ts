@@ -1,7 +1,9 @@
 // What the page knows of the sync: the shape of the core's `sync_status` answer, read defensively, and the words that
 // say it. Pure functions, so they are unit tested without a browser.
 
-export type SyncPhase = "off" | "idle" | "syncing" | "error";
+import { STRINGS } from "./vaultstate.js";
+
+export type SyncPhase = "off" | "idle" | "syncing" | "paused" | "error";
 
 export interface SyncStatus {
   configured: boolean;
@@ -23,7 +25,7 @@ export const OFF: SyncStatus = {
   configured: false, endpoint: "", user: "", state: "off", last: null, files: 0, conflicts: 0, error: null, restart: false, removed: 0,
 };
 
-const PHASES: ReadonlySet<string> = new Set(["off", "idle", "syncing", "error"]);
+const PHASES: ReadonlySet<string> = new Set(["off", "idle", "syncing", "paused", "error"]);
 
 function text(o: Record<string, unknown>, key: string, max: number): string {
   const v = o[key];
@@ -63,6 +65,8 @@ export function syncLabel(s: SyncStatus): string {
       return "☁ sync off";
     case "syncing":
       return "☁ syncing…";
+    case "paused":
+      return STRINGS.syncButton;
     case "error":
       return "☁ sync error";
     default:

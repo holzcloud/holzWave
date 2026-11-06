@@ -409,4 +409,6 @@ export async function initPhone(): Promise<void> {
   await setLayout(layoutClass(facts()));
   window.addEventListener("resize", onResize);
   window.addEventListener("orientationchange", onResize);
+  // The vault's chip, sheet and notices exist on Android only, and the module is not fetched anywhere else.
+  if (state.os === "android") void import("./vault.js").then((m) => m.initVault()).catch(() => {});
 }

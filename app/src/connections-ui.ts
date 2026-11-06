@@ -9,6 +9,7 @@ import type { Connection } from "./connstate.js";
 import { el, loadStyles, setText } from "./dom.js";
 import { pushKeyHandler } from "./keystack.js";
 import { INTERACTIVE_HINT } from "./loginpromptstate.js";
+import { lockedAnswer } from "./vaultstate.js";
 
 let opened: Promise<void> | null = null;
 
@@ -327,6 +328,7 @@ async function show(): Promise<void> {
     /** Save the form; resolves to the saved connection, or null after showing why not. */
     const doSave = async (): Promise<Connection | null> => {
       setText(statusLine, "");
+      delete statusLine.dataset["quiet"];
       try {
         const saved = await call<Connection>("connection_save", { profile: read(), secret: secretChange() });
         await refreshConnections();
@@ -362,9 +364,13 @@ async function show(): Promise<void> {
       void (async () => {
         const target = await doSave();
         if (!target) return;
+        delete statusLine.dataset["quiet"];
         const reason = await connect(target.id);
-        if (reason) setText(statusLine, reason);
-        else finish();
+        if (reason) {
+          setText(statusLine, reason);
+          // The secrets are locked: the quiet line, not the warn colour of a refusal (docs/design.md 6.6).
+          if (reason === lockedAnswer("connect")) statusLine.dataset["quiet"] = "true";
+        } else finish();
       })();
     });
 

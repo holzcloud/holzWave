@@ -8,6 +8,7 @@ import { call } from "./bridge.js";
 import { el, loadStyles, setText } from "./dom.js";
 import { pushKeyHandler } from "./keystack.js";
 import { OFF, clock, conflictText, endpointText, lastText, readSync, removedText, syncLabel } from "./syncstate.js";
+import { STRINGS, syncLine } from "./vaultstate.js";
 import type { SyncStatus } from "./syncstate.js";
 
 let status: SyncStatus = OFF;
@@ -87,11 +88,22 @@ async function show(): Promise<void> {
       title.textContent = "Nextcloud";
       const chip = el("span", "sy-chip", head);
       chip.dataset.state = status.state;
-      chip.textContent = status.configured ? (status.state === "error" ? "error" : status.state === "syncing" ? "syncing" : "connected") : "not set up";
+      chip.textContent = status.configured
+        ? status.state === "error" ? "error" : status.state === "syncing" ? "syncing" : status.state === "paused" ? "paused" : "connected"
+        : "not set up";
       const note = el("p", "set-status", box);
       note.setAttribute("role", "status");
       note.dataset.failed = failed ? "true" : "false";
-      note.textContent = message || status.error || "";
+      if (!message && status.state === "paused") {
+        // The store of secrets is locked: not an error, so the line is quiet and has a pause mark before it (docs/design.md 6.6).
+        note.dataset.quiet = "true";
+        const mark = el("span", "sy-pause", note);
+        mark.setAttribute("aria-hidden", "true");
+        mark.textContent = STRINGS.syncMark;
+        note.append(syncLine(status.state));
+      } else {
+        note.textContent = message || status.error || "";
+      }
       if (status.configured) configured(box, note, render);
       else form(box, note, render);
       const actions = el("div", "dlg-actions", box);
@@ -128,7 +140,7 @@ async function show(): Promise<void> {
         now.addEventListener("click", () => {
           now.disabled = true;
           setText(note, "Syncing…");
-          void syncNow().then((why) => again(why ?? "Synced.", why !== null));
+          void syncNow().then((why) => again(why ?? (status.state === "paused" ? "" : "Synced."), why !== null));
         });
       }
     };

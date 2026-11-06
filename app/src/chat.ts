@@ -52,6 +52,7 @@ import { applyView } from "./scene.js";
 import { state } from "./state.js";
 import { showNotice } from "./status.js";
 import { Undos } from "./undo.js";
+import { LOCKED_EVENT, isLockedFailure, lockedAnswer } from "./vaultstate.js";
 import type { View } from "./types.js";
 
 /** Opens a block pane; `blocks.ts` hands its `openBlock` to `initChat`. Answers null when done, else one sentence. */
@@ -440,6 +441,15 @@ function sayTo(s: Session, text: string, kind: "error" | "note"): void {
   s.stopping = false;
   for (const view of s.views) view.drawStatus();
 }
+
+// A send that waits for the unlock (Android, docs/design.md 6.6): the chat says so at once, as a quiet note and not as an error. The event
+// only comes from the vault module, which exists on Android alone, so on every other platform this never runs.
+document.addEventListener(LOCKED_EVENT, (event) => {
+  const detail = (event as CustomEvent<{ action?: unknown; args?: { conversation?: unknown } }>).detail;
+  const conversation = detail?.action === "ai" ? detail.args?.conversation : undefined;
+  const mine = typeof conversation === "string" ? sessions.get(conversation) : undefined;
+  if (mine !== undefined) sayTo(mine, lockedAnswer("ai"), "note");
+});
 
 /** The two privacy settings as one string for the route; empty while the settings are unknown. */
 function privacyKey(): string {
@@ -1450,6 +1460,11 @@ class Mounted implements ChatView {
       try {
         await send(held);
       } catch (e) {
+        // The secrets stayed locked (the unlock was left): the chat says so quietly and keeps the draft, like any refusal.
+        if (isLockedFailure(e) || isLockedFailure((e as { text?: unknown } | null)?.text)) {
+          this.say(lockedAnswer("ai"), "note");
+          return;
+        }
         if (automatic) {
           // The same content as the chat already carried goes without it; any other refusal stops the send and keeps the draft.
           if (contextFault(e).code !== "context_duplicate") {

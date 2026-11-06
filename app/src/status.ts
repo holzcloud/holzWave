@@ -37,6 +37,16 @@ const encoding = seg("encoding");
 const version = seg("version");
 strip.append(modeSeg, noticeSeg, conns, panes, renderer, encoding, version);
 
+/** The place of the vault's chip on a tablet (docs/design.md 6.6): one segment at the end of the strip, made when it is first asked for. */
+let chipSeg: HTMLElement | null = null;
+export function chipSlot(): HTMLElement {
+  if (!chipSeg) {
+    chipSeg = seg("vault-seg");
+    strip.append(chipSeg);
+  }
+  return chipSeg;
+}
+
 /** The segments of the Kubernetes context and the Azure subscription, made when the core has a value and removed when it has not. */
 const ctxSegs = new Map<string, HTMLButtonElement>();
 

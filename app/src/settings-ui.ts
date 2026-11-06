@@ -279,6 +279,15 @@ async function show(api: SettingsApi): Promise<void> {
     const removeNetwork = state.os === "macos" ? mountLocalNetworkGroup(box, actions) : null;
     // The group `Host shell` is for a Flatpak: Linux in the desktop app only. It asks the shell and draws nothing when this is not a Flatpak (docs/design.md 6.32).
     const removeHostShell = state.os === "linux" && backend === "tauri" ? mountHostShellGroup(box, actions) : null;
+    // The group `Security` is for Android: the one switch of the vault's protection (docs/design.md 6.6). Its module is loaded on demand, so no other platform fetches it.
+    let removeSecurity: (() => void) | null = null;
+    if (state.os === "android") {
+      void import("./vault.js")
+        .then((m) => {
+          if (!done) removeSecurity = m.mountSecurityGroup(box, actions);
+        })
+        .catch(() => {});
+    }
     // The browser build has a group for notifications in the same place. Its module is loaded on demand, so the desktop never loads it.
     let removeNotify: (() => void) | null = null;
     if (state.os === "web") {
@@ -329,6 +338,7 @@ async function show(api: SettingsApi): Promise<void> {
       removeNetwork?.();
       removeHostShell?.();
       removeNotify?.();
+      removeSecurity?.();
       stop();
       pop();
       backdrop.remove();

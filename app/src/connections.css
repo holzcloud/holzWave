@@ -34,3 +34,6 @@
 .conns .dlg-actions button:disabled { opacity: .5; cursor: default; }
 .conns .dlg-actions .cx-danger[data-armed="true"] { color: var(--hw-danger); border-color: var(--hw-danger); }
 @media (max-width: 640px) { .conns .cx-body { grid-template-columns: minmax(0, 1fr); } }
+
+/* The secrets are locked and a connection could not start: a quiet line, not a refusal (docs/design.md 6.6). */
+.conns .set-status[data-quiet="true"] { color: var(--hw-dim); }

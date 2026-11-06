@@ -6,6 +6,7 @@ import { openBlock } from "./blocks.js";
 import { call } from "./bridge.js";
 import { focusInput } from "./keyboard.js";
 import { state } from "./state.js";
+import { isLockedFailure, lockedAnswer } from "./vaultstate.js";
 import { connSummary, opensHere, paneConns, readConnections, readPaneConns, setPaneConns } from "./connstate.js";
 import type { Connection } from "./connstate.js";
 import type { View } from "./types.js";
@@ -69,7 +70,8 @@ export async function connect(id: string): Promise<string | null> {
     focusInput();
     return null;
   } catch (e) {
-    return String(e);
+    // The secrets are locked and the unlock was left: the quiet line of docs/design.md 6.6, not the host's sentence.
+    return isLockedFailure(e) ? lockedAnswer("connect") : String(e);
   }
 }
 

@@ -57,9 +57,50 @@ const webHttp = createHttp({
 /** The listeners the Tauri backend holds, by event name: the same diagnostics the web transport gives. */
 const tauriListeners = new Map<string, number>();
 
-/** Invoke a core command. Most layout commands answer with the new view, hence the default type. */
-export const call = <T = View>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
+const invoke = <T>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
   tauri ? tauri.core.invoke<T>(cmd, args) : web.call<T>(cmd, args);
+
+/** A command that failed because the store of secrets is locked: what the hook gets to decide what happens next. */
+export interface LockedCall {
+  cmd: string;
+  args: Record<string, unknown> | undefined;
+  /** The failure, as the command made it. */
+  error: unknown;
+  /** The same command again, straight to the core: it does not pass the hook, so a second locked answer ends with its caller. */
+  retry: () => Promise<unknown>;
+}
+
+/**
+ * What the vault module sets on Android. It looks at the failure: for the locked text it answers with the retry's answer (or rejects
+ * with the failure when the unlock is left); for any other failure it answers null and the failure goes on to the caller as it was.
+ * The words of the locked text live in the vault module, so this file, which the login page also loads, imports nothing of it.
+ */
+type LockedHook = (call: LockedCall) => Promise<unknown> | null;
+
+let lockedHook: LockedHook | null = null;
+
+/** Set (or, with null, remove) the hook for a command that fails with the locked text. Only the vault module sets it, and only on Android. */
+export function setLockedHook(hook: LockedHook | null): void {
+  lockedHook = hook;
+}
+
+/** Commands that are sent for every key, wheel step or resize and never touch a secret: they do not wait on the hook. */
+const HOT: ReadonlySet<string> = new Set(["key", "text", "wheel", "mouse", "resize", "paste", "send_edit", "request_full", "scroll"]);
+
+/**
+ * Invoke a core command. Most layout commands answer with the new view, hence the default type. Without a hook (every platform
+ * but Android) the command's own promise is returned as it is; with one, a failure goes to the hook, which takes the ones that say the secrets are locked.
+ */
+export const call = <T = View>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
+  const first = invoke<T>(cmd, args);
+  if (lockedHook === null || HOT.has(cmd)) return first;
+  return first.catch((error: unknown) => {
+    const hook = lockedHook;
+    const taken = hook === null || cmd.startsWith("vault_") ? null : hook({ cmd, args, error, retry: () => invoke<T>(cmd, args) });
+    if (taken === null) throw error;
+    return taken as Promise<T>;
+  });
+};
 
 /**
  * Subscribe to a core event; the callback gets the payload. Resolves to the unlisten function.
