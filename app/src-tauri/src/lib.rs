@@ -29,8 +29,13 @@
 #![recursion_limit = "256"]
 
 mod ai_device;
+// The Android host touches no Android API, so its rules are tested on the desktop too; the desktop app never uses it.
+#[cfg(any(target_os = "android", test))]
+mod android;
 mod clipboard;
 mod commands;
+// The desktop host answers with the operating system's keychain, which Android does not have (see `android`).
+#[cfg(not(target_os = "android"))]
 mod desktop;
 mod desktop_table;
 mod files_protocol;
@@ -38,16 +43,22 @@ mod local_network;
 mod menu;
 #[cfg(test)]
 mod state;
+// The operating system's text size is read by the desktop host; Android's host does not read it yet.
+#[cfg(not(target_os = "android"))]
 mod textscale;
 
 use std::sync::Arc;
 
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, Manager, PhysicalPosition, PhysicalSize, RunEvent, WebviewWindow,
-    WebviewWindowBuilder, Window, WindowEvent,
+    AppHandle, Emitter, LogicalPosition, Manager, PhysicalPosition, RunEvent, WebviewWindow, WebviewWindowBuilder, Window,
+    WindowEvent,
 };
+#[cfg(not(target_os = "android"))]
+use tauri::PhysicalSize;
 
-use holzwave_core::session::{DEFAULT_SIZE, MonitorRect, Placement, WindowState};
+use holzwave_core::session::WindowState;
+#[cfg(not(target_os = "android"))]
+use holzwave_core::session::{DEFAULT_SIZE, MonitorRect, Placement};
 use holzwave_host::ai_host::AiParts;
 use holzwave_host::seams::Host;
 use holzwave_host::state::{AppCore, Out, ShellSpec, Sink, Target};
@@ -233,7 +244,8 @@ fn frame_of(label: &str, window: &WebviewWindow) -> Option<Frame> {
 // Pixels are physical pixels throughout: what the window system reports for the window and for the monitors, and what
 // the setters take, so the numbers compare without a scale factor.
 
-/// What to do with the window when the app starts.
+/// What to do with the window when the app starts. Not on Android, where the system sizes the one window.
+#[cfg(not(target_os = "android"))]
 #[derive(Debug, PartialEq, Eq)]
 struct Startup {
     /// `None` leaves the size of the configuration (logical pixels, so right on every display).
@@ -249,6 +261,7 @@ struct Startup {
 /// in logical pixels and the saved sizes are physical ones, so applying the default as a physical size would shrink
 /// the window on a high density display. (A saved window of exactly the default size, off every monitor, is treated
 /// the same way; its size differs from the default only on such a display.)
+#[cfg(not(target_os = "android"))]
 fn startup_for(placement: Placement) -> Startup {
     let untouched = placement.size == DEFAULT_SIZE && placement.position.is_none() && !placement.maximized;
     Startup {
@@ -286,7 +299,9 @@ fn state_to_note(facts: WindowFacts, normal: &mut Option<Normal>) -> Option<Wind
 }
 
 /// Apply the saved frame to the window `label`: the monitors that are connected now decide whether the saved position
-/// is used (T-02-59). Failures only cost the restore, never the start.
+/// is used (T-02-59). Failures only cost the restore, never the start. Not on Android: the system sizes the one window
+/// there (and the window type has no `maximize` on that platform).
+#[cfg(not(target_os = "android"))]
 fn restore_window(window: &WebviewWindow, core: &AppCore, label: &str) {
     let monitors: Vec<MonitorRect> = match window.available_monitors() {
         Ok(list) => list
@@ -348,6 +363,22 @@ fn note_window(window: &Window) {
     }
 }
 
+/// The host of this platform: the desktop's (system keychain, no private folders) or, on Android, the one that names the
+/// app's private folders and keeps no secret.
+#[cfg(not(target_os = "android"))]
+fn platform_host(_app: &tauri::App) -> Result<Arc<dyn Host>, Box<dyn std::error::Error>> {
+    Ok(Arc::new(desktop::DesktopHost::new()))
+}
+
+/// See the other `platform_host`: the folders are made here, before the core is built, and a failure to make them stops
+/// the start with the reason.
+#[cfg(target_os = "android")]
+fn platform_host(app: &tauri::App) -> Result<Arc<dyn Host>, Box<dyn std::error::Error>> {
+    let data = app.path().app_data_dir()?;
+    let cache = app.path().app_cache_dir()?;
+    Ok(Arc::new(android::host::AndroidHost::new(&data, &cache)?))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default().runtime(tauri_runtime_wry::Wry::default());
@@ -368,7 +399,7 @@ pub fn run() {
             let mut protected = Vec::new();
             protected.extend(app.path().app_config_dir().ok());
             protected.extend(ipc_dir(app.handle()));
-            let host = Arc::new(desktop::DesktopHost::new());
+            let host = platform_host(app)?;
             let parts = AiParts::with_secrets(host.secrets()).protecting(protected);
             let core = AppCore::new_with_host(dir, sink, ShellSpec::default(), Some(parts), None, host);
             // The on-device model (macOS only): the host learns where it comes from and asks nothing of it until a person acts.
@@ -380,16 +411,20 @@ pub fn run() {
                 core.set_resource_dir(resources);
             }
             app.manage(core.clone());
-            if let Some(window) = app.get_webview_window("main") {
-                restore_window(&window, &core, "main");
-            }
-            // The windows of the last session other than `main` (which the configuration makes): each is built
-            // hidden with its own frame, and shown when its page is ready. A window that cannot be built keeps its
-            // entry in the layout, so the next start tries again.
-            for label in core.restored_windows() {
-                match build_window(app.handle(), &label) {
-                    Ok(window) => restore_window(&window, &core, &label),
-                    Err(e) => eprintln!("holzwave: cannot restore the window {label}: {e}"),
+            // A phone has one window that the system sizes: no frame is restored, and no second window is built.
+            #[cfg(not(target_os = "android"))]
+            {
+                if let Some(window) = app.get_webview_window("main") {
+                    restore_window(&window, &core, "main");
+                }
+                // The windows of the last session other than `main` (which the configuration makes): each is built
+                // hidden with its own frame, and shown when its page is ready. A window that cannot be built keeps its
+                // entry in the layout, so the next start tries again.
+                for label in core.restored_windows() {
+                    match build_window(app.handle(), &label) {
+                        Ok(window) => restore_window(&window, &core, &label),
+                        Err(e) => eprintln!("holzwave: cannot restore the window {label}: {e}"),
+                    }
                 }
             }
             // `wsh` finds the app through a socket in a folder only this user can enter; every pane started from now on
