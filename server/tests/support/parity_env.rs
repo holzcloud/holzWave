@@ -590,10 +590,11 @@ pub fn unavailable_rows() -> Vec<&'static Command> {
     COMMANDS.iter().filter(|c| c.web == Web::Unavailable).collect()
 }
 
-/// The groups of the table in the order they first appear.
+/// The groups of the table that the browser has at least one row of, in the order they first appear. A group whose rows
+/// are all unavailable in the browser (the vault of a phone) has nothing to try there.
 pub fn groups() -> Vec<&'static str> {
     let mut seen: Vec<&'static str> = Vec::new();
-    for command in COMMANDS {
+    for command in COMMANDS.iter().filter(|command| command.web != Web::Unavailable) {
         if !seen.contains(&command.group) {
             seen.push(command.group);
         }
