@@ -1,0 +1,7 @@
+holzWave is an open-source terminal emulator written from scratch in Rust, built on Tauri 3 and libghostty. On the desktop today it has tiled panes, tabs and workspaces, a WebGL2 renderer, SSH that reconnects, settings that sync through your own Nextcloud, and an AI chat that sees your terminal only after you share that pane.
+
+This is a beta. It is a preview, not a finished release, and it will change. Parts of it have not been tried: the author has run the desktop app on macOS and Windows, and the Android app has not been run on any device or emulator.
+
+Google's developer verification: the package is not registered with Google, because a full developer account costs money and this project does not pay it. From the global rollout in 2027, an app that is not registered installs only through Android's advanced flow (a developer options switch and a one-time wait of 24 hours) or through ADB, and an update can fail where that flow is off.
+
+This Android build does not exist yet. When it does, it will include the cloud AI providers (Anthropic, OpenAI and Gemini), which F-Droid labels NonFreeNet; the AI chat also works with local servers.
