@@ -272,13 +272,18 @@ The run of the whole set on the three images (one emulator at a time) ended with
 | `api31` | 12 (API 31) | 91.0.4472.114 | 4096 | tracer, service, vault, pagesize | the foreground service type (it is read from Android 14), the notification permission and its dialog (they start with Android 13) |
 | `16k` | 17 (API 37, Google APIs) | 145.0.7632.218 | **16384** | tracer, service, pagesize | none |
 
-Two things the Android 12 image showed that are **not fixed here** and are listed for the owner:
+Two things the Android 12 image showed. The first is fixed; the second is not yet (see the end of this part).
 
-- **The page's bottom bar under the system buttons.** On that image the system starts with the three-button navigation bar, and its
-  old WebView does not tell the page the height of that bar as a safe area. The page's bottom bar (the tab row with the "+") is then
-  drawn under the system buttons. The newer WebView of the other two images lifts the bar. Whether a real Android 12 phone with a
-  WebView that is kept up to date by its store shows this was not tried. The service check switches that image to gesture navigation
-  before the app starts (and back at the end) so that it measures the service and not this layout.
+- **The page's bottom bar under the system buttons (fixed).** On that image the system starts with the three-button navigation bar,
+  and its old WebView (91) does not tell the page the height of that bar as a safe area, so the page's bottom bar (the tab row with the
+  "+") was drawn under the system buttons, and its top strip under the status bar. The Android shell now measures the system bars
+  (`WindowInsets`, status bar, navigation bar and display cutout) and writes the four heights in CSS pixels into the page as
+  `--hw-sys-top`, `-right`, `-bottom` and `-left` on the root element; the page uses the larger of those and its own
+  `env(safe-area-inset-*)` (`--hw-inset-*`, [design.md](design.md) section 6.6). The values are written when the system reports the
+  bars and again when a page has finished loading. Checked on the Android 12 image with three-button navigation and WebView 91: the
+  screenshot shows both bars clear of the system's, and the `service` section runs there without the switch to gesture navigation that
+  it used to need (the switch is removed). Not tried: a real Android 12 phone, a display cutout, a landscape phone, and the tablet
+  layout, which does not use the values yet.
 - **A relaunched activity and the service.** When the system relaunches the activity while the app runs (seen when the navigation mode
   changed on that image), a shell that is started after `Stop all` runs but the service is not started again and no notification
   shows, although the core told the plugin the new counts. The likely cause (the plugin keeps the activity that was destroyed, and the
@@ -708,9 +713,9 @@ an empty result:
 Also untested: the tablet layout on a tablet, the paste through the page's own menu into a running pane, and the local shell on the
 shells of phone makers.
 
-**Two defects, not fixed.** The page's bottom bar lies under the system buttons on the Android 12 image with three-button navigation
-(see [what the three images showed](#what-the-three-images-showed)); and a shell started after `Stop all` does not bring the service back
-once the system has recreated the activity. Both are in Part 13 of the test plan as rows to look at on a phone.
+**One defect, not fixed.** A shell started after `Stop all` does not bring the service back once the system has recreated the activity
+(see [what the three images showed](#what-the-three-images-showed)). The page's bottom bar that lay under the system buttons on the
+Android 12 image is fixed there; a phone is still the place to look at both (rows in Part 13 of the test plan).
 
 ## Facts for whoever offers the app
 

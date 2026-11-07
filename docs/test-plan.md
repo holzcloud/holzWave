@@ -782,12 +782,12 @@ locked, a new connect refused while locked with no login at the server; and a re
 
 ### Known defects, not fixed
 
-Two defects of the app were found by the emulator runs and are **not fixed**:
+Two defects of the app were found by the emulator runs. The first is fixed (and checked on an emulator only); the second is **not fixed**:
 
-- **The bottom bar under the system buttons.** On the Android 12 image with three-button navigation and WebView 91 the page does not
-  get a safe-area inset for the navigation bar, so its bottom bar (the tabs and the plus) is drawn under the system buttons. Whether a
-  phone with an up-to-date web view shows it was not tried (row AND8). The check of the service switches that image to gesture
-  navigation, so the check measures the service and not this layout.
+- **The bottom bar under the system buttons (fixed, emulator only).** On the Android 12 image with three-button navigation and WebView 91
+  the page got no safe-area inset, so its bottom bar was drawn under the system buttons. The app's shell now tells the page the height
+  of the system bars and the page keeps clear of them; the emulator shows both bars clear on that image. A phone with an up-to-date web
+  view, a display cutout, a landscape phone and the tablet layout (which does not use the values yet) were not tried (row AND8).
 - **The service after a recreated window.** After the system recreates the app's window while the app runs (seen when the navigation
   mode changed), a shell started after `Stop all` runs but the foreground service does not start again and no notification shows, although
   the core tells the plugin the new counts. The same steps without the recreation work. The likely cause (the plugin keeps the window

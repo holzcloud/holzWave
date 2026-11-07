@@ -24,6 +24,14 @@
    theme later (plan 20) replaces the values on :root and nothing else. */
 :root {
   color-scheme: dark;
+  /* The room the system bars take at each edge (docs/design.md section 6.6). The window is edge to edge on Android, so the page keeps
+     its own bars clear of the status bar and the navigation bar. A current WebView reports the room as `env(safe-area-inset-*)`; an old
+     one (WebView 91 on Android 12) reports none, so the Android shell also writes the heights it measured into `--hw-sys-*` on the
+     root element. The larger of the two wins: where both report, they agree. Everywhere else both are zero. */
+  --hw-inset-top: max(env(safe-area-inset-top, 0px), var(--hw-sys-top, 0px));
+  --hw-inset-right: max(env(safe-area-inset-right, 0px), var(--hw-sys-right, 0px));
+  --hw-inset-bottom: max(env(safe-area-inset-bottom, 0px), var(--hw-sys-bottom, 0px));
+  --hw-inset-left: max(env(safe-area-inset-left, 0px), var(--hw-sys-left, 0px));
   --hw-ground: #14091a;          /* window and terminal background */
   --hw-ground-2: #1d0f26;        /* bars, headers */
   --hw-pane: #1b0e20;            /* pane surface */

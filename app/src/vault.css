@@ -32,7 +32,7 @@
 .dlg.settings.vault-box { max-width: none; font-size: calc(14rem / 12); }
 .dlg.settings.vault-sheet {
   width: 100%; max-height: 85%; border-width: 1px 0 0; border-radius: 8px 8px 0 0;
-  padding: 1rem .833rem calc(1rem + env(safe-area-inset-bottom, 0px));
+  padding: 1rem .833rem calc(1rem + var(--hw-inset-bottom));
 }
 .dlg.settings.vault-lost, .dlg.settings.vault-off { width: min(560px, calc(100vw - 1.667rem)); }
 .vault-box .dlg-title { font-size: calc(15rem / 12); }

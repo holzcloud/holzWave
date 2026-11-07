@@ -531,6 +531,13 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
     invoke.resolve(answer)
   }
 
+  /** A page finished loading: the variables it lost with the old document are written again (see [SystemInsets]). */
+  @Command
+  fun insetsApply(invoke: Invoke) {
+    SystemInsets.push()
+    invoke.resolve()
+  }
+
   /** Rust's count of the live sessions. */
   @Command
   fun serviceUpdate(invoke: Invoke) {

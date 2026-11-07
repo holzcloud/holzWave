@@ -22,8 +22,8 @@
 
 #phone-top {
   box-sizing: border-box; display: flex; align-items: center; flex: none; min-width: 0;
-  min-height: calc(var(--phone-target) + env(safe-area-inset-top, 0px));
-  padding: env(safe-area-inset-top, 0px) .667rem 0 0; background: var(--hw-ground-2); border-bottom: 1px solid var(--hw-line);
+  min-height: calc(var(--phone-target) + var(--hw-inset-top));
+  padding: var(--hw-inset-top) .667rem 0 0; background: var(--hw-ground-2); border-bottom: 1px solid var(--hw-line);
   font-size: calc(16rem / 12); user-select: none; -webkit-user-select: none;
 }
 #phone-top button {
@@ -53,7 +53,7 @@
 
 #phone-nav {
   box-sizing: border-box; display: flex; align-items: stretch; flex: none; min-width: 0;
-  min-height: calc(var(--phone-target) + env(safe-area-inset-bottom, 0px)); padding-bottom: env(safe-area-inset-bottom, 0px);
+  min-height: calc(var(--phone-target) + var(--hw-inset-bottom)); padding-bottom: var(--hw-inset-bottom);
   background: var(--hw-ground-2); border-top: 1px solid var(--hw-line); font-size: calc(16rem / 12);
   user-select: none; -webkit-user-select: none;
 }
@@ -86,7 +86,7 @@
 #phone-sheet {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 21; box-sizing: border-box; display: flex; flex-direction: column;
   max-height: min(85%, calc(var(--hw-vvh, 100dvh) - 1rem)); overflow-y: auto; overscroll-behavior: contain;
-  padding: 1rem .833rem env(safe-area-inset-bottom, 0px); background: var(--hw-ground-2); color: var(--hw-ink); border-top: 1px solid var(--hw-line);
+  padding: 1rem .833rem var(--hw-inset-bottom); background: var(--hw-ground-2); color: var(--hw-ink); border-top: 1px solid var(--hw-line);
   border-radius: 8px 8px 0 0; box-shadow: 0 -12px 40px rgb(0 0 0 / .5); font-size: calc(16rem / 12);
   user-select: none; -webkit-user-select: none;
 }

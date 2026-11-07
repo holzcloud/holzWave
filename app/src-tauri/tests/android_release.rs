@@ -2643,3 +2643,83 @@ fn the_hand_over_check_fails_on_bad_input() {
     ));
     assert!(file_dialog_problems(&commented, PLUGIN_KT, FILES_KT).is_empty(), "a comment about the words passed as bad");
 }
+
+// ---- the system bars: the heights the shell measured reach the page as four CSS variables, and the page uses them -------------
+
+const INSETS_KT: &str =
+    include_str!("../gen/android/app/src/main/java/ch/holzcloud/holzwave/SystemInsets.kt");
+const MAIN_ACTIVITY_KT: &str =
+    include_str!("../gen/android/app/src/main/java/ch/holzcloud/holzwave/MainActivity.kt");
+const APP_CSS: &str = include_str!("../../src/app.css");
+const PHONE_CSS: &str = include_str!("../../src/phone.css");
+
+/// What the project must say so that the page's bars clear the system's on a WebView that reports no safe area: the shell writes
+/// four bounded numbers into the root element (nothing else reaches the script, and the page gets no bridge object), the activity
+/// installs it, a finished page load asks for it again, and the page takes the larger of its own `env()` and the shell's value.
+fn insets_problems(insets_kt: &str, main_kt: &str, plugin_kt: &str, plugin_rs: &str, app_css: &str, phone_css: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    let insets = source_code(insets_kt);
+    for name in ["top", "right", "bottom", "left"] {
+        if !insets.contains(&format!("\"{name}\"")) {
+            problems.push(format!("SystemInsets.kt does not write --hw-sys-{name}"));
+        }
+        let token = format!("--hw-inset-{name}: max(env(safe-area-inset-{name}, 0px), var(--hw-sys-{name}, 0px));");
+        if !app_css.contains(&token) {
+            problems.push(format!("app.css does not take the larger of env() and --hw-sys-{name} for --hw-inset-{name}"));
+        }
+    }
+    if !insets.contains("--hw-sys-%s") || !insets.contains("coerceIn(0, MAX_CSS_PX)") {
+        problems.push("SystemInsets.kt does not bound the numbers it writes".into());
+    }
+    for banned in ["addJavascriptInterface", "loadUrl(", "eval(", "append("] {
+        if insets.contains(banned) {
+            problems.push(format!("SystemInsets.kt has {banned}: more than four numbers could reach the page"));
+        }
+    }
+    if !source_code(main_kt).contains("SystemInsets.install(webView)") {
+        problems.push("MainActivity does not install the insets in onWebViewCreate".into());
+    }
+    if !source_code(plugin_kt).contains("fun insetsApply(invoke: Invoke)") {
+        problems.push("the plugin has no command insetsApply".into());
+    }
+    let rust = source_code(plugin_rs);
+    if !rust.contains("PageLoadEvent::Finished") || !rust.contains("const INSETS_APPLY: &str = \"insetsApply\"") {
+        problems.push("plugin.rs does not ask for the insets again when a page has finished loading".into());
+    }
+    if phone_css.contains("env(safe-area-inset") {
+        problems.push("phone.css reads env(safe-area-inset-*) itself: it must use --hw-inset-*, which also has the shell's value".into());
+    }
+    for edge in ["top", "bottom"] {
+        if !phone_css.contains(&format!("var(--hw-inset-{edge})")) {
+            problems.push(format!("phone.css does not use --hw-inset-{edge}"));
+        }
+    }
+    problems
+}
+
+#[test]
+fn the_page_clears_the_system_bars_with_the_heights_the_shell_measured() {
+    assert_none("the system bars", insets_problems(INSETS_KT, MAIN_ACTIVITY_KT, PLUGIN_KT, PLUGIN_RS, APP_CSS, PHONE_CSS));
+}
+
+#[test]
+fn the_system_bars_check_fails_on_bad_input() {
+    let ok = |insets: &str, main: &str, plugin: &str, rust: &str, app: &str, phone: &str| insets_problems(insets, main, plugin, rust, app, phone);
+    assert!(ok(INSETS_KT, MAIN_ACTIVITY_KT, PLUGIN_KT, PLUGIN_RS, APP_CSS, PHONE_CSS).is_empty());
+    let bad = [
+        ("a bridge object", ok(&format!("{INSETS_KT}\nwebView.addJavascriptInterface(o, \"x\")\n"), MAIN_ACTIVITY_KT, PLUGIN_KT, PLUGIN_RS, APP_CSS, PHONE_CSS)),
+        ("unbounded numbers", ok(&INSETS_KT.replace("coerceIn(0, MAX_CSS_PX)", "coerceAtLeast(0)"), MAIN_ACTIVITY_KT, PLUGIN_KT, PLUGIN_RS, APP_CSS, PHONE_CSS)),
+        ("an edge missing", ok(&INSETS_KT.replace("\"left\"", "\"start\""), MAIN_ACTIVITY_KT, PLUGIN_KT, PLUGIN_RS, APP_CSS, PHONE_CSS)),
+        ("not installed", ok(INSETS_KT, &MAIN_ACTIVITY_KT.replace("SystemInsets.install(webView)", ""), PLUGIN_KT, PLUGIN_RS, APP_CSS, PHONE_CSS)),
+        ("no command", ok(INSETS_KT, MAIN_ACTIVITY_KT, &PLUGIN_KT.replace("fun insetsApply", "fun other"), PLUGIN_RS, APP_CSS, PHONE_CSS)),
+        ("no page-load hook", ok(INSETS_KT, MAIN_ACTIVITY_KT, PLUGIN_KT, &PLUGIN_RS.replace("PageLoadEvent::Finished", "PageLoadEvent::Started"), APP_CSS, PHONE_CSS)),
+        ("env alone in the token", ok(INSETS_KT, MAIN_ACTIVITY_KT, PLUGIN_KT, PLUGIN_RS, &APP_CSS.replace("max(env(safe-area-inset-bottom, 0px), var(--hw-sys-bottom, 0px))", "env(safe-area-inset-bottom, 0px)"), PHONE_CSS)),
+        ("env in the phone sheet", ok(INSETS_KT, MAIN_ACTIVITY_KT, PLUGIN_KT, PLUGIN_RS, APP_CSS, &PHONE_CSS.replace("var(--hw-inset-bottom)", "env(safe-area-inset-bottom, 0px)"))),
+    ];
+    for (what, problems) in bad {
+        assert!(!problems.is_empty(), "{what} passed");
+    }
+    // A comment may name what the code must not do.
+    let commented = format!("{INSETS_KT}\n// never addJavascriptInterface\n");
+    assert!(ok(&commented, MAIN_ACTIVITY_KT, PLUGIN_KT, PLUGIN_RS, APP_CSS, PHONE_CSS).is_empty());
+}

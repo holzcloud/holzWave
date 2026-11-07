@@ -188,8 +188,6 @@ cleanup() {
         adbd shell rm -f /data/local/tmp/webview-command-line >/dev/null 2>&1
         adbd shell am force-stop "$PKG" >/dev/null 2>&1
     fi
-    # The service section's one change on Android 12 (the gesture navigation overlay, see there) is put back.
-    [ -n "$nav_changed" ] && adbd shell cmd overlay disable com.android.internal.systemui.navbar.gestural >/dev/null 2>&1
     # The throwaway SSH server of the ssh section, its forward, and the sealed key (and the passphrase file, if a step did not already
     # remove it) in the app's private folder.
     if [ "$SECTION" = ssh ]; then
@@ -214,7 +212,6 @@ cleanup() {
     rm -rf "$tmp"
 }
 HOMEREL=
-nav_changed=
 pin_set=
 rooted=
 server_pid=
@@ -449,18 +446,6 @@ sh scripts/android-emulator.sh install "$apk" || die "the install failed"
 # (Android 12 and 12L have no such permission: nothing to grant.)
 if [ "$(adbd shell getprop ro.build.version.sdk | tr -d '\r')" -ge 33 ]; then
     adbd shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS || die "the notification permission could not be granted"
-fi
-
-# The image of Android 12 starts with the three-button navigation bar, and its old WebView (91) does not report the bar's height to the
-# page as a safe area, so the page's bottom bar, with the "+" that opens a second pane, lies under the system buttons. The service
-# section is about the service, not about that layout, so for it the emulator is switched to gesture navigation (like the newest image)
-# BEFORE the app starts, and put back at every way out. It is switched before the start on purpose: a change of the navigation mode
-# while the app runs relaunches its activity, which is a finding of its own (see the summary of the run), and would make this
-# section measure that instead of the service.
-if [ "$SECTION" = service ] && [ "$(adbd shell getprop ro.build.version.sdk | tr -d '\r')" -lt 34 ] \
-    && ! adbd shell cmd overlay list android 2>/dev/null | tr -d '\r' | grep -q '^\[x\] com.android.internal.systemui.navbar.gestural$'; then
-    adbd shell cmd overlay enable com.android.internal.systemui.navbar.gestural >/dev/null 2>&1 && nav_changed=1
-    sleep 4
 fi
 
 if [ "$SECTION" != vault ] && [ "$SECTION" != tls ] && [ "$SECTION" != handover ] && [ "$SECTION" != clipboard ] && [ "$SECTION" != ssh ]; then
@@ -967,11 +952,10 @@ if [ "$SECTION" = service ]; then
     height=${size#* }
     [ -n "$width" ] && [ -n "$height" ] || die "cannot read the screen size"
     sdk=$(adbd shell getprop ro.build.version.sdk | tr -d '\r')
-    # The "+" of the bottom bar: where the bar is depends on the safe area the WebView reports. The newest WebView lifts the bar by the
-    # height of the gesture area (the "+" is at 92.4 % of the height); the old one of the Android 12 image (91) does not, and the bar
-    # is at the very bottom (97.7 %), where a tap at 92.4 % would land on the key row.
+    # The "+" of the bottom bar. The page clears the system's navigation bar by the height that the app's shell measured, whatever the
+    # WebView reports, so the bar is above the three buttons or the gesture line on every image (the Android 12 image has the three
+    # buttons and an old WebView) and the "+" is at the same place: 92.4 % of the height of these screens.
     bar_y=924
-    [ "$sdk" -lt 34 ] && bar_y=977
     shells_at_least() { [ "$(shells_alive)" -ge "$1" ]; }
     open_pane() { # <how many shells there must be afterwards>
         hide_keyboard
@@ -988,7 +972,8 @@ if [ "$SECTION" = service ]; then
             *) check "HolzwaveService is a foreground service of the type specialUse" bad "wanted types=0x40000000 in: $line" ;;
         esac
     else
-        echo "$line" | grep -q 'isForeground=true' && check "HolzwaveService is a foreground service (Android $(adbd shell getprop ro.build.version.release | tr -d '\r'): the service type specialUse is read from Android 14)" ok \
+        case "$line" in *isForeground=true*) fg_ok=1 ;; *) fg_ok= ;; esac
+        [ -n "$fg_ok" ] && check "HolzwaveService is a foreground service (Android $(adbd shell getprop ro.build.version.release | tr -d '\r'): the service type specialUse is read from Android 14)" ok \
             || check "HolzwaveService is a foreground service" bad "$line"
         skipped "the foreground service type specialUse" "foreground service types are enforced from Android 14 (API 34); this image is API $sdk, so there is no type to read"
     fi
@@ -996,19 +981,20 @@ if [ "$SECTION" = service ]; then
     # 2. the notification
     wait_until 20 text_is '1 shell' && check "the notification says 1 shell" ok \
         || check "the notification says 1 shell" bad "its text is '$(notification_text)'"
-    block=$(notification_block)
-    echo "$block" | grep -q 'android.title=String (holzWave is running)' \
+    # The block goes to a file and is searched there: `grep -q` stops at the first match, and a pipe from `echo` would report a broken pipe.
+    notification_block >"$tmp/notification.txt"
+    grep -q 'android.title=String (holzWave is running)' "$tmp/notification.txt" \
         && check "the title is holzWave is running" ok || check "the title is holzWave is running" bad
-    echo "$block" | grep -q '\[0\] "Stop all"' \
+    grep -q '\[0\] "Stop all"' "$tmp/notification.txt" \
         && check "the action is Stop all" ok || check "the action is Stop all" bad
-    channel=$(echo "$block" | grep -m 1 'effectiveNotificationChannel=')
+    channel=$(grep -m 1 'effectiveNotificationChannel=' "$tmp/notification.txt")
     case "$channel" in
         *"mName=Running sessions"*"mImportance=2"*"mSound=null"*"mShowBadge=false"*) check "the channel is Running sessions: low importance, no sound, no badge" ok ;;
         *) check "the channel is Running sessions: low importance, no sound, no badge" bad "$channel" ;;
     esac
-    echo "$block" | head -n 1 | grep -q 'sound=null' \
+    head -n 1 "$tmp/notification.txt" | grep -q 'sound=null' \
         && check "the notification has no sound" ok || check "the notification has no sound" bad
-    echo "$block" | head -n 1 | grep -q 'vis=PRIVATE' \
+    head -n 1 "$tmp/notification.txt" | grep -q 'vis=PRIVATE' \
         && check "the notification is private on the lock screen" ok || check "the notification is private on the lock screen" bad
 
     # 6. counts: a second pane

@@ -8,6 +8,7 @@
 use std::sync::OnceLock;
 
 use tauri::plugin::{Builder, PluginHandle, TauriPlugin};
+use tauri::webview::PageLoadEvent;
 use tauri::DynRuntime;
 
 /// The name Tauri knows the plugin by. It is the key of the plugin in the plugin manager of the Kotlin side.
@@ -35,5 +36,30 @@ pub fn init() -> TauriPlugin<DynRuntime> {
             let _ = HANDLE.set(handle);
             Ok(())
         })
+        .on_page_load(|_webview, payload| {
+            if payload.event() == PageLoadEvent::Finished {
+                apply_insets();
+            }
+        })
         .build()
+}
+
+/// The command of the Kotlin plugin that writes the system bar heights into the page (`--hw-sys-top` and its three
+/// siblings), see `SystemInsets.kt`.
+const INSETS_APPLY: &str = "insetsApply";
+
+/// A page has finished loading: the variables the page lost with its old document are written again. The call into Kotlin
+/// blocks until it answers, so it runs on a thread of its own, never on the thread that reports the page load. When the
+/// plugin is not registered yet nothing happens: Kotlin writes the variables itself the moment the system reports the bars.
+fn apply_insets() {
+    let spawned = std::thread::Builder::new().name("hw-insets".into()).spawn(|| {
+        if let Some(handle) = handle() {
+            if let Err(e) = handle.run_mobile_plugin::<()>(INSETS_APPLY, ()) {
+                eprintln!("holzwave: the system bar heights were not written into the page: {e}");
+            }
+        }
+    });
+    if let Err(e) = spawned {
+        eprintln!("holzwave: the insets thread could not start: {e}");
+    }
 }

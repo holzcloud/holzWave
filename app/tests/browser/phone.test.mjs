@@ -15,6 +15,7 @@ export default async function ({ engine, page, url }) {
   await desktopCase(page, url);
   await markupCase(page, url);
   await cuesCase(page, url, engine);
+  await insetsCase(page, url);
 }
 
 /** One workspace and one tab of three panes side by side, the second focused; a second tab and a second workspace to tap. */
@@ -369,4 +370,45 @@ async function cuesCase(page, url, engine) {
   assert.ok(seen.tab.includes("underline") && seen.tabLine !== "none", `the shown tab keeps its underline and line: ${JSON.stringify(seen)}`);
   assert.ok(seen.name.includes("underline") && seen.bar !== "none", `the shown pane row keeps its underline and bar: ${JSON.stringify(seen)}`);
   await page.emulateMedia({ forcedColors: "none" });
+}
+
+/**
+ * The system bars: the Android shell writes the heights it measured into `--hw-sys-*` on the root element (an old WebView reports no
+ * `env(safe-area-inset-*)`), and the top strip and the bottom bar keep clear of them. The shell's write is imitated here. Where both
+ * the WebView and the shell report, the larger wins (`max()` in app.css), so they never add up; the engines of these tests report 0.
+ */
+async function insetsCase(page, url) {
+  await open(page, url);
+  const measure = () => page.evaluate(() => {
+    const px = (v) => parseFloat(v);
+    const top = document.getElementById("phone-top");
+    const nav = document.getElementById("phone-nav");
+    const cs = (el) => getComputedStyle(el);
+    return {
+      topH: top.getBoundingClientRect().height, topPad: px(cs(top).paddingTop),
+      navH: nav.getBoundingClientRect().height, navPad: px(cs(nav).paddingBottom),
+      win: innerHeight, navBottom: nav.getBoundingClientRect().bottom,
+      first: nav.querySelector("button").getBoundingClientRect().toJSON(),
+    };
+  });
+  const none = await measure();
+  assert.equal(none.topPad, 0, "no system bar: nothing is added above the top strip");
+  assert.equal(none.navPad, 0, "no system bar: nothing is added below the bottom bar");
+  assert.ok(none.navH >= 44 && none.navH < 60, `no system bar: the bottom bar is its 44 px target (${none.navH})`);
+
+  await page.evaluate(() => {
+    const s = document.documentElement.style;
+    s.setProperty("--hw-sys-top", "24px");
+    s.setProperty("--hw-sys-bottom", "48px");
+  });
+  const bars = await measure();
+  assert.equal(bars.topPad, 24, "the top strip clears the status bar");
+  assert.ok(Math.abs(bars.topH - (none.topH + 24)) <= 1, `and is that much higher (${bars.topH} against ${none.topH})`);
+  assert.equal(bars.navPad, 48, "the bottom bar clears the navigation bar");
+  assert.ok(Math.abs(bars.navH - (none.navH + 48)) <= 1, `and is that much higher (${bars.navH} against ${none.navH})`);
+  assert.ok(Math.abs(bars.navBottom - bars.win) <= 1, "and still ends at the bottom of the window, behind the system bar");
+  assert.ok(bars.first.height >= 44 && bars.first.bottom <= bars.win - 48 + 1, `its buttons are 44 px or more and end above the navigation bar (${JSON.stringify(bars.first)})`);
+  // Taken away again, nothing of it stays (the WebView's own `env()` is 0 in these engines).
+  await page.evaluate(() => document.documentElement.style.setProperty("--hw-sys-bottom", "0px"));
+  assert.equal((await measure()).navPad, 0, "with the shell's value back at 0 nothing remains");
 }
