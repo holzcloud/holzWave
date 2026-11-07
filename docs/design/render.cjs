@@ -275,7 +275,7 @@ async function check(file) {
   }
   // Lock, notice and hand-over (docs/design.md 6.6): two rows of phones, the three chip states told apart by a glyph and a word, and the exact words of the spec.
   const lockPhones = await page.$$eval('#phones-lock .ph1', (n) => n.length);
-  if (lockPhones !== 5) failures.push(`#phones-lock holds ${lockPhones} phones, not 5`);
+  if (lockPhones !== 7) failures.push(`#phones-lock holds ${lockPhones} phones, not 7`);
   const handoverPhones = await page.$$eval('#phones-handover .ph1', (n) => n.length);
   if (handoverPhones !== 4) failures.push(`#phones-handover holds ${handoverPhones} phones, not 4`);
   const chips = await page.$$eval('#phones-lock > div:first-child .lk-chip', (ns) =>
@@ -294,6 +294,35 @@ async function check(file) {
     const small = await page.$$eval(`#${row} [data-target]`, (ns) => ns.map((n) => n.getBoundingClientRect()).filter((r) => r.width < 21.5 || r.height < 21.5).map((r) => `${Math.round(r.width)} by ${Math.round(r.height)}`));
     if (small.length > 0) failures.push(`#${row} draws ${small.length} touch targets under 22 px (${small.join(', ')})`);
     for (const sel of wanted) if ((await page.$$eval(`#${row} ${sel}[data-target]`, (n) => n.length)) === 0) failures.push(`#${row} draws no ${sel} target`);
+  }
+  // The switch of the preferences row in both states: told apart by its word, the side of the knob, a filled or a hollow knob, the outline and the wash (never by colour alone).
+  const switches = await page.$$eval('#phones-lock .lk-sw[role="switch"]', (ns) =>
+    ns.map((n) => {
+      const st = getComputedStyle(n), knob = getComputedStyle(n.querySelector('i'));
+      const kr = n.querySelector('i').getBoundingClientRect(), nr = n.getBoundingClientRect();
+      return { word: n.textContent.trim(), checked: n.getAttribute('aria-checked'), knobRight: kr.left + kr.width / 2 > nr.left + nr.width / 2, filled: knob.backgroundColor !== 'rgba(0, 0, 0, 0)', washed: st.backgroundColor !== 'rgba(0, 0, 0, 0)', outline: st.borderTopColor };
+    }),
+  );
+  const swOn = switches.filter((w) => w.checked === 'true'), swOff = switches.filter((w) => w.checked === 'false');
+  if (swOn.length < 1 || swOn.some((w) => w.word !== 'ON' || !w.knobRight || !w.filled || !w.washed)) failures.push('#phones-lock: the switch in the state ON is not the word ON, the knob at the right, filled, with a wash');
+  if (swOff.length !== 1) failures.push(`#phones-lock draws ${swOff.length} switches in the state OFF, not 1`);
+  else if (swOff[0].word !== 'OFF' || swOff[0].knobRight || swOff[0].filled || swOff[0].washed || swOff.every((w) => swOn.some((o) => o.outline === w.outline))) failures.push('#phones-lock: the switch in the state OFF is not the word OFF, the knob at the left, hollow, with no wash and an outline of its own');
+  // The sync popover while locked: Turn off is disabled with a dashed border, its reason is the paused line (named as its description), Close and Sync now are not disabled.
+  const syncLocked = await page.$$eval('#phones-lock .ph1', (phs) => {
+    const ph = phs.find((p) => /Sync while locked/.test(p.parentElement.lastElementChild?.textContent ?? ''));
+    if (!ph) return null;
+    const btns = [...ph.querySelectorAll('.lk-btn')].map((b) => ({ text: b.textContent.trim(), disabled: b.getAttribute('aria-disabled') === 'true', border: getComputedStyle(b).borderTopStyle, desc: b.getAttribute('aria-describedby'), solid: getComputedStyle(b).backgroundColor !== 'rgba(0, 0, 0, 0)' }));
+    const why = ph.querySelector('#lk-why');
+    return { btns, why: why ? why.textContent.replace(/\s+/g, ' ').trim() : null, whyId: why ? why.id : null, chip: ph.querySelector('.chip')?.textContent.trim() };
+  });
+  if (!syncLocked) failures.push('#phones-lock draws no phone for the sync popover while locked');
+  else {
+    const off = syncLocked.btns.find((b) => b.text === 'Turn off');
+    if (syncLocked.btns.map((b) => b.text).join('|') !== 'Close|Turn off|Sync now') failures.push(`the locked sync popover has the buttons ${syncLocked.btns.map((b) => b.text).join('|')}, not Close|Turn off|Sync now`);
+    if (!off || !off.disabled || off.border !== 'dashed') failures.push('the locked sync popover: Turn off is not disabled with a dashed border');
+    if (off && off.desc !== syncLocked.whyId) failures.push('the locked sync popover: the paused line is not the description of Turn off');
+    if (syncLocked.btns.filter((b) => b.text !== 'Turn off').some((b) => b.disabled || b.border === 'dashed')) failures.push('the locked sync popover: Close or Sync now looks disabled');
+    if (!/Paused: secrets are locked$/.test(syncLocked.why ?? '') || syncLocked.chip !== 'paused') failures.push('the locked sync popover does not say paused and Paused: secrets are locked');
   }
   if ((await page.$$eval('#phones-handover .ho-row[data-target]', (n) => n.length)) !== 2) failures.push('#phones-handover does not draw exactly two sheet rows');
   if ((await page.$$eval('#phones-handover .ho-ent[data-target]', (n) => n.length)) !== 2) failures.push('#phones-handover does not draw exactly two palette entries');
@@ -323,6 +352,7 @@ async function check(file) {
       if (!text.includes(w)) failures.push(`#phones-${name} does not show: ${w}`);
     }
   }
+  for (const w of ["the popover's `Turn off` is disabled", 'dim with a dashed border', '`ON` has the knob at the right', '`OFF` has the knob at the left']) if (!specText.includes(w)) failures.push(`docs/design.md does not say: ${w}`);
   if ((await page.$$eval('#phones-lock input, #phones-lock [type="password"]', (n) => n.length)) !== 0) failures.push('#phones-lock draws an input or a password field');
   // Nothing is drawn for what is not built: no file browser, no folder mirror, no all-files permission, no account screen.
   for (const [name, text] of [['lock', lockText], ['handover', handoverText]]) {
