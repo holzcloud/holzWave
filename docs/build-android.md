@@ -8,8 +8,8 @@ here costs money. The toolchain, the SDK, the NDK, the emulator and the system i
 > image with 16 KB memory pages, never on a phone and never on a tablet. What exists: the toolchain and its check, a compile gate for
 > the Rust code, a script that builds a debug APK and an unsigned release APK, a check of a built APK, scripts that create and start
 > arm64 emulators, and a set of end to end checks run with one command (see [the end to end check](#the-end-to-end-check) and
-> [the whole set](#the-whole-set-on-three-images)). **No single full run of that set was all green**, and several checks ended
-> `not run`: [What ran and what did not](#what-ran-and-what-did-not) says which. Everything that only a real phone or tablet shows is
+> [the whole set](#the-whole-set-on-three-images)). **Only one full run of that set was all green** (the last one, and
+> earlier full runs failed in places), and several checks ended `not run`: [What ran and what did not](#what-ran-and-what-did-not) says which. Everything that only a real phone or tablet shows is
 > **not run**: see [what was not tried](#what-was-not-tried) and Part 13 of [test-plan.md](test-plan.md). Two defects found on an
 > emulator are [not fixed](#what-the-three-images-showed).
 
@@ -264,7 +264,7 @@ the page size is 16384, on the other two 4096.
 The run of the whole set on the three images (one emulator at a time) ended with these tables. A check that could not be made is
 `not run` and was not proved; the reasons are printed with every run.
 
-**No single full run of the set was all green.** In the last full run Android 17 had 117 checks `ok`, 3 `not run` and 1 `FAIL` (the page size section, a broken pipe from the activity manager when the app was started; run alone afterwards it had 5 `ok`), Android 12 had 53 `ok` and 3 `not run`, and the 16 KB image had 36 `ok`. The hand-over section on Android 17 failed in three earlier full runs (the system's document dialog was in front and the tap chose nothing) and passed run alone and in the last full run; the driver now taps again when the dialog is still in front, and it cannot be said whether that retry made it pass. The retry for the broken pipe was added after the failing run and was not exercised by a later full run.
+**Only one full run of the set was all green, the last.** The first four full runs each had a failed or a flaky check. In the fourth, Android 17 had 117 checks `ok`, 3 `not run` and 1 `FAIL` (the page size section, a broken pipe from the activity manager when the app was started; run alone afterwards it had 5 `ok`), Android 12 had 53 `ok` and 3 `not run`, and the 16 KB image had 36 `ok`. The hand-over section on Android 17 failed in three earlier full runs (the system's document dialog was in front and the tap chose nothing) and passed run alone and in the fourth run; the driver now taps again when the dialog is still in front, and the retry for the broken pipe was added after the failing run. The fifth full run, made by `sh scripts/android-gate.sh --emulator` on the finished tree, was all green: Android 17 had 122 `ok`, 3 `not run` and 0 `FAIL`, Android 12 had 53 `ok` and 3 `not run`, and the 16 KB image had 36 `ok`. One green run does not show that the earlier failures are gone, and it cannot be said whether the retries are what made it pass. During the Android 12 part of that run the script printed five `Broken pipe` lines from its own `echo` (a noise in the output of the service section; those checks were still `ok`).
 
 | Image | Android | WebView | Page size | Sections | Not run |
 |---|---|---|---|---|---|

@@ -747,7 +747,7 @@ Machines the rows need:
 ### What the emulators showed
 
 Every statement below is about an arm64 emulator image, never a phone. `sh scripts/android-e2e.sh matrix` runs the sections on one
-image at a time and ends with one table per image. **No single full run of the matrix was all green.** The fourth and last full run:
+image at a time and ends with one table per image. **Only one full run of the matrix was all green, the last.** The fourth full run, which still had a failure:
 
 - **Android 17 (API 37, default image, 4 KB pages, WebView 145):** tracer 6 ok, service 25, vault 23, TLS 17, hand-over 10,
   clipboard 2, touch 13 ok and 3 not run, SSH 21, page size 0 ok and 1 FAIL (a broken pipe from the activity manager at the start;
@@ -759,6 +759,8 @@ image at a time and ends with one table per image. **No single full run of the m
   runs them on the newest image only.
 - **16 KB page image (API 37, Google APIs, page size 16384):** tracer 6 ok, service 25, page size 5. Total 36 ok. Every mapping of the
   app's library is aligned to 16384 bytes.
+
+The fifth full run was made by `sh scripts/android-gate.sh --emulator` on the finished tree and was all green: Android 17 122 ok, 3 not run, 0 FAIL; Android 12 53 ok, 3 not run; the 16 KB image 36 ok. One green run does not show that the earlier failures (the hand-over section failed in three full runs and passed alone) are gone.
 
 Checks that ended **not run** and why: the hardware-keyboard rule (the emulator's input command never made the page see a hardware
 keyboard; unit tests hold the rule), the two-finger pinch (the input command has no two-finger gesture), text composed by a soft keyboard

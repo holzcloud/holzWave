@@ -4,7 +4,8 @@
 #   sh scripts/test-android-scripts.sh
 #
 # The scripts under test are scripts/android-check.sh, android-build.sh, android-emulator.sh, android-e2e.sh (with android-adb.sh, the
-# one door to adb), android-e2e-summary.sh and android-ssh-server.sh. Each case
+# one door to adb), android-e2e-summary.sh, android-ssh-server.sh and android-gate.sh (the phase gate, run here with stand-ins for every
+# step command). Each case
 # builds a throwaway directory with a copy of those scripts and of android-env.sh, a fake SDK tree and a private PATH of tiny
 # shims for adb, emulator, avdmanager, npm, cargo, rustup, java, zig, uname and for the tools that must never be called
 # (sdkmanager, brew, curl, wget, keytool, jarsigner, apksigner). Every shim logs its call to one file; the last checks assert
@@ -96,7 +97,7 @@ mkdir -p "$HOME/.android/avd/$n.avd"; printf "hw.keyboard=yes\nhw.ramSize=2G\n" 
   printf '#!/bin/sh\ncase "$1" in -m) echo %s ;; *) exec /usr/bin/uname "$@" ;; esac\n' "${C_UNAME:-arm64}" > "$c/bin/uname"
   chmod +x "$c/bin/uname"
   cp "$here/android-env.sh" "$here/android-check.sh" "$here/android-build.sh" "$here/android-emulator.sh" "$here/android-e2e.sh" \
-    "$here/android-adb.sh" "$here/android-e2e-summary.sh" "$here/android-ssh-server.sh" "$c/repo/scripts/"
+    "$here/android-adb.sh" "$here/android-e2e-summary.sh" "$here/android-ssh-server.sh" "$here/android-gate.sh" "$c/repo/scripts/"
 }
 # run <script> [args...]: run a script of the fake machine; output in $out, status in $rc. $EXTRA holds more
 # NAME=value pairs for the environment (the script's environment is otherwise empty). The calls of the shims go to $ALL too.
@@ -794,6 +795,173 @@ for text in 'Escape' 'Control' '"Arrow up"' '"id:keyrow"' '"id:phone-nav"' '"id:
 done
 ok "the touch section names each of them"
 
+echo "test 13: the phase gate runs its steps in order, stops at the first failure and names it, and calls the matrix only with --emulator"
+# gatecase: the fake machine with stand-ins for every command the gate runs. The scripts it calls log their call and fail when
+# FAKE_FAIL (a comma list of script names) names them; cargo, npm and node fail when HW_FAIL (a comma list of tool:last-word, such
+# as npm:test) names the call; git answers `status --porcelain` with nothing (a clean tree) and `diff --quiet` with 0 (unchanged);
+# the lock cases give it another shim.
+gatecase() {
+  mkcase
+  for s in android-env-check.sh android-check.sh test-android-env.sh test-android-scripts.sh test-android-version-code.sh \
+    test-android-apk-check.sh android-apk-check.sh android-e2e.sh; do
+    printf '#!/bin/sh\necho "%s $*" >> "$HW_LOG"\ncase ",${FAKE_FAIL:-}," in *",%s,"*) exit 1 ;; esac\nexit 0\n' "$s" "$s" > "$c/repo/scripts/$s"
+  done
+  printf '#!/bin/sh\necho "android-build.sh $*" >> "$HW_LOG"\ncase ",${FAKE_FAIL:-}," in *",android-build.sh,"*) exit 1 ;; esac\nmkdir -p out\n: > out/app-universal-release-unsigned.apk\necho "building"\necho out/app-universal-release-unsigned.apk\n' > "$c/repo/scripts/android-build.sh"
+  for tool in cargo npm node; do
+    shim "$c/bin/$tool" 'echo "ndkbin-for-$(basename "$0")=${HOLZWAVE_NDK_BIN:-unset}" >> "$HW_LOG"
+for last in "$@"; do :; done
+case ",${HW_FAIL:-}," in *",'"$tool"':$last,"*) exit 1 ;; esac
+exit 0'
+  done
+  shim "$c/bin/git" 'case "$*" in
+  "status --porcelain") exit 0 ;;
+  "diff --quiet -- Cargo.lock") exit 0 ;;
+  *) exit 1 ;;
+esac'
+  for dir in android-31/default/arm64-v8a android-37.0/google_apis_ps16k/arm64-v8a; do mkdir -p "$sdk/system-images/$dir"; done
+}
+gate_order() { # the calls of the log that the gate makes, one word each, in order
+  grep -E '^(android-env-check|android-check|test-android-env|test-android-scripts|test-android-version-code|test-android-apk-check|android-build|android-apk-check|android-e2e)\.sh |^(cargo|npm|node|git) ' "$LOG" \
+    | awk '{ if ($1 == "npm") print "npm:" $NF; else if ($1 == "cargo" || $1 == "node") print $1; else if ($1 == "git") print "git:" $2; else print $1 " " $2 }'
+}
+
+gatecase
+: > "$LOG"
+run android-gate.sh
+expected='git:status
+android-env-check.sh 
+android-check.sh 
+test-android-env.sh 
+test-android-scripts.sh 
+test-android-version-code.sh 
+test-android-apk-check.sh 
+cargo
+npm:build
+npm:test
+npm:test:browser
+node
+android-build.sh release
+android-apk-check.sh out/app-universal-release-unsigned.apk
+git:diff'
+got=$(gate_order | sed 's/ $/ /')
+if [ "$rc" -eq 0 ] && [ "$got" = "$expected" ]; then
+  ok "the gate runs the environment check, the compile gate, the four stand-in tests, the workspace, the page build, unit and browser tests, the design check, the release build, the APK check and the lock check in that order"
+else
+  bad "the gate's order (rc $rc): $(printf '%s' "$got" | tr '\n' ',')"
+fi
+for name in env compile script-tests workspace page-build page-unit page-browser design release-build release-apk lock; do
+  echo "$out" | grep -qx "gate $name: ok" || bad "no line 'gate $name: ok'"
+done
+ok "every step printed its 'gate <name>: ok' line"
+echo "$out" | tail -n 1 | grep -qx 'android-gate: ok (11 steps)' && ok "the gate ends with its own ok line and the count of steps" || bad "the last line: $(echo "$out" | tail -n 1)"
+[ "$(calls android-e2e.sh)" -eq 0 ] && ok "without --emulator the matrix is never called" || bad "the matrix was called without --emulator"
+grep -q '^android-apk-check.sh .* release$' "$LOG" && ok "the APK check is given the path that the release build printed last" || bad "the APK check call: $(grep '^android-apk-check' "$LOG")"
+nothing_left && ok "the gate leaves nothing in its temporary folder" || bad "left in the temporary folder: $(ls "$c/tmpdir")"
+[ "$(grep -c '^ndkbin-for-cargo=unset$' "$LOG")" -eq 1 ] && grep -q '^ndkbin-for-npm=' "$LOG" && ! grep -q '^ndkbin-for-npm=unset$' "$LOG" \
+  && ok "the workspace tests run without HOLZWAVE_NDK_BIN, which the Android environment exports (a host test counts the HOLZWAVE_ variables of a shell), and the other steps keep it" \
+  || bad "HOLZWAVE_NDK_BIN in the steps: $(grep '^ndkbin-for' "$LOG" | tr '\n' ' ')"
+
+gatecase
+: > "$LOG"
+EXTRA="FAKE_FAIL=android-check.sh"
+run android-gate.sh
+EXTRA=
+if [ "$rc" -eq 1 ] && echo "$out" | grep -q '^gate compile: FAILED sh scripts/android-check.sh$' && [ "$(calls cargo)" -eq 0 ] && [ "$(calls npm)" -eq 0 ] \
+  && ! echo "$out" | grep -q '^gate compile: ok'; then
+  ok "a failing compile gate stops the gate at once (exit 1), names the command, and nothing after it runs"
+else
+  bad "the compile failure (rc $rc, cargo $(calls cargo), npm $(calls npm)): $(echo "$out" | tail -n 4)"
+fi
+gatecase
+: > "$LOG"
+EXTRA="FAKE_FAIL=test-android-version-code.sh"
+run android-gate.sh
+EXTRA=
+if [ "$rc" -eq 1 ] && echo "$out" | grep -q '^gate script-tests: FAILED sh scripts/test-android-version-code.sh$' && [ "$(calls test-android-apk-check.sh)" -eq 0 ] \
+  && [ "$(calls cargo)" -eq 0 ]; then
+  ok "a failing stand-in test names its own command, and the next one does not run"
+else
+  bad "the stand-in failure (rc $rc): $(echo "$out" | tail -n 4)"
+fi
+gatecase
+: > "$LOG"
+EXTRA="HW_FAIL=npm:test"
+run android-gate.sh
+EXTRA=
+if [ "$rc" -eq 1 ] && echo "$out" | grep -q '^gate page-unit: FAILED npm --prefix app test$' && [ "$(calls node)" -eq 0 ] && [ "$(calls android-build.sh)" -eq 0 ]; then
+  ok "a failing page test stops the gate before the design check and the release build"
+else
+  bad "the page test failure (rc $rc, node $(calls node)): $(echo "$out" | tail -n 4)"
+fi
+gatecase
+: > "$LOG"
+EXTRA="FAKE_FAIL=android-apk-check.sh"
+run android-gate.sh
+EXTRA=
+if [ "$rc" -eq 1 ] && echo "$out" | grep -q '^gate release-apk: FAILED sh scripts/android-apk-check.sh out/app-universal-release-unsigned.apk release$'; then
+  ok "a failing APK check names the command with the path of the APK"
+else
+  bad "the APK check failure (rc $rc): $(echo "$out" | tail -n 3)"
+fi
+
+gatecase
+rm -f "$c/bin/node"
+: > "$LOG"
+run android-gate.sh
+if [ "$rc" -eq 2 ] && echo "$out" | grep -q 'node is missing' && [ ! -s "$LOG" ]; then
+  ok "a missing tool is exit 2 before any step runs, never a skip"
+else
+  bad "the missing node (rc $rc, log $(wc -l < "$LOG")): $out"
+fi
+gatecase
+: > "$LOG"
+run android-gate.sh --everything
+[ "$rc" -eq 2 ] && echo "$out" | grep -q '^usage:' && [ ! -s "$LOG" ] && ok "an unknown argument is exit 2 and runs nothing" || bad "the unknown argument (rc $rc): $out"
+
+gatecase
+: > "$LOG"
+run android-gate.sh --emulator
+if [ "$rc" -eq 0 ] && [ "$(calls android-e2e.sh)" -eq 1 ] && grep -qx 'android-e2e.sh matrix' "$LOG" && [ "$(tail -n 1 "$LOG")" = "android-e2e.sh matrix" ] \
+  && echo "$out" | grep -qx 'gate emulator: ok' && echo "$out" | tail -n 1 | grep -qx 'android-gate: ok (12 steps)'; then
+  ok "with --emulator the matrix is the last step and is called once"
+else
+  bad "--emulator (rc $rc): $(grep -c '' "$LOG") calls, last '$(tail -n 1 "$LOG")'"
+fi
+gatecase
+rm -rf "$sdk/system-images/android-31"
+: > "$LOG"
+run android-gate.sh --emulator
+if [ "$rc" -eq 2 ] && echo "$out" | grep -q 'android-31/default/arm64-v8a' && echo "$out" | grep -q 'sdkmanager "system-images;android-31;default;arm64-v8a"' && [ ! -s "$LOG" ]; then
+  ok "a missing image is exit 2 with the one sdkmanager line as text, before any step, and nothing is installed"
+else
+  bad "the missing image (rc $rc): $out"
+fi
+gatecase
+: > "$LOG"
+EXTRA="FAKE_FAIL=android-e2e.sh"
+run android-gate.sh --emulator
+EXTRA=
+[ "$rc" -eq 1 ] && echo "$out" | grep -q '^gate emulator: FAILED sh scripts/android-e2e.sh matrix$' && ok "a failing matrix is the gate's failure and names the matrix command" || bad "the matrix failure (rc $rc): $(echo "$out" | tail -n 3)"
+
+gatecase
+shim "$c/bin/git" 'case "$*" in "status --porcelain") exit 0 ;; "diff --quiet -- Cargo.lock") exit 1 ;; *) exit 1 ;; esac'
+: > "$LOG"
+run android-gate.sh
+if [ "$rc" -eq 1 ] && echo "$out" | grep -q '^gate lock: FAILED git diff --quiet -- Cargo.lock$'; then
+  ok "a changed Cargo.lock on a tree that was clean at the start fails the gate"
+else
+  bad "the changed lock on a clean tree (rc $rc): $(echo "$out" | tail -n 3)"
+fi
+gatecase
+shim "$c/bin/git" 'case "$*" in "status --porcelain") echo " M README.md" ;; "diff --quiet -- Cargo.lock") exit 1 ;; *) exit 1 ;; esac'
+: > "$LOG"
+run android-gate.sh
+if [ "$rc" -eq 0 ] && echo "$out" | grep -q '^gate lock: ok (not judged' && ! grep -q '^git diff' "$LOG"; then
+  ok "on a tree that was not clean at the start the lock is not judged, and the gate says so"
+else
+  bad "the lock on a dirty tree (rc $rc): $(echo "$out" | tail -n 3)"
+fi
+
 echo "test 6: nothing was installed, downloaded or signed"
 if grep -Eq '^(sdkmanager|brew|curl|wget|keytool|jarsigner|apksigner) ' "$ALL"; then
   bad "a forbidden tool was called: $(grep -E '^(sdkmanager|brew|curl|wget|keytool|jarsigner|apksigner) ' "$ALL" | head -n 3)"
@@ -805,7 +973,7 @@ if grep '^rustup ' "$ALL" | grep -vqx 'rustup target list --installed'; then
 else
   ok "rustup was only asked for its installed targets"
 fi
-for script in android-check.sh android-build.sh android-emulator.sh android-e2e.sh android-adb.sh android-e2e-summary.sh android-ssh-server.sh; do
+for script in android-check.sh android-build.sh android-emulator.sh android-e2e.sh android-adb.sh android-e2e-summary.sh android-ssh-server.sh android-gate.sh; do
   # The commands of a script: no comment lines, no lines that only print a message.
   code=$(grep -v '^[[:space:]]*#' "$here/$script" | grep -Ev '^[[:space:]]*(echo|printf) |^[[:space:]]*"|^[[:space:]]*\*\)' || true)
   if echo "$code" | grep -Eq '(^|[[:space:];&|(])(sdkmanager|brew|curl|wget|keytool|jarsigner|apksigner)([[:space:]]|$)'; then
