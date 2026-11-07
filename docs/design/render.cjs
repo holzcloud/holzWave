@@ -312,7 +312,7 @@ async function check(file) {
     ],
     handover: [
       'Copy a file into the shell folder', 'Copy a file out of the shell folder', 'Copied report.pdf (1.2 MB) to ~/handover/report.pdf', 'Copied report.pdf (1.2 MB) to ~/handover/report-2.pdf', 'Copied report.pdf (1.2 MB) out',
-      'report.pdf is 612 MB; the limit is 256 MB', 'File to copy out, from the shell folder',
+      'report.pdf is 612 MB; the limit is 256 MB', 'Could not copy the file', 'File to copy out, from the shell folder',
       'holzWave is running', '3 shells, 1 connection', 'Stop all',
     ],
   };
