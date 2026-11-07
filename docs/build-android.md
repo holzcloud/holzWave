@@ -636,10 +636,25 @@ The target SDK is printed and not judged: what minimum a store such as F-Droid a
 
 `sh scripts/android-build.sh release` builds `app-universal-release-unsigned.apk`. No script of the repository signs, creates a key
 or reads a keystore password, and the Gradle project has no signing configuration. Signing is the owner's own step, with the owner's
-own key kept outside the repository, when a release is published. An unsigned APK cannot be installed. To see that the minified release (R8 is on) still starts, a copy of the release APK was signed
-once, by hand and outside the repository, with the Android SDK's public debug key, installed on the arm64 emulator (Android 37), and
-started: the native library loaded, the page appeared and a pane started the system shell. That copy was removed afterwards and is not
-a build output of any script.
+own key kept outside the repository, when a release is published. An unsigned APK cannot be installed. To see that the minified release (R8 is on) still works, a **copy** of the release APK is signed by hand,
+outside the repository, with the Android SDK's public debug key (`~/.android/debug.keystore`, alias `androiddebugkey`, password `android`;
+never a distribution key), installed on the Android 17 arm64 emulator and run, and then the copy is deleted and the app uninstalled. The
+original is never signed: its SHA-256 and its unsigned state were the same before and after, and `android-apk-check.sh <apk> release`
+still passes it and still fails a release APK that holds `holzwave_selftest` (the stand-in test proves that failing case in the dex
+files and in the native library).
+
+What the minified release did on that emulator: the app started without a crash and the log shows the platform certificate verifier
+set up; the page appeared and a first shell pane opened by itself (`sh -l`, a child of the app, in the app's `home` folder); the
+system's notification dialog showed once, when the first shell started, and after Allow the foreground service ran with its notification;
+a command typed with the input command (`sleep 777`) became a child process of that shell; and with a screen lock set the app started and
+its bars were clear of the system bars. The dex files of the minified build still hold the plugin commands (`localNetworkEnsure`,
+`insetsApply`), the Keystore bridge and the enrolment setting, and hold no self-test.
+
+What could not run there: the `tracer`, `vault` and `tls` sections of `scripts/android-e2e.sh` are driven by the debug-only self-test, which
+a release build does not contain (that is the point of the check above), so none of them ran against the minified build. The phone page
+has no control that opens the secret store or a connection (the SSH connection manager and the save-a-password dialogs are not on the
+phone layout), so the system's unlock prompt, a TLS request and the local-network question could not be reached by hand either. For these
+the minified build is only shown to keep the code they call; their behaviour was proved on the debug build.
 
 ## Reproducibility
 

@@ -814,8 +814,11 @@ This is every claim of this part that no suite or emulator supports. It is liste
 - The SSH check reached one throwaway OpenSSH server on the computer's loopback address with one Ed25519 key. Password login, other key
   types, a server on a network, a slow or dropping server and the local-network permission for a real address on a real network were not tried (the permission was run on the Android 17 emulator with the Mac as `10.0.2.2`: the dialog, a refusal, an allow, a revoke and the settings). A real
   WebDAV server, a real AI provider and a user-installed certificate authority were not tried; no revocation behaviour was seen.
-- The release APK was built, checked and is unsigned; it was never installed from a channel. To see that the minified build starts, one copy
-  was signed once with the SDK's public debug key and run on an emulator. Obtainium, F-Droid, updates across two sources, the warnings of the
+- The release APK was built, checked and is unsigned; it was never installed from a channel. To see that the minified build works, a copy
+  was signed with the SDK's public debug key (never the original, never a distribution key) and run on the Android 17 emulator, then deleted:
+  it started, opened a shell, showed the notification dialog, kept its foreground service and ran a typed command. The `tracer`, `vault` and
+  `tls` sections need the debug-only self-test and could not run against it, and the phone page has no control for the vault or a
+  connection, so the unlock prompt and the TLS and local-network paths were not run on the minified build. Obtainium, F-Droid, updates across two sources, the warnings of the
   phone's protection service for an APK from outside a store and the developer verification of 2027 were not tried.
 - The build is arm64 only and was never built for x86_64 or 32-bit ARM: the terminal engine does not build there and the emulator on
   an Apple silicon Mac cannot run an x86_64 image. Two builds of the release APK in one folder on one machine were byte for byte equal;
