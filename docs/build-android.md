@@ -445,6 +445,13 @@ but it holds only ciphertext.
   minutes after the app's page was hidden, measured with the clock that also counts the time the phone slept (the elapsed-realtime
   clock; the ordinary monotonic clock stops in suspend), and a check every thirty seconds applies that rule even while the page stays
   hidden. Live shell and SSH sessions go on while the store is locked; only reading or saving a secret waits for the unlock.
+- **A new fingerprint does not end the key (the owner's decision).** The wrapping key is made with
+  `setInvalidatedByBiometricEnrollment(false)`, so enrolling a new fingerprint or face does not delete it and the saved secrets stay
+  readable. This was decided by the owner on purpose and is not an oversight: the key also accepts the device credential, so whoever
+  can enrol a finger already knows the PIN and could simply unlock, and losing every saved secret over a harmless act is the worse
+  failure. Removing the screen lock still deletes the key, which the system does for every key that needs authentication. The
+  decision is in the code beside the setting (`KeystoreBridge.kt`); a stricter choice (the key dies at an enrolment) would be a new
+  decision of the owner, with a way to enter the secrets again.
 - **Plain mode.** On a device with no screen lock the key needs nothing, the store opens by itself, and the page shows a notice that
   the secrets are protected by the device key only. When a screen lock is set later the store can be switched to protected mode, and
   back: the data key stays the same and only its wrapping changes.
