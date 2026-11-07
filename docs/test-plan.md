@@ -760,7 +760,7 @@ image at a time and ends with one table per image. **Only one full run of the ma
 - **16 KB page image (API 37, Google APIs, page size 16384):** tracer 6 ok, service 25, page size 5. Total 36 ok. Every mapping of the
   app's library is aligned to 16384 bytes.
 
-The fifth full run was made by `sh scripts/android-gate.sh --emulator` on the finished tree and was all green: Android 17 122 ok, 3 not run, 0 FAIL; Android 12 53 ok, 3 not run; the 16 KB image 36 ok. One green run does not show that the earlier failures (the hand-over section failed in three full runs and passed alone) are gone.
+The fifth full run was made by `sh scripts/android-gate.sh --emulator` on the finished tree and was all green: Android 17 122 ok, 3 not run, 0 FAIL; Android 12 53 ok, 3 not run; the 16 KB image 36 ok. One green run does not show that the earlier failures (the hand-over section failed in three full runs and passed alone) are gone. A sixth run of the gate with `--emulator`, after the defect fixes and the local-network permission, was green again: Android 17 135 ok and 3 not run, Android 12 56 ok and 3 not run, the 16 KB image 39 ok; two green runs in a row still do not prove that the matrix is stable.
 
 Checks that ended **not run** and why: the hardware-keyboard rule (the emulator's input command never made the page see a hardware
 keyboard; unit tests hold the rule), the two-finger pinch (the input command has no two-finger gesture), text composed by a soft keyboard
