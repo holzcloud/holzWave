@@ -170,7 +170,7 @@ ARM or 32-bit x86 at all.
 sh scripts/android-e2e.sh tracer
 ```
 
-(The section `service` is described with the foreground service below.) It starts the emulator if none runs (and stops it at the end only if it started it), builds and installs the debug APK, starts
+(The section `service` is described with the foreground service below, and the section `vault` with the secret store.) It starts the emulator if none runs (and stops it at the end only if it started it), builds and installs the debug APK, starts
 the app, waits until the app has started a shell, taps the screen, types three lines with the real Android key path (`adb shell
 input text` and the Enter key), and reads the results back with `run-as`:
 
@@ -272,7 +272,7 @@ check the scheme.
 
 ## One list of permissions
 
-`app/src-tauri/android-permissions.txt` is the one list of the permissions the app may ask for (today the network, and the three of the foreground service described below).
+`app/src-tauri/android-permissions.txt` is the one list of the permissions the app may ask for (today the network, the three of the foreground service described below, and the one for the system prompt of the secret store).
 The `android_release` test requires the manifest to hold exactly these, and the APK check requires the same of a built APK, so a
 permission that is added anywhere else fails one of them. A feature that needs a permission adds its line to the file in its own
 commit, with the manifest line, and says in the message what it is for. A permission that installs packages, reads the screen, draws
@@ -326,6 +326,56 @@ the notification permission (granted, revoked, and the system's dialog at the fi
 of the app out of the recents list, doze and app standby over hours, the skins of phone makers, the permission dialog of another
 Android version or locale, and any real phone.
 
+## The secret store
+
+Passwords, key passphrases, the sync password and the AI provider keys are kept in one encrypted file, `vault.bin`, in the app's data
+folder (beside the app's own files, not inside the shell's `home` folder). The shell runs as the same user and can read that file,
+but it holds only ciphertext.
+
+- **What is encrypted with what.** One random data key encrypts the file with XChaCha20-Poly1305. That data key is wrapped by an
+  AES-256-GCM key that lives in the Android Keystore and never leaves it: in the secure chip (StrongBox) when the device has one,
+  otherwise in the trusted environment of the system. The file holds the wrapped data key and the ciphertext; the app holds the data
+  key in memory only while the store is unlocked. No cryptography is written by hand and no library is used for the prompt: the keys
+  are made through the platform's `KeyGenParameterSpec` and the prompt is the platform's `BiometricPrompt`.
+- **Protected mode.** When the device has a screen lock, the store is protected by default: the wrapping key needs the screen lock or
+  a strong biometric for every single use (no time window), through the system prompt, once per unlock. Locking again happens five
+  minutes after the app's page was hidden, measured with the clock that also counts the time the phone slept (the elapsed-realtime
+  clock; the ordinary monotonic clock stops in suspend), and a check every thirty seconds applies that rule even while the page stays
+  hidden. Live shell and SSH sessions go on while the store is locked; only reading or saving a secret waits for the unlock.
+- **Plain mode.** On a device with no screen lock the key needs nothing, the store opens by itself, and the page shows a notice that
+  the secrets are protected by the device key only. When a screen lock is set later the store can be switched to protected mode, and
+  back: the data key stays the same and only its wrapping changes.
+- **A lost store.** Removing the screen lock makes the system delete every key that needs authentication. The store then reports
+  that it is lost (its key is gone), never that it is empty, and only an explicit reset starts a new one.
+- **The app switcher.** While the store is protected, the app switcher hides the picture of the app whenever the app is not in the
+  foreground, whether the store is locked or unlocked, so a store that locked five minutes after the app went to the background
+  already has no picture to show. This is a call of Android 13 and later that changes only that picture; **screenshots and screen
+  recordings are not blocked**, on purpose, because a terminal's content is what people want to screenshot. Plain mode (protection
+  off) does not hide the picture. **On Android 12 and 12L nothing hides it**: the call does not exist there, no cover view or other
+  workaround is used, and the picture may show terminal content, protected store or not. That is a known limit, not a best effort.
+- **What the emulator run proved.** `sh scripts/android-e2e.sh vault` runs a self-test that exists in debug builds only (it is
+  compiled out of a release build and the APK check fails a release APK that holds its trigger). On the arm64 emulator it showed: a
+  plain store made by the first save and reopened with no prompt after a restart; the switch to protected mode with the system
+  prompt answered by a PIN typed through the input path; a locked store after a restart that answers the locked error, the prompt,
+  the PIN, and the saved secret read back; the lock after the page was hidden and a device clock that advances; an AI key saved while
+  unlocked and present after a restart and an unlock (no provider is called); the removed screen lock giving a lost store and a reset
+  giving a new one; the app switcher call applied for the protected store and not applied for plain mode, with the system's own
+  picture of the app's task a placeholder of about a kilobyte in the first case and a real image of tens of kilobytes in the second
+  (Android 37, read as root on the emulator image), and the app switcher screenshots saved under `target/android-e2e/`. It also
+  searches for a canary secret in every file of the app's data folder and of its folder on the shared storage, the whole log, the
+  environment of the process and the argument lists of all processes, and finds it in none. The same run passes on an Android 12
+  image, where the call reports that it is unsupported and the system keeps a real picture of the app in the protected case too.
+- **A virtual fingerprint, once by hand.** The emulator image has a virtual fingerprint sensor. It was enrolled once through the
+  Settings app and touched with `adb emu finger touch`: the prompt of a newly made protected store, and the unlock after a restart,
+  were each answered by the virtual finger and the system counted them as accepted crypto operations. This was not scripted and
+  is not part of `e2e vault`; it shows that the prompt works with a crypto object and a biometric on that image, not on a phone.
+- **What it did not prove.** StrongBox (the emulator has none and reports it truthfully), a real fingerprint sensor or a face (the
+  scripted run drives the prompt with a PIN), how the strong-biometric prompt behaves on any given phone, a key that a vendor's Keystore invalidates or
+  loses in its own ways, a key made unusable by enrolling a new fingerprint (the key is made to survive an enrolment: whoever can
+  enrol a finger already knows the PIN that also opens the prompt, and losing every secret over a harmless act would be the worse
+  failure), the app switcher card of any real phone (vendors draw their own), and every Android version other than the two images
+  named. Whether the prompt works on a particular phone is a row of the test plan without a result.
+
 ## Check a built APK
 
 ```sh
@@ -339,7 +389,9 @@ the scheme, `minSdkVersion` 31, the native code (arm64-v8a and nothing else, and
 against the list, `allowBackup`, the extraction rules inside the APK, the exported components of the **merged** manifest (including
 those of libraries), `debuggable` and cleartext in debug only, `zipalign -c -P 16 -v 4`, the alignment of every `LOAD` segment of
 every native library (at least `0x4000`, the 16 KB page size that Android 15 and later devices may use), the absence of Google Play
-services and Firebase classes, and the signature (a release APK must be unsigned; a debug APK carries the debug certificate). It
+services and Firebase classes, that a release APK holds no trace of the debug-only self-test of the secret store (its trigger is searched
+in the dex files and the native library), and the signature (a release APK must be unsigned; a debug APK carries the debug
+certificate). It
 installs nothing and writes only to a temporary folder that it removes on every way out.
 `sh scripts/test-android-apk-check.sh` proves every rule once passing and once failing with stand-in tools, without any Android
 software.
@@ -380,6 +432,6 @@ registry paths of the form `/cargo-home/registry/...`; whether those stay the sa
   shell of a phone maker.
 - The limit of Android 12 and later on background processes for local shells (the emulator does not apply it), a swipe of the app out
   of the recents list, doze and app standby over hours, and the system's notification dialog on another version or locale.
-- Any Android version other than the emulator image the check ran on (the default is Android 37, arm64).
+- Any Android version other than the emulator image the check ran on (the default is Android 37, arm64; the secret store's check also ran on an Android 12 image).
 - x86_64 and 32-bit images or builds, which are refused by design.
 - A signed release APK for distribution, installing from F-Droid or Obtainium, Play Protect or installer warnings for a self-signed APK, and a 16 KB page device other than the emulator image with that page size.

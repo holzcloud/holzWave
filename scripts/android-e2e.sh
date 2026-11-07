@@ -3,6 +3,7 @@
 #
 #   sh scripts/android-e2e.sh tracer
 #   sh scripts/android-e2e.sh service
+#   sh scripts/android-e2e.sh vault
 #
 # What `tracer` does, in order:
 #   1. starts the emulator when none runs (and stops it at the end only if it started it), builds the debug APK for
@@ -44,6 +45,28 @@
 # not apply it as phones do), the skins of phone makers, doze and app standby over hours, a swipe of the app out of the recents
 # list, and any real phone.
 #
+# What `vault` does (it starts like the others: emulator, debug APK, fresh install; it does not wait for a shell) is run the steps
+# of the debug-only self-test of the secret store, each by a launch of the debug app with the step named in an intent extra, one
+# line per check. The vault is the real one over the real Android Keystore. The script sets a screen lock itself with
+# `locksettings set-pin` and removes it again at every way out, and never touches a lock it did not set (a device that already has
+# one makes the first step say so and the section stops):
+#   a. no screen lock: a plain vault is made by the first save, and after a restart of the process it opens by itself, no prompt;
+#   b. a PIN is set, and the vault is switched to protected mode: the system prompt shows (found by the focused window
+#      `BiometricPrompt`) and the PIN is typed with `input text` and Enter; the file is ciphertext (magic, no account name);
+#   c. after a restart the vault is locked and answers the locked fault; the prompt, the PIN, the secret reads back;
+#   d. the page hidden and the vault locked, and the real device clock advancing;
+#   e. an AI key saved while unlocked is there after a restart and an unlock;
+#   e2. the app switcher picture (see below);
+#   f. the PIN is removed, which makes the system delete the key: the vault is lost with key_gone and a reset gives a new one.
+# The canary secret that the first step makes is searched for in every file of the app's data folder (and the app's folder on the
+# shared storage), the whole log, the process environment and the argument lists of all processes: it must be in none of them.
+# The app switcher picture: with the vault protected the script presses Home and, where `adb root` works (this image allows it),
+# reads the picture the system keeps for the app's task (a placeholder of about a kilobyte when the system was told to hide it, a
+# real image of tens of kilobytes otherwise) and saves a screenshot of the app switcher under target/android-e2e/; the same with
+# protected mode off as the control. The mode the host reports must be `system` on Android 13 and later and `unsupported` below.
+# What it does NOT prove: StrongBox, a fingerprint or face (the prompt is driven with the PIN), BIOMETRIC_STRONG on any phone,
+# a key invalidated by a new fingerprint, vendor Keystore behaviour, the app switcher card of a real phone, any real phone.
+#
 # Environment: HOLZWAVE_EMULATOR_PORT (default 5554) picks the emulator; HOLZWAVE_E2E_SKIP_BUILD=1 reuses the debug APK that
 # is already built (for a repeated run).
 #
@@ -63,9 +86,9 @@ SERIAL=emulator-$PORT
 export ANDROID_SERIAL=$SERIAL
 
 case "$SECTION" in
-    tracer | service) ;;
+    tracer | service | vault) ;;
     *)
-        echo "usage: sh scripts/android-e2e.sh tracer|service" >&2
+        echo "usage: sh scripts/android-e2e.sh tracer|service|vault" >&2
         exit 2
         ;;
 esac
@@ -79,6 +102,13 @@ done
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/holzwave-e2e.XXXXXX") || exit 2
 started_emulator=
 cleanup() {
+    # The screen lock that this script set is taken off again while the emulator is still there, and never one it did not set.
+    if [ -n "$pin_set" ]; then
+        adb -s "$SERIAL" shell locksettings clear --old "$PIN" >/dev/null 2>&1
+    fi
+    [ -n "$rooted" ] && adb -s "$SERIAL" unroot >/dev/null 2>&1
+    # The canary the self-test wrote into the debug app's private folder is removed with the rest of what the run left.
+    [ "$SECTION" = vault ] && adb -s "$SERIAL" shell run-as "$PKG" rm -f selftest-canary >/dev/null 2>&1
     # The three files and the app's own process are cleaned while the emulator is still there.
     if [ -n "$HOMEREL" ]; then
         adb -s "$SERIAL" shell run-as "$PKG" rm -f "$HOMEREL/e2e-pwd" "$HOMEREL/e2e-echo" "$HOMEREL/e2e-sh" "$HOMEREL/e2e-bg" >/dev/null 2>&1
@@ -87,6 +117,9 @@ cleanup() {
     rm -rf "$tmp"
 }
 HOMEREL=
+pin_set=
+rooted=
+PIN=1234
 trap cleanup EXIT HUP INT TERM
 
 fails=0
@@ -136,8 +169,12 @@ sh scripts/android-emulator.sh install "$apk" || die "the install failed"
 # The permission of the notification is granted for the run (Android 13 and later), in both sections: without it the app asks
 # at the first start of a session, and the system's dialog would take the keys of the tracer. The service section drives the
 # dialog itself at its end.
-adbd shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS || die "the notification permission could not be granted"
+# (Android 12 and 12L have no such permission: nothing to grant.)
+if [ "$(adbd shell getprop ro.build.version.sdk | tr -d '\r')" -ge 33 ]; then
+    adbd shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS || die "the notification permission could not be granted"
+fi
 
+if [ "$SECTION" != vault ]; then
 # 2. start the app and wait for its window
 adbd logcat -c >/dev/null 2>&1
 adbd shell am start -W -n "$PKG/$ACTIVITY" >"$tmp/start.txt" 2>&1 || die "the activity did not start: $(cat "$tmp/start.txt")"
@@ -176,6 +213,7 @@ if [ -z "$shell_up" ]; then
 fi
 check "the page started a pane: the app has a shell process" ok
 sleep 3
+fi
 
 if [ "$SECTION" = tracer ]; then
     # 4. focus the pane and type
@@ -423,6 +461,236 @@ if [ "$SECTION" = service ]; then
         check "the first start of a session asks for the notification permission" bad "no permission dialog within 90 s"
     fi
     adbd shell pm clear "$PKG" >/dev/null 2>&1
+fi
+
+
+if [ "$SECTION" = vault ]; then
+    notrun=0
+    skipped() { # <description> <reason>: a check that was not done is said so, and never counts as ok
+        echo "e2e $SECTION: not run $1 ($2)"
+        notrun=$((notrun + 1))
+    }
+    sdk=$(adbd shell getprop ro.build.version.sdk | tr -d '\r')
+    outdir=target/android-e2e
+    mkdir -p "$outdir"
+    entered=
+    seen_prompt=
+
+    prompt_up() { adbd shell dumpsys window | grep mCurrentFocus | grep -q BiometricPrompt; }
+    # The prompt of the system for the screen lock: the PIN goes in with the keys of the real input path, then Enter. (`input
+    # text` reached the prompt on the image of the proof; the keycode route is the fallback if it ever does not.)
+    enter_pin() {
+        sleep 1
+        adbd shell input text "$PIN"
+        sleep 1
+        adbd shell input keyevent 66
+    }
+    stop_app() {
+        adbd shell am force-stop "$PKG"
+        waited=0
+        while [ "$waited" -lt 10 ] && [ -n "$(adbd shell pidof "$PKG" | tr -d '\r')" ]; do
+            sleep 1
+            waited=$((waited + 1))
+        done
+    }
+    step_line() { adbd logcat -d 2>/dev/null | grep "holzwave-selftest $1:" | tail -n 1 | sed 's/.*RustStdoutStderr: *//'; }
+    # run_step <step> <prompt|none> [seconds]: launch the debug app with the step in the intent, answer the system prompt when the
+    # step is to show one (and say so when it does not show), and wait for the line the step logs. Sets $line.
+    run_step() {
+        step=$1
+        want=$2
+        limit=${3:-150}
+        entered=
+        seen_prompt=
+        adbd logcat -c >/dev/null 2>&1
+        adbd shell am start -W -n "$PKG/$ACTIVITY" --es holzwave_selftest "$step" >/dev/null 2>&1 || die "the activity did not start for $step"
+        waited=0
+        line=
+        while [ "$waited" -lt "$limit" ]; do
+            line=$(step_line "$step")
+            [ -n "$line" ] && break
+            if prompt_up; then
+                seen_prompt=1
+                if [ "$want" = prompt ] && [ -z "$entered" ]; then
+                    enter_pin
+                    entered=1
+                fi
+            fi
+            sleep 1
+            waited=$((waited + 1))
+        done
+        # The step may have logged while the prompt closed: look once more at the prompt's trace for the "none" case.
+        if [ -z "$line" ]; then
+            line="holzwave-selftest $step: FAIL no line in the log after $limit s"
+        fi
+    }
+    expect_ok() { # <step> <prompt|none> <description> [seconds]
+        run_step "$1" "$2" "${4:-150}"
+        case "$line" in
+            *"$1: ok"*) ;;
+            *)
+                check "$3" bad "$line"
+                return 1
+                ;;
+        esac
+        if [ "$2" = prompt ] && [ -z "$entered" ]; then
+            check "$3" bad "the step ended without the system prompt: $line"
+            return 1
+        fi
+        if [ "$2" = none ] && [ -n "$seen_prompt" ]; then
+            check "$3" bad "a system prompt showed where none was wanted: $line"
+            return 1
+        fi
+        check "$3 [${line#*"$1: ok "}]" ok
+        return 0
+    }
+    stop_here() { # a step that cannot continue the section ends it
+        die "$1"
+    }
+
+    echo "e2e vault: image API $sdk; the prompt is driven with the PIN $PIN (set by this script), the keys of the real input path"
+
+    # a. no screen lock: plain
+    expect_ok vault-info none "the Keystore answers: the state of the new app" || stop_here "the self-test did not start"
+    echo "e2e vault: device facts: ${line#*vault-info: ok }"
+    expect_ok vault-plain-write none "no screen lock: the first save makes a plain vault and reads back" \
+        || stop_here "step a failed (a device that already has a screen lock is never changed by this script)"
+    stop_app
+    expect_ok vault-plain-read none "after a restart the plain vault opens by itself, with no prompt" || stop_here "step a2 failed"
+
+    # b. a PIN, protected mode
+    adbd shell locksettings set-pin "$PIN" >/dev/null || stop_here "locksettings set-pin did not work on this image"
+    pin_set=1
+    sleep 5
+    expect_ok vault-protect prompt "a screen lock exists: switching to protected mode shows the system prompt, the PIN opens it" \
+        || stop_here "step b failed"
+    HOMEREL=$(as_app 'find . -maxdepth 3 -type d -name home' | head -n 1 | sed 's|^\./||')
+    [ -n "$HOMEREL" ] && rel_parent=$(dirname "$HOMEREL") || rel_parent=.
+    magic=$(as_app "head -c 3 $rel_parent/vault.bin")
+    [ "$magic" = HWV ] && check "the vault file exists and starts with the vault magic" ok || check "the vault file exists and starts with the vault magic" bad "got '$magic'"
+    hits=$(as_app "grep -c ssh:selftest $rel_parent/vault.bin" | head -n 1)
+    [ "${hits:-1}" = 0 ] && check "the vault file does not hold the account name in plaintext" ok || check "the vault file does not hold the account name in plaintext" bad "grep counted '$hits'"
+
+    # c. restart: locked
+    stop_app
+    expect_ok vault-locked-read prompt "after a restart the vault is locked and answers the locked fault; the prompt and the PIN unlock it and the secret reads back" \
+        || stop_here "step c failed"
+
+    # the canary scan
+    canary=$(as_app "cat $rel_parent/selftest-canary" | head -n 1)
+    case "$canary" in
+        HW-CANARY-????????????????????????????????) ;;
+        *) stop_here "the canary file was not written ('$canary')" ;;
+    esac
+    app_pid=$(adbd shell pidof "$PKG" | tr -d '\r')
+    echo "e2e vault: canary scan of: the app's data folder (every file but the canary's own), its folder on the shared storage, the whole log, /proc/$app_pid/environ, the argument lists of every process"
+    # The log is searched first: adbd logs the command line of every `adb shell` it runs, so a scan whose command line holds the
+    # canary would put the canary into the log itself, and a search of the log after it would find the script's own trace.
+    in_log=$(adbd logcat -d 2>/dev/null | grep -c -F "$canary")
+    [ "$in_log" = 0 ] && check "the canary is not in the log" ok \
+        || check "the canary is not in the log" bad "$in_log lines: $(adbd logcat -d 2>/dev/null | grep -F "$canary" | head -n 2 | sed "s/$canary/<canary>/g" | cut -c1-240)"
+    in_files=$(as_app "grep -rlaF $canary . --exclude=selftest-canary 2>/dev/null" | head -n 3)
+    [ -z "$in_files" ] && check "the canary is in no file of the app's data folder" ok || check "the canary is in no file of the app's data folder" bad "found in: $in_files"
+    control=$(as_app "grep -rlaF $canary . 2>/dev/null" | head -n 3)
+    [ "$control" = "./selftest-canary" ] || [ "$control" = "selftest-canary" ] \
+        && check "the scan can find the canary: it finds exactly the canary's own file when that is not excluded" ok \
+        || check "the scan can find the canary: it finds exactly the canary's own file when that is not excluded" bad "found: $control"
+    shared=$(adbd shell "grep -rlaF $canary /sdcard/Android/data/$PKG 2>/dev/null" | tr -d '\r' | head -n 3)
+    [ -z "$shared" ] && check "the canary is in no file of the app's folder on the shared storage" ok || check "the canary is in no file of the app's folder on the shared storage" bad "found in: $shared"
+    in_env=$(as_app "cat /proc/$app_pid/environ" | grep -a -c -F "$canary")
+    [ "$in_env" = 0 ] && check "the canary is not in the environment of the app's process" ok || check "the canary is not in the environment of the app's process" bad "$in_env matches"
+    in_args=$(adbd shell ps -A -o PID,ARGS 2>/dev/null | tr -d '\r' | grep -c -F "$canary")
+    [ "$in_args" = 0 ] && check "the canary is in no process's argument list" ok || check "the canary is in no process's argument list" bad "$in_args matches"
+
+    # d. hidden and locked, the real clock
+    expect_ok vault-background none "hidden, then locked: the next read is the locked fault, and the device clock advances" || true
+
+    # e. the AI key
+    expect_ok vault-ai-key prompt "an AI key saved while unlocked is present (no provider is called)" || true
+    stop_app
+    expect_ok vault-ai-key-after-restart prompt "after a restart the key is held back while locked and present after the unlock" || true
+
+    # e2. the app switcher picture
+    snapshot_task() { adbd shell dumpsys activity recents | tr -d '\r' | sed -n "s/.*Recent #[0-9]*: Task{[^ ]* #\\([0-9][0-9]*\\) .*A=[0-9]*:$PKG.*/\\1/p" | head -n 1; }
+    snapshot_size() { # <task id>: the size of the picture the system keeps for the task, 0 when there is none
+        sz=$(adbd shell "f=\$(find /data/system_ce/0/snapshots -name '$1.jpg' 2>/dev/null | head -n 1); [ -n \"\$f\" ] && stat -c %s \"\$f\" || echo 0" | tr -d '\r')
+        echo "${sz:-0}"
+    }
+    back_to_app() {
+        adbd shell am start -n "$PKG/$ACTIVITY" >/dev/null 2>&1
+        wait_focus=0
+        while [ "$wait_focus" -lt 20 ]; do
+            adbd shell dumpsys window | grep mCurrentFocus | grep -q "$PKG/$ACTIVITY" && return 0
+            sleep 1
+            wait_focus=$((wait_focus + 1))
+        done
+        return 1
+    }
+    switcher_shot() { # <name>: Home, then the app switcher, saved as a picture
+        adbd shell input keyevent KEYCODE_HOME
+        sleep 3
+        snap_after_home=$(snapshot_size "$task")
+        adbd shell input keyevent KEYCODE_APP_SWITCH
+        sleep 2
+        adbd exec-out screencap -p >"$outdir/recents-$1.png" 2>/dev/null
+        echo "e2e vault: app switcher screenshot $outdir/recents-$1.png ($(wc -c <"$outdir/recents-$1.png" | tr -d ' ') bytes)"
+    }
+    mode_matches() { # <detail> <protected|plain>
+        case "$1" in
+            *"mode=system"*) [ "$sdk" -ge 33 ] ;;
+            *"mode=unsupported"*) [ "$sdk" -lt 33 ] ;;
+            *) false ;;
+        esac
+    }
+    expect_ok vault-recents-protected none "the protected vault: the host told the plugin to hide the app switcher picture" || true
+    if mode_matches "$line"; then
+        check "the mode the host reports matches API $sdk (system from 33, unsupported below)" ok
+    else
+        check "the mode the host reports matches API $sdk (system from 33, unsupported below)" bad "$line"
+    fi
+    case "$line" in
+        *"applied=true mode=system"*) [ "$sdk" -ge 33 ] && check "protected: the plugin reports applied=true" ok ;;
+        *"applied=false mode=unsupported"*) [ "$sdk" -lt 33 ] && check "Android 12 and 12L: applied=false, mode=unsupported (no protection exists)" ok ;;
+        *) check "protected: the plugin's applied value" bad "$line" ;;
+    esac
+    task=$(snapshot_task)
+    if adbd root >/dev/null 2>&1; then
+        sleep 3
+        adbd wait-for-device
+        rooted=1
+    fi
+    can_see=
+    if [ -n "$rooted" ] && [ -n "$task" ] && [ "$(adbd shell id -u | tr -d '\r')" = 0 ]; then can_see=1; fi
+    switcher_shot protected
+    protected_size=$snap_after_home
+    back_to_app || skipped "the app switcher control run" "the app did not come back to the front"
+    expect_ok vault-recents-plain none "protection off: the host told the plugin to show the app switcher picture" || true
+    switcher_shot plain
+    plain_size=$snap_after_home
+    if [ -z "$can_see" ]; then
+        skipped "the system's snapshot of the app's task" "no root on this image or no task found (the screenshots are saved; the executor looks at them)"
+    elif [ "$sdk" -ge 33 ]; then
+        echo "e2e vault: the system's picture of the app's task: ${protected_size} bytes protected, ${plain_size} bytes with protection off"
+        if [ "$plain_size" -le 20000 ]; then
+            skipped "the system's snapshot comparison" "the control picture is only $plain_size bytes: the check cannot conclude"
+        elif [ "$protected_size" -lt 8192 ]; then
+            check "protected: the system kept no picture of the app (${protected_size} bytes), while it kept one with protection off (${plain_size} bytes)" ok
+        else
+            check "protected: the system kept no picture of the app" bad "$protected_size bytes, control $plain_size bytes"
+        fi
+    else
+        echo "e2e vault: observation on API $sdk (no protection exists): the system's picture is ${protected_size} bytes protected and ${plain_size} bytes with protection off"
+    fi
+    back_to_app || true
+    expect_ok vault-protect prompt "protected mode is switched on again (prompt and PIN)" || true
+
+    # f. the PIN is removed: the system deletes the key
+    stop_app
+    adbd shell locksettings clear --old "$PIN" >/dev/null || stop_here "locksettings clear did not work"
+    pin_set=
+    sleep 5
+    expect_ok vault-lost none "the screen lock removed: the vault is lost with key_gone, and a reset gives a new one" || true
+    stop_app
 fi
 
 end_time=$(date +%s)

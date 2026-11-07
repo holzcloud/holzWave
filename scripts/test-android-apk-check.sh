@@ -122,6 +122,7 @@ n=0
 #   C_SIGNED    for the apksigner shim: yes or no
 #   C_DN        the certificate DN [debug certificate]
 #   C_DEX       text that the dex files hold []
+#   C_SO        text that the native library holds []
 #   C_TOOL      a tool to leave out of the fake SDK: aapt2, zipalign, apksigner, readelf, unzip
 #   C_RULES     the domains excluded in the rules file [root file database sharedpref external device_root]
 mkcase() {
@@ -161,6 +162,7 @@ resources.arsc}" > "$c/entries.txt"
     printf '  Type Offset VirtAddr PhysAddr FileSiz MemSiz Flg Align\n  LOAD 0x000000 0x0000000000000000 0x0000000000000000 0x001234 0x001234 R   %s\n  LOAD 0x004000 0x0000000000004000 0x0000000000004000 0x002000 0x002000 R E %s\n' \
         "${C_ALIGN:-0x4000}" "${C_ALIGN:-0x4000}" > "$c/readelf.txt"
     printf '%s\n' "${C_DEX:-}" > "$c/dex.txt"
+    printf '%s\n' "${C_SO:-}" > "$c/so.txt"
     if [ "$mode" = release ]; then
         echo 1 > "$c/signer.rc"
         printf 'DOES NOT VERIFY\nERROR: Missing META-INF/MANIFEST.MF\n' > "$c/signer.txt"
@@ -187,7 +189,7 @@ esac'
     shim "$bin/llvm-readelf" 'cat "$HW_CASE/readelf.txt"'
     shim "$c/bin/unzip" 'case "$1" in
   -Z1) cat "$HW_CASE/entries.txt" ;;
-  -p) cat "$HW_CASE/dex.txt" ;;
+  -p) case "$3" in lib/*) cat "$HW_CASE/so.txt" ;; *) cat "$HW_CASE/dex.txt" ;; esac ;;
   -q)
     # unzip -q -o <apk> <pattern> -d <dir>
     dir=$6
@@ -231,7 +233,7 @@ check() {
 }
 clean_after() { [ -z "$(ls -A "$c/tmpdir")" ]; }
 reset_f() { unset F_PACKAGE F_BACKUP F_FULL_BACKUP F_RULES F_DEBUGGABLE F_CLEARTEXT F_PERMISSION F_COMPONENTS F_MAIN_EXPORTED F_INCLUDE; }
-reset_c() { unset C_ENTRIES C_ZIPALIGN C_ALIGN C_CODE C_ABIS C_MIN C_SIGNED C_DN C_DEX C_TOOL C_RULES; }
+reset_c() { unset C_ENTRIES C_ZIPALIGN C_ALIGN C_CODE C_ABIS C_MIN C_SIGNED C_DN C_DEX C_SO C_TOOL C_RULES; }
 
 # rule <name> <mode>: with the F_ and C_ variables set by the caller, a run must fail with a FAIL line that matches <pattern>.
 expect_fail() { # <what> <mode> <pattern>
@@ -357,6 +359,17 @@ echo "services"
 C_DEX='xxLcom/google/firebase/analytics/FirebaseAnalytics;xx'; expect_fail "a Firebase class in the dex" release "services: found 1"
 C_DEX='Lcom/google/android/gms/common/api/Api;'; expect_fail "a Play services class in the dex" release "services: found 1"
 C_DEX='Lcom/google/android/play/core/review/ReviewManager;'; expect_fail "a Play core class in the dex" release "services: found 1"
+
+echo "the debug-only self-test"
+C_DEX='xxholzwave_selftestxx'; expect_fail "the self-test trigger in the dex of a release APK" release "self-test: found 1"
+C_SO='holzwave-selftest vault-plain-write: ok'; expect_fail "the self-test report tag in the native library of a release APK" release "self-test: found 1"
+C_DEX='holzwave_selftest'; C_SO='holzwave-selftest'; mkcase debug
+check debug
+[ "$rc" -eq 0 ] && echo "$out" | grep -q 'the debug APK holds the self-test, as intended' && ok "a debug APK may hold the self-test and is told so" || bad "debug with the self-test (rc $rc): $out"
+reset_c
+mkcase release
+check
+echo "$out" | grep -q '^ok   the release APK holds no self-test' && ok "a clean release APK is reported as holding no self-test" || bad "no self-test line: $out"
 
 echo "signature"
 C_SIGNED=yes; expect_fail "a signed release APK" release "signature: found a release APK that verifies or holds signature files"

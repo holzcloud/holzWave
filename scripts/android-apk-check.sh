@@ -24,6 +24,9 @@
 #                 usesCleartextTraffic nor a network security config; debug: no blanket usesCleartextTraffic)
 #   16 KB pages   `zipalign -c -P 16 -v 4` passes, and every LOAD segment of every lib/arm64-v8a/*.so is aligned to 0x4000 or more
 #   services      the dex files name no Google Play services, Firebase or Play core class
+#   self-test     a release APK holds no trace of the debug-only self-test, neither in the dex files nor in the native library
+#                 (the name of the intent extra that starts a step, and the tag its report uses); a debug APK may hold it and is
+#                 only told so
 #   signature     release: the APK is UNSIGNED (apksigner does not verify it and the file holds no signature files); debug: it is
 #                 signed with the debug certificate (CN=Android Debug)
 #
@@ -335,6 +338,18 @@ done
 
 service_hits=$(unzip -p "$apk" 'classes*.dex' 2> /dev/null | grep -a -c -E 'Lcom/google/(android/gms|firebase|android/play/core)/' || true)
 if [ "${service_hits:-0}" -eq 0 ]; then pass "the dex files name no Google Play services, Firebase or Play core class"; else fail "services: found $service_hits dex lines naming Google Play services, Firebase or Play core, wanted none"; fi
+
+# ---- the debug-only self-test -----------------------------------------------------------------------------------------------------
+
+# The emulator's self-test of the secret store starts from an intent extra that exists in the debug source set, and its Rust is
+# compiled for debug builds only. A release APK must hold neither: the name of the extra and the tag of its report are searched
+# in the dex files and in the native libraries.
+selftest_hits=$( { unzip -p "$apk" 'classes*.dex' 2> /dev/null; unzip -p "$apk" 'lib/arm64-v8a/*.so' 2> /dev/null; } | grep -a -c -E 'holzwave[_-]selftest' || true)
+if [ "$mode" = release ]; then
+    if [ "${selftest_hits:-0}" -eq 0 ]; then pass "the release APK holds no self-test (no holzwave_selftest in the dex files or the native library)"; else fail "self-test: found $selftest_hits lines naming holzwave_selftest in the release APK, wanted none"; fi
+else
+    if [ "${selftest_hits:-0}" -eq 0 ]; then info "the debug APK holds no self-test trigger"; else info "the debug APK holds the self-test, as intended for the runs of a debug build"; fi
+fi
 
 # ---- the signature ------------------------------------------------------------------------------------------------------------------
 
