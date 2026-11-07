@@ -170,7 +170,7 @@ ARM or 32-bit x86 at all.
 sh scripts/android-e2e.sh tracer
 ```
 
-(The section `service` is described with the foreground service below, and the section `vault` with the secret store.) It starts the emulator if none runs (and stops it at the end only if it started it), builds and installs the debug APK, starts
+(The section `service` is described with the foreground service below, the section `vault` with the secret store, and the section `tls` with HTTPS and certificates.) It starts the emulator if none runs (and stops it at the end only if it started it), builds and installs the debug APK, starts
 the app, waits until the app has started a shell, taps the screen, types three lines with the real Android key path (`adb shell
 input text` and the Enter key), and reads the results back with `run-as`:
 
@@ -376,6 +376,55 @@ but it holds only ciphertext.
   failure), the app switcher card of any real phone (vendors draw their own), and every Android version other than the two images
   named. Whether the prompt works on a particular phone is a row of the test plan without a result.
 
+## HTTPS and certificates
+
+Both network clients of the app, the WebDAV client of the sync and the client of the AI chat, judge a server's certificate with the
+platform certificate verifier (`rustls-platform-verifier`), and with nothing else: no bundled list of roots, no custom verifier, no
+setting that accepts any certificate (a text test searches the sources for each of those and finds none). On Android that means the
+chain is judged by the system trust store through the platform's own trust manager.
+
+- **What Android needs that other systems do not.** The verifier calls into the Java side, so two things must exist or every HTTPS
+  request fails: a small Kotlin component in the app, and one call at start that hands the verifier the application context. The
+  component is a prebuilt Maven artifact (`org.rustls:rustls-platform-verifier`) that the verifier's own project publishes on GitHub.
+  It is outside Maven Central and Google's repository, so **the Gradle build needs network access to that repository**. The Gradle
+  project asks that repository for its own group only; the version of the artifact is read from the entry of the Rust crate
+  `rustls-platform-verifier-android` in `Cargo.lock`, so the Kotlin and the Rust half cannot drift apart; and the SHA-256 of the
+  artifact and its metadata file are pinned in `app/src-tauri/gen/android/gradle/verification-metadata.xml`, so Gradle refuses a
+  file that does not match (every other artifact is trusted as before). When the crate is updated the pinned sums are updated in
+  the same commit, and a text test compares the version there with the lock file. The call that hands over the context is one
+  native function (`init_tls` in `src/android/tls.rs`) that the app's Kotlin plugin class calls when it is made, before any network
+  code can run.
+- **A failed set-up refuses, it never accepts.** If the call fails, the app does not crash and no check is loosened: the sync run
+  and the send of an AI chat message refuse with the fixed word `tls_not_ready` (the sync shows it as an error, the chat as a
+  network failure), and a restart tries again. The two refusals exist in Android builds only.
+- **Revocation.** The verifier asks Android to check revocation of the server's certificate as a soft failure only, and the
+  component's own manifest would allow plain HTTP to the hosts of the certificate authorities' revocation lists. The app takes that
+  allowance out of its manifest, because the release build allows no cleartext at all (the APK check enforces it). The result: the
+  system trust store decides what is trusted, and online revocation lookups that need plain HTTP are not made.
+- **Sync and the locked vault.** While the secret store is locked, the sync does not run at all: its state is `paused`, with no
+  error text and no network connection, and the first unlock starts one run at once.
+- **What the emulator run proved.** `sh scripts/android-e2e.sh tls` runs a debug-only self-test on the arm64 emulator against a
+  throwaway TLS server that the script starts on the Mac (a self-signed certificate made for the run, the server bound to the Mac's
+  loopback address and forwarded to the emulator's own loopback address with `adb reverse`, all removed at every way out). On the
+  Android 37 image and on the Android 12 image it showed: a public site is accepted by both clients (the sync client reaches the
+  server's own answer, `405 Method Not Allowed`, and the chat client gets an answer); the self-signed server is refused by both
+  clients, as `invalid peer certificate: UnknownIssuer` for the sync and `the server certificate was not accepted` for the chat,
+  and the server's own log shows the failed handshakes; a save of a sync account against it keeps nothing; after a restart with a
+  locked vault the sync is `paused` with no error text and the server sees no connection, and the unlock starts one run that
+  reaches the handshake and refuses the certificate. The canary secret is in no log, file, environment or argument list.
+- **Local-network addresses on Android 17.** The emulator's name for the development machine, `10.0.2.2`, is a local-network
+  address. An app that targets Android 17 (this one does) can not reach such an address until it holds the runtime permission
+  `ACCESS_LOCAL_NETWORK`; on the emulator the connection simply timed out (`timeout: global`), and it worked as soon as the
+  permission was granted with `adb shell pm grant`. **The app does not declare that permission**, so a WebDAV server or an AI
+  server on the home network (a private address) is not reachable from an Android 17 device in this build, with HTTPS or without.
+  The emulator check therefore reaches its server through `adb reverse` (a loopback address needs no permission). Declaring the
+  permission is a decision of its own: it is a new runtime permission with a prompt, and it belongs in `android-permissions.txt`.
+- **What it did not prove.** Any real phone, any Android version other than the images named, user-installed certificate
+  authorities (Android applies them to an app only as its target SDK and network security config allow; this app has no such
+  config, so none is expected to be trusted, and that was not tried), corporate proxies and TLS inspection, captive portals,
+  certificate pinning (the app pins nothing), revocation behaviour, mobile networks, a real WebDAV server and a real AI provider
+  from a phone.
+
 ## Check a built APK
 
 ```sh
@@ -432,6 +481,7 @@ registry paths of the form `/cargo-home/registry/...`; whether those stay the sa
   shell of a phone maker.
 - The limit of Android 12 and later on background processes for local shells (the emulator does not apply it), a swipe of the app out
   of the recents list, doze and app standby over hours, and the system's notification dialog on another version or locale.
+- The HTTPS check on any Android version other than 12 and 37, and the local-network permission on a real phone.
 - Any Android version other than the emulator image the check ran on (the default is Android 37, arm64; the secret store's check also ran on an Android 12 image).
 - x86_64 and 32-bit images or builds, which are refused by design.
 - A signed release APK for distribution, installing from F-Droid or Obtainium, Play Protect or installer warnings for a self-signed APK, and a 16 KB page device other than the emulator image with that page size.

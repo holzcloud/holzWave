@@ -123,6 +123,8 @@ n=0
 #   C_DN        the certificate DN [debug certificate]
 #   C_DEX       text that the dex files hold []
 #   C_SO        text that the native library holds []
+#   C_NO_VERIFIER  set: the dex files do not hold the verifier component (it is there by default)
+#   C_NO_INIT   set: the native library does not export the verifier's set-up function (it does by default)
 #   C_TOOL      a tool to leave out of the fake SDK: aapt2, zipalign, apksigner, readelf, unzip
 #   C_RULES     the domains excluded in the rules file [root file database sharedpref external device_root]
 mkcase() {
@@ -162,7 +164,9 @@ resources.arsc}" > "$c/entries.txt"
     printf '  Type Offset VirtAddr PhysAddr FileSiz MemSiz Flg Align\n  LOAD 0x000000 0x0000000000000000 0x0000000000000000 0x001234 0x001234 R   %s\n  LOAD 0x004000 0x0000000000004000 0x0000000000004000 0x002000 0x002000 R E %s\n' \
         "${C_ALIGN:-0x4000}" "${C_ALIGN:-0x4000}" > "$c/readelf.txt"
     printf '%s\n' "${C_DEX:-}" > "$c/dex.txt"
+    [ -n "${C_NO_VERIFIER:-}" ] || echo 'Lorg/rustls/platformverifier/CertificateVerifier;' >> "$c/dex.txt"
     printf '%s\n' "${C_SO:-}" > "$c/so.txt"
+    [ -n "${C_NO_INIT:-}" ] || echo 'Java_ch_holzcloud_holzwave_HolzwavePlugin_initTls' >> "$c/so.txt"
     if [ "$mode" = release ]; then
         echo 1 > "$c/signer.rc"
         printf 'DOES NOT VERIFY\nERROR: Missing META-INF/MANIFEST.MF\n' > "$c/signer.txt"
@@ -233,7 +237,7 @@ check() {
 }
 clean_after() { [ -z "$(ls -A "$c/tmpdir")" ]; }
 reset_f() { unset F_PACKAGE F_BACKUP F_FULL_BACKUP F_RULES F_DEBUGGABLE F_CLEARTEXT F_PERMISSION F_COMPONENTS F_MAIN_EXPORTED F_INCLUDE; }
-reset_c() { unset C_ENTRIES C_ZIPALIGN C_ALIGN C_CODE C_ABIS C_MIN C_SIGNED C_DN C_DEX C_SO C_TOOL C_RULES; }
+reset_c() { unset C_ENTRIES C_ZIPALIGN C_ALIGN C_CODE C_ABIS C_MIN C_SIGNED C_DN C_DEX C_SO C_TOOL C_RULES C_NO_VERIFIER C_NO_INIT; }
 
 # rule <name> <mode>: with the F_ and C_ variables set by the caller, a run must fail with a FAIL line that matches <pattern>.
 expect_fail() { # <what> <mode> <pattern>
@@ -359,6 +363,16 @@ echo "services"
 C_DEX='xxLcom/google/firebase/analytics/FirebaseAnalytics;xx'; expect_fail "a Firebase class in the dex" release "services: found 1"
 C_DEX='Lcom/google/android/gms/common/api/Api;'; expect_fail "a Play services class in the dex" release "services: found 1"
 C_DEX='Lcom/google/android/play/core/review/ReviewManager;'; expect_fail "a Play core class in the dex" release "services: found 1"
+
+echo "https: the platform certificate verifier"
+C_NO_VERIFIER=1; expect_fail "no verifier component in the dex of a release APK" release "https: found no class org.rustls.platformverifier.CertificateVerifier"
+C_NO_VERIFIER=1; expect_fail "no verifier component in the dex of a debug APK" debug "https: found no class org.rustls.platformverifier.CertificateVerifier"
+C_NO_INIT=1; expect_fail "no set-up function in the native library of a release APK" release "https: found no Java_ch_holzcloud_holzwave_HolzwavePlugin_initTls"
+C_NO_INIT=1; expect_fail "no set-up function in the native library of a debug APK" debug "https: found no Java_ch_holzcloud_holzwave_HolzwavePlugin_initTls"
+mkcase release
+check
+echo "$out" | grep -q '^ok   the dex files hold the Kotlin component of the platform certificate verifier' && echo "$out" | grep -q '^ok   the native library exports the function that sets the verifier up' \
+    && ok "a good release APK is reported as holding the verifier component and its set-up function" || bad "no verifier lines: $out"
 
 echo "the debug-only self-test"
 C_DEX='xxholzwave_selftestxx'; expect_fail "the self-test trigger in the dex of a release APK" release "self-test: found 1"

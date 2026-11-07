@@ -4,6 +4,7 @@
 #   sh scripts/android-e2e.sh tracer
 #   sh scripts/android-e2e.sh service
 #   sh scripts/android-e2e.sh vault
+#   sh scripts/android-e2e.sh tls
 #
 # What `tracer` does, in order:
 #   1. starts the emulator when none runs (and stops it at the end only if it started it), builds the debug APK for
@@ -67,6 +68,32 @@
 # What it does NOT prove: StrongBox, a fingerprint or face (the prompt is driven with the PIN), BIOMETRIC_STRONG on any phone,
 # a key invalidated by a new fingerprint, vendor Keystore behaviour, the app switcher card of a real phone, any real phone.
 #
+# What `tls` does (it starts like `vault`: emulator, debug APK, fresh install) is run the steps of the debug-only self-test that
+# use the two real network clients of the core, the WebDAV client of the sync and the client of the AI chat, which both take their
+# trust decisions from the Android system trust store through the platform certificate verifier. The script starts a throwaway TLS
+# server on the Mac with `openssl s_server`: a self-signed certificate made for this run in a private temporary folder, the
+# server bound to the loopback address of the Mac and reached from the emulator at its own 127.0.0.1:8443 through `adb reverse`
+# (removed at every way out, like the folder). The emulator's name for the Mac, 10.0.2.2, is not used for this: it is a
+# local-network address, which an app that targets Android 17 may not reach without a runtime permission this app does not ask
+# for. One line per check:
+#   a. `tls-untrusted`: both clients request the server and both are refused with an error that names the certificate; the
+#      server saw the connection attempts (its log), so the refusal is a verdict on the certificate and not a missing route;
+#   b. `tls-public`: both clients request https://example.com/ and both get an HTTP-level answer, so the verifier accepts what the
+#      system trusts (the check is skipped, and said to be, when the Mac cannot connect to that site: a skip is never reported as ok);
+#   c. a PIN is set (the script clears it again at every way out) and the first unlock makes a protected vault; the sync is saved
+#      through the real path, which is refused as a certificate error and keeps nothing, and the account a successful save would
+#      have left is put in place; the app is stopped;
+#   d. after the restart the vault is locked: the sync state is `paused`, with no error text, and the server's log has no new
+#      connection since the restart;
+#   e. the unlock (the system prompt, the PIN) starts one run, which reaches the server's TLS handshake, where the certificate is
+#      refused: the state is `error` with a text that names the certificate (not a missing secret, and never `idle`), and the
+#      server's log shows the connection attempt;
+#   f. the canary secret, used as the sync's password and passphrase, is searched for in the app's files, the log, the process
+#      environment and the argument lists of all processes: in none of them.
+# What it does NOT prove: any real phone or other Android version than the image run; other trust stores, user-installed
+# certificate authorities, proxies and TLS inspection, captive portals, certificate pinning, revocation and mobile networks; a real
+# WebDAV server or a real AI provider.
+#
 # Environment: HOLZWAVE_EMULATOR_PORT (default 5554) picks the emulator; HOLZWAVE_E2E_SKIP_BUILD=1 reuses the debug APK that
 # is already built (for a repeated run).
 #
@@ -86,9 +113,9 @@ SERIAL=emulator-$PORT
 export ANDROID_SERIAL=$SERIAL
 
 case "$SECTION" in
-    tracer | service | vault) ;;
+    tracer | service | vault | tls) ;;
     *)
-        echo "usage: sh scripts/android-e2e.sh tracer|service|vault" >&2
+        echo "usage: sh scripts/android-e2e.sh tracer|service|vault|tls" >&2
         exit 2
         ;;
 esac
@@ -108,7 +135,13 @@ cleanup() {
     fi
     [ -n "$rooted" ] && adb -s "$SERIAL" unroot >/dev/null 2>&1
     # The canary the self-test wrote into the debug app's private folder is removed with the rest of what the run left.
-    [ "$SECTION" = vault ] && adb -s "$SERIAL" shell run-as "$PKG" rm -f selftest-canary >/dev/null 2>&1
+    { [ "$SECTION" = vault ] || [ "$SECTION" = tls ]; } && adb -s "$SERIAL" shell run-as "$PKG" rm -f selftest-canary >/dev/null 2>&1
+    # The throwaway TLS server of the tls section; its certificate and key are in $tmp, which is removed below.
+    [ -n "$reversed" ] && adb -s "$SERIAL" reverse --remove tcp:8443 >/dev/null 2>&1
+    if [ -n "$server_pid" ]; then
+        kill "$server_pid" >/dev/null 2>&1
+        wait "$server_pid" 2>/dev/null
+    fi
     # The three files and the app's own process are cleaned while the emulator is still there.
     if [ -n "$HOMEREL" ]; then
         adb -s "$SERIAL" shell run-as "$PKG" rm -f "$HOMEREL/e2e-pwd" "$HOMEREL/e2e-echo" "$HOMEREL/e2e-sh" "$HOMEREL/e2e-bg" >/dev/null 2>&1
@@ -119,6 +152,8 @@ cleanup() {
 HOMEREL=
 pin_set=
 rooted=
+server_pid=
+reversed=
 PIN=1234
 trap cleanup EXIT HUP INT TERM
 
@@ -174,7 +209,7 @@ if [ "$(adbd shell getprop ro.build.version.sdk | tr -d '\r')" -ge 33 ]; then
     adbd shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS || die "the notification permission could not be granted"
 fi
 
-if [ "$SECTION" != vault ]; then
+if [ "$SECTION" != vault ] && [ "$SECTION" != tls ]; then
 # 2. start the app and wait for its window
 adbd logcat -c >/dev/null 2>&1
 adbd shell am start -W -n "$PKG/$ACTIVITY" >"$tmp/start.txt" 2>&1 || die "the activity did not start: $(cat "$tmp/start.txt")"
@@ -464,7 +499,7 @@ if [ "$SECTION" = service ]; then
 fi
 
 
-if [ "$SECTION" = vault ]; then
+if [ "$SECTION" = vault ] || [ "$SECTION" = tls ]; then
     notrun=0
     skipped() { # <description> <reason>: a check that was not done is said so, and never counts as ok
         echo "e2e $SECTION: not run $1 ($2)"
@@ -548,6 +583,7 @@ if [ "$SECTION" = vault ]; then
         die "$1"
     }
 
+    if [ "$SECTION" = vault ]; then
     echo "e2e vault: image API $sdk; the prompt is driven with the PIN $PIN (set by this script), the keys of the real input path"
 
     # a. no screen lock: plain
@@ -691,6 +727,124 @@ if [ "$SECTION" = vault ]; then
     sleep 5
     expect_ok vault-lost none "the screen lock removed: the vault is lost with key_gone, and a reset gives a new one" || true
     stop_app
+    else
+    # ---- the tls section ------------------------------------------------------------------------------------------------
+    echo "e2e tls: image API $sdk; the PIN $PIN is set by this script (and cleared again) for the vault steps"
+    command -v openssl >/dev/null 2>&1 || die "openssl is missing: the throwaway TLS server needs it"
+    certdir="$tmp/tls"
+    mkdir -m 700 "$certdir" || die "no private folder for the certificate"
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 -subj /CN=127.0.0.1 \
+        -addext subjectAltName=IP:127.0.0.1 -keyout "$certdir/key.pem" -out "$certdir/cert.pem" >/dev/null 2>&1 \
+        || die "openssl could not make the self-signed certificate (an OpenSSL with -pkeyopt and -addext is needed)"
+    # Bound to the loopback address of the Mac: nothing else on the network can reach it. The emulator reaches it at its own
+    # loopback address, through the forward of adb reverse.
+    openssl s_server -accept 127.0.0.1:8443 -cert "$certdir/cert.pem" -key "$certdir/key.pem" -www >"$tmp/server.log" 2>&1 &
+    server_pid=$!
+    adbd reverse tcp:8443 tcp:8443 >/dev/null || die "adb reverse did not work"
+    reversed=1
+    waited=0
+    while [ "$waited" -lt 10 ] && ! grep -q ACCEPT "$tmp/server.log" 2>/dev/null; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    grep -q ACCEPT "$tmp/server.log" 2>/dev/null || die "the throwaway TLS server did not start on 127.0.0.1:8443 (is the port in use?): $(head -n 3 "$tmp/server.log" | tr '\n' ' ')"
+    echo "e2e tls: a TLS server with a self-signed certificate (EC P-256, valid one day) listens on 127.0.0.1:8443 of the Mac, seen from the emulator as its own 127.0.0.1:8443 (adb reverse)"
+    # The attempts the server has seen: its start and every connection (a refused certificate shows as an alert line).
+    attempts() {
+        n=$(grep -c -E 'ACCEPT|error:' "$tmp/server.log" 2>/dev/null)
+        echo "${n:-0}"
+    }
+
+    expect_ok vault-info none "the self-test answers: the state of the new app" || stop_here "the self-test did not start"
+    case "$line" in
+        *"screen_lock=true"*) stop_here "the device already has a screen lock; this script never changes a lock it did not set" ;;
+    esac
+
+    # a. the verdict on a certificate the system does not trust
+    before=$(attempts)
+    expect_ok tls-untrusted none "both clients refuse a self-signed certificate, as an error that names the certificate" || true
+    sleep 1
+    after=$(attempts)
+    if [ "$after" -gt "$before" ]; then
+        check "the server saw the connection attempts of the clients ($((after - before)) lines in its log)" ok
+    else
+        check "the server saw the connection attempts of the clients" bad "its log did not grow"
+    fi
+
+    # b. the verdict on a certificate the system trusts
+    # (A TCP connect decides; no downloader tool is used in these scripts, the stand-in test refuses one.)
+    if nc -z -w 5 example.com 443 >/dev/null 2>&1; then
+        expect_ok tls-public none "both clients get an HTTP answer from a public site: the system's trust store accepts it" || true
+    else
+        skipped "tls-public" "the Mac cannot open a connection to example.com port 443, and the emulator goes through the Mac's network"
+    fi
+
+    # c. a PIN, the protected vault, the sync saved
+    adbd shell locksettings set-pin "$PIN" >/dev/null || stop_here "locksettings set-pin did not work on this image"
+    pin_set=1
+    sleep 5
+    expect_ok vault-create prompt "a screen lock exists: the first unlock makes a protected vault (system prompt, the PIN)" || stop_here "the vault could not be made"
+    expect_ok sync-save none "the save through the real path is refused as a certificate error and keeps nothing; the account is put in place" || stop_here "the sync could not be set up"
+    HOMEREL=$(as_app 'find . -maxdepth 3 -type d -name home' | head -n 1 | sed 's|^\./||')
+    [ -n "$HOMEREL" ] && rel_parent=$(dirname "$HOMEREL") || rel_parent=.
+    # The log of the step that held the canary as a password is searched now, before the next step clears it.
+    canary=$(as_app "cat $rel_parent/selftest-canary" | head -n 1)
+    case "$canary" in
+        HW-CANARY-????????????????????????????????) ;;
+        *) stop_here "the canary file was not written ('$canary')" ;;
+    esac
+    in_log=$(adbd logcat -d 2>/dev/null | grep -c -F "$canary")
+    [ "$in_log" = 0 ] && check "the canary is not in the log of the save step" ok \
+        || check "the canary is not in the log of the save step" bad "$in_log lines"
+    stop_app
+
+    # d. restart: the vault is locked, the sync is paused, the server sees nothing
+    before=$(attempts)
+    expect_ok sync-paused none "after the restart the vault is locked and the sync is paused, with no error text" 60 || stop_here "the paused state was not reached"
+    sleep 2
+    after=$(attempts)
+    if [ "$after" = "$before" ]; then
+        check "the server saw no connection from the app while the sync was paused" ok
+    else
+        check "the server saw no connection from the app while the sync was paused" bad "its log grew from $before to $after lines"
+    fi
+
+    # e. the unlock starts one run that reaches the TLS handshake
+    expect_ok sync-resume prompt "the unlock (system prompt, PIN) starts one sync run, which reaches the server and refuses its certificate" 120 || true
+    waited=0
+    while [ "$waited" -lt 15 ] && [ "$(attempts)" = "$after" ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if [ "$(attempts)" -gt "$after" ]; then
+        check "the server's log shows the connection attempt of the resumed run" ok
+    else
+        check "the server's log shows the connection attempt of the resumed run" bad "its log did not grow after the unlock"
+    fi
+
+    # f. the canary, used as the sync's password and passphrase, is nowhere
+    app_pid=$(adbd shell pidof "$PKG" | tr -d '\r')
+    echo "e2e tls: canary scan of: the app's data folder (every file but the canary's own), its folder on the shared storage, the whole log, /proc/$app_pid/environ, the argument lists of every process"
+    in_log=$(adbd logcat -d 2>/dev/null | grep -c -F "$canary")
+    [ "$in_log" = 0 ] && check "the canary is not in the log" ok \
+        || check "the canary is not in the log" bad "$in_log lines: $(adbd logcat -d 2>/dev/null | grep -F "$canary" | head -n 2 | sed "s/$canary/<canary>/g" | cut -c1-240)"
+    in_files=$(as_app "grep -rlaF $canary . --exclude=selftest-canary 2>/dev/null" | head -n 3)
+    [ -z "$in_files" ] && check "the canary is in no file of the app's data folder" ok || check "the canary is in no file of the app's data folder" bad "found in: $in_files"
+    control=$(as_app "grep -rlaF $canary . 2>/dev/null" | head -n 3)
+    { [ "$control" = "./selftest-canary" ] || [ "$control" = "selftest-canary" ]; } \
+        && check "the scan can find the canary: it finds exactly the canary's own file when that is not excluded" ok \
+        || check "the scan can find the canary: it finds exactly the canary's own file when that is not excluded" bad "found: $control"
+    shared=$(adbd shell "grep -rlaF $canary /sdcard/Android/data/$PKG 2>/dev/null" | tr -d '\r' | head -n 3)
+    [ -z "$shared" ] && check "the canary is in no file of the app's folder on the shared storage" ok || check "the canary is in no file of the app's folder on the shared storage" bad "found in: $shared"
+    in_env=$(as_app "cat /proc/$app_pid/environ" | grep -a -c -F "$canary")
+    [ "$in_env" = 0 ] && check "the canary is not in the environment of the app's process" ok || check "the canary is not in the environment of the app's process" bad "$in_env matches"
+    in_args=$(adbd shell ps -A -o PID,ARGS 2>/dev/null | tr -d '\r' | grep -c -F "$canary")
+    [ "$in_args" = 0 ] && check "the canary is in no process's argument list" ok || check "the canary is in no process's argument list" bad "$in_args matches"
+
+    # the PIN is cleared while the emulator is still there, and the app stopped
+    stop_app
+    adbd shell locksettings clear --old "$PIN" >/dev/null && pin_set=
+    fi
 fi
 
 end_time=$(date +%s)

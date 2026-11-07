@@ -24,6 +24,9 @@
 #                 usesCleartextTraffic nor a network security config; debug: no blanket usesCleartextTraffic)
 #   16 KB pages   `zipalign -c -P 16 -v 4` passes, and every LOAD segment of every lib/arm64-v8a/*.so is aligned to 0x4000 or more
 #   services      the dex files name no Google Play services, Firebase or Play core class
+#   https         both modes: the Kotlin component of the platform certificate verifier is in the dex files (class
+#                 org.rustls.platformverifier.CertificateVerifier, by name: the shrinker must have kept it) and the native library
+#                 exports the one function that hands it the Android context; without either every HTTPS request would be refused
 #   self-test     a release APK holds no trace of the debug-only self-test, neither in the dex files nor in the native library
 #                 (the name of the intent extra that starts a step, and the tag its report uses); a debug APK may hold it and is
 #                 only told so
@@ -338,6 +341,16 @@ done
 
 service_hits=$(unzip -p "$apk" 'classes*.dex' 2> /dev/null | grep -a -c -E 'Lcom/google/(android/gms|firebase|android/play/core)/' || true)
 if [ "${service_hits:-0}" -eq 0 ]; then pass "the dex files name no Google Play services, Firebase or Play core class"; else fail "services: found $service_hits dex lines naming Google Play services, Firebase or Play core, wanted none"; fi
+
+# ---- HTTPS: the platform certificate verifier ------------------------------------------------------------------------------------
+
+# Both network clients judge certificates through the verifier of the platform. On Android that needs its Kotlin component in the
+# app (a prebuilt artifact the Gradle build adds) and the native function Kotlin calls to hand it the Android context. The
+# component is called from Rust by class and method name, so the shrinker of a release build must have kept it with its name.
+verifier_hits=$(unzip -p "$apk" 'classes*.dex' 2> /dev/null | grep -a -c 'Lorg/rustls/platformverifier/CertificateVerifier;' || true)
+if [ "${verifier_hits:-0}" -gt 0 ]; then pass "the dex files hold the Kotlin component of the platform certificate verifier"; else fail "https: found no class org.rustls.platformverifier.CertificateVerifier in the dex files, wanted the verifier component (HTTPS would be refused)"; fi
+inittls_hits=$(unzip -p "$apk" 'lib/arm64-v8a/*.so' 2> /dev/null | grep -a -c 'Java_ch_holzcloud_holzwave_HolzwavePlugin_initTls' || true)
+if [ "${inittls_hits:-0}" -gt 0 ]; then pass "the native library exports the function that sets the verifier up"; else fail "https: found no Java_ch_holzcloud_holzwave_HolzwavePlugin_initTls in the native library, wanted it (the verifier would never be set up)"; fi
 
 # ---- the debug-only self-test -----------------------------------------------------------------------------------------------------
 

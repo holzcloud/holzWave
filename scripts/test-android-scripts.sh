@@ -301,7 +301,7 @@ run android-e2e.sh
 [ "$rc" -eq 2 ] && ok "no argument is a usage error, exit 2" || bad "e2e usage (rc $rc)"
 mkcase
 run android-e2e.sh nonsense
-[ "$rc" -eq 2 ] && echo "$out" | grep -q 'tracer|service|vault' && ok "an unknown section is a usage error that names the three sections, exit 2" \
+[ "$rc" -eq 2 ] && echo "$out" | grep -q 'tracer|service|vault|tls' && ok "an unknown section is a usage error that names the four sections, exit 2" \
   || bad "e2e unknown section (rc $rc): $out"
 mkcase
 rm -f "$c/bin/adb"
@@ -341,6 +341,24 @@ if grep -q 'locksettings' "$LOG"; then
   bad "the vault section touched the screen lock before it had set one"
 else
   ok "the vault section never calls locksettings before the emulator is up"
+fi
+
+mkcase
+rm -f "$c/bin/adb"
+run android-e2e.sh tls
+[ "$rc" -eq 2 ] && nothing_left && ok "the tls section without adb is exit 2" || bad "e2e tls without adb (rc $rc): $out"
+mkcase
+: > "$LOG"
+run android-e2e.sh tls
+if [ "$rc" -eq 1 ] && echo "$out" | grep -q 'the emulator did not boot' && nothing_left && [ "$(calls npm)" -eq 0 ]; then
+  ok "the tls section with an emulator that does not boot is exit 1, nothing is built, no server is started, no screen lock is touched"
+else
+  bad "e2e tls with a dead emulator (rc $rc, left: $(ls -A "$c/tmpdir")): $out"
+fi
+if grep -q 'locksettings' "$LOG" || grep -q 's_server' "$LOG"; then
+  bad "the tls section touched the screen lock or started a server before the emulator was up"
+else
+  ok "the tls section calls neither locksettings nor a TLS server before the emulator is up"
 fi
 
 echo "test 6: nothing was installed, downloaded or signed"
