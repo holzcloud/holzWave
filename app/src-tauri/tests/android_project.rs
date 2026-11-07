@@ -19,8 +19,13 @@ const RUST_PLUGIN: &str = include_str!("../gen/android/buildSrc/src/main/java/ch
 const MAIN_ACTIVITY: &str = include_str!("../gen/android/app/src/main/java/ch/holzcloud/holzwave/MainActivity.kt");
 const PROJECT_GITIGNORE: &str = include_str!("../gen/android/.gitignore");
 
-/// The permissions the manifest may ask for. A later change that adds one extends this list in the same commit.
-const ALLOWED_PERMISSIONS: &[&str] = &["android.permission.INTERNET"];
+/// The one list of permissions the app may ask for (one per line, `#` starts a comment). A later change that adds a
+/// permission adds its line there in the same commit as the manifest line.
+const PERMISSION_LIST: &str = include_str!("../android-permissions.txt");
+
+fn allowed_permissions() -> Vec<&'static str> {
+    PERMISSION_LIST.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#')).collect()
+}
 
 /// The one ABI and the names it has in the other two places: the Gradle flavour and the Tauri target.
 const ABI: &str = "arm64-v8a";
@@ -284,9 +289,12 @@ fn gitignore_problems(gitignore: &str) -> Vec<String> {
         .collect()
 }
 
-/// The permissions of the manifest are exactly `allowed`, and only the launcher activity is exported.
+/// The permissions of the manifest are exactly `allowed`, only the launcher activity is exported, and no backup is allowed.
 fn manifest_problems(manifest: &str, allowed: &[&str]) -> Vec<String> {
     let mut problems = Vec::new();
+    if !manifest.contains("android:allowBackup=\"false\"") {
+        problems.push("the manifest does not set android:allowBackup=\"false\"".into());
+    }
     let asked: Vec<&str> = manifest
         .lines()
         .filter(|line| line.contains("<uses-permission"))
@@ -309,8 +317,9 @@ fn manifest_problems(manifest: &str, allowed: &[&str]) -> Vec<String> {
     problems
 }
 
-/// The release build type is neither debuggable nor allowed to use cleartext; the cleartext switch is false by default and
-/// true only in the debug build type, and the manifest reads it from there instead of fixing it.
+/// The release build type is not debuggable and does not allow cleartext; the debug build type is debuggable; and the main
+/// manifest neither allows cleartext nor names a network security config (both belong to the debug source set, where the
+/// text tests of `android_release` read them).
 fn build_type_problems(gradle: &str, manifest: &str) -> Vec<String> {
     let mut problems = Vec::new();
     match block_after(gradle, "getByName(\"release\")") {
@@ -324,16 +333,17 @@ fn build_type_problems(gradle: &str, manifest: &str) -> Vec<String> {
         }
         None => problems.push("the Gradle file has no release build type".into()),
     }
-    match block_after(gradle, "defaultConfig") {
-        Some(default) if default.contains("manifestPlaceholders[\"usesCleartextTraffic\"] = \"false\"") => {}
-        _ => problems.push("usesCleartextTraffic is not false by default".into()),
+    if gradle.contains("usesCleartextTraffic") {
+        problems.push("the Gradle file sets usesCleartextTraffic: cleartext belongs to the debug source set only".into());
     }
     match block_after(gradle, "getByName(\"debug\")") {
         Some(debug) if debug.contains("isDebuggable = true") => {}
         _ => problems.push("the debug build type is not debuggable (run-as and the emulator proof need it)".into()),
     }
-    if !manifest.contains("android:usesCleartextTraffic=\"${usesCleartextTraffic}\"") {
-        problems.push("the manifest does not take usesCleartextTraffic from the build type".into());
+    for needle in ["usesCleartextTraffic", "networkSecurityConfig"] {
+        if manifest.contains(needle) {
+            problems.push(format!("the main manifest names {needle}: it belongs to the debug source set only"));
+        }
     }
     problems
 }
@@ -449,23 +459,24 @@ fn secret_checks_fail_on_bad_input() {
 }
 
 #[test]
-fn the_manifest_asks_for_internet_only_and_exports_the_launcher_only() {
-    assert_none("manifest", manifest_problems(MANIFEST, ALLOWED_PERMISSIONS));
-    // Not a failure: the value of allowBackup, reported so that the plan that sets it can see the current state.
-    let backup = MANIFEST.split("android:allowBackup=\"").nth(1).and_then(|rest| rest.split('"').next());
-    eprintln!("android_project: allowBackup is {backup:?} (not set means the Android default, true; the release plan sets it)");
+fn the_manifest_asks_for_the_listed_permissions_only_exports_the_launcher_only_and_allows_no_backup() {
+    assert_none("manifest", manifest_problems(MANIFEST, &allowed_permissions()));
 }
 
 #[test]
 fn manifest_check_fails_on_bad_input() {
+    let allowed = allowed_permissions();
     let extra = MANIFEST.replace(
         "<uses-permission android:name=\"android.permission.INTERNET\" />",
         "<uses-permission android:name=\"android.permission.INTERNET\" />\n<uses-permission android:name=\"android.permission.CAMERA\" />",
     );
-    assert!(!manifest_problems(&extra, ALLOWED_PERMISSIONS).is_empty());
-    assert!(!manifest_problems(&MANIFEST.replace("android.permission.INTERNET", "android.permission.NETWORK"), ALLOWED_PERMISSIONS).is_empty());
+    assert!(!manifest_problems(&extra, &allowed).is_empty());
+    assert!(!manifest_problems(&MANIFEST.replace("android.permission.INTERNET", "android.permission.NETWORK"), &allowed).is_empty());
     let more_exported = MANIFEST.replace("android:exported=\"false\"", "android:exported=\"true\"");
-    assert!(!manifest_problems(&more_exported, ALLOWED_PERMISSIONS).is_empty());
+    assert!(!manifest_problems(&more_exported, &allowed).is_empty());
+    // Backup: not set (the Android default is true) and set to true both fail.
+    assert!(!manifest_problems(&MANIFEST.replace("android:allowBackup=\"false\"", ""), &allowed).is_empty());
+    assert!(!manifest_problems(&MANIFEST.replace("android:allowBackup=\"false\"", "android:allowBackup=\"true\""), &allowed).is_empty());
 }
 
 #[test]
@@ -480,13 +491,13 @@ fn build_type_check_fails_on_bad_input() {
     let cleartext_release =
         APP_GRADLE.replace("getByName(\"release\") {", "getByName(\"release\") {\n manifestPlaceholders[\"usesCleartextTraffic\"] = \"true\"");
     assert!(!build_type_problems(&cleartext_release, MANIFEST).is_empty());
-    let default_true = APP_GRADLE.replace(
-        "manifestPlaceholders[\"usesCleartextTraffic\"] = \"false\"",
-        "manifestPlaceholders[\"usesCleartextTraffic\"] = \"true\"",
-    );
-    assert!(!build_type_problems(&default_true, MANIFEST).is_empty());
+    let cleartext_default = APP_GRADLE.replace("defaultConfig {", "defaultConfig {\n manifestPlaceholders[\"usesCleartextTraffic\"] = \"true\"");
+    assert!(!build_type_problems(&cleartext_default, MANIFEST).is_empty());
     assert!(!build_type_problems(&APP_GRADLE.replace("isDebuggable = true", ""), MANIFEST).is_empty());
-    assert!(!build_type_problems(APP_GRADLE, &MANIFEST.replace("${usesCleartextTraffic}", "true")).is_empty());
+    let in_main = MANIFEST.replace("<application", "<application android:usesCleartextTraffic=\"true\"");
+    assert!(!build_type_problems(APP_GRADLE, &in_main).is_empty());
+    let netsec = MANIFEST.replace("<application", "<application android:networkSecurityConfig=\"@xml/network_security_config\"");
+    assert!(!build_type_problems(APP_GRADLE, &netsec).is_empty());
 }
 
 #[test]

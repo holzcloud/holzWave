@@ -1,15 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- The permissions below are the list in app/src-tauri/android-permissions.txt; a feature that needs one adds it there
+         and here in the same commit. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
-    <!-- AndroidTV support -->
-    <uses-feature android:name="android.software.leanback" android:required="false" />
-
+    <!-- No backup of any kind: the app keeps its vault file and its history in its private folder, and a cloud backup or a
+         device-to-device transfer must not copy them. allowBackup=false and the extraction rules say the same twice. The
+         template's AndroidTV lines (the leanback feature and launcher category) and its file provider, which shared the
+         whole external storage and the cache and which nothing used, are removed: a terminal is not a TV app, and an
+         unused component is attack surface. Cleartext traffic is allowed in the debug source set only (src/debug). -->
     <application
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
-        android:theme="@style/Theme.holzwave_app"
-        android:usesCleartextTraffic="${usesCleartextTraffic}">
+        android:theme="@style/Theme.holzwave_app">
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
             android:launchMode="singleTask"
@@ -19,19 +25,15 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
-                <!-- AndroidTV support -->
-                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
 
-        <provider
-          android:name="androidx.core.content.FileProvider"
-          android:authorities="${applicationId}.fileprovider"
-          android:exported="false"
-          android:grantUriPermissions="true">
-          <meta-data
-            android:name="android.support.FILE_PROVIDER_PATHS"
-            android:resource="@xml/file_paths" />
-        </provider>
+        <!-- AndroidX's profile installer brings a receiver that is exported (guarded by the DUMP permission, which only the
+             shell holds) for benchmarking tools. The app has one exported component, the launcher activity, so the receiver
+             is taken out of the merged manifest. The installer still installs the baseline profile at start. -->
+        <receiver
+            android:name="androidx.profileinstaller.ProfileInstallReceiver"
+            android:exported="false"
+            tools:node="remove" />
     </application>
 </manifest>

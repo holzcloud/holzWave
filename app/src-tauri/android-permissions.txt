@@ -1,0 +1,12 @@
+# The one list of permissions the Android app may ask for, one per line. Lines that start with # are comments.
+#
+# The manifest (app/src-tauri/gen/android/app/src/main/AndroidManifest.xml) must hold exactly these permissions, no more and no
+# fewer. The text test android_release and the APK check scripts/android-apk-check.sh both read this file, so a permission that is
+# added anywhere else fails one of them. A feature that needs a permission adds its line here in the same commit as the line in
+# the manifest, and says in the commit message what the permission is for. Nothing that installs packages, reads the screen,
+# draws over other apps or reads contacts, messages or location belongs here.
+#
+# Not listed on purpose: a permission that the app itself defines with signature protection (the one AndroidX adds so that only
+# the app can send a broadcast to its own receivers, named <application id>.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION). It is not
+# in the manifest of the project but in the merged manifest of a built APK, and the APK check accepts exactly that name.
+android.permission.INTERNET

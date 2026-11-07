@@ -65,13 +65,16 @@ mkcase() {
   : > "$bin/aarch64-linux-android$API-clang++"; chmod +x "$bin/aarch64-linux-android$API-clang++"
   : > "$bin/llvm-ar"; : > "$bin/llvm-ranlib"
   shim "$c/jdk/bin/java" "echo 'openjdk version \"21.0.5\"' >&2"
-  shim "$c/bin/npm" 'out=app/src-tauri/gen/android/app/build/outputs/apk/universal
+  shim "$c/bin/npm" 'echo "npm-env SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH RUSTFLAGS=[$RUSTFLAGS] FLAGS=$(printf %s "$CARGO_ENCODED_RUSTFLAGS" | tr "\037" "|")" >> "$HW_LOG"
+out=app/src-tauri/gen/android/app/build/outputs/apk/universal
 case " $* " in
   *" --debug "*) mkdir -p "$out/debug"; : > "$out/debug/app-universal-debug.apk" ;;
   *) mkdir -p "$out/release"; : > "$out/release/app-universal-release-unsigned.apk" ;;
 esac'
   shim "$c/bin/cargo" 'echo "cargo-env CC=$CC_aarch64_linux_android LINKER=$CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER NDK=$ANDROID_NDK_HOME" >> "$HW_LOG"; exit '"${C_CARGO_RC:-0}"
   shim "$c/bin/zig" "echo 0.17.1"
+  shim "$c/bin/rustc" "echo 'rustc 1.99.0 (stand-in)'"
+  shim "$c/bin/git" "case \"\$*\" in 'log -1 --format=%ct') echo 1700000000 ;; *) exit 1 ;; esac"
   rust_list=
   [ "${C_RUST:-yes}" = yes ] && rust_list=$TARGET
   shim "$c/bin/rustup" "case \"\$*\" in 'target list --installed') printf '%s\n' aarch64-apple-darwin $rust_list ;; *) exit 9 ;; esac"
@@ -153,6 +156,39 @@ if [ "$rc" -eq 0 ] && [ "$targets" = "--target aarch64," ] && echo "$npm_line" |
 else
   bad "debug build (rc $rc, npm: $npm_line): $out"
 fi
+mkcase
+: > "$LOG"
+run android-build.sh release
+env_line=$(grep '^npm-env ' "$LOG")
+repo_real=$(cd "$c/repo" && pwd -P)
+flags="--remap-path-prefix=$repo_real=/holzwave-src|--remap-path-prefix=$c/home/.cargo=/cargo-home|--remap-path-prefix=$sdk/ndk/$NDK=/android-ndk"
+if [ "$rc" -eq 0 ] && echo "$env_line" | grep -q 'SOURCE_DATE_EPOCH=1700000000 ' && echo "$env_line" | grep -q 'RUSTFLAGS=\[\] ' \
+  && [ "$env_line" = "npm-env SOURCE_DATE_EPOCH=1700000000 RUSTFLAGS=[] FLAGS=$flags" ] \
+  && grep '^npm ' "$LOG" | grep -q -- ' -- --locked$' && echo "$out" | grep -q '^android-build: rustc 1.99.0' \
+  && echo "$out" | grep -q "^android-build: ANDROID_NDK_HOME $sdk/ndk/$NDK\$" && echo "$out" | grep -q '^android-build: SOURCE_DATE_EPOCH 1700000000$'; then
+  ok "the build runs with SOURCE_DATE_EPOCH from the last commit, the three path remaps, --locked, and prints the Rust version and the NDK"
+else
+  bad "reproducibility environment (rc $rc): $env_line (wanted FLAGS=$flags) / $(grep '^npm ' "$LOG")"
+fi
+mkcase
+: > "$LOG"
+EXTRA="SOURCE_DATE_EPOCH=1600000000 RUSTFLAGS=-Cdebuginfo=2"
+run android-build.sh debug
+EXTRA=
+env_line=$(grep '^npm-env ' "$LOG")
+if [ "$rc" -eq 0 ] && echo "$env_line" | grep -q 'SOURCE_DATE_EPOCH=1600000000 RUSTFLAGS=\[\] ' \
+  && echo "$out" | grep -q 'RUSTFLAGS of the environment are replaced'; then
+  ok "a SOURCE_DATE_EPOCH of the caller is kept, and a RUSTFLAGS of the caller is replaced by the pinned flags and says so"
+else
+  bad "caller environment (rc $rc): $env_line / $out"
+fi
+mkcase
+rm -f "$c/bin/git"
+printf '#!/bin/sh\nexit 1\n' > "$c/bin/git"; chmod +x "$c/bin/git"
+: > "$LOG"
+run android-build.sh debug
+[ "$rc" -eq 2 ] && echo "$out" | grep -q 'SOURCE_DATE_EPOCH' && [ "$(calls npm)" -eq 0 ] \
+  && ok "no commit date and no SOURCE_DATE_EPOCH is exit 2 and builds nothing" || bad "no commit date (rc $rc): $out"
 mkcase
 : > "$LOG"
 run android-build.sh

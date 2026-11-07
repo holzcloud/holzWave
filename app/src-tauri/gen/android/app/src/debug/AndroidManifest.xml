@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Debug build only: the emulator's tests reach the Mac over plain HTTP at the host alias 10.0.2.2, and nothing else.
+         The release build has neither this attribute nor the file. -->
+    <application android:networkSecurityConfig="@xml/network_security_config" />
+</manifest>

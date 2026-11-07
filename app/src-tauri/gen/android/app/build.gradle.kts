@@ -18,7 +18,6 @@ android {
     compileSdk = 37
     namespace = "ch.holzcloud.holzwave"
     defaultConfig {
-        manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "ch.holzcloud.holzwave"
         minSdk = 31
         targetSdk = 37
@@ -32,7 +31,6 @@ android {
     buildTypes {
         getByName("debug") {
             applicationIdSuffix = ".debug"
-            manifestPlaceholders["usesCleartextTraffic"] = "true"
             isDebuggable = true
             isJniDebuggable = true
             isMinifyEnabled = false
@@ -41,8 +39,15 @@ android {
             }
         }
         getByName("release") {
+            // No signingConfig here, on purpose: the release APK is built unsigned and the owner signs it with the owner's own
+            // key outside this repository.
             optimization {
                enable = true
+            }
+            // The commit and the state of the checkout are not written into the APK: a rebuild from another checkout of the
+            // same source must give the same file.
+            vcsInfo {
+                include = false
             }
             proguardFiles(
                 *fileTree(".") {
@@ -58,6 +63,12 @@ android {
     }
     buildFeatures {
         buildConfig = true
+    }
+    // The Android Gradle plugin adds a dependency block to the signing block of an APK, encrypted so that only Google Play can
+    // read it. It is left out: nobody who reads or rebuilds this APK can open it, and the app has no Play listing.
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
     }
 }
 
