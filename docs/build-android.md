@@ -11,7 +11,7 @@ here costs money. The toolchain, the SDK, the NDK, the emulator and the system i
 > [the whole set](#the-whole-set-on-three-images)). **Only one full run of that set was all green** (the last one, and
 > earlier full runs failed in places), and several checks ended `not run`: [What ran and what did not](#what-ran-and-what-did-not) says which. Everything that only a real phone or tablet shows is
 > **not run**: see [what was not tried](#what-was-not-tried) and Part 13 of [test-plan.md](test-plan.md). Two defects found on an
-> emulator are [not fixed](#what-the-three-images-showed).
+> emulator are [fixed, and were checked on emulators only](#what-the-three-images-showed).
 
 Contents: [What to install](#what-to-install-all-free) · [arm64 only](#arm64-only-and-why) · [Check it](#check-it) ·
 [Compile the Rust code](#compile-the-rust-code-for-android) · [Build the APK](#build-the-debug-apk) · [The emulator](#the-emulator) ·
@@ -272,7 +272,7 @@ The run of the whole set on the three images (one emulator at a time) ended with
 | `api31` | 12 (API 31) | 91.0.4472.114 | 4096 | tracer, service, vault, pagesize | the foreground service type (it is read from Android 14), the notification permission and its dialog (they start with Android 13) |
 | `16k` | 17 (API 37, Google APIs) | 145.0.7632.218 | **16384** | tracer, service, pagesize | none |
 
-Two things the Android 12 image showed. The first is fixed; the second is not yet (see the end of this part).
+Two things the Android 12 image showed. Both are fixed, and both were checked on emulators only.
 
 - **The page's bottom bar under the system buttons (fixed).** On that image the system starts with the three-button navigation bar,
   and its old WebView (91) does not tell the page the height of that bar as a safe area, so the page's bottom bar (the tab row with the
@@ -284,11 +284,17 @@ Two things the Android 12 image showed. The first is fixed; the second is not ye
   screenshot shows both bars clear of the system's, and the `service` section runs there without the switch to gesture navigation that
   it used to need (the switch is removed). Not tried: a real Android 12 phone, a display cutout, a landscape phone, and the tablet
   layout, which does not use the values yet.
-- **A relaunched activity and the service.** When the system relaunches the activity while the app runs (seen when the navigation mode
-  changed on that image), a shell that is started after `Stop all` runs but the service is not started again and no notification
-  shows, although the core told the plugin the new counts. The likely cause (the plugin keeps the activity that was destroyed, and the
-  check for a visible app reads that one) was **not verified**. The checks never change the navigation mode while the app runs, so
-  they do not trigger it.
+- **A relaunched activity and the service (fixed).** When the system relaunched the activity while the app ran (seen when the
+  navigation mode changed on that image; a change of the font scale does the same on every image), a shell that was started after
+  `Stop all` ran but the service was not started again and no notification showed, although the core told the plugin the new counts.
+  The cause was the one suspected, and it was confirmed by a check that failed before the change and passes after it: the plugin is made
+  once per process with the first activity and kept that one, so its check for a visible app read an activity that was destroyed and
+  never answered yes. The plugin now keeps the application context for everything that needs no window and the activity in use (set
+  when one comes to the front, cleared when that one is destroyed) for the rest: the visibility check, the app switcher picture
+  and the system prompt of the secret store. The `service` section changes the font scale while the app runs, confirms from the system
+  log that the window was relaunched, and requires `Stop all` and a new shell to bring the service back; it ran on the Android 12 image.
+  Not tried: other reasons for a relaunch than the font scale and the navigation mode, a relaunch while the system prompt is open, and
+  a phone.
 
 ## The committed project
 
@@ -713,9 +719,9 @@ an empty result:
 Also untested: the tablet layout on a tablet, the paste through the page's own menu into a running pane, and the local shell on the
 shells of phone makers.
 
-**One defect, not fixed.** A shell started after `Stop all` does not bring the service back once the system has recreated the activity
-(see [what the three images showed](#what-the-three-images-showed)). The page's bottom bar that lay under the system buttons on the
-Android 12 image is fixed there; a phone is still the place to look at both (rows in Part 13 of the test plan).
+**Two defects, fixed and checked on emulators only.** The page's bottom bar that lay under the system buttons on the Android 12 image,
+and the service that did not come back for a shell started after `Stop all` once the system had recreated the activity (see [what the
+three images showed](#what-the-three-images-showed)). A phone is still the place to look at both (rows in Part 13 of the test plan).
 
 ## Facts for whoever offers the app
 

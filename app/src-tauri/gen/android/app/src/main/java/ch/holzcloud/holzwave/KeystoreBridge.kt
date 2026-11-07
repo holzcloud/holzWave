@@ -48,7 +48,7 @@ class KeystoreFailure(val word: String) : Exception(word)
  * prompt with the cipher as its crypto object; `plain` needs nothing, for a device that has no screen lock. No library is
  * used (no androidx.biometric), and no cryptography is written here: the platform does it.
  */
-internal class KeystoreBridge(private val host: Activity) {
+internal class KeystoreBridge(private val app: Context, private val activityOf: () -> Activity?) {
   private val lock = Any()
 
   /** The prompt that is on screen, so it can be closed when the activity goes. */
@@ -56,7 +56,7 @@ internal class KeystoreBridge(private val host: Activity) {
 
   private fun store(): KeyStore = KeyStore.getInstance(PROVIDER).apply { load(null) }
 
-  private fun keyguard(): KeyguardManager = host.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+  private fun keyguard(): KeyguardManager = app.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
 
   fun hasScreenLock(): Boolean = keyguard().isDeviceSecure
 
@@ -99,7 +99,7 @@ internal class KeystoreBridge(private val host: Activity) {
       if (auth && !hasScreenLock()) throw KeystoreFailure("no_screen_lock")
       val ks = store()
       val number = (numbers(ks).lastOrNull() ?: 0) + 1
-      val wantsChip = host.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)
+      val wantsChip = app.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)
       try {
         make(alias(number), auth, wantsChip)
       } catch (e: ProviderException) {
@@ -261,6 +261,13 @@ internal class KeystoreBridge(private val host: Activity) {
    * end the prompt; the person cancels it or gets it right.
    */
   private fun ask(cipher: Cipher, done: (Cipher?, KeystoreFailure?) -> Unit) {
+    // The prompt belongs to the activity in use now (after a relaunch of the window it is not the one of the first start); with none
+    // there is no screen to show it on.
+    val host = activityOf()
+    if (host == null) {
+      done(null, KeystoreFailure("failed"))
+      return
+    }
     host.runOnUiThread {
       try {
         val signal = CancellationSignal()

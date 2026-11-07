@@ -2274,7 +2274,7 @@ fn tls_problems(
     if !plugin.contains("private external fun initTls(context: Context)") {
         problems.push("HolzwavePlugin does not declare the native method initTls(context)".into());
     }
-    match plugin.find("initTls(host.applicationContext)") {
+    match plugin.find("initTls(app)") {
         None => problems.push("HolzwavePlugin never calls initTls with the application context".into()),
         Some(at) => {
             let before = &plugin[..at];
@@ -2446,7 +2446,7 @@ fn the_tls_check_fails_on_bad_input() {
         ("another version in the metadata", Box::new(move |i| i.verification = i.verification.replace(&format!("version=\"{version}\""), "version=\"9.9.9\""))),
         ("a short checksum", Box::new(|i| i.verification = i.verification.replace("aa021794230fbc2f", "aa02179"))),
         ("everything trusted", Box::new(|i| i.verification = i.verification.replace("^(?!org\\.rustls$).*", ".*"))),
-        ("no call of initTls", Box::new(|i| i.plugin_kt = i.plugin_kt.replace("initTls(host.applicationContext)", "Unit"))),
+        ("no call of initTls", Box::new(|i| i.plugin_kt = i.plugin_kt.replace("initTls(app)", "Unit"))),
         ("no native declaration", Box::new(|i| i.plugin_kt = i.plugin_kt.replace("private external fun initTls(context: Context)", ""))),
         ("an unguarded call", Box::new(|i| i.plugin_kt = i.plugin_kt.replace("catch (e: Throwable)", "catch (e: IllegalStateException)"))),
         ("another exported name", Box::new(|i| i.tls_rs = i.tls_rs.replace("\"initTls\"", "\"init\""))),
@@ -2528,7 +2528,7 @@ fn file_dialog_problems(files: &[(String, String)], plugin_kt: &str, files_kt: &
     if plugin.contains("filesDir") || files_code.contains("filesDir") {
         problems.push("a path is checked against the files folder, not against the shell's own folder".into());
     }
-    if !plugin.contains("HolzwaveFiles.shellHome(host.dataDir)") {
+    if !plugin.contains("HolzwaveFiles.shellHome(app.dataDir)") {
         problems.push("the jail of the paths is not the shell's folder".into());
     }
     if !plugin.contains("EXTRA_ALLOW_MULTIPLE, false") {
@@ -2610,7 +2610,7 @@ fn the_hand_over_check_fails_on_bad_input() {
         ("Intent.CATEGORY_OPENABLE", "Intent.CATEGORY_DEFAULT"),
         ("EXTRA_ALLOW_MULTIPLE, false", "EXTRA_ALLOW_MULTIPLE, true"),
         ("HolzwaveFiles.isContent(uri)", "true"),
-        ("HolzwaveFiles.shellHome(host.dataDir)", "host.filesDir"),
+        ("HolzwaveFiles.shellHome(app.dataDir)", "host.filesDir"),
     ] {
         let changed = PLUGIN_KT.replace(from, to);
         assert!(!file_dialog_problems(&files, &changed, FILES_KT).is_empty(), "{from} passed");
@@ -2722,4 +2722,62 @@ fn the_system_bars_check_fails_on_bad_input() {
     // A comment may name what the code must not do.
     let commented = format!("{INSETS_KT}\n// never addJavascriptInterface\n");
     assert!(ok(&commented, MAIN_ACTIVITY_KT, PLUGIN_KT, PLUGIN_RS, APP_CSS, PHONE_CSS).is_empty());
+}
+
+// ---- the plugin and the activity the system relaunches ----------------------------------------------------------------------------
+
+/// The plugin is made once per process with the first activity, and the system makes a new activity when it relaunches the window.
+/// So the plugin must not keep the activity it was made with and ask it about the window: it keeps the application context and the
+/// activity in use, which `onResume` sets and `onDestroy` clears, and the check for a visible app reads that one.
+fn relaunch_problems(plugin_kt: &str, keystore_kt: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    let plugin = source_code(plugin_kt);
+    if !plugin.contains("class HolzwavePlugin(host: Activity) : Plugin(host)") {
+        problems.push("HolzwavePlugin keeps the activity it was made with as a property".into());
+    }
+    let after_constructor = plugin.split("class HolzwavePlugin(host: Activity)").nth(1).unwrap_or("");
+    let uses = after_constructor
+        .lines()
+        .filter(|line| line.contains("host.") && !line.contains("val app: Context = host.applicationContext") && !line.contains("Activity? = host"))
+        .count();
+    if uses != 0 {
+        problems.push(format!("HolzwavePlugin reads the activity it was made with in {uses} place(s)"));
+    }
+    for needed in [
+        "private var current: Activity? = host",
+        "current = activity",
+        "if (current === activity) current = null",
+        "(current as? LifecycleOwner)?.lifecycle",
+        "KeystoreBridge(app) { current }",
+    ] {
+        if !plugin.contains(needed) {
+            problems.push(format!("HolzwavePlugin lacks `{needed}`"));
+        }
+    }
+    if !source_code(keystore_kt).contains("val host = activityOf()") {
+        problems.push("the secret store's prompt does not ask for the activity in use".into());
+    }
+    problems
+}
+
+#[test]
+fn the_plugin_asks_the_activity_in_use_and_not_the_one_it_was_made_with() {
+    assert_none("the relaunched window", relaunch_problems(PLUGIN_KT, KEYSTORE_KT));
+}
+
+#[test]
+fn the_relaunch_check_fails_on_bad_input() {
+    assert!(relaunch_problems(PLUGIN_KT, KEYSTORE_KT).is_empty());
+    let bad = [
+        ("a kept activity", PLUGIN_KT.replace("class HolzwavePlugin(host: Activity)", "class HolzwavePlugin(private val host: Activity)")),
+        ("the old visibility read", PLUGIN_KT.replace("(current as? LifecycleOwner)?.lifecycle", "(host as? LifecycleOwner)?.lifecycle")),
+        ("no tracking in onResume", PLUGIN_KT.replace("current = activity\n", "")),
+        ("no clearing in onDestroy", PLUGIN_KT.replace("if (current === activity) current = null", "")),
+        ("a stray read of the first activity", format!("{PLUGIN_KT}\n  fun leak() = host.runOnUiThread {{ }}\n")),
+    ];
+    for (what, text) in bad {
+        assert!(!relaunch_problems(&text, KEYSTORE_KT).is_empty(), "{what} passed");
+    }
+    let keystore = KEYSTORE_KT.replace("val host = activityOf()", "val host = first");
+    assert!(!relaunch_problems(PLUGIN_KT, &keystore).is_empty(), "a prompt on the first activity passed");
 }

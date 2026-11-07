@@ -185,8 +185,8 @@ folder; SSH; the secret store behind the Android Keystore with the system prompt
 the system's document dialog; the clipboard through the app's own code; and a foreground service with a `Stop all` notification.
 **Not tried:** everything that only a phone, a keyboard, a sensor, a network, a storage provider or a person shows, listed as rows
 with empty results in Part 13 of [test-plan.md](test-plan.md); how it is built and what each emulator run showed is in
-[build-android.md](build-android.md). One defect found on an emulator is not fixed (the service not coming back after the system recreated the window); the bottom bar that
-lay under the system buttons with three-button navigation on Android 12 is fixed and was checked on an emulator only.
+[build-android.md](build-android.md). Two defects found on an emulator are fixed and were checked on emulators only (the bottom bar that lay under the system buttons with
+three-button navigation on Android 12, and the service not coming back after the system recreated the window).
 
 - Android: local shell plus SSH. iOS is out of scope (no Apple developer account).
 - Touch UI, a soft keyboard with special keys, a simplified layout (one block per screen).

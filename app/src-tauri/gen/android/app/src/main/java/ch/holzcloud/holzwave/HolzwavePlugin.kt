@@ -8,6 +8,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import androidx.activity.result.ActivityResult
@@ -100,11 +102,25 @@ class ClipWriteArgs {
  * clipboard as plain text. None of them is reachable from the page.
  */
 @TauriPlugin
-class HolzwavePlugin(private val host: Activity) : Plugin(host) {
+class HolzwavePlugin(host: Activity) : Plugin(host) {
   @Volatile private var shells = 0
   @Volatile private var connections = 0
 
-  private val keys = KeystoreBridge(host)
+  /**
+   * The application context: everything that does not need a window (files, the clipboard, the service, permissions) goes through
+   * it. The plugin is made once per process, with the first activity, and the system makes a new activity whenever it relaunches
+   * the window (a change that the manifest does not list in `configChanges`, such as the navigation mode), so the activity the plugin
+   * was made with is not the one in use later. The constructor's activity is therefore not kept: a destroyed activity would answer
+   * "not visible" for ever, and the service would not start again.
+   */
+  private val app: Context = host.applicationContext
+
+  /** The activity that is in use: set when one comes to the front ([onResume]), cleared when that one is destroyed ([onDestroy]). */
+  @Volatile private var current: Activity? = host
+
+  private val main = Handler(Looper.getMainLooper())
+
+  private val keys = KeystoreBridge(app) { current }
 
   /** What Rust last asked for the app switcher picture; `null` until it asks. It belongs to the process, not to one activity. */
   @Volatile private var recentsHidden: Boolean? = null
@@ -116,7 +132,7 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
     // (a restarted activity makes the class again) finds it set up and changes nothing. A failure is never fatal and never
     // loosens a check: the Rust side keeps its readiness flag unset and every HTTPS request is refused as `tls_not_ready`.
     try {
-      initTls(host.applicationContext)
+      initTls(app)
     } catch (e: Throwable) {
       Log.e(TAG, "the platform certificate verifier could not be set up; HTTPS requests are refused")
     }
@@ -282,7 +298,7 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
     try {
       val args = invoke.parseArgs(RecentsArgs::class.java)
       recentsHidden = args.hidden
-      host.runOnUiThread {
+      main.post {
         applyRecents()
         invoke.resolve(recentsAnswer())
       }
@@ -294,7 +310,7 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
   /** Main thread. Gives the activity the last value Rust asked for; the flag belongs to the activity, so a new one needs it again. */
   private fun applyRecents() {
     val hidden = recentsHidden ?: return
-    if (Build.VERSION.SDK_INT >= 33) host.setRecentsScreenshotEnabled(!hidden)
+    if (Build.VERSION.SDK_INT >= 33) current?.setRecentsScreenshotEnabled(!hidden)
   }
 
   private fun recentsAnswer(): JSObject {
@@ -312,7 +328,7 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
   // keeps one result handler.
 
   /** The shell's own folder, the only place a path from Rust may point into. */
-  private fun shellHome() = HolzwaveFiles.shellHome(host.dataDir)
+  private fun shellHome() = HolzwaveFiles.shellHome(app.dataDir)
 
   /** A dialog is open or a copy is running. */
   private val filesBusy = AtomicBoolean(false)
@@ -363,7 +379,7 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
         .addCategory(Intent.CATEGORY_OPENABLE)
         .setType("*/*")
         .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)
-      host.runOnUiThread {
+      main.post {
         try {
           startActivityForResult(invoke, intent, "pickInResult")
         } catch (e: Throwable) {
@@ -396,7 +412,7 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
         failFiles(invoke)
         return
       }
-      val resolver = host.contentResolver
+      val resolver = app.contentResolver
       thread(name = "hw-files", isDaemon = true) {
         try {
           resolveCopied(invoke, HolzwaveFiles.copyIn(resolver, uri, target, args.max_bytes))
@@ -427,7 +443,7 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
         .addCategory(Intent.CATEGORY_OPENABLE)
         .setType("application/octet-stream")
         .putExtra(Intent.EXTRA_TITLE, args.suggested_name.take(255))
-      host.runOnUiThread {
+      main.post {
         try {
           startActivityForResult(invoke, intent, "saveOutResult")
         } catch (e: Throwable) {
@@ -458,7 +474,7 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
         failFiles(invoke)
         return
       }
-      val resolver = host.contentResolver
+      val resolver = app.contentResolver
       thread(name = "hw-files", isDaemon = true) {
         try {
           resolveCopied(invoke, HolzwaveFiles.copyOut(resolver, uri, source))
@@ -475,7 +491,7 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
   // Plain text only, bounded in both directions, never logged. There is no listener for clipboard changes and no handler the
   // page can reach: Rust asks when a person's own paste or copy asks.
 
-  private fun clipboard(): ClipboardManager = host.getSystemService(ClipboardManager::class.java)
+  private fun clipboard(): ClipboardManager = app.getSystemService(ClipboardManager::class.java)
 
   /** Reads the primary clip as plain text. `{ text, sensitive }`; a text above the bound rejects `too_large`. */
   @Command
@@ -544,18 +560,23 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
     val counts = invoke.parseArgs(ServiceCounts::class.java)
     shells = maxOf(counts.shells, 0)
     connections = maxOf(counts.connections, 0)
-    host.runOnUiThread { apply() }
+    main.post { apply() }
     invoke.resolve()
   }
 
   /** The app is in front again: a start that was refused or had to wait for it is tried now. */
   override fun onResume(activity: androidx.appcompat.app.AppCompatActivity) {
+    // The activity that is in front now is the one to ask about: after the system relaunched the window it is not the one this
+    // plugin was made with.
+    current = activity
     apply()
     applyRecents()
   }
 
   /** The activity is going away: a prompt that is on screen is closed. */
   override fun onDestroy(activity: androidx.appcompat.app.AppCompatActivity) {
+    // Only the activity in use is let go: a later one may already have come to the front.
+    if (current === activity) current = null
     keys.cancelPrompt()
   }
 
@@ -571,11 +592,11 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
 
   /** Whether the app has a window the person can see. Android 12 and later refuse a foreground service started without one. */
   private fun visible(): Boolean =
-    (host as? LifecycleOwner)?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.STARTED) == true
+    (current as? LifecycleOwner)?.lifecycle?.currentState?.isAtLeast(Lifecycle.State.STARTED) == true
 
   private fun notificationsAllowed(): Boolean =
     Build.VERSION.SDK_INT < 33 ||
-      host.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+      app.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
 
   /** Main thread. Brings the service in line with the last counts. */
   private fun apply() {
@@ -596,11 +617,11 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
   }
 
   private fun start() {
-    val intent = Intent(host.applicationContext, HolzwaveService::class.java)
+    val intent = Intent(app, HolzwaveService::class.java)
       .putExtra(HolzwaveService.EXTRA_SHELLS, shells)
       .putExtra(HolzwaveService.EXTRA_CONNECTIONS, connections)
     try {
-      host.applicationContext.startForegroundService(intent)
+      app.startForegroundService(intent)
     } catch (e: ForegroundServiceStartNotAllowedException) {
       // Android refused (the app was not visible after all). The counts stay; the next `onResume` tries again.
       Log.w(TAG, "the service could not start now: it is tried again when the app is in front")
@@ -613,7 +634,7 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
    * notification and Android lists it among the active apps. `then` runs after the answer.
    */
   private fun askForNotificationsOnce(then: () -> Unit) {
-    val prefs = host.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     if (notificationsAllowed() || prefs.getBoolean(ASKED, false)) {
       then()
       return
@@ -621,7 +642,7 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
     prefs.edit().putBoolean(ASKED, true).apply()
     PluginManager.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS)) { _ ->
       // The dialog paused the activity and the answer resumes it; start from here, which is while it is visible again.
-      host.runOnUiThread { then() }
+      main.post { then() }
     }
   }
 

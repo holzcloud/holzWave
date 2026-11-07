@@ -43,7 +43,10 @@
 #   5. after one shell exits the text says `1 shell`; the action `Stop all` is tapped in the notification shade (found with
 #      uiautomator, never assumed: a shade that cannot be parsed makes the check `not run`, never ok), after which no shell of
 #      the app lives, the service is gone, the notification is gone and the app is still running with its window; a new shell
-#      then starts the service again.
+#      then starts the service again;
+#   6. the system relaunches the window while the app runs (the script changes the font scale, which the manifest does not list in
+#      configChanges, and reads the relaunch from the system log; without that line the check is `not run`): the service is still up,
+#      `Stop all` ends everything, and a new shell brings the service back. The font scale is put back at every way out.
 # What it does NOT prove: the system's permission dialog of another Android version, skin or locale, Android's phantom-process limit (the emulator does
 # not apply it as phones do), the skins of phone makers, doze and app standby over hours, a swipe of the app out of the recents
 # list, and any real phone.
@@ -188,6 +191,8 @@ cleanup() {
         adbd shell rm -f /data/local/tmp/webview-command-line >/dev/null 2>&1
         adbd shell am force-stop "$PKG" >/dev/null 2>&1
     fi
+    # The service section's one change of a system setting (the font scale, which makes the system relaunch the window) is put back.
+    [ -n "$font_changed" ] && adbd shell settings put system font_scale 1.0 >/dev/null 2>&1
     # The throwaway SSH server of the ssh section, its forward, and the sealed key (and the passphrase file, if a step did not already
     # remove it) in the app's private folder.
     if [ "$SECTION" = ssh ]; then
@@ -212,6 +217,8 @@ cleanup() {
     rm -rf "$tmp"
 }
 HOMEREL=
+font_changed=
+stop_all_driven=
 pin_set=
 rooted=
 server_pid=
@@ -1037,6 +1044,7 @@ if [ "$SECTION" = service ]; then
         adbd shell cmd statusbar collapse
         skipped "Stop all" "the notification shade could not be read with uiautomator on this image"
     else
+        stop_all_driven=1
         wait_until 30 no_shells && check "after Stop all no shell of the app lives" ok \
             || check "after Stop all no shell of the app lives" bad "$(shells_alive) shell(s) left"
         wait_until 15 service_gone && check "after Stop all the service is gone" ok \
@@ -1056,6 +1064,47 @@ if [ "$SECTION" = service ]; then
             && check "a new shell after Stop all starts the service again" ok \
             || { mkdir -p target/android-e2e; adbd exec-out screencap -p >target/android-e2e/service-after-stop-all.png 2>/dev/null
                  check "a new shell after Stop all starts the service again" bad "its text is '$(notification_text)', $(shells_alive) shell(s) of the app, window in front: $(adbd shell dumpsys window | grep mCurrentFocus | head -n 1 | tr -d '\r'); service: $(service_block | head -n 3 | cut -c1-160 | tr '\n' '|'); log: $(adbd logcat -d 2>/dev/null | grep -E 'serviceUpdate|HolzwaveService|ForegroundService|RustStdoutStderr' | tail -n 8 | cut -c1-200 | tr '\n' '|'); screenshot: target/android-e2e/service-after-stop-all.png"; }
+    fi
+
+    # 7. the window relaunched by the system. The plugin is made once per process, with the first activity; the system makes a new
+    # activity when a setting changes that the manifest does not list in configChanges (the font scale is one; so is the navigation mode).
+    # A shell started after Stop all must still bring the service back then, which needs the plugin to ask the activity in use, not the
+    # destroyed one. The relaunch is confirmed in the system log (the window manager says so); without that line the check is `not run`.
+    if [ -n "$stop_all_driven" ]; then
+        font_changed=1
+        adbd logcat -c >/dev/null 2>&1
+        adbd shell settings put system font_scale 1.3
+        relaunched() { adbd logcat -d 2>/dev/null | grep -qi 'relaunch'; }
+        if ! wait_until 30 relaunched; then
+            adbd shell settings put system font_scale 1.0
+            font_changed=
+            skipped "a shell started after Stop all in a window the system relaunched brings the service back" "the system log did not show a relaunch of the window after the font scale changed"
+        else
+            wait_until 60 has_focus || die "the app has no focus after the system relaunched its window"
+            sleep 8 # the new page loads and asks the core for the layout
+            service_up && check "a shell is up and the service still runs in the relaunched window" ok \
+                || check "a shell is up and the service still runs in the relaunched window" bad "$(shells_alive) shell(s)"
+            adbd shell cmd statusbar expand-notifications
+            sleep 2
+            if ! tap_node 'content-desc="Stop all"|text="STOP ALL"'; then
+                adbd shell cmd statusbar collapse
+                skipped "a shell started after Stop all in a window the system relaunched brings the service back" "the notification shade could not be read with uiautomator on this image"
+            else
+                wait_until 30 no_shells && wait_until 15 service_gone \
+                    && check "in the relaunched window Stop all ends the shells and the service" ok \
+                    || check "in the relaunched window Stop all ends the shells and the service" bad "$(shells_alive) shell(s)"
+                adbd shell cmd statusbar collapse
+                sleep 3
+                open_pane 1
+                wait_until 30 service_up && wait_until 20 text_is '1 shell' \
+                    && check "in the relaunched window a shell started after Stop all brings the service back" ok \
+                    || { mkdir -p target/android-e2e; adbd exec-out screencap -p >target/android-e2e/service-after-relaunch.png 2>/dev/null
+                         check "in the relaunched window a shell started after Stop all brings the service back" bad "its text is '$(notification_text)', $(shells_alive) shell(s) of the app; service: $(service_block | head -n 3 | cut -c1-160 | tr '\n' '|'); screenshot: target/android-e2e/service-after-relaunch.png"; }
+            fi
+            adbd shell settings put system font_scale 1.0
+            font_changed=
+            sleep 6 # putting the scale back relaunches the window once more
+        fi
     fi
 
     # 3. the notification permission (Android 13 and later: before that there is no such permission to revoke or to ask for)

@@ -780,19 +780,19 @@ read through the app's own path; the phone and tablet layouts, the key row above
 long-press selection with `Copy` and `Paste`; a saved SSH connection whose passphrase is in the store, kept alive when the store is
 locked, a new connect refused while locked with no login at the server; and a release APK that passes the APK check and is unsigned.
 
-### Known defects, not fixed
+### Known defects, fixed and checked on emulators only
 
-Two defects of the app were found by the emulator runs. The first is fixed (and checked on an emulator only); the second is **not fixed**:
+Two defects of the app were found by the emulator runs. Both are fixed, and both were checked on emulators only:
 
 - **The bottom bar under the system buttons (fixed, emulator only).** On the Android 12 image with three-button navigation and WebView 91
   the page got no safe-area inset, so its bottom bar was drawn under the system buttons. The app's shell now tells the page the height
   of the system bars and the page keeps clear of them; the emulator shows both bars clear on that image. A phone with an up-to-date web
   view, a display cutout, a landscape phone and the tablet layout (which does not use the values yet) were not tried (row AND8).
-- **The service after a recreated window.** After the system recreates the app's window while the app runs (seen when the navigation
-  mode changed), a shell started after `Stop all` runs but the foreground service does not start again and no notification shows, although
-  the core tells the plugin the new counts. The same steps without the recreation work. The likely cause (the plugin keeps the window
-  that was destroyed and its check for a visible app reads that one) was not verified. A phone recreates the window for other
-  reasons too, so row AND4 asks for it.
+- **The service after a recreated window (fixed, emulator only).** After the system recreates the app's window while the app runs (seen
+  when the navigation mode changed; a change of the font scale does the same), a shell started after `Stop all` did not bring the
+  foreground service back. The plugin kept the window it was made with, which was destroyed, and asked it whether the app is visible.
+  It now asks the window in use. The emulator check changes the font scale while the app runs and passes on the Android 12 image; it
+  failed before the change. A phone recreates the window for other reasons too, so row AND4 still asks for it.
 
 ### Not tried
 
@@ -869,7 +869,7 @@ Known limits of this build, so they are not reported as defects:
   Files move one at a time through the Android file dialog. The cloud AI providers are part of the Android build. The shell can read
   the secret store's file, which holds ciphertext only. While the store is protected the app switcher card hides the terminal whenever
   the app is not in front, on Android 13 and later; screenshots are not blocked, and on Android 12 and 12L nothing hides the card.
-  Two defects found on an emulator are not fixed (Known defects in Part 13).
+  Two defects found on an emulator are fixed and were checked on emulators only (Known defects in Part 13).
 - The title-bar buttons are smaller than 44 px in a window of 640 px and narrower ([design.md](design.md) names the exception).
 - The Apple model needs macOS 26 or later, Apple Silicon and Apple Intelligence, and building it needs the Xcode 26 SDK; an
   older SDK builds the app without it. Where it is missing it cannot be chosen, and nothing falls back to another provider.
