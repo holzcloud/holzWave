@@ -1491,6 +1491,124 @@ if [ "$SECTION" = vault ] || [ "$SECTION" = tls ] || [ "$SECTION" = handover ] |
     known=$(as_app "cat known_hosts" | grep -c -F "[127.0.0.1]:$ssh_port $ssh_key_type $ssh_key_blob")
     [ "$known" = 1 ] && check "the app's known hosts file holds the server's key for that address and port, once" ok \
         || check "the app's known hosts file holds the server's key once" bad "$known matching lines"
+    # ---- e. a private address and the permission of Android 17 ------------------------------------------------------------------
+    # The emulator's name for the Mac, 10.0.2.2, is a private address, reached here with no `adb reverse`. An app that targets Android 17
+    # needs the runtime permission ACCESS_LOCAL_NETWORK for it (without it the connection times out); the app asks when the first such
+    # connection is made, with the system's own dialog, which this section answers. Below Android 17 the permission does not exist.
+    if [ "$sdk" -lt 37 ]; then
+        skipped "the local network permission: nothing asked at the start, the refusal as a sentence, Allow, a refused connect and the way back" "the permission exists from Android 17 (API 37); this image is API $sdk"
+    else
+        ln_granted() { adbd shell dumpsys package "$PKG" | tr -d '\r' | grep -m 1 'android.permission.ACCESS_LOCAL_NETWORK: granted=' | sed 's/.*granted=\([a-z]*\).*/\1/'; }
+        dialog_up() { adbd shell dumpsys window | grep mCurrentFocus | grep -q GrantPermissionsActivity; }
+        # run_step_dialog <step> <allow|deny|none> [seconds]: like run_step, and the system's permission dialog is answered with that button
+        # when it shows. Sets $line and $shown (1 when a permission dialog was in front at any time).
+        run_step_dialog() {
+            step=$1
+            button=$2
+            limit=${3:-90}
+            shown=
+            tapped=
+            adbd logcat -c >/dev/null 2>&1
+            if [ -n "${STEP_ARGS:-}" ]; then
+                adbd shell am start -W -n "$PKG/$ACTIVITY" --es holzwave_selftest "$step" --es holzwave_selftest_args "$STEP_ARGS" >/dev/null 2>&1 || die "the activity did not start for $step"
+            else
+                adbd shell am start -W -n "$PKG/$ACTIVITY" --es holzwave_selftest "$step" >/dev/null 2>&1 || die "the activity did not start for $step"
+            fi
+            waited=0
+            line=
+            while [ "$waited" -lt "$limit" ]; do
+                line=$(step_line "$step")
+                [ -n "$line" ] && break
+                if dialog_up; then
+                    shown=1
+                    if [ -z "$tapped" ] && [ "$button" != none ]; then
+                        if ui_tap_text "id:com.android.permissioncontroller:id/permission_${button}_button"; then
+                            tapped=1
+                        else
+                            mkdir -p "$outdir"
+                            cp "$tmp/hw-ui.xml" "$outdir/permission-dialog.xml" 2>/dev/null
+                        fi
+                    fi
+                fi
+                sleep 1
+                waited=$((waited + 1))
+            done
+            [ -n "$line" ] || line="(no answer of the step within $limit s)"
+        }
+        push_ssh_files() {
+            adbd shell "run-as $PKG sh -c 'cat > selftest-ssh-key'" <"$ssh_dir/client_key" || stop_here "the key file could not be written into the app's folder"
+            adbd shell "run-as $PKG sh -c 'cat > selftest-ssh-pass'" <"$ssh_dir/client_pass" || stop_here "the passphrase file could not be written into the app's folder"
+        }
+        private_host=10.0.2.2
+
+        # 1. nothing is asked at the start, nor when a connection to a private address is only saved
+        [ "$(ln_granted)" = false ] && check "the permission is not held at the start of this part" ok || check "the permission is not held at the start of this part" bad "granted=$(ln_granted)"
+        push_ssh_files
+        STEP_ARGS="$ssh_port,$ssh_user,$ssh_key_type,$ssh_key_blob,$private_host"
+        run_step_dialog ssh-prepare none 60
+        STEP_ARGS=
+        case "$line" in
+            *"ssh-prepare: ok"*) [ -z "$shown" ] && [ "$(ln_granted)" = false ] \
+                && check "starting the app and saving a connection to a private address asks for nothing" ok \
+                || check "starting the app and saving a connection to a private address asks for nothing" bad "dialog shown: ${shown:-no}, granted=$(ln_granted)" ;;
+            *) stop_here "the connection to the private address could not be saved: $line" ;;
+        esac
+
+        # 2. the refusal: a plain sentence, no timeout
+        STEP_ARGS=$private_host
+        run_step_dialog localnet-ask deny 60
+        STEP_ARGS=
+        case "$line" in
+            *"localnet-ask: ok refused: "*"not allowed to reach $private_host"*"local network"*"Nearby devices"*"Android settings"*)
+                [ -n "$shown" ] && [ "$(ln_granted)" = false ] \
+                    && check "the first connection to a private address shows the system's dialog; Don't allow gives a plain sentence [${line#*refused: }]" ok \
+                    || check "the first connection to a private address shows the system's dialog; Don't allow gives a plain sentence" bad "dialog shown: ${shown:-no}, granted=$(ln_granted)" ;;
+            *) check "the first connection to a private address shows the system's dialog; Don't allow gives a plain sentence" bad "$line (dialog shown: ${shown:-no})" ;;
+        esac
+
+        # 3. Allow in the dialog: the connection is made
+        before_allow=$(logins)
+        run_step_dialog ssh-connect allow 90
+        case "$line" in
+            *"ssh-connect: ok connected"*)
+                after_allow=$(logins)
+                [ -n "$shown" ] && [ "$(ln_granted)" = true ] && [ "$after_allow" -gt "$before_allow" ] \
+                    && check "Allow in the dialog: the saved connection to the private address connects without adb reverse (server logins $before_allow before, $after_allow after)" ok \
+                    || check "Allow in the dialog: the saved connection to the private address connects" bad "dialog shown: ${shown:-no}, granted=$(ln_granted), logins $before_allow before, $after_allow after" ;;
+            *) check "Allow in the dialog: the saved connection to the private address connects" bad "$line (dialog shown: ${shown:-no}, granted=$(ln_granted))" ;;
+        esac
+
+        # 4. the permission taken away again (the system ends the app's process): the next connection asks again, Don't allow fails the pane
+        adbd shell pm revoke "$PKG" android.permission.ACCESS_LOCAL_NETWORK >/dev/null 2>&1
+        sleep 4
+        [ "$(ln_granted)" = false ] && check "the permission is revoked again" ok || check "the permission is revoked again" bad "granted=$(ln_granted)"
+        expect_ok ssh-unlock prompt "the vault is unlocked again after the app was ended (system prompt, the PIN)" || stop_here "the vault could not be unlocked"
+        before_deny=$(logins)
+        run_step_dialog ssh-connect deny 90
+        sleep 3
+        case "$line" in
+            *"ssh-connect"*"the pane ended as failed"*)
+                [ -n "$shown" ] && [ "$(logins)" = "$before_deny" ] \
+                    && check "Don't allow: the pane fails at once with no login at the server and the app keeps running" ok \
+                    || check "Don't allow: the pane fails at once with no login at the server" bad "dialog shown: ${shown:-no}, logins $before_deny before, $(logins) after" ;;
+            *) check "Don't allow: the pane fails at once with no login at the server" bad "$line (dialog shown: ${shown:-no})" ;;
+        esac
+        [ -n "$(adbd shell pidof "$PKG" | tr -d '\r')" ] && check "after the refusal the app is still running (no crash)" ok || check "after the refusal the app is still running (no crash)" bad "no process"
+        adbd logcat -d 2>/dev/null | grep -q 'FATAL EXCEPTION' && check "the log shows no crash" bad "a FATAL EXCEPTION is in the log" || check "the log shows no crash" ok
+
+        # 5. the way back: the permission allowed in the settings (pm grant does what the switch there does), and the connection is made
+        adbd shell pm grant "$PKG" android.permission.ACCESS_LOCAL_NETWORK >/dev/null 2>&1
+        sleep 3
+        before_settings=$(logins)
+        run_step_dialog ssh-connect none 90
+        case "$line" in
+            *"ssh-connect: ok connected"*)
+                [ -z "$shown" ] && [ "$(logins)" -gt "$before_settings" ] \
+                    && check "allowed in the settings: the connection is made and no dialog shows (server logins $before_settings before, $(logins) after)" ok \
+                    || check "allowed in the settings: the connection is made and no dialog shows" bad "dialog shown: ${shown:-no}, logins $before_settings before, $(logins) after" ;;
+            *) check "allowed in the settings: the connection is made and no dialog shows" bad "$line (dialog shown: ${shown:-no})" ;;
+        esac
+    fi
     stop_app
     # The PIN is cleared while the emulator is still there, the key goes with the app's folder at the next install.
     adbd shell locksettings clear --old "$PIN" >/dev/null && pin_set=

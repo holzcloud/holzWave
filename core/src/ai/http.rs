@@ -1302,6 +1302,11 @@ impl Http {
         cancel: &CancelToken,
     ) -> Result<Exchange, AiError> {
         let resolved = raced(cancel, self.resolve(call.target, &call.policy)).await??;
+        // A server on the local network needs the platform's permission on Android 17, asked now and not at the start of the app; a
+        // refusal is a plain sentence instead of a timeout. No gate is installed anywhere else, and this returns at once.
+        if resolved.addrs.iter().any(|address| crate::reach::is_local(address.ip())) {
+            raced(cancel, crate::reach::require(call.target.origin().host())).await?.map_err(|why| unavailable(&why))?;
+        }
         let client = self.client_for(call.target, &resolved)?;
         let retry = self.config.retry;
         let mut tries: u32 = 0;

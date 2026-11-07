@@ -10,6 +10,7 @@
 
 pub mod host;
 pub mod keystore;
+pub mod network;
 pub mod picker;
 #[cfg(target_os = "android")]
 pub mod plugin;

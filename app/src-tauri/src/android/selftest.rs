@@ -22,7 +22,7 @@
 //! name and a size, a fixed test pattern's own path, or the fixed words of the clipboard steps; never the bytes of a file and
 //! never a text that came from the clipboard.
 //!
-//! The steps `ssh-prepare`, `ssh-unlock`, `ssh-connect`, `ssh-send`, `ssh-lock` and `ssh-connect-locked` run a saved SSH connection to
+//! The steps `localnet-ask` (the permission question before a private address) and `ssh-prepare`, `ssh-unlock`, `ssh-connect`, `ssh-send`, `ssh-lock` and `ssh-connect-locked` run a saved SSH connection to
 //! a throwaway OpenSSH server that the emulator script starts on the Mac and forwards to the emulator's loopback address with `adb
 //! reverse`. The values a step needs and that are public (the port, the user name, the two words of the host's public key, a folder
 //! and a file name of the Mac) come in the intent's second extra; the sealed private key and its passphrase are two files that the
@@ -466,6 +466,15 @@ impl Steps {
                 Ok("unlocked".into())
             }
             "ssh-connect" => self.ssh_connect(),
+            // The question the core asks before it dials a private address (the system's permission dialog on Android 17, answered by
+            // the script): the step says whether the app was let through, or the plain sentence it was refused with.
+            "localnet-ask" => {
+                let host = args.get(0, 64, is_word)?;
+                Ok(match holzwave_core::reach::ensure_blocking(host, 22) {
+                    Ok(()) => "granted".to_owned(),
+                    Err(text) => format!("refused: {}", clean(&text)),
+                })
+            }
             "ssh-send" => self.ssh_send(&args),
             "ssh-lock" => {
                 self.expect_state(VaultState::Unlocked)?;
@@ -504,6 +513,9 @@ impl Steps {
             return fail("the port is 0");
         }
         let user = args.get(1, 32, is_word)?;
+        // The fifth value is optional: the address the app dials. It is the loopback address by default (reached through `adb reverse`);
+        // the local network steps give the emulator's name for the Mac, `10.0.2.2`, which is a private address.
+        let host = args.get(4, 64, is_word).unwrap_or(SSH_HOST);
         let key_type = args.get(2, 20, |c| c.is_ascii_alphanumeric() || c == '-')?;
         let blob = args.get(3, 200, is_base64)?;
         if key_type != "ssh-ed25519" {
@@ -525,12 +537,12 @@ impl Steps {
         // Trust exactly this host key, the way the connection's own check reads it: an OpenSSH known hosts line for the host and
         // port. Any other key of that host and port is refused as a changed key; nothing here accepts a key it was not given.
         let known = self.data_dir.join(KNOWN_HOSTS);
-        let head = format!("[{SSH_HOST}]:{port} ");
+        let head = format!("[{host}]:{port} ");
         let mut lines: Vec<String> =
             std::fs::read_to_string(&known).unwrap_or_default().lines().filter(|line| !line.starts_with(&head)).map(str::to_owned).collect();
         lines.push(format!("{head}{key_type} {blob}"));
         std::fs::write(&known, lines.join("\n") + "\n").map_err(|_| "the known hosts file could not be written".to_owned())?;
-        let mut profile = Profile::new(SSH_ID, "Selftest SSH", SSH_HOST);
+        let mut profile = Profile::new(SSH_ID, "Selftest SSH", host);
         profile.port = port;
         profile.user = user.to_owned();
         profile.auth = Auth::Key;

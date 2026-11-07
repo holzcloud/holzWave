@@ -18,3 +18,7 @@ android.permission.POST_NOTIFICATIONS
 # The system prompt that opens the secret store (the screen lock or a fingerprint or face): the framework BiometricPrompt, which
 # the platform asks every app to declare this permission for. It reads no biometric data; the system does the check.
 android.permission.USE_BIOMETRIC
+# Reaching a device on the local network (a private address: a NAS, a home server, another computer on the same Wi-Fi) on Android 17
+# and later, where an app that targets it needs this runtime permission and a connection without it times out. It is asked, with the
+# system's own dialog, when the first connection to such an address is made and never at the start; below Android 17 it does not exist.
+android.permission.ACCESS_LOCAL_NETWORK

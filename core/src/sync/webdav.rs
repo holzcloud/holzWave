@@ -72,6 +72,9 @@ fn err(m: impl Into<String>) -> Error {
 pub struct WebDav {
     agent: Agent,
     base: String,
+    /// The host and port of the endpoint, for the check before a connection to the local network.
+    host: String,
+    port: u16,
     auth: String,
 }
 
@@ -138,9 +141,13 @@ impl WebDav {
             .tls_config(TlsConfig::builder().root_certs(RootCerts::PlatformVerifier).build())
             .user_agent("holzWave-sync")
             .build();
+        let port_text = if host_only.starts_with('[') { host_only.split_once("]:") } else { host_only.split_once(':') }.map(|(_, p)| p);
+        let port = port_text.and_then(|p| p.parse().ok()).unwrap_or(if scheme == "http" { 80 } else { 443 });
         Ok(Self {
             agent: config.into(),
             base: endpoint.trim_end_matches('/').to_owned(),
+            host: name.to_owned(),
+            port,
             auth: format!("Basic {}", base64(format!("{user}:{password}").as_bytes())),
         })
     }
@@ -162,6 +169,9 @@ impl WebDav {
             req = req.header(*k, v.as_str());
         }
         let req = req.body(body.to_vec()).map_err(|e| err(format!("request: {e}")))?;
+        // A server on the local network needs the platform's permission on Android 17 (a connection without it times out); asked
+        // here, when the first request is made, and a refusal is the plain sentence. No gate exists elsewhere: this returns at once.
+        crate::reach::ensure_blocking(&self.host, self.port).map_err(err)?;
         // The folder itself has an empty path: name it in words instead of leaving a gap in the text.
         let shown = if path.is_empty() { "the sync folder" } else { path };
         let mut resp = self.agent.run(req).map_err(|e| err(format!("{method} {shown}: {e}")))?;

@@ -595,8 +595,9 @@ fn the_manifest_asks_for_exactly_the_permissions_of_the_list() {
             "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
             "android.permission.POST_NOTIFICATIONS",
             "android.permission.USE_BIOMETRIC",
+            "android.permission.ACCESS_LOCAL_NETWORK",
         ],
-        "the list today is the network, the three of the foreground service and the prompt of the secret store"
+        "the list today is the network, the three of the foreground service, the prompt of the secret store and the local network"
     );
 }
 
@@ -2568,9 +2569,16 @@ fn the_hand_over_uses_the_system_dialogs_and_asks_for_no_storage_permission_and_
         "the project's file code was found"
     );
     assert_none("hand-over", file_dialog_problems(&files, PLUGIN_KT, FILES_KT));
-    // The permission list still has the lines it had before the dialogs: nothing was added for them.
+    // Nothing was added to the permission list for the dialogs: no storage, media or document permission is listed (the sixth line is the
+    // local network, which has nothing to do with files).
     let listed = listed_permissions(PERMISSION_LIST);
-    assert_eq!(listed.len(), 5, "{listed:?}");
+    assert_eq!(listed.len(), 6, "{listed:?}");
+    for permission in &listed {
+        assert!(
+            !permission.contains("STORAGE") && !permission.contains("MEDIA") && !permission.contains("DOCUMENT"),
+            "{permission} is a permission for files"
+        );
+    }
 }
 
 #[test]
@@ -2780,4 +2788,100 @@ fn the_relaunch_check_fails_on_bad_input() {
     }
     let keystore = KEYSTORE_KT.replace("val host = activityOf()", "val host = first");
     assert!(!relaunch_problems(PLUGIN_KT, &keystore).is_empty(), "a prompt on the first activity passed");
+}
+
+// ---- the local network permission ------------------------------------------------------------------------------------------------
+
+/// What the project must say about the permission to reach the local network: it is declared in the manifest and in the one list,
+/// it is asked for by the plugin only when a connection needs it (a command, never at start), only on Android 17 and later, with the
+/// system's dialog, and the Rust side installs the gate from setup and nowhere asks it at the start.
+fn local_network_problems(manifest: &str, list: &str, plugin_kt: &str, lib_rs: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    let declared = tags(manifest)
+        .iter()
+        .any(|tag| tag.name == "uses-permission" && tag.attr("android:name") == Some("android.permission.ACCESS_LOCAL_NETWORK"));
+    if !declared {
+        problems.push("the manifest does not declare ACCESS_LOCAL_NETWORK".into());
+    }
+    if !listed_permissions(list).contains(&"android.permission.ACCESS_LOCAL_NETWORK") {
+        problems.push("android-permissions.txt does not list ACCESS_LOCAL_NETWORK".into());
+    }
+    let plugin = source_code(plugin_kt);
+    for needed in [
+        "fun localNetworkEnsure(invoke: Invoke)",
+        "private const val LOCAL_NETWORK = \"android.permission.ACCESS_LOCAL_NETWORK\"",
+        "private const val LOCAL_NETWORK_SDK = 37",
+        "if (Build.VERSION.SDK_INT < LOCAL_NETWORK_SDK)",
+        "PluginManager.requestPermissions(arrayOf(LOCAL_NETWORK))",
+        "LOCAL_NETWORK_WAIT_MS",
+    ] {
+        if !plugin.contains(needed) {
+            problems.push(format!("HolzwavePlugin lacks `{needed}`"));
+        }
+    }
+    // Never at the start: no lifecycle hook and no init block asks for it.
+    for hook in ["override fun onResume", "init {", "override fun load("] {
+        if let Some(at) = plugin.find(hook) {
+            let body: String = plugin[at..].lines().take(14).collect::<Vec<_>>().join("\n");
+            if body.contains("LOCAL_NETWORK") || body.contains("localNetworkEnsure") {
+                problems.push(format!("`{hook}` asks for the local network permission: it may only be asked when a connection needs it"));
+            }
+        }
+    }
+    let lib = source_code(lib_rs);
+    if !lib.contains("android::network::install();") {
+        problems.push("lib.rs does not install the gate for the local network".into());
+    }
+    if lib.contains("localNetworkEnsure") {
+        problems.push("lib.rs asks for the permission itself".into());
+    }
+    problems
+}
+
+const LIB_RS: &str = include_str!("../src/lib.rs");
+
+#[test]
+fn the_local_network_permission_is_declared_and_asked_only_when_a_connection_needs_it() {
+    let files = project_text();
+    assert_none(
+        "the local network permission",
+        local_network_problems(find(&files, "app/src/main/AndroidManifest.xml"), PERMISSION_LIST, PLUGIN_KT, LIB_RS),
+    );
+}
+
+#[test]
+fn the_local_network_check_fails_on_bad_input() {
+    let files = project_text();
+    let manifest = find(&files, "app/src/main/AndroidManifest.xml").to_owned();
+    assert!(local_network_problems(&manifest, PERMISSION_LIST, PLUGIN_KT, LIB_RS).is_empty());
+    let cases = [
+        (
+            "not declared",
+            local_network_problems(&manifest.replace("android.permission.ACCESS_LOCAL_NETWORK", "android.permission.NEARBY"), PERMISSION_LIST, PLUGIN_KT, LIB_RS),
+        ),
+        (
+            "not listed",
+            local_network_problems(&manifest, &PERMISSION_LIST.replace("android.permission.ACCESS_LOCAL_NETWORK", ""), PLUGIN_KT, LIB_RS),
+        ),
+        (
+            "asked on every Android",
+            local_network_problems(&manifest, PERMISSION_LIST, &PLUGIN_KT.replace("if (Build.VERSION.SDK_INT < LOCAL_NETWORK_SDK)", "if (false)"), LIB_RS),
+        ),
+        (
+            "asked on resume",
+            local_network_problems(
+                &manifest,
+                PERMISSION_LIST,
+                &PLUGIN_KT.replace("override fun onResume(activity: androidx.appcompat.app.AppCompatActivity) {", "override fun onResume(activity: androidx.appcompat.app.AppCompatActivity) {\n    PluginManager.requestPermissions(arrayOf(LOCAL_NETWORK)) { }"),
+                LIB_RS,
+            ),
+        ),
+        (
+            "no gate",
+            local_network_problems(&manifest, PERMISSION_LIST, PLUGIN_KT, &LIB_RS.replace("android::network::install();", "")),
+        ),
+    ];
+    for (what, problems) in cases {
+        assert!(!problems.is_empty(), "{what} passed");
+    }
 }

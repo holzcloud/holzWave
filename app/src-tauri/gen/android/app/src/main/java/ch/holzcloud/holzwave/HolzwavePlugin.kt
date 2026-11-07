@@ -547,6 +547,62 @@ class HolzwavePlugin(host: Activity) : Plugin(host) {
     invoke.resolve(answer)
   }
 
+  // ---- the local network permission ------------------------------------------------------------------------------------------
+  // Android 17 lets an app that targets it reach a device on the local network (a private address) only with the runtime permission
+  // ACCESS_LOCAL_NETWORK; a connection without it does not fail, it times out. The Rust side asks here before it dials such an
+  // address, so the system's dialog shows when it is needed and never at the start of the app. Below Android 17 nothing is needed.
+
+  /** A system permission dialog is open (the plugin manager keeps one result handler, so there is one at a time). */
+  private val askBusy = AtomicBoolean(false)
+
+  private fun localNetworkAnswer(state: String): JSObject {
+    val answer = JSObject()
+    answer.put("state", state)
+    return answer
+  }
+
+  /**
+   * Answers one word: `granted` (held, or not needed on this Android), `denied` (the person or the system said no, or the dialog
+   * could not be shown or was not answered in two minutes), `background` (the dialog can only be shown while the app is on screen)
+   * or `busy` (another permission dialog is open; Rust asks again shortly). The dialog is the system's own and shows only when the
+   * permission is not held; an app that was denied twice gets `denied` at once from the system.
+   */
+  @Command
+  fun localNetworkEnsure(invoke: Invoke) {
+    if (Build.VERSION.SDK_INT < LOCAL_NETWORK_SDK) {
+      invoke.resolve(localNetworkAnswer("granted"))
+      return
+    }
+    main.post {
+      if (app.checkSelfPermission(LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED) {
+        invoke.resolve(localNetworkAnswer("granted"))
+      } else if (!visible()) {
+        invoke.resolve(localNetworkAnswer("background"))
+      } else if (!askBusy.compareAndSet(false, true)) {
+        invoke.resolve(localNetworkAnswer("busy"))
+      } else {
+        val answered = AtomicBoolean(false)
+        val finish = { state: String ->
+          if (answered.compareAndSet(false, true)) {
+            askBusy.set(false)
+            invoke.resolve(localNetworkAnswer(state))
+          }
+        }
+        val giveUp = Runnable { finish("denied") }
+        main.postDelayed(giveUp, LOCAL_NETWORK_WAIT_MS)
+        try {
+          PluginManager.requestPermissions(arrayOf(LOCAL_NETWORK)) { result ->
+            main.removeCallbacks(giveUp)
+            finish(if (result[LOCAL_NETWORK] == true) "granted" else "denied")
+          }
+        } catch (e: Throwable) {
+          main.removeCallbacks(giveUp)
+          finish("denied")
+        }
+      }
+    }
+  }
+
   /** A page finished loading: the variables it lost with the old document are written again (see [SystemInsets]). */
   @Command
   fun insetsApply(invoke: Invoke) {
@@ -639,8 +695,14 @@ class HolzwavePlugin(host: Activity) : Plugin(host) {
       then()
       return
     }
+    // Another permission dialog is open (the local network one): this ask is left for the next start of a session.
+    if (!askBusy.compareAndSet(false, true)) {
+      then()
+      return
+    }
     prefs.edit().putBoolean(ASKED, true).apply()
     PluginManager.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS)) { _ ->
+      askBusy.set(false)
       // The dialog paused the activity and the answer resumes it; start from here, which is while it is visible again.
       main.post { then() }
     }
@@ -649,6 +711,11 @@ class HolzwavePlugin(host: Activity) : Plugin(host) {
   companion object {
     private const val TAG = "holzwave"
     private const val STOP_ALL_EVENT = "stopAll"
+    /** The permission exists from Android 17 (API 37), and only an app that targets it needs it. */
+    private const val LOCAL_NETWORK = "android.permission.ACCESS_LOCAL_NETWORK"
+    private const val LOCAL_NETWORK_SDK = 37
+    /** A dialog that nobody answers in this time is a refusal, so a connection never waits for ever. */
+    private const val LOCAL_NETWORK_WAIT_MS = 120_000L
     private const val PREFS = "holzwave_service"
     private const val ASKED = "notifications_asked"
     /** The data key is 32 bytes; a wrapped one is 4 + 12 + 32 + 16. The bounds are wide and refuse anything absurd. */

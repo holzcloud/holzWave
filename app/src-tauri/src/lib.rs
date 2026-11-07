@@ -443,6 +443,9 @@ pub fn run() {
             // there are, and its `Stop all` ends them.
             #[cfg(target_os = "android")]
             android::service::start(core.clone());
+            // Android: a connection to a device on the local network asks for the system's permission when it is made (Android 17).
+            #[cfg(target_os = "android")]
+            android::network::install();
             // Android debug builds only: the steps of the emulator's self-test of the vault. Release builds do not contain it.
             #[cfg(all(target_os = "android", debug_assertions))]
             android::selftest::start(core.clone(), app.state::<Arc<android::host::AndroidHost>>().inner().clone());

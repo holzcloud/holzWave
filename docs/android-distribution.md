@@ -84,13 +84,17 @@ Android SDK build tools.) A matching fingerprint says the file was signed with t
 - **One processor family: arm64-v8a.** Only arm64-v8a is built. The APK installs on 64-bit ARM phones and tablets with
   Android 12 or newer. It does not install on devices that are 32-bit ARM only, and not on x86 devices; the terminal engine
   cannot be built for those targets either.
-- **Permissions: exactly five.** No other permission, no Google services and no tracker.
+- **Permissions: exactly six.** No other permission, no Google services and no tracker.
   - `INTERNET`: SSH connections, sync and the requests of the AI chat.
   - `FOREGROUND_SERVICE` and `FOREGROUND_SERVICE_SPECIAL_USE`: a foreground service of type `specialUse` keeps shells and SSH
     connections running while the app is in the background, with a persistent notification. Its subtype text is: `Keeps
     terminal shells and SSH connections running while the app is in the background`.
   - `POST_NOTIFICATIONS`: that notification, on Android 13 and later.
   - `USE_BIOMETRIC`: unlocking the secret store with the screen lock or a biometric.
+  - `ACCESS_LOCAL_NETWORK`: reaching a device on the local network (a NAS, a home server, another computer on the same Wi-Fi) on Android 17
+    and later, where an app that targets it needs this permission and a connection without it times out. It is a runtime permission:
+    the system's own dialog (worded as access to nearby devices) shows when the first connection to a private address is made, never
+    at the start, and the app works without it for everything that is not on the local network. It does not exist below Android 17.
 - **Version code.** Android needs a number that goes up with every build. It is
   `major * 10000000 + minor * 100000 + patch * 1000 + stage * 100 + number`, with the stage digit alpha 1, beta 2, rc 3 and
   final 9. For example `0.0.1-beta2` gives 1202. The script `scripts/android-version-code.sh` computes it, and every later

@@ -66,6 +66,7 @@ pub mod preview;
 pub mod profiles;
 pub mod pty;
 pub mod queue;
+pub mod reach;
 pub mod secrets;
 pub mod session;
 pub mod settings;

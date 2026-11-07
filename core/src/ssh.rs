@@ -982,6 +982,9 @@ async fn open_waiting(
             .map_err(|e| lost(&e))?;
         client::connect_stream(config, channel.into_stream(), handler(target)).await
     } else {
+        // A host on the local network needs the platform's permission on Android 17; asked here, when the connection is made, and a
+        // refusal is the plain sentence instead of a timeout. Nowhere else is a gate installed, and this returns at once.
+        crate::reach::ensure(&target.host, target.port).await.map_err(Outcome::Fatal)?;
         let connect = client::connect(config, (target.host.as_str(), target.port), handler(target));
         match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
             Ok(result) => result,

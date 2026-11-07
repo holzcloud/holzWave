@@ -237,7 +237,7 @@ emulator property. A phone on the cable is never addressed, and a typed port tha
 **The `ssh` section.** `scripts/android-ssh-server.sh` starts a throwaway OpenSSH server as the current user (no root) in a private
 folder: bound to `127.0.0.1` only, key login only, no forwarding, one throwaway Ed25519 key sealed with a random passphrase, which is
 given to `ssh-keygen` through a private askpass program, never as an argument. The emulator reaches it through `adb reverse` (a
-loopback address needs no permission; see the local-network note under HTTPS). In a debug build a self-test then saves the connection
+loopback address needs no permission; see the local-network note under HTTPS, and the end of this paragraph for the private address). In a debug build a self-test then saves the connection
 with the key file and its passphrase **in the vault**, trusts exactly the server's host key, opens a pane and waits for `connected`,
 and the script has a command typed into that pane leave a file on the server side. With a PIN set, the vault is then **locked**: the
 live pane keeps working (a second command still lands), a new connect in the locked state is refused with the answer for a locked
@@ -515,13 +515,25 @@ chain is judged by the system trust store through the platform's own trust manag
   and the server's own log shows the failed handshakes; a save of a sync account against it keeps nothing; after a restart with a
   locked vault the sync is `paused` with no error text and the server sees no connection, and the unlock starts one run that
   reaches the handshake and refuses the certificate. The canary secret is in no log, file, environment or argument list.
-- **Local-network addresses on Android 17.** The emulator's name for the development machine, `10.0.2.2`, is a local-network
-  address. An app that targets Android 17 (this one does) can not reach such an address until it holds the runtime permission
-  `ACCESS_LOCAL_NETWORK`; on the emulator the connection simply timed out (`timeout: global`), and it worked as soon as the
-  permission was granted with `adb shell pm grant`. **The app does not declare that permission**, so a WebDAV server or an AI
-  server on the home network (a private address) is not reachable from an Android 17 device in this build, with HTTPS or without.
-  The emulator check therefore reaches its server through `adb reverse` (a loopback address needs no permission). Declaring the
-  permission is a decision of its own: it is a new runtime permission with a prompt, and it belongs in `android-permissions.txt`.
+- **Local-network addresses on Android 17 (declared).** The emulator's name for the development machine, `10.0.2.2`, is a local-network
+  address, and so is any private address (10/8, 172.16/12, 192.168/16, 100.64/10, link-local, fc00::/7, `.local` names). An app that
+  targets Android 17 (this one does) can not reach such an address until it holds the runtime permission `ACCESS_LOCAL_NETWORK`; without
+  it the connection simply times out (`timeout: global`). The app now declares the permission (the sixth line of
+  `android-permissions.txt`) and asks for it **when the first connection to such an address is made**, never at the start: the SSH
+  login, the sync's WebDAV request and the AI chat's request each ask the platform first (`reach.rs` in the core holds the rule, the
+  Kotlin plugin shows the system's own dialog, which is worded `Allow holzWave to find, connect to, and determine the relative position
+  of nearby devices?`). A refusal is a plain sentence that names the host and says what to do (`holzWave is not allowed to reach
+  192.168.1.20, which is on your local network. Allow Nearby devices for holzWave in the Android settings (Apps, holzWave, Permissions),
+  then try again`), never a timeout; an SSH pane shows it and waits for Enter, which asks again. A grant is remembered for the run. An
+  address that is not local (loopback, public) is never asked about, and below Android 17 nothing is asked because the permission does
+  not exist. If the app is not on screen when the question is due (a reconnect in the background), the sentence says the permission can
+  only be asked while the app is on screen. The `ssh` section checks it on the Android 17 image without `adb reverse`: the app reaches
+  the Mac as `10.0.2.2`; saving such a connection and starting the app ask nothing; `Don't allow` gives the sentence and no login at the
+  server; `Allow` connects (the server logs a login); after the permission is revoked the next connect asks again and `Don't allow`
+  fails the pane with no crash; and after the permission is allowed in the settings (`pm grant` does what the switch there does) the
+  connection is made with no dialog. Not run: an address on a real network, a real phone, the dialog after two refusals (the system then
+  stops asking and the person has to use the settings), a `.local` name resolved by a real mDNS responder, and the sync and the chat
+  against a private address on the emulator (their checks are in the core's tests with a gate that refuses).
 - **What it did not prove.** Any real phone, any Android version other than the images named, user-installed certificate
   authorities (Android applies them to an app only as its target SDK and network security config allow; this app has no such
   config, so none is expected to be trusted, and that was not tried), corporate proxies and TLS inspection, captive portals,
@@ -647,14 +659,14 @@ registry paths of the form `/cargo-home/registry/...`; whether those stay the sa
   shell of a phone maker.
 - The limit of Android 12 and later on background processes for local shells (the emulator does not apply it), a swipe of the app out
   of the recents list, doze and app standby over hours, and the system's notification dialog on another version or locale.
-- The HTTPS check on any Android version other than 12 and 37, and the local-network permission on a real phone.
+- The HTTPS check on any Android version other than 12 and 37, and the local-network permission on a real phone and on a real network.
 - Any Android version other than the three emulator images (Android 17 with API 37, Android 12 with API 31, and the 16 KB page image,
   all arm64): no Android 13, 14, 15 or 16 image, no phone maker's skin, and for the Android 12 image only the sections named above.
 - The hardware-keyboard rule of the key row, the two-finger pinch, and text composed by a real soft keyboard (Gboard): the emulator's
   input command cannot make them, so those checks are `not run`.
 - A real SSH server on a network: the SSH check reaches a throwaway OpenSSH server on this computer's loopback address through
-  `adb reverse`, with one key. Password login to a server, other key types, a server that is slow or drops, and the local-network
-  permission for a real address were not tried.
+  `adb reverse` (and once as `10.0.2.2` for the local-network permission), with one key. Password login to a server, other key types, a
+  server that is slow or drops, and the local-network permission for a real address on a real network were not tried.
 - x86_64 and 32-bit images or builds, which are refused by design.
 - A signed release APK for distribution, installing from F-Droid or Obtainium, Play Protect or installer warnings for a self-signed APK, and a 16 KB page device other than the emulator image with that page size.
 
@@ -733,8 +745,9 @@ anywhere: no package has been signed for use and no channel exists.
 - **Version code:** explicit, from `sh scripts/android-version-code.sh <version>` (the scheme is in [the version code](#the-version-code));
   `0.0.1-beta2` is 1202. A build for a listing comes from `sh scripts/android-build.sh release`, which builds the APK **unsigned**.
 - **Permissions** (the one list, `app/src-tauri/android-permissions.txt`): the network (`INTERNET`), the foreground service
-  (`FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE`), the notification (`POST_NOTIFICATIONS`) and the system prompt of the secret
-  store (`USE_BIOMETRIC`). No storage, media, contacts, location, install-packages or boot permission, no wake lock, no Google services,
+  (`FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE`), the notification (`POST_NOTIFICATIONS`), the system prompt of the secret
+  store (`USE_BIOMETRIC`) and, from Android 17, reaching a device on the local network (`ACCESS_LOCAL_NETWORK`, asked at the first such
+  connection). No storage, media, contacts, location, install-packages or boot permission, no wake lock, no Google services,
   no tracker and no updater.
 - **The foreground service type:** `specialUse`, with the public text `Keeps terminal shells and SSH connections running while the app
   is in the background`.
