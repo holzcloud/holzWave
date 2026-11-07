@@ -15,6 +15,7 @@ pub mod commands;
 pub mod handover;
 pub mod host_shell;
 pub mod integrate_host;
+pub mod keystore_wire;
 pub mod local_network;
 pub mod locked;
 pub mod login_prompt;
