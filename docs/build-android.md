@@ -5,9 +5,10 @@ here costs money. The toolchain, the SDK, the NDK, the emulator and the system i
 
 > [!IMPORTANT]
 > **Status.** The Android app is being built in stages, and this is an early one. What exists: the toolchain and its check, a
-> compile gate for the Rust code, a script that builds a debug APK, scripts that create and start an arm64 emulator, and one
-> end to end check on that emulator (see [the end to end check](#the-end-to-end-check)). It was run on **one** arm64 emulator image
-> of **one** Android version, and on no phone. Everything that only a real phone shows is **not run**: see
+> compile gate for the Rust code, a script that builds a debug APK, scripts that create and start arm64 emulators, and a set of end
+> to end checks on them, run with one command (see [the end to end check](#the-end-to-end-check) and
+> [the whole set](#the-whole-set-on-three-images)). They were run on **three** arm64 emulator images (Android 17 with API 37,
+> Android 12 with API 31, and the 16 KB page image), and on no phone. Everything that only a real phone shows is **not run**: see
 > [what was not tried](#what-was-not-tried).
 
 ## What to install, all free
@@ -146,17 +147,25 @@ build runs the page's own `npm run build` first, which clears and rewrites `app/
 ## The emulator
 
 ```sh
-sh scripts/android-emulator.sh create   # once: the virtual device holzwave-arm64
-sh scripts/android-emulator.sh start    # headless, waits for the boot
-sh scripts/android-emulator.sh install  # adb install -r of the debug APK
+sh scripts/android-emulator.sh create [profile]   # once per profile: a virtual device
+sh scripts/android-emulator.sh start [profile]    # headless, waits for the boot
+sh scripts/android-emulator.sh install [apk] [profile]  # adb install -r of the debug APK
 sh scripts/android-emulator.sh shot out.png
-sh scripts/android-emulator.sh stop
+sh scripts/android-emulator.sh stop [profile]
 ```
 
-`create` uses the system image `system-images;android-37.0;default;arm64-v8a` from the install line above (set
-`HOLZWAVE_ANDROID_IMAGE` for another arm64 image, for example the Android 31 one). It **refuses** an image that is not arm64-v8a and
-a host that is not arm64, and it never installs a system image: a missing one is exit 2 with the `sdkmanager` line printed as
-text. `start` boots without a window (`-no-window -no-audio -no-snapshot -gpu swiftshader_indirect`; set
+There are three profiles, each an arm64-v8a image and a virtual device of its own:
+
+| Profile | Virtual device | System image | What it is for |
+|---|---|---|---|
+| `api37` (the default) | `holzwave-arm64` | `system-images;android-37.0;default;arm64-v8a` | the newest Android, 4 KB pages |
+| `api31` | `holzwave-arm64-api31` | `system-images;android-31;default;arm64-v8a` | Android 12, the oldest version the app installs on (minimum API 31) |
+| `16k` | `holzwave-arm64-16k` | `system-images;android-37.0;google_apis_ps16k;arm64-v8a` | the 16 KB memory page size that new devices ship with |
+
+`create` **refuses** an image that is not arm64-v8a (also when `HOLZWAVE_ANDROID_IMAGE` names one) and a host that is not arm64, and
+it never installs a system image: a missing one is exit 2 with the `sdkmanager` line for it printed as text (installing is the
+owner's step). It sets `hw.keyboard=no` in the device's configuration, so the soft keyboard can show (with a hardware keyboard the
+system keeps it hidden, and the touch checks need it). `start` boots without a window (`-no-window -no-audio -no-snapshot -gpu swiftshader_indirect`; set
 `HOLZWAVE_EMULATOR_GPU=host` for `-gpu host` if the first does not draw). The scripts talk to one device only, the emulator on
 console port 5554 (`emulator-5554`; `HOLZWAVE_EMULATOR_PORT` changes it), never to a phone on the cable.
 
@@ -192,6 +201,75 @@ is the one of the emulator image (the script prints it), and the shell is the on
 The shell's own folder is `home` inside the app's data folder: a folder of its own, kept apart from the app's settings and layout
 files, with mode 0700. A program a person starts in a pane does not find those files next to its own, and a later hand-over of files
 can be limited to it. The shell's `TMPDIR` is the app's cache folder.
+
+## The whole set on three images
+
+```sh
+sh scripts/android-e2e.sh all [profile]   # every section below on one image
+sh scripts/android-e2e.sh matrix          # the three images, one emulator at a time
+```
+
+`all` runs the sections `tracer`, `service`, `vault`, `tls`, `handover`, `clipboard`, `touch`, `ssh` and `pagesize` in that order on the
+emulator that is up (or on one it starts for the profile and stops again). It builds the debug APK once. `matrix` runs `all` on the
+newest image (`api37`), then `tracer service vault pagesize` on Android 12 (`api31`), then `tracer service pagesize` on the 16 KB
+page image (`16k`), and stops each emulator, and waits until it has left the list of devices, before the next starts. Each section is
+a process of its own; the run ends with **one table per image**: the sections, how many checks were `ok`, `not run` and `FAIL`, every
+check that was **not run** with its reason, and every failure with its reason. A check that could not be made is `not run`, counted on
+its own and named: it is never `ok`, and a section that ends with a failure status and no result line is a `FAIL`. Exit 0 means no
+failure (the last line also says how many checks were not run), 1 a failure, 2 a missing tool or a refused request.
+
+**Only emulators.** Every `adb` call the scripts make names the emulator (`adb -s emulator-5554`; `scripts/android-adb.sh` is the one
+door), and a script refuses (exit 2, before it sends anything) unless that serial is attached as a device **and** reports the
+emulator property. A phone on the cable is never addressed, and a typed port that is not a number is refused.
+
+**The `ssh` section.** `scripts/android-ssh-server.sh` starts a throwaway OpenSSH server as the current user (no root) in a private
+folder: bound to `127.0.0.1` only, key login only, no forwarding, one throwaway Ed25519 key sealed with a random passphrase, which is
+given to `ssh-keygen` through a private askpass program, never as an argument. The emulator reaches it through `adb reverse` (a
+loopback address needs no permission; see the local-network note under HTTPS). In a debug build a self-test then saves the connection
+with the key file and its passphrase **in the vault**, trusts exactly the server's host key, opens a pane and waits for `connected`,
+and the script has a command typed into that pane leave a file on the server side. With a PIN set, the vault is then **locked**: the
+live pane keeps working (a second command still lands), a new connect in the locked state is refused with the answer for a locked
+secret store and the server logs **no** new login for it, and after the unlock a second pane opens on the same saved connection and
+shares the open login. The passphrase is a random canary: it is checked to appear in no log. The server, its keys and the proof files
+are removed at every way out.
+
+**The `touch` section.** It drives the **real WebView** on the emulator, not a browser. `uiautomator` does not see a page's content
+unless the WebView exposes it, so the script writes `--force-renderer-accessibility` into `/data/local/tmp/webview-command-line` (which
+only a userdebug image reads) and removes the file and the screen size it changed at every way out. It checks: the phone layout at
+1080x2400 (the key row and the phone's bars, none of the tablet's chrome), the tablet layout at 1800x2560 and density 240, a change
+between the two, the key row above the real soft keyboard, the sticky Control key (armed, sent with `c` as an interrupt, and cleared),
+scrolling the scrollback by touch, and a long press that selects text with Copy and Paste in the page's own menu (a number that was
+copied reached the shell). Three checks are reported as **not run**, with their reasons: the hardware-keyboard rule (the emulator's
+input command could not make the page see a hardware keyboard; the page's unit tests hold the rule), the pinch (the input command has no
+two-finger gesture), and text composed by a soft keyboard (`input text` sends key events; Gboard is a real-device row).
+
+**The `pagesize` section.** It reads the page size of the image (`getconf PAGE_SIZE`) and checks, from `/proc/<pid>/maps`, that the
+app's native library is mapped from the APK with every mapping aligned to the page size and the `base.apk` mapped executable. On the 16 KB image
+the page size is 16384, on the other two 4096.
+
+### What the three images showed
+
+The run of the whole set on the three images (one emulator at a time) ended with these tables. A check that could not be made is
+`not run` and was not proved; the reasons are printed with every run.
+
+| Image | Android | WebView | Page size | Sections | Not run |
+|---|---|---|---|---|---|
+| `api37` | 17 (API 37) | 145.0.7632.218 | 4096 | tracer, service, vault, tls, handover, clipboard, touch, ssh, pagesize | the hardware-keyboard rule, the pinch, text composed by a soft keyboard |
+| `api31` | 12 (API 31) | 91.0.4472.114 | 4096 | tracer, service, vault, pagesize | the foreground service type (it is read from Android 14), the notification permission and its dialog (they start with Android 13) |
+| `16k` | 17 (API 37, Google APIs) | 145.0.7632.218 | **16384** | tracer, service, pagesize | none |
+
+Two things the Android 12 image showed that are **not fixed here** and are listed for the owner:
+
+- **The page's bottom bar under the system buttons.** On that image the system starts with the three-button navigation bar, and its
+  old WebView does not tell the page the height of that bar as a safe area. The page's bottom bar (the tab row with the "+") is then
+  drawn under the system buttons. The newer WebView of the other two images lifts the bar. Whether a real Android 12 phone with a
+  WebView that is kept up to date by its store shows this was not tried. The service check switches that image to gesture navigation
+  before the app starts (and back at the end) so that it measures the service and not this layout.
+- **A relaunched activity and the service.** When the system relaunches the activity while the app runs (seen when the navigation mode
+  changed on that image), a shell that is started after `Stop all` runs but the service is not started again and no notification
+  shows, although the core told the plugin the new counts. The likely cause (the plugin keeps the activity that was destroyed, and the
+  check for a visible app reads that one) was **not verified**. The checks never change the navigation mode while the app runs, so
+  they do not trigger it.
 
 ## The committed project
 
@@ -545,6 +623,12 @@ registry paths of the form `/cargo-home/registry/...`; whether those stay the sa
 - The limit of Android 12 and later on background processes for local shells (the emulator does not apply it), a swipe of the app out
   of the recents list, doze and app standby over hours, and the system's notification dialog on another version or locale.
 - The HTTPS check on any Android version other than 12 and 37, and the local-network permission on a real phone.
-- Any Android version other than the emulator image the check ran on (the default is Android 37, arm64; the secret store's check also ran on an Android 12 image).
+- Any Android version other than the three emulator images (Android 17 with API 37, Android 12 with API 31, and the 16 KB page image,
+  all arm64): no Android 13, 14, 15 or 16 image, no phone maker's skin, and for the Android 12 image only the sections named above.
+- The hardware-keyboard rule of the key row, the two-finger pinch, and text composed by a real soft keyboard (Gboard): the emulator's
+  input command cannot make them, so those checks are `not run`.
+- A real SSH server on a network: the SSH check reaches a throwaway OpenSSH server on this computer's loopback address through
+  `adb reverse`, with one key. Password login to a server, other key types, a server that is slow or drops, and the local-network
+  permission for a real address were not tried.
 - x86_64 and 32-bit images or builds, which are refused by design.
 - A signed release APK for distribution, installing from F-Droid or Obtainium, Play Protect or installer warnings for a self-signed APK, and a 16 KB page device other than the emulator image with that page size.

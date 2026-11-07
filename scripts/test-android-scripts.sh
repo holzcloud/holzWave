@@ -3,7 +3,8 @@
 #
 #   sh scripts/test-android-scripts.sh
 #
-# The scripts under test are scripts/android-check.sh, android-build.sh, android-emulator.sh and android-e2e.sh. Each case
+# The scripts under test are scripts/android-check.sh, android-build.sh, android-emulator.sh, android-e2e.sh (with android-adb.sh, the
+# one door to adb), android-e2e-summary.sh and android-ssh-server.sh. Each case
 # builds a throwaway directory with a copy of those scripts and of android-env.sh, a fake SDK tree and a private PATH of tiny
 # shims for adb, emulator, avdmanager, npm, cargo, rustup, java, zig, uname and for the tools that must never be called
 # (sdkmanager, brew, curl, wget, keytool, jarsigner, apksigner). Every shim logs its call to one file; the last checks assert
@@ -58,7 +59,12 @@ mkcase() {
   sdk="$c/sdk"
   bin="$sdk/ndk/$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin"
   mkdir -p "$c/bin" "$c/home" "$c/brew" "$c/tmpdir" "$c/jdk/bin" "$c/repo/scripts" "$c/repo/app/src-tauri/gen/android" "$bin" \
-    "$sdk/platform-tools" "$sdk/emulator" "$sdk/cmdline-tools/latest/bin"
+    "$sdk/platform-tools" "$sdk/emulator" "$sdk/cmdline-tools/latest/bin" "$c/state" "$c/home/.android/avd"
+  # The three virtual devices exist (their configuration says hw.keyboard=yes, which `create` must turn into no).
+  for avd in holzwave-arm64 holzwave-arm64-api31 holzwave-arm64-16k; do
+    mkdir -p "$c/home/.android/avd/$avd.avd"
+    printf 'hw.keyboard=yes\nhw.ramSize=2G\n' > "$c/home/.android/avd/$avd.avd/config.ini"
+  done
   [ "${C_IMAGE:-yes}" = yes ] && mkdir -p "$sdk/system-images/android-37.0/default/arm64-v8a"
   printf 'Pkg.Revision = %s\n' "$NDK" > "$sdk/ndk/$NDK/source.properties"
   : > "$bin/aarch64-linux-android$API-clang"; chmod +x "$bin/aarch64-linux-android$API-clang"
@@ -78,9 +84,11 @@ esac'
   rust_list=
   [ "${C_RUST:-yes}" = yes ] && rust_list=$TARGET
   shim "$c/bin/rustup" "case \"\$*\" in 'target list --installed') printf '%s\n' aarch64-apple-darwin $rust_list ;; *) exit 9 ;; esac"
-  shim "$c/bin/adb" 'case "$*" in *devices*) echo "List of devices attached" ;; *) exit 1 ;; esac'
+  shim "$c/bin/adb" "${C_ADB:-case \"\$*\" in *devices*) echo \"List of devices attached\" ;; *) exit 1 ;; esac}"
   shim "$c/bin/emulator" "${C_EMU:-exit 1}"
-  shim "$c/bin/avdmanager" "cat > /dev/null"
+  # avdmanager makes the device's configuration the way the real one does (with a hardware keyboard), for the profile's name.
+  shim "$c/bin/avdmanager" 'cat > /dev/null; n=; while [ $# -gt 0 ]; do [ "$1" = --name ] && n=$2; shift; done
+mkdir -p "$HOME/.android/avd/$n.avd"; printf "hw.keyboard=yes\nhw.ramSize=2G\n" > "$HOME/.android/avd/$n.avd/config.ini"'
   for forbidden in sdkmanager brew curl wget keytool jarsigner apksigner; do
     shim "$c/bin/$forbidden" "exit 9"
   done
@@ -88,7 +96,7 @@ esac'
   printf '#!/bin/sh\ncase "$1" in -m) echo %s ;; *) exec /usr/bin/uname "$@" ;; esac\n' "${C_UNAME:-arm64}" > "$c/bin/uname"
   chmod +x "$c/bin/uname"
   cp "$here/android-env.sh" "$here/android-check.sh" "$here/android-build.sh" "$here/android-emulator.sh" "$here/android-e2e.sh" \
-    "$c/repo/scripts/"
+    "$here/android-adb.sh" "$here/android-e2e-summary.sh" "$here/android-ssh-server.sh" "$c/repo/scripts/"
 }
 # run <script> [args...]: run a script of the fake machine; output in $out, status in $rc. $EXTRA holds more
 # NAME=value pairs for the environment (the script's environment is otherwise empty). The calls of the shims go to $ALL too.
@@ -97,6 +105,7 @@ run() {
   shift
   out=$(cd "$c/repo" && env -i HOME="$c/home" HOMEBREW_PREFIX="$c/brew" HW_LOG="$LOG" TMPDIR="$c/tmpdir" \
     PATH="$c/bin:/usr/bin:/bin" HOLZWAVE_ANDROID_HOME="$sdk" HOLZWAVE_JAVA_HOME="$c/jdk" \
+    HW_STATE="$c/state" HW_DEVICES="$c/devices" HW_ORDER="$c/order.log" HW_QEMU="${C_QEMU:-1}" \
     HOLZWAVE_EMULATOR_BOOT_TIMEOUT=6 $EXTRA sh "scripts/$s" "$@" 2>&1)
   rc=$?
   cat "$LOG" >> "$ALL"
@@ -281,8 +290,8 @@ else
 fi
 mkcase
 run android-emulator.sh shot "$c/tmpdir/out.png"
-[ "$rc" -eq 1 ] && [ ! -e "$c/tmpdir/out.png" ] && [ "$(ls -A "$c/tmpdir" | wc -l | tr -d ' ')" -eq 0 ] \
-  && ok "a failed screenshot is exit 1 and leaves no temporary file and no output" || bad "failed shot (rc $rc, left: $(ls -A "$c/tmpdir"))"
+[ "$rc" -eq 2 ] && [ ! -e "$c/tmpdir/out.png" ] && [ "$(ls -A "$c/tmpdir" | wc -l | tr -d ' ')" -eq 0 ] \
+  && ok "a screenshot with no emulator attached is exit 2 and leaves no temporary file and no output" || bad "shot without an emulator (rc $rc, left: $(ls -A "$c/tmpdir"))"
 mkcase
 run android-emulator.sh
 [ "$rc" -eq 2 ] && ok "no subcommand is a usage error, exit 2" || bad "usage (rc $rc)"
@@ -434,6 +443,357 @@ else
   bad "the function ui_center was not found in android-e2e.sh"
 fi
 
+echo "test 7: the result table counts what ran, names what did not run, and an empty input is not a pass"
+tab=$(printf '\t')
+summary() { # <lines...>: feed the lines to the summary script; output in $out, status in $rc
+  out=$(printf '%s\n' "$@" | sh "$here/android-e2e-summary.sh" 2>&1)
+  rc=$?
+}
+summary "result${tab}tracer${tab}a${tab}ok${tab}" "result${tab}vault${tab}b${tab}ok${tab}"
+if [ "$rc" -eq 0 ] && echo "$out" | tail -n 1 | grep -qx 'e2e summary: ok, not run: 0' && echo "$out" | grep -q '^total  *2  *0  *0$'; then
+  ok "all ok is exit 0, the counts are 2, 0, 0 and the last line says not run: 0"
+else
+  bad "all ok (rc $rc): $out"
+fi
+summary "result${tab}tracer${tab}a${tab}ok${tab}" "result${tab}touch${tab}pinch${tab}not-run${tab}no two-finger gesture on this image"
+if [ "$rc" -eq 0 ] && echo "$out" | grep -q 'touch: pinch -- no two-finger gesture on this image' && echo "$out" | tail -n 1 | grep -qx 'e2e summary: ok, not run: 1'; then
+  ok "a not run is exit 0 but is named with its reason and counted on the last line, never as ok"
+else
+  bad "one not run (rc $rc): $out"
+fi
+if echo "$out" | grep -q '^total  *1  *1  *0$'; then ok "a not run is not counted among the ok"; else bad "not run counted wrong: $out"; fi
+summary "result${tab}tracer${tab}a${tab}ok${tab}" "result${tab}ssh${tab}b${tab}FAIL${tab}the server logged a login"
+if [ "$rc" -eq 1 ] && echo "$out" | grep -q 'ssh: b -- the server logged a login' && echo "$out" | tail -n 1 | grep -qx 'e2e summary: FAIL: 1, not run: 0'; then
+  ok "one FAIL is exit 1 and is named with its reason"
+else
+  bad "one FAIL (rc $rc): $out"
+fi
+summary
+if [ "$rc" -eq 2 ] && echo "$out" | grep -q 'nothing ran'; then ok "an empty input is exit 2 (nothing ran is not a pass)"; else bad "empty input (rc $rc): $out"; fi
+summary "some other line" "another one"
+[ "$rc" -eq 2 ] && ok "input without a single result line is exit 2" || bad "no result lines (rc $rc): $out"
+summary "result${tab}vault${tab}a \"quoted\" | piped 'check'${tab}not-run${tab}it's | a \"reason\" with a pipe" "result${tab}vault${tab}c${tab}ok${tab}"
+if [ "$rc" -eq 0 ] && echo "$out" | grep -qF "vault: a \"quoted\" | piped 'check' -- it's | a \"reason\" with a pipe" && echo "$out" | grep -q '^vault  *1  *1  *0$'; then
+  ok "a check and a reason with pipes and quotes do not break the table"
+else
+  bad "pipes and quotes (rc $rc): $out"
+fi
+summary "result${tab}vault${tab}c${tab}maybe${tab}" "result${tab}tracer${tab}d${tab}ok${tab}"
+if [ "$rc" -eq 1 ] && echo "$out" | grep -q 'unreadable status "maybe"'; then ok "a status nobody can read is a FAIL, not a pass"; else bad "unknown status (rc $rc): $out"; fi
+
+echo "test 8: every adb call names an emulator, and a physical phone is never addressed"
+APK_DUMMY=app-debug.apk
+PHYS="ABC123XYZ"
+devices_both() { printf 'List of devices attached\n%s\tdevice\nemulator-5554\tdevice\n' "$PHYS" > "$c/devices"; }
+RICH_ADB='case "$1" in
+  devices) cat "$HW_DEVICES" 2>/dev/null || { echo "List of devices attached"; [ -f "$HW_STATE/up" ] && printf "emulator-5554\tdevice\n"; } ;;
+  -s) serial=$2; shift 2
+      case "$*" in
+        "shell getprop ro.kernel.qemu" | "shell getprop ro.boot.qemu") [ "$serial" = emulator-5554 ] && echo "$HW_QEMU" ;;
+        "shell getprop sys.boot_completed") [ -f "$HW_STATE/up" ] && echo 1 ;;
+        "shell getprop ro.build.fingerprint") cat "$HW_STATE/avd" 2>/dev/null ;;
+        "emu kill") rm -f "$HW_STATE/up" ;;
+        *) exit 0 ;;
+      esac ;;
+  *) exit 0 ;;
+esac'
+C_ADB=$RICH_ADB; mkcase; unset C_ADB
+devices_both
+: > "$c/repo/$APK_DUMMY"
+: > "$LOG"
+run android-emulator.sh install "$APK_DUMMY"
+if [ "$rc" -eq 0 ] && grep -q '^adb -s emulator-5554 install -r ' "$LOG" && ! grep -q "$PHYS" "$LOG"; then
+  ok "with a phone and an emulator attached the install goes to the emulator by its serial and the phone's serial is in no call"
+else
+  bad "install with both attached (rc $rc): $out / $(grep '^adb' "$LOG")"
+fi
+if grep '^adb ' "$LOG" | grep -v '^adb devices' | grep -qv '^adb -s emulator-5554 '; then
+  bad "an adb call without the emulator's serial: $(grep '^adb ' "$LOG" | grep -v '^adb devices' | grep -v '^adb -s emulator-5554 ' | head -n 2)"
+else
+  ok "every adb call but the list of devices carries -s emulator-5554"
+fi
+printf 'List of devices attached\n%s\tdevice\n' "$PHYS" > "$c/devices"
+: > "$LOG"
+run android-emulator.sh install "$APK_DUMMY"
+if [ "$rc" -eq 2 ] && ! grep -Eq '^adb .*( shell| install| push| wm )|locksettings' "$LOG" && ! grep -q "$PHYS" "$LOG"; then
+  ok "with only a phone attached the install is exit 2 and no shell, install, push, wm or locksettings call was made"
+else
+  bad "install with only a phone (rc $rc): $out / $(grep '^adb' "$LOG")"
+fi
+: > "$LOG"
+run android-emulator.sh shot "$c/tmpdir/x.png"
+[ "$rc" -eq 2 ] && ! grep -Eq '^adb .*( shell| exec-out)' "$LOG" && ok "with only a phone attached a screenshot is exit 2 and no command reached it" || bad "shot with only a phone (rc $rc): $(grep '^adb' "$LOG")"
+C_QEMU=0; C_ADB=$RICH_ADB; mkcase; unset C_ADB
+devices_both
+: > "$LOG"
+run android-emulator.sh install "$APK_DUMMY"
+if [ "$rc" -eq 2 ] && echo "$out" | grep -q 'emulator property' && ! grep -q '^adb -s emulator-5554 install' "$LOG"; then
+  ok "a target that does not report the emulator property is refused (exit 2) before anything is installed"
+else
+  bad "a non-emulator behind an emulator serial (rc $rc): $out"
+fi
+: > "$LOG"
+run android-e2e.sh tracer
+if [ "$rc" -eq 2 ] && ! grep -Eq '^adb .*( install| push| wm )|locksettings|input' "$LOG" && ! grep -q "$PHYS" "$LOG"; then
+  ok "the end to end script stops at the same door: exit 2, nothing installed, nothing typed, the phone not addressed"
+else
+  bad "e2e with a non-emulator target (rc $rc): $out / $(grep '^adb' "$LOG" | head -n 4)"
+fi
+unset C_QEMU
+C_ADB=$RICH_ADB; mkcase; unset C_ADB
+printf 'List of devices attached\n%s\tdevice\n' "$PHYS" > "$c/devices"
+: > "$LOG"
+run android-e2e.sh tracer
+if ! grep -q "$PHYS" "$LOG" && ! grep '^adb ' "$LOG" | grep -v '^adb devices' | grep -qv '^adb -s emulator-5554 ' && ! grep -q locksettings "$LOG"; then
+  ok "with only a phone attached the end to end script does not address it (no call carries its serial, every call is for the emulator)"
+else
+  bad "e2e with only a phone: $(grep '^adb' "$LOG" | head -n 4)"
+fi
+mkcase
+EXTRA="HOLZWAVE_EMULATOR_PORT=notaport"
+run android-emulator.sh start
+rc1=$rc
+run android-e2e.sh tracer
+EXTRA=
+[ "$rc1" -eq 2 ] && [ "$rc" -eq 2 ] && ok "a port that is not a number is refused by both scripts (exit 2), so no text becomes a serial" || bad "bad port (rc $rc1, $rc)"
+
+echo "test 8b: an emulator that is attached but offline for a moment is waited for, not started a second time"
+C_ADB=$RICH_ADB; mkcase; unset C_ADB
+printf 'List of devices attached\nemulator-5554\toffline\n' > "$c/devices"
+( sleep 2; printf 'List of devices attached\nemulator-5554\tdevice\n' > "$c/devices" ) &
+flip=$!
+: > "$LOG"
+run android-emulator.sh start
+wait "$flip" 2>/dev/null
+if [ "$rc" -eq 0 ] && echo "$out" | grep -q 'already running' && [ "$(calls emulator)" -eq 0 ]; then
+  ok "an offline emulator that becomes a device within seconds is reported as running and no second emulator is started"
+else
+  bad "offline then device (rc $rc, emulator calls $(calls emulator)): $out"
+fi
+
+echo "test 9: the throwaway ssh server"
+mkcase
+cat > "$c/bin/fake-sshd" <<'SH'
+#!/bin/sh
+exec sleep 4713
+SH
+chmod +x "$c/bin/fake-sshd"
+shim "$c/bin/ssh-keyscan" 'echo "[127.0.0.1]:1 ssh-ed25519 AAAA"'
+EXTRA="HOLZWAVE_SSHD=$c/bin/fake-sshd"
+run android-ssh-server.sh start
+EXTRA=
+if [ "$rc" -eq 0 ]; then
+  ssh_dir=$(echo "$out" | sed -n 's/^dir=//p')
+  cfg="$ssh_dir/sshd_config"
+  listen=$(grep -c '^ListenAddress ' "$cfg")
+  if [ -d "$ssh_dir" ] && [ "$listen" -eq 1 ] && grep -qx 'ListenAddress 127.0.0.1' "$cfg"; then
+    ok "start writes a config with ListenAddress 127.0.0.1 and no other ListenAddress"
+  else
+    bad "ListenAddress lines: $listen in $cfg"
+  fi
+  if grep -qx 'PasswordAuthentication no' "$cfg" && grep -qx 'KbdInteractiveAuthentication no' "$cfg" && grep -qx 'AllowTcpForwarding no' "$cfg" \
+    && grep -qx 'X11Forwarding no' "$cfg" && grep -qx "AllowUsers $(id -un)" "$cfg" && grep -qx 'LogLevel VERBOSE' "$cfg"; then
+    ok "the config allows only the current user, no password, no forwarding, and logs every login"
+  else
+    bad "the config: $(cat "$cfg")"
+  fi
+  for want in dir port user host_key_type host_key_blob fingerprint client_key client_pass proof log; do
+    echo "$out" | grep -q "^$want=." || bad "start printed no $want="
+  done
+  ok "start printed its key=value lines"
+  mode=$(ls -ld "$ssh_dir" | cut -c1-10)
+  [ "$mode" = "drwx------" ] && ok "the folder is private (mode 0700)" || bad "folder mode $mode"
+  if ssh-keygen -y -P '' -f "$ssh_dir/client_key" >/dev/null 2>&1; then
+    bad "the client key opens with an empty passphrase (it is not sealed)"
+  else
+    ok "the throwaway client key is sealed with a passphrase"
+  fi
+  if grep -rq -F "$(cat "$ssh_dir/client_pass")" "$LOG" "$ssh_dir/sshd_config" 2>/dev/null; then bad "the passphrase is in the log or the config"; else ok "the passphrase is in no command log and not in the config"; fi
+  run android-ssh-server.sh stop "$ssh_dir"
+  first=$rc
+  run android-ssh-server.sh stop "$ssh_dir"
+  if [ "$first" -eq 0 ] && [ "$rc" -eq 0 ] && [ ! -e "$ssh_dir" ] && ! pgrep -f 'sleep 4713' >/dev/null 2>&1; then
+    ok "stop removes the folder and the server, and is safe to call twice"
+  else
+    bad "stop (rc $first, $rc), folder $(ls -d "$ssh_dir" 2>&1)"
+    pkill -f 'sleep 4713' 2>/dev/null
+  fi
+else
+  bad "start with a stand-in server (rc $rc): $out"
+fi
+mkcase
+mkdir -p "$c/tmpdir/not-ours"
+run android-ssh-server.sh stop "$c/tmpdir/not-ours"
+[ "$rc" -eq 2 ] && [ -d "$c/tmpdir/not-ours" ] && ok "stop refuses a folder this script did not make and leaves it" || bad "stop of a foreign folder (rc $rc)"
+mkcase
+EXTRA="HOLZWAVE_SSHD=$c/nowhere/sshd"
+run android-ssh-server.sh start
+EXTRA=
+[ "$rc" -eq 2 ] && nothing_left && ok "start without sshd is exit 2 and leaves nothing" || bad "no sshd (rc $rc, left: $(ls -A "$c/tmpdir"))"
+mkcase
+mkdir "$c/empty"
+out=$(cd "$c/repo" && env -i HOME="$c/home" TMPDIR="$c/tmpdir" PATH="$c/empty" /bin/sh scripts/android-ssh-server.sh start 2>&1)
+rc=$?
+[ "$rc" -eq 2 ] && echo "$out" | grep -q 'ssh-keygen is missing' && nothing_left && ok "start without ssh-keygen is exit 2 and leaves nothing" || bad "no ssh-keygen (rc $rc): $out"
+mkcase
+printf '#!/bin/sh\nexit 1\n' > "$c/bin/fake-sshd"
+chmod +x "$c/bin/fake-sshd"
+shim "$c/bin/ssh-keyscan" 'exit 1'
+EXTRA="HOLZWAVE_SSHD=$c/bin/fake-sshd"
+run android-ssh-server.sh start
+EXTRA=
+[ "$rc" -eq 1 ] && nothing_left && ok "a server that stops at start is exit 1 and the folder is removed" || bad "dying server (rc $rc, left: $(ls -A "$c/tmpdir")): $out"
+
+echo "test 10: the three profiles of the emulator"
+add_image() { mkdir -p "$sdk/system-images/$1/$2/arm64-v8a"; }
+for entry in 'api37:holzwave-arm64:android-37.0:default' 'api31:holzwave-arm64-api31:android-31:default' '16k:holzwave-arm64-16k:android-37.0:google_apis_ps16k'; do
+  prof=${entry%%:*}; rest=${entry#*:}; name=${rest%%:*}; rest=${rest#*:}; level=${rest%%:*}; flavour=${rest#*:}
+  image="system-images;$level;$flavour;arm64-v8a"
+  mkcase
+  add_image "$level" "$flavour"
+  : > "$LOG"
+  run android-emulator.sh create "$prof"
+  cfg="$c/home/.android/avd/$name.avd/config.ini"
+  if [ "$rc" -eq 0 ] && grep -q "^avdmanager create avd --force --name $name --package $image " "$LOG" && [ "$(grep -c '^hw.keyboard=' "$cfg")" -eq 1 ] && grep -qx 'hw.keyboard=no' "$cfg" && grep -qx 'hw.ramSize=2G' "$cfg"; then
+    ok "profile $prof: create makes $name from $image with hw.keyboard=no and keeps the other settings"
+  else
+    bad "profile $prof create (rc $rc): $out / $(grep '^avdmanager' "$LOG") / $(cat "$cfg")"
+  fi
+  for bad_image in 'system-images;android-37.0;default;x86_64' 'system-images;android-31;default;armeabi-v7a' 'system-images;android-37.0;google_apis_ps16k;x86'; do
+    : > "$LOG"
+    EXTRA="HOLZWAVE_ANDROID_IMAGE=$bad_image"
+    run android-emulator.sh create "$prof"
+    EXTRA=
+    if [ "$rc" -eq 2 ] && echo "$out" | grep -q 'arm64' && [ "$(calls avdmanager)" -eq 0 ]; then :; else bad "profile $prof accepted '$bad_image' (rc $rc): $out"; fi
+  done
+  ok "profile $prof: three images that are not arm64-v8a are refused before avdmanager runs"
+  C_IMAGE=no; mkcase; unset C_IMAGE
+  rm -rf "$sdk/system-images/$level/$flavour"
+  : > "$LOG"
+  run android-emulator.sh create "$prof"
+  if [ "$rc" -eq 2 ] && echo "$out" | grep -qF "sdkmanager \"$image\"" && [ "$(calls sdkmanager)" -eq 0 ] && [ "$(calls avdmanager)" -eq 0 ]; then
+    ok "profile $prof: a missing image is exit 2, the sdkmanager line for $image is printed as text and nothing is installed"
+  else
+    bad "profile $prof missing image (rc $rc): $out"
+  fi
+done
+mkcase
+run android-emulator.sh create sideways
+[ "$rc" -eq 2 ] && echo "$out" | grep -q 'unknown profile' && ok "an unknown profile is exit 2" || bad "unknown profile (rc $rc): $out"
+mkcase
+rm -rf "$c/home/.android/avd/holzwave-arm64-16k.avd"
+run android-emulator.sh start 16k
+[ "$rc" -eq 2 ] && echo "$out" | grep -q 'create 16k' && ok "start of a device that was never created is exit 2 and names the create command" || bad "start without the device (rc $rc): $out"
+
+echo "test 11: the all and matrix runners"
+FAKE_SECTION='#!/bin/sh
+avd=$(sed -n "s/.*-avd \([^ ]*\).*/\1/p" "$HW_STATE/avd")
+echo "$avd $1" >> "$HW_ORDER"
+r="$HOLZWAVE_E2E_RESULTS"
+if [ "$FAKE_KILL" = "$avd:$1" ]; then kill -TERM $PPID; sleep 1; exit 1; fi
+if [ "$FAKE_FAIL" = "$avd:$1" ]; then printf "result\t%s\t%s\t%s\t%s\n" "$1" "a check" FAIL "broke" >> "$r"; exit 1; fi
+if [ "$FAKE_SILENT" = "$avd:$1" ]; then exit 1; fi
+if [ "$1" = vault ]; then printf "result\t%s\t%s\t%s\t%s\n" vault "a check" not-run "no | pipe" >> "$r"; fi
+printf "result\t%s\t%s\t%s\t%s\n" "$1" "a check" ok "" >> "$r"
+exit 0'
+RUNNER_ENV='HOLZWAVE_E2E_SKIP_BUILD=1'
+runner_case() { # the fake machine with a fake section command
+  C_EMU='echo "$*" > "$HW_STATE/avd"; touch "$HW_STATE/up"; exec sleep 4714'; C_ADB=$RICH_ADB; mkcase; unset C_EMU C_ADB
+  printf '%s\n' "$FAKE_SECTION" > "$c/repo/fake-section.sh"
+  chmod +x "$c/repo/fake-section.sh"
+  : > "$c/order.log"
+  : > "$LOG"
+  rm -f "$c/devices"
+}
+runner_run() { # <extra env> <args...>
+  e=$1
+  shift
+  EXTRA="$RUNNER_ENV HOLZWAVE_E2E_SECTION_CMD=$c/repo/fake-section.sh $e"
+  run android-e2e.sh "$@"
+  EXTRA=
+}
+none_running() { [ ! -f "$c/state/up" ] && ! pgrep -f 'sleep 4714' >/dev/null 2>&1; }
+ALL9="tracer service vault tls handover clipboard touch ssh pagesize"
+runner_case
+runner_run "" all
+order=$(awk '{ printf "%s ", $2 }' "$c/order.log")
+if [ "$rc" -eq 0 ] && [ "$order" = "$ALL9 " ] && echo "$out" | tail -n 1 | grep -qx 'e2e all: ok'; then
+  ok "all runs tracer, service, vault, tls, handover, clipboard, touch, ssh, pagesize in that order and ends ok"
+else
+  bad "all (rc $rc, order '$order'): $(echo "$out" | tail -n 8)"
+fi
+if echo "$out" | grep -q '^total  *9  *1  *0$' && echo "$out" | grep -q 'vault: a check -- no | pipe' && echo "$out" | grep -q 'e2e summary: ok, not run: 1'; then
+  ok "all prints one table: nine sections, the not run named with its reason (and counted)"
+else
+  bad "the table of all: $(echo "$out" | grep -A14 'table')"
+fi
+none_running && ok "the emulator all started is stopped again" || { bad "an emulator is left after all"; pkill -f 'sleep 4714' 2>/dev/null; }
+runner_case
+runner_run "" matrix
+order=$(awk '{ printf "%s:%s ", $1, $2 }' "$c/order.log")
+want=""
+for sec in $ALL9; do want="${want}holzwave-arm64:$sec "; done
+for sec in tracer service vault pagesize; do want="${want}holzwave-arm64-api31:$sec "; done
+for sec in tracer service pagesize; do want="${want}holzwave-arm64-16k:$sec "; done
+if [ "$rc" -eq 0 ] && [ "$order" = "$want" ]; then
+  ok "matrix runs all on the newest image, then tracer service vault pagesize on Android 12, then tracer service pagesize on the 16 KB image"
+else
+  bad "matrix (rc $rc): order '$order'"
+fi
+[ "$(echo "$out" | grep -c '^section  *ok  *not run  *FAIL$')" -eq 3 ] && ok "matrix prints one table per image" || bad "tables: $(echo "$out" | grep -c '^section')"
+if echo "$out" | grep -q '^e2e matrix: holzwave-arm64\|^e2e matrix: api37: ok, not run: 1' && echo "$out" | grep -q '^e2e matrix: api31: ok, not run: 1' && echo "$out" | grep -q '^e2e matrix: 16k: ok, not run: 0'; then
+  ok "matrix ends with one result line per image"
+else
+  bad "the final lines: $(echo "$out" | tail -n 6)"
+fi
+[ "$(grep -c '^adb -s emulator-5554 emu kill' "$LOG")" -eq 3 ] && none_running && ok "matrix starts three emulators, one at a time, and stops each of them" \
+  || { bad "emulators started/stopped: kills $(grep -c 'emu kill' "$LOG")"; pkill -f 'sleep 4714' 2>/dev/null; }
+runner_case
+runner_run "FAKE_FAIL=holzwave-arm64-api31:service" matrix
+order=$(awk '{ printf "%s:%s ", $1, $2 }' "$c/order.log")
+case "$order" in *"holzwave-arm64-16k:pagesize "*) later=yes ;; *) later=no ;; esac
+if [ "$rc" -eq 1 ] && [ "$later" = yes ] && echo "$out" | grep -q '^e2e matrix: api31: FAIL: 1' && echo "$out" | grep -q '^e2e matrix: 16k: ok' && none_running; then
+  ok "a FAIL on one image does not stop the later images from running, the final status is 1, and the emulator is stopped"
+else
+  bad "a FAIL on the middle image (rc $rc, later $later): $(echo "$out" | tail -n 5)"
+fi
+runner_case
+runner_run "FAKE_SILENT=holzwave-arm64:touch" all
+if [ "$rc" -eq 1 ] && echo "$out" | grep -q 'touch: the section ended well -- exit status 1 and no failed check of its own'; then
+  ok "a section that ends with a failure status and no result line of its own is a FAIL in the table"
+else
+  bad "a silent failure (rc $rc): $(echo "$out" | tail -n 8)"
+fi
+runner_case
+runner_run "FAKE_KILL=holzwave-arm64:service" all
+if [ "$rc" -ne 0 ] && none_running; then
+  ok "an interrupt in the middle of all stops the emulator the runner started"
+else
+  bad "interrupted all (rc $rc): emulator state $(ls "$c/state")"
+  pkill -f 'sleep 4714' 2>/dev/null
+fi
+runner_case
+runner_run "" all sideways
+[ "$rc" -eq 2 ] && echo "$out" | grep -q 'unknown profile' && [ ! -s "$c/order.log" ] && ok "all with an unknown profile is exit 2 and runs nothing" || bad "all sideways (rc $rc): $out"
+runner_case
+printf 'List of devices attached\nemulator-5554\tdevice\n' > "$c/devices"
+runner_run "" matrix
+[ "$rc" -eq 2 ] && echo "$out" | grep -q 'already running' && [ ! -s "$c/order.log" ] && ok "matrix refuses to start while an emulator already runs (one at a time)" || bad "matrix with a running emulator (rc $rc): $out"
+
+echo "test 12: the names the touch checks look for are the names the page gives"
+for pair in 'app/src/keyrow.ts:aria: "Escape"' 'app/src/keyrow.ts:aria: "Tab"' 'app/src/keyrow.ts:aria: "Control"' 'app/src/keyrow.ts:aria: "Alt"' 'app/src/keyrow.ts:aria: "Arrow up"' \
+  'app/src/keyrow.ts:aria: "Arrow down"' 'app/src/keyrow.ts:root.id = "keyrow"' 'app/src/phone.ts:nav.id = "phone-nav"' 'app/src/touchstate.ts:copy: "Copy", paste: "Paste"' \
+  'app/src/chrome.ts:"New workspace"' 'app/src/chrome.ts:"Close workspace"'; do
+  file=${pair%%:*}
+  text=${pair#*:}
+  if grep -qF "$text" "$root/$file"; then :; else bad "$file does not contain $text any more: the touch section looks for it"; fi
+done
+ok "the key row, the phone's bars, the tablet's bar and the selection menu still carry the names the touch section looks for"
+for text in 'Escape' 'Control' '"Arrow up"' '"id:keyrow"' '"id:phone-nav"' '"id:bar"' '"New workspace"' '"Copy"' '"Paste"'; do
+  grep -qF -- "$text" "$here/android-e2e.sh" || bad "the touch section does not name $text"
+done
+ok "the touch section names each of them"
+
 echo "test 6: nothing was installed, downloaded or signed"
 if grep -Eq '^(sdkmanager|brew|curl|wget|keytool|jarsigner|apksigner) ' "$ALL"; then
   bad "a forbidden tool was called: $(grep -E '^(sdkmanager|brew|curl|wget|keytool|jarsigner|apksigner) ' "$ALL" | head -n 3)"
@@ -445,7 +805,7 @@ if grep '^rustup ' "$ALL" | grep -vqx 'rustup target list --installed'; then
 else
   ok "rustup was only asked for its installed targets"
 fi
-for script in android-check.sh android-build.sh android-emulator.sh android-e2e.sh; do
+for script in android-check.sh android-build.sh android-emulator.sh android-e2e.sh android-adb.sh android-e2e-summary.sh android-ssh-server.sh; do
   # The commands of a script: no comment lines, no lines that only print a message.
   code=$(grep -v '^[[:space:]]*#' "$here/$script" | grep -Ev '^[[:space:]]*(echo|printf) |^[[:space:]]*"|^[[:space:]]*\*\)' || true)
   if echo "$code" | grep -Eq '(^|[[:space:];&|(])(sdkmanager|brew|curl|wget|keytool|jarsigner|apksigner)([[:space:]]|$)'; then

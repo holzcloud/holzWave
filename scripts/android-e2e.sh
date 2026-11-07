@@ -141,14 +141,23 @@ cd "$here/.." || exit 2
 
 SERIAL=emulator-$PORT
 export ANDROID_SERIAL=$SERIAL
+. scripts/android-adb.sh
+
+# The profile of the emulator for `all` and `matrix` (see scripts/android-emulator.sh); the single sections run on the emulator that
+# is up, whatever its profile.
+PROFILE=${2:-}
 
 case "$SECTION" in
-    tracer | service | vault | tls | handover | clipboard) ;;
+    tracer | service | vault | tls | handover | clipboard | touch | ssh | pagesize | all | matrix) ;;
     *)
-        echo "usage: sh scripts/android-e2e.sh tracer|service|vault|tls|handover|clipboard" >&2
+        echo "usage: sh scripts/android-e2e.sh tracer|service|vault|tls|handover|clipboard|touch|ssh|pagesize|all [profile]|matrix" >&2
         exit 2
         ;;
 esac
+adb_serial_ok || {
+    echo "e2e $SECTION: refused: HOLZWAVE_EMULATOR_PORT '$PORT' is not a number" >&2
+    exit 2
+}
 for tool in adb emulator; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "e2e $SECTION: $tool is missing: run . scripts/android-env.sh && sh scripts/android-env-check.sh" >&2
@@ -172,6 +181,25 @@ cleanup() {
         adbd shell "rm -f /sdcard/Download/hw-* '/sdcard/Download/hw späce.bin' '/sdcard/Download/hw-out-test (1).bin'" >/dev/null 2>&1
         adbd shell run-as "$PKG" sh -c "'rm -f home/handover/hw-* home/handover/hw\ * home/hw-out-test.bin'" >/dev/null 2>&1
     fi
+    # The touch section's two changes of the emulator: the screen size and density, and the WebView's command line file.
+    if [ "$SECTION" = touch ]; then
+        adbd shell wm size reset >/dev/null 2>&1
+        adbd shell wm density reset >/dev/null 2>&1
+        adbd shell rm -f /data/local/tmp/webview-command-line >/dev/null 2>&1
+        adbd shell am force-stop "$PKG" >/dev/null 2>&1
+    fi
+    # The service section's one change on Android 12 (the gesture navigation overlay, see there) is put back.
+    [ -n "$nav_changed" ] && adbd shell cmd overlay disable com.android.internal.systemui.navbar.gestural >/dev/null 2>&1
+    # The throwaway SSH server of the ssh section, its forward, and the sealed key (and the passphrase file, if a step did not already
+    # remove it) in the app's private folder.
+    if [ "$SECTION" = ssh ]; then
+        [ -n "$ssh_reversed" ] && adbd reverse --remove "tcp:$ssh_reversed" >/dev/null 2>&1
+        adbd shell run-as "$PKG" rm -f selftest-ssh-key selftest-ssh-pass >/dev/null 2>&1
+    fi
+    if [ -n "$ssh_dir" ]; then
+        sh scripts/android-ssh-server.sh stop "$ssh_dir" >/dev/null 2>&1
+        ssh_dir=
+    fi
     # The throwaway TLS server of the tls section; its certificate and key are in $tmp, which is removed below.
     [ -n "$reversed" ] && adb -s "$SERIAL" reverse --remove tcp:8443 >/dev/null 2>&1
     if [ -n "$server_pid" ]; then
@@ -186,27 +214,46 @@ cleanup() {
     rm -rf "$tmp"
 }
 HOMEREL=
+nav_changed=
 pin_set=
 rooted=
 server_pid=
 reversed=
+ssh_dir=
+ssh_reversed=
 PIN=1234
 trap cleanup EXIT HUP INT TERM
 
 fails=0
+# report <section> <description> <ok|not-run|FAIL> <reason>: the line scripts/android-e2e-summary.sh tabulates, five fields separated by
+# tabs. A run that `all` or `matrix` started names a file in HOLZWAVE_E2E_RESULTS and the line goes there; a single section prints it
+# to the standard output, after the human line. Tabs and line breaks in the text are spaces, and the reason is cut at 300 characters.
+report() {
+    f1=$(printf '%s' "$1" | tr '\t\r\n' '   ')
+    f2=$(printf '%s' "$2" | tr '\t\r\n' '   ')
+    f4=$(printf '%s' "$4" | tr '\t\r\n' '   ' | cut -c1-300)
+    rline=$(printf 'result\t%s\t%s\t%s\t%s' "$f1" "$f2" "$3" "$f4")
+    if [ -n "${HOLZWAVE_E2E_RESULTS:-}" ]; then
+        printf '%s\n' "$rline" >>"$HOLZWAVE_E2E_RESULTS"
+    else
+        printf '%s\n' "$rline"
+    fi
+}
 check() { # <description> <ok|bad> [detail]
     if [ "$2" = ok ]; then
         echo "e2e $SECTION: ok   $1"
+        report "$SECTION" "$1" ok ""
     else
         echo "e2e $SECTION: FAIL $1 ${3:+($3)}" >&2
+        report "$SECTION" "$1" FAIL "${3:-}"
         fails=$((fails + 1))
     fi
 }
 die() { # <message>: a step that cannot continue
     echo "e2e $SECTION: FAIL $1" >&2
+    report "$SECTION" "the section could continue" FAIL "$1"
     exit 1
 }
-adbd() { adb -s "$SERIAL" "$@"; }
 # on the device, as the app: run-as runs the command as the app's own user, in its data folder. `adb shell` hands one string to
 # the shell of the device, so the whole command is one argument and its own quotes are written for that shell.
 as_app() { adbd shell "run-as $PKG $*" | tr -d '\r'; }
@@ -251,6 +298,124 @@ ui_center() {
     ' "$1"
 }
 
+# UI driving: a dump that cannot be read is tried again, and a dump that still cannot be read is a node that is not found.
+ui_dump() { # <file>
+    tries=0
+    while [ "$tries" -lt 3 ]; do
+        adbd shell uiautomator dump /sdcard/hw-ui.xml >/dev/null 2>&1
+        adbd exec-out cat /sdcard/hw-ui.xml >"$1" 2>/dev/null
+        adbd shell rm -f /sdcard/hw-ui.xml >/dev/null 2>&1
+        grep -q '<hierarchy' "$1" 2>/dev/null && return 0
+        tries=$((tries + 1))
+        sleep 1
+    done
+    : >"$1"
+    return 1
+}
+ui_tap_text() { # <text, or id:resource-id>: tap the centre of the first node that matches; 1 when there is none
+    ui_dump "$tmp/hw-ui.xml" || return 1
+    xy=$(ui_center "$tmp/hw-ui.xml" "$1") || return 1
+    set -- $xy
+    adbd shell input tap "$1" "$2"
+}
+
+# ---- all and matrix: the sections one after the other, each on the emulator that is up, and one table of what they said ----------
+# `all [profile]` runs tracer, service, vault, tls, handover, clipboard, touch, ssh and pagesize on the emulator that is up (or one
+# it starts for the profile and stops at the end). `matrix` runs `all` on the newest image, then tracer, service, vault and pagesize
+# on the Android 12 image, then tracer, service and pagesize on the 16 KB page image, one emulator at a time, each stopped before the
+# next starts. Every section is a process of its own (the same script, one section), writes its result lines to a file, and the table
+# of scripts/android-e2e-summary.sh is made from them: a section that ends with a non-zero status and no FAIL line of its own, or
+# with no result line at all, is a FAIL here, because nothing that did not report is a pass. HOLZWAVE_E2E_SECTION_CMD names the
+# command that runs one section (the stand-in tests put a fake there); HOLZWAVE_E2E_SKIP_BUILD=1 skips the one build at the start.
+if [ "$SECTION" = all ] || [ "$SECTION" = matrix ]; then
+    SECTION_CMD=${HOLZWAVE_E2E_SECTION_CMD:-sh scripts/android-e2e.sh}
+    ALL_SECTIONS='tracer service vault tls handover clipboard touch ssh pagesize'
+    tab=$(printf '\t')
+    case "$PROFILE" in
+        "" | api37 | api31 | 16k) ;;
+        *)
+            echo "e2e $SECTION: unknown profile '$PROFILE' (api37, api31 or 16k)" >&2
+            exit 2
+            ;;
+    esac
+    overall=0
+    final_lines=
+    if [ "${HOLZWAVE_E2E_SKIP_BUILD:-}" != 1 ]; then
+        sh scripts/android-build.sh debug >"$tmp/build.log" 2>&1 || {
+            tail -n 15 "$tmp/build.log" >&2
+            die "the debug build failed"
+        }
+        echo "e2e $SECTION: the debug APK is built once; every section reuses it"
+    fi
+    # one_image <profile> <sections>: the emulator of the profile, the sections, the table, the emulator stopped again.
+    one_image() {
+        prof=${1:-api37}
+        secs=$2
+        results="$tmp/results-$prof"
+        : >"$results"
+        echo "e2e $SECTION: ==== image $prof: $secs ===="
+        if adb devices 2>/dev/null | grep -q "^$SERIAL[[:space:]]*device"; then
+            if [ "$SECTION" = matrix ]; then
+                echo "e2e matrix: an emulator ($SERIAL) is already running; the matrix needs the images one at a time, so stop it first (sh scripts/android-emulator.sh stop)" >&2
+                exit 2
+            fi
+            echo "e2e $SECTION: using the emulator that already runs ($SERIAL)"
+        else
+            if ! sh scripts/android-emulator.sh start "$prof"; then
+                printf 'result\t%s\t%s\t%s\t%s\n' "$prof" "the emulator of the profile booted" FAIL "the start failed" >>"$results"
+                sh scripts/android-e2e-summary.sh <"$results"
+                overall=1
+                final_lines="$final_lines
+e2e $SECTION: $prof: FAIL (the emulator did not boot)"
+                return 0
+            fi
+            started_emulator=1
+        fi
+        adb_require "e2e $SECTION"
+        echo "e2e $SECTION: [$prof] image $(adbd shell getprop ro.build.fingerprint | tr -d '\r')"
+        echo "e2e $SECTION: [$prof] Android $(adbd shell getprop ro.build.version.release | tr -d '\r'), API $(adbd shell getprop ro.build.version.sdk | tr -d '\r'), abi $(adbd shell getprop ro.product.cpu.abi | tr -d '\r'), page size $(adbd shell getconf PAGE_SIZE | tr -d '\r')"
+        echo "e2e $SECTION: [$prof] webview $(adbd shell dumpsys webviewupdate | tr -d '\r' | grep -E 'Current WebView package|Current WebView provider' | head -n 1 | sed 's/^ *//')"
+        for sec in $secs; do
+            echo "e2e $SECTION: [$prof] ---- section $sec ----"
+            HOLZWAVE_E2E_SKIP_BUILD=1 HOLZWAVE_E2E_RESULTS="$results" $SECTION_CMD "$sec"
+            rc=$?
+            seen=$(grep -c "^result$tab$sec$tab" "$results")
+            bad=$(grep -c "^result$tab$sec$tab.*${tab}FAIL$tab" "$results")
+            if [ "$rc" -ne 0 ] && [ "$bad" -eq 0 ]; then
+                printf 'result\t%s\t%s\t%s\t%s\n' "$sec" "the section ended well" FAIL "exit status $rc and no failed check of its own" >>"$results"
+            elif [ "$rc" -eq 0 ] && [ "$seen" -eq 0 ]; then
+                printf 'result\t%s\t%s\t%s\t%s\n' "$sec" "the section reported a result" FAIL "it ended with status 0 and printed no result line" >>"$results"
+            fi
+        done
+        echo "e2e $SECTION: [$prof] ---- table ----"
+        sh scripts/android-e2e-summary.sh <"$results"
+        status=$?
+        last=$(sh scripts/android-e2e-summary.sh <"$results" 2>/dev/null | tail -n 1)
+        [ "$status" -eq 0 ] || overall=1
+        final_lines="$final_lines
+e2e $SECTION: $prof: ${last#e2e summary: }"
+        if [ -n "$started_emulator" ]; then
+            sh scripts/android-emulator.sh stop "$prof" >/dev/null 2>&1
+            started_emulator=
+        fi
+    }
+    if [ "$SECTION" = matrix ]; then
+        one_image api37 "$ALL_SECTIONS"
+        one_image api31 'tracer service vault pagesize'
+        one_image 16k 'tracer service pagesize'
+        echo "e2e matrix: result per image:$final_lines"
+    else
+        one_image "${PROFILE:-api37}" "$ALL_SECTIONS"
+        echo "e2e all: result:$final_lines"
+    fi
+    if [ "$overall" -ne 0 ]; then
+        echo "e2e $SECTION: FAIL (see the table)" >&2
+        exit 1
+    fi
+    echo "e2e $SECTION: ok"
+    exit 0
+fi
+
 start_time=$(date +%s)
 
 # 1. the emulator, the build, the install
@@ -260,6 +425,7 @@ else
     sh scripts/android-emulator.sh start || die "the emulator did not boot"
     started_emulator=1
 fi
+adb_require "e2e $SECTION"
 echo "e2e $SECTION: image $(adbd shell getprop ro.build.fingerprint | tr -d '\r')"
 echo "e2e $SECTION: api $(adbd shell getprop ro.build.version.sdk | tr -d '\r'), abi $(adbd shell getprop ro.product.cpu.abi | tr -d '\r')"
 abi=$(adbd shell getprop ro.product.cpu.abi | tr -d '\r')
@@ -285,10 +451,37 @@ if [ "$(adbd shell getprop ro.build.version.sdk | tr -d '\r')" -ge 33 ]; then
     adbd shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS || die "the notification permission could not be granted"
 fi
 
-if [ "$SECTION" != vault ] && [ "$SECTION" != tls ] && [ "$SECTION" != handover ] && [ "$SECTION" != clipboard ]; then
+# The image of Android 12 starts with the three-button navigation bar, and its old WebView (91) does not report the bar's height to the
+# page as a safe area, so the page's bottom bar, with the "+" that opens a second pane, lies under the system buttons. The service
+# section is about the service, not about that layout, so for it the emulator is switched to gesture navigation (like the newest image)
+# BEFORE the app starts, and put back at every way out. It is switched before the start on purpose: a change of the navigation mode
+# while the app runs relaunches its activity, which is a finding of its own (see the summary of the run), and would make this
+# section measure that instead of the service.
+if [ "$SECTION" = service ] && [ "$(adbd shell getprop ro.build.version.sdk | tr -d '\r')" -lt 34 ] \
+    && ! adbd shell cmd overlay list android 2>/dev/null | tr -d '\r' | grep -q '^\[x\] com.android.internal.systemui.navbar.gestural$'; then
+    adbd shell cmd overlay enable com.android.internal.systemui.navbar.gestural >/dev/null 2>&1 && nav_changed=1
+    sleep 4
+fi
+
+if [ "$SECTION" != vault ] && [ "$SECTION" != tls ] && [ "$SECTION" != handover ] && [ "$SECTION" != clipboard ] && [ "$SECTION" != ssh ]; then
 # 2. start the app and wait for its window
+# The touch section reads the page through uiautomator. A WebView hands its content to the accessibility tree only when it is asked to,
+# which this debug-image-only file does for the next start of the WebView (the file is read because the image is a userdebug build;
+# it is removed again when the section ends, whichever way).
+if [ "$SECTION" = touch ]; then
+    adbd shell "echo '_ --force-renderer-accessibility' > /data/local/tmp/webview-command-line; chmod 644 /data/local/tmp/webview-command-line" \
+        || die "the WebView command line file could not be written"
+    adbd shell am force-stop "$PKG" >/dev/null 2>&1
+fi
 adbd logcat -c >/dev/null 2>&1
-adbd shell am start -W -n "$PKG/$ACTIVITY" >"$tmp/start.txt" 2>&1 || die "the activity did not start: $(cat "$tmp/start.txt")"
+# The activity manager of an emulator that has just finished another section may answer a start with a broken pipe once (the system
+# process was busy); the start is tried again, at most three times, five seconds apart, and the last answer is the error.
+start_tries=0
+until adbd shell am start -W -n "$PKG/$ACTIVITY" >"$tmp/start.txt" 2>&1 && ! grep -qE 'Failure calling service|Error type|Exception' "$tmp/start.txt"; do
+    start_tries=$((start_tries + 1))
+    [ "$start_tries" -lt 3 ] || die "the activity did not start: $(cat "$tmp/start.txt")"
+    sleep 5
+done
 waited=0
 focused=
 while [ "$waited" -lt 90 ]; do
@@ -378,11 +571,333 @@ if [ "$SECTION" = tracer ]; then
     esac
 fi
 
+if [ "$SECTION" = pagesize ]; then
+    notrun=0
+    # The page size the kernel of this image reports, and the library the app loaded in its own process: a measured line, not a claim.
+    page=$(adbd shell getconf PAGE_SIZE | tr -d '\r')
+    avd_name=$(adbd emu avd name 2>/dev/null | tr -d '\r' | head -n 1)
+    case "$avd_name" in
+        *-16k) want_page=16384 ;;
+        *) want_page=4096 ;;
+    esac
+    echo "e2e pagesize: the device reports a page size of $page bytes (virtual device '${avd_name:-unknown}', so $want_page is expected)"
+    [ "$page" = "$want_page" ] && check "the page size is $want_page, as the image's profile says" ok || check "the page size is $want_page" bad "getconf PAGE_SIZE said '$page'"
+    pid=$(adbd shell pidof "$PKG" | tr -d '\r')
+    maps=$(as_app "cat /proc/$pid/maps" 2>/dev/null)
+    # The library is stored uncompressed in the APK and mapped from it (extractNativeLibs is false, which is what lets a 16 KB device load
+    # it), so its mappings carry the name of the APK, not of the library: the executable ones of the APK are the library's code.
+    apk_maps=$(echo "$maps" | grep '/base\.apk$')
+    exec_maps=$(echo "$apk_maps" | grep ' r-xp ')
+    if [ -n "$exec_maps" ]; then
+        check "the app's process executes code mapped straight from the APK (libholzwave_app_lib.so, the engine linked into it): $(echo "$exec_maps" | wc -l | tr -d ' ') executable mappings" ok
+        # Every mapping of the APK starts on a page of the device, at a file offset that is a multiple of the page size.
+        bad_map=0
+        for entry in $(echo "$apk_maps" | awk '{ split($1, a, "-"); print a[1] ":" $3 }'); do
+            start=${entry%:*}
+            offset=${entry#*:}
+            [ $(($(printf '%d' "0x$start") % page)) -eq 0 ] && [ $(($(printf '%d' "0x$offset") % page)) -eq 0 ] || bad_map=$((bad_map + 1))
+        done
+        [ "$bad_map" -eq 0 ] && check "every mapping of the APK starts on a $page byte page and at a file offset that is a multiple of it" ok \
+            || check "every mapping of the APK starts on a $page byte page and at a multiple of it in the file" bad "$bad_map mappings do not"
+    else
+        check "the app's process executes code mapped from the APK (the library)" bad "no executable mapping of base.apk in /proc/$pid/maps (read with run-as)"
+    fi
+fi
+
+if [ "$SECTION" = touch ]; then
+    notrun=0
+    skipped() { # <description> <reason>
+        echo "e2e $SECTION: not run $1 ($2)"
+        report "$SECTION" "$1" not-run "$2"
+        notrun=$((notrun + 1))
+    }
+    UI=$tmp/touch-ui.xml
+    phys=$(adbd shell wm size | tr -d '\r' | sed -n 's/Physical size: *\([0-9]*\)x\([0-9]*\).*/\1 \2/p' | head -n 1)
+    width=${phys% *}
+    height=${phys#* }
+    [ -n "$width" ] && [ -n "$height" ] || die "cannot read the physical screen size"
+    dens=$(adbd shell wm density | tr -d '\r' | sed -n 's/Physical density: *\([0-9]*\).*/\1/p' | head -n 1)
+    wait_until() { # <seconds> <command...>
+        limit=$1
+        shift
+        waited=0
+        while [ "$waited" -lt "$limit" ]; do
+            if "$@"; then return 0; fi
+            sleep 1
+            waited=$((waited + 1))
+        done
+        return 1
+    }
+    has_focus() { adbd shell dumpsys window | grep mCurrentFocus | grep -q "$PKG/$ACTIVITY"; }
+    have() { ui_dump "$UI" && ui_center "$UI" "$1" >/dev/null; } # a fresh dump, then: is there a node by that name
+    here() { ui_center "$UI" "$1" >/dev/null; }                    # the dump already taken
+    shell_pid_up() { as_app ps -A | grep -qw sh; }
+    # The app from its start: the page, its first shell, and the page's own nodes in the dump (a dump that holds no web content at all is
+    # the one reason the node checks end as not run).
+    fresh() {
+        adbd shell am force-stop "$PKG"
+        sleep 1
+        adbd shell am start -W -n "$PKG/$ACTIVITY" >/dev/null 2>&1 || return 1
+        wait_until 60 has_focus || return 1
+        wait_until 90 shell_pid_up || return 1
+        sleep 4
+        return 0
+    }
+    page_in_dump=
+    tap_pane() { # focus the terminal input: a tap in the middle of the pane (the pane's own bounds when the dump has them)
+        ui_dump "$UI"
+        # The notice of a device with no screen lock lies over the top of the pane until it is dismissed: it is dismissed first, so
+        # that a press on the pane is a press on the pane.
+        if xy=$(ui_center "$UI" "Dismiss"); then
+            set -- $xy
+            adbd shell input tap "$1" "$2"
+            sleep 2
+            ui_dump "$UI"
+        fi
+        if xy=$(ui_center "$UI" "id:term"); then set -- $xy; else set -- $((width / 2)) $((height / 3)); fi
+        adbd shell input tap "$1" "$2"
+        sleep 3
+    }
+    type_line() { # <text with %s for a space>: typed with the keys of the real input path, then Enter
+        adbd shell "input text '$1'"
+        sleep 1
+        adbd shell input keyevent 66
+        sleep 2
+    }
+    bounds_of() { # <dump> <resource id>: x1 y1 x2 y2 of the first node with that resource id
+        awk -v want="$2" 'BEGIN { RS = "<" } index($0, "resource-id=\"" want "\"") { match($0, /bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"/); b = substr($0, RSTART, RLENGTH); gsub(/[^0-9,]/, " ", b); gsub(/,/, " ", b); print b; exit }' "$1"
+    }
+    home_has() { as_app "ls home" | grep -qx "$1"; }
+    file_in_home() { # <name> <seconds>
+        wait_until "$2" home_has "$1"
+    }
+    nodes_note="the dump of this image shows no web content (the WebView does not expose its page), so no coordinates are guessed"
+
+    echo "e2e touch: image API $(adbd shell getprop ro.build.version.sdk | tr -d "\r"); the WebView is asked to expose its page to uiautomator (a debug-image-only command line file), the soft keyboard is allowed to show"
+    fresh || die "the app did not start with its first shell"
+    tap_pane
+    ui_dump "$UI" || die "uiautomator could not dump the screen"
+    if here "id:app" && here "id:stage"; then page_in_dump=1; fi
+    if [ -z "$page_in_dump" ]; then
+        for c in layout-phone layout-tablet keyrow-above-ime sticky-ctrl scroll select-copy-paste hardware-keyboard; do
+            skipped "$c" "$nodes_note"
+        done
+    else
+        # (a) the phone layout at the screen's own size
+        missing=
+        for name in Escape Tab Control Alt "Arrow up" "Arrow down" "id:keyrow" "id:phone-nav" "id:phone-top"; do
+            here "$name" || missing="$missing [$name]"
+        done
+        tablet_here=
+        for name in "id:bar" "New workspace" "Close workspace"; do
+            here "$name" && tablet_here="$tablet_here [$name]"
+        done
+        [ -z "$missing" ] && [ -z "$tablet_here" ] \
+            && check "layout-phone: at ${width}x${height} (density $dens) the key row and the phone's bars are there and none of the tablet's chrome" ok \
+            || check "layout-phone: the key row and the phone's bars are there, the tablet's chrome is not" bad "missing:$missing; tablet nodes present:$tablet_here"
+
+        # (b) the tablet layout: only the size and the density change
+        adbd shell wm size 1800x2560
+        adbd shell wm density 240
+        sleep 4
+        fresh || die "the app did not start at the tablet size"
+        tap_pane
+        ui_dump "$UI"
+        tab_missing=
+        for name in "id:bar" "New workspace" "Close workspace" "id:status" Control; do
+            here "$name" || tab_missing="$tab_missing [$name]"
+        done
+        phone_here=
+        for name in "id:phone-nav" "id:phone-top"; do
+            here "$name" && phone_here="$phone_here [$name]"
+        done
+        [ -z "$tab_missing" ] && [ -z "$phone_here" ] \
+            && check "layout-tablet: at 1800x2560 and density 240 (1200 by 1707 dp) the tablet's bar and status line are there and the phone's bars are not" ok \
+            || check "layout-tablet: the tablet's chrome is there and the phone's is not" bad "missing:$tab_missing; phone nodes present:$phone_here"
+        adbd shell wm size reset
+        adbd shell wm density reset
+        sleep 4
+        fresh || die "the app did not start after the size was reset"
+        tap_pane
+        ui_dump "$UI"
+        if here "id:phone-nav" && ! here "id:bar"; then
+            check "layout-class: after the size and density are reset the phone layout is back (the class follows the size and nothing else)" ok
+        else
+            check "layout-class: after the size and density are reset the phone layout is back" bad "phone-nav or the tablet's bar is wrong in the dump"
+        fi
+
+        # (c) the key row above the soft keyboard
+        shown() { adbd shell dumpsys input_method | grep -q 'mInputShown=true'; }
+        wait_until 10 shown || { adbd shell input tap $((width / 2)) $((height / 3)); sleep 3; }
+        if shown; then
+            ime_top=$(adbd shell dumpsys window | tr -d '\r' | sed -n 's/.*InsetsSource id=[0-9a-fx]* type=ime frame=\[[0-9]*,\([0-9]*\)\]\[[0-9]*,[0-9]*\] visibleFrame.*visible=true.*/\1/p' | head -n 1)
+            ui_dump "$UI"
+            row_xy=$(ui_center "$UI" "id:keyrow") && row_bottom=$(awk 'BEGIN { RS = "<" } /resource-id="keyrow"/ { match($0, /bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"/); b = substr($0, RSTART, RLENGTH); gsub(/[^0-9,]/, " ", b); gsub(/,/, " ", b); split(b, p, " "); print p[4]; exit }' "$UI")
+            if [ -z "$ime_top" ] || [ -z "$row_bottom" ]; then
+                skipped "keyrow-above-ime" "the keyboard's top edge ('$ime_top') or the key row's bottom ('$row_bottom') could not be read from dumpsys window and the dump"
+            elif [ "$row_bottom" -le "$ime_top" ]; then
+                check "keyrow-above-ime: the key row ends at y=$row_bottom, at or above the soft keyboard's top edge at y=$ime_top" ok
+            else
+                check "keyrow-above-ime: the key row is above the soft keyboard" bad "the row ends at y=$row_bottom, the keyboard starts at y=$ime_top"
+            fi
+        else
+            skipped "keyrow-above-ime" "the soft keyboard did not show on this image (dumpsys input_method has no mInputShown=true)"
+        fi
+
+        # (d) sticky ctrl interrupts a running command and clears again
+        as_app "rm -f home/e2e-ctrl home/e2e-after home/e2e-scroll home/e2e-paste" >/dev/null 2>&1
+        tap_pane
+        type_line 'sleep%s60'
+        ui_dump "$UI"
+        if ui_tap_text "Control"; then
+            sleep 1
+            ui_dump "$UI"
+            here "Control, armed" || here "Control, locked" \
+                && check "sticky-ctrl: a tap on Control arms it (the node's name says so)" ok \
+                || skipped "sticky-ctrl-armed" "the node did not take the name 'Control, armed' after the tap"
+            adbd shell input text c
+            sleep 2
+            type_line 'echo%sdone>e2e-ctrl'
+            if file_in_home e2e-ctrl 10; then
+                check "sticky-ctrl: sleep 60 was interrupted by ctrl+c from the sticky key (the next line ran within 10 s, not after 60 s)" ok
+            else
+                check "sticky-ctrl: sleep 60 was interrupted by ctrl+c from the sticky key" bad "e2e-ctrl was not written within 10 s"
+            fi
+            type_line 'echo%sx>e2e-after'
+            file_in_home e2e-after 10 && check "sticky-ctrl: after the press the sticky state is clear (a following line ran as typed)" ok \
+                || check "sticky-ctrl: after the press the sticky state is clear" bad "e2e-after was not written"
+        else
+            adbd shell input keyevent KEYCODE_ENTER
+            skipped "sticky-ctrl" "the node named Control was not found in the dump while sleep 60 ran"
+        fi
+
+        # (e) one finger drags: the screen changes, and typing brings the live row back
+        tap_pane
+        type_line 'seq%s1%s400'
+        sleep 2
+        ui_dump "$UI"
+        if xy=$(ui_center "$UI" "id:term"); then
+            set -- $xy
+            cx=$1
+            cy=$2
+            adbd exec-out screencap -p >"$tmp/s1.png"
+            sleep 1
+            adbd exec-out screencap -p >"$tmp/s1b.png"
+            if ! cmp -s "$tmp/s1.png" "$tmp/s1b.png"; then
+                skipped "scroll" "the screen changes by itself between two screenshots with no touch, so a difference after a drag would prove nothing"
+            else
+                adbd shell input swipe "$cx" $((cy - height / 6)) "$cx" $((cy + height / 6)) 400
+                sleep 2
+                adbd exec-out screencap -p >"$tmp/s2.png"
+                if cmp -s "$tmp/s1.png" "$tmp/s2.png"; then
+                    check "scroll: a one-finger drag down over the pane changed what the screen shows" bad "the screenshots before and after are identical"
+                else
+                    check "scroll: a one-finger drag down over the pane changed what the screen shows (the screenshots differ; this proves the picture changed, not which rows are shown)" ok
+                fi
+                type_line 'echo%sbottom>e2e-scroll'
+                file_in_home e2e-scroll 10 && check "scroll: typing after the drag still reached the shell (the view went back to the live row)" ok \
+                    || check "scroll: typing after the drag still reached the shell" bad "e2e-scroll was not written"
+            fi
+        else
+            skipped "scroll" "the pane's node (term) was not found in the dump"
+        fi
+
+        # (f) long press selects a word, the menu's Copy then Paste lands it in the shell
+        tap_pane
+        type_line 'seq%s1%s400'
+        sleep 1
+        adbd shell "input text 'echo%s'"
+        sleep 1
+        ui_dump "$UI"
+        if xy=$(ui_center "$UI" "id:term"); then
+            set -- $xy
+            set -- $(bounds_of "$UI" term)
+            lx=$(($1 + 24))
+            ly1=$(($2 + ($4 - $2) * 40 / 100))
+            ly2=$(($2 + ($4 - $2) * 65 / 100))
+            adbd shell input swipe "$lx" "$ly1" "$lx" "$ly1" 700
+            sleep 2
+            ui_dump "$UI"
+            if here "Copy" && here "Paste"; then
+                min_px=$(((44 * ${dens:-420} + 79) / 160))
+                small=
+                for name in Copy Paste; do
+                    b=$(awk -v want="$name" 'BEGIN { RS = "<" } index($0, "text=\"" want "\"") { match($0, /bounds="\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]"/); b = substr($0, RSTART, RLENGTH); gsub(/[^0-9,]/, " ", b); gsub(/,/, " ", b); split(b, p, " "); print p[3] - p[1], p[4] - p[2]; exit }' "$UI")
+                    set -- $b
+                    if [ "${1:-0}" -lt "$min_px" ] || [ "${2:-0}" -lt "$min_px" ]; then small="$small [$name ${1:-0}x${2:-0} px]"; fi
+                done
+                [ -z "$small" ] && check "select-copy-paste: the long press opened the menu with Copy and Paste, each at least 44 dp ($min_px px at density ${dens:-420}) in both directions" ok \
+                    || check "select-copy-paste: the menu's buttons are at least 44 dp" bad "too small:$small (minimum $min_px px)"
+                ui_tap_text "Copy"
+                sleep 2
+                adbd shell input swipe "$lx" "$ly2" "$lx" "$ly2" 700
+                sleep 2
+                if ui_tap_text "Paste"; then
+                    sleep 2
+                    adbd shell "input text '>e2e-paste'"
+                    sleep 1
+                    adbd shell input keyevent 66
+                    if file_in_home e2e-paste 10; then
+                        word=$(as_app "cat home/e2e-paste" | head -n 1)
+                        case "$word" in
+                            *[!0-9]* | "") check "select-copy-paste: Copy then Paste landed a word of the screen in the shell" bad "the file holds '$word' (wanted a number from the seq output)" ;;
+                            *)
+                                if [ "$word" -ge 1 ] && [ "$word" -le 400 ]; then
+                                    check "select-copy-paste: a word was selected by a long press, copied with the menu, pasted with the menu, and it reached the shell ($word is a number of the seq output)" ok
+                                else
+                                    check "select-copy-paste: the pasted word is a number of the seq output" bad "got $word"
+                                fi
+                                ;;
+                        esac
+                    else
+                        check "select-copy-paste: the pasted line reached the shell" bad "e2e-paste was not written"
+                    fi
+                else
+                    skipped "select-copy-paste" "after Copy the second long press did not show the menu's Paste node"
+                fi
+            else
+                skipped "select-copy-paste" "the long press did not show nodes named Copy and Paste in the dump"
+                adbd shell input keyevent KEYCODE_ENTER
+            fi
+        else
+            skipped "select-copy-paste" "the pane's node (term) was not found in the dump"
+        fi
+
+        # (g) the hardware keyboard rule: a key an on-screen keyboard has not hides the row; an input method's key brings it back
+        tap_pane
+        ui_dump "$UI"
+        if here "id:keyrow"; then
+            adbd shell input keyevent KEYCODE_ESCAPE
+            sleep 2
+            ui_dump "$UI"
+            if here "id:keyrow"; then
+                skipped "hardware-keyboard" "the key events of the emulator's input command (Escape, an arrow, Tab, F1, Page Up) did not make the page treat the keys as a hardware keyboard: the row stayed, so the rule could not be triggered here; the page's unit tests hold the rule and a hardware keyboard is a test-plan row"
+            else
+                check "hardware-keyboard: an Escape key event hides the key row (the keys come from a hardware keyboard)" ok
+                adbd shell input text x
+                sleep 2
+                ui_dump "$UI"
+                if here "id:keyrow"; then
+                    check "hardware-keyboard: a key of the input method brings the key row back" ok
+                else
+                    skipped "hardware-keyboard-return" "the emulator's input command sent no input-method key event, so the return half of the rule could not be triggered here"
+                fi
+                adbd shell input keyevent KEYCODE_DEL
+            fi
+        else
+            skipped "hardware-keyboard" "the key row was not in the dump before the key event"
+        fi
+    fi
+    skipped "pinch" "the emulator's input command has no two-finger gesture; the touch tests' synthetic pinch and a test-plan row stand in"
+    skipped "ime-composition" "adb shell input text sends key events, not a soft keyboard's composition; Gboard is a test-plan row"
+fi
+
 if [ "$SECTION" = service ]; then
     pid=$(adbd shell pidof "$PKG" | tr -d '\r')
     notrun=0
     skipped() { # <description> <reason>: a check that was not done is said so, and never counts as ok
         echo "e2e $SECTION: not run $1 ($2)"
+        report "$SECTION" "$1" not-run "$2"
         notrun=$((notrun + 1))
     }
     wait_until() { # <seconds> <command...>: run the command every second until it succeeds
@@ -451,14 +966,32 @@ if [ "$SECTION" = service ]; then
     width=${size% *}
     height=${size#* }
     [ -n "$width" ] && [ -n "$height" ] || die "cannot read the screen size"
+    sdk=$(adbd shell getprop ro.build.version.sdk | tr -d '\r')
+    # The "+" of the bottom bar: where the bar is depends on the safe area the WebView reports. The newest WebView lifts the bar by the
+    # height of the gesture area (the "+" is at 92.4 % of the height); the old one of the Android 12 image (91) does not, and the bar
+    # is at the very bottom (97.7 %), where a tap at 92.4 % would land on the key row.
+    bar_y=924
+    [ "$sdk" -lt 34 ] && bar_y=977
+    shells_at_least() { [ "$(shells_alive)" -ge "$1" ]; }
+    open_pane() { # <how many shells there must be afterwards>
+        hide_keyboard
+        adbd shell input tap $((width * 78 / 100)) $((height * bar_y / 1000))
+        wait_until 15 shells_at_least "$1"
+    }
 
     # 1. the foreground service and its type
     wait_until 60 service_up || die "no foreground service of the app after 60 s"
     line=$(service_line)
-    case "$line" in
-        *types=0x40000000*) check "HolzwaveService is a foreground service of the type specialUse (dumpsys prints types=0x40000000)" ok ;;
-        *) check "HolzwaveService is a foreground service of the type specialUse" bad "wanted types=0x40000000 in: $line" ;;
-    esac
+    if [ "$sdk" -ge 34 ]; then
+        case "$line" in
+            *types=0x40000000*) check "HolzwaveService is a foreground service of the type specialUse (dumpsys prints types=0x40000000)" ok ;;
+            *) check "HolzwaveService is a foreground service of the type specialUse" bad "wanted types=0x40000000 in: $line" ;;
+        esac
+    else
+        echo "$line" | grep -q 'isForeground=true' && check "HolzwaveService is a foreground service (Android $(adbd shell getprop ro.build.version.release | tr -d '\r'): the service type specialUse is read from Android 14)" ok \
+            || check "HolzwaveService is a foreground service" bad "$line"
+        skipped "the foreground service type specialUse" "foreground service types are enforced from Android 14 (API 34); this image is API $sdk, so there is no type to read"
+    fi
 
     # 2. the notification
     wait_until 20 text_is '1 shell' && check "the notification says 1 shell" ok \
@@ -479,7 +1012,7 @@ if [ "$SECTION" = service ]; then
         && check "the notification is private on the lock screen" ok || check "the notification is private on the lock screen" bad
 
     # 6. counts: a second pane
-    bar_tap
+    open_pane 2
     wait_until 30 text_is '2 shells' && check "after a second pane is opened the text says 2 shells" ok \
         || check "after a second pane is opened the text says 2 shells" bad "its text is '$(notification_text)'"
 
@@ -532,53 +1065,61 @@ if [ "$SECTION" = service ]; then
         # With nothing running the service stays stopped, and a new shell starts it again.
         sleep 6
         service_gone && check "with no session the service stays stopped" ok || check "with no session the service stays stopped" bad
-        bar_tap
+        open_pane 1
         wait_until 30 service_up && wait_until 20 text_is '1 shell' \
             && check "a new shell after Stop all starts the service again" ok \
-            || check "a new shell after Stop all starts the service again" bad "its text is '$(notification_text)'"
+            || { mkdir -p target/android-e2e; adbd exec-out screencap -p >target/android-e2e/service-after-stop-all.png 2>/dev/null
+                 check "a new shell after Stop all starts the service again" bad "its text is '$(notification_text)', $(shells_alive) shell(s) of the app, window in front: $(adbd shell dumpsys window | grep mCurrentFocus | head -n 1 | tr -d '\r'); service: $(service_block | head -n 3 | cut -c1-160 | tr '\n' '|'); log: $(adbd logcat -d 2>/dev/null | grep -E 'serviceUpdate|HolzwaveService|ForegroundService|RustStdoutStderr' | tail -n 8 | cut -c1-200 | tr '\n' '|'); screenshot: target/android-e2e/service-after-stop-all.png"; }
     fi
 
-    # 3. the permission revoked: the service still runs, its notification is not posted, and nothing asks again
-    adbd shell pm revoke "$PKG" android.permission.POST_NOTIFICATIONS
-    sleep 3
-    # The app asks once: a debug build lets the script write the note that the ask was made, which is what a person who answered
-    # the dialog once leaves behind. (The dialog itself is driven at the end.)
-    as_app "sh -c 'mkdir -p shared_prefs && echo \"<map><boolean name=\\\"notifications_asked\\\" value=\\\"true\\\" /></map>\" > shared_prefs/holzwave_service.xml'"
-    adbd shell am start -n "$PKG/$ACTIVITY" >/dev/null 2>&1
-    wait_until 60 has_focus || die "the app has no focus after the revoked start"
-    pid=$(adbd shell pidof "$PKG" | tr -d '\r')
-    wait_until 60 service_up && check "with the permission revoked the service is still foreground" ok \
-        || check "with the permission revoked the service is still foreground" bad
-    sleep 3
-    notification_gone && check "with the permission revoked the notification is not posted" ok \
-        || check "with the permission revoked the notification is not posted" bad "$(notification_text)"
-    has_focus && check "with the permission revoked no dialog asks again" ok \
-        || check "with the permission revoked no dialog asks again" bad "$(adbd shell dumpsys window | grep mCurrentFocus)"
-    # The dialog: a fresh install state (no grant, nothing asked) asks once at the first start of a session, and Allow lets the
-    # notification show. The node is found by the resource id of the system's button, so the locale does not matter.
-    adbd shell pm clear "$PKG" >/dev/null 2>&1
-    adbd shell am start -n "$PKG/$ACTIVITY" >/dev/null 2>&1
-    dialog_up() { adbd shell dumpsys window | grep mCurrentFocus | grep -q GrantPermissionsActivity; }
-    if wait_until 90 dialog_up; then
-        check "the first start of a session asks for the notification permission" ok
-        if tap_node 'permission_allow_button'; then
-            wait_until 60 service_up && wait_until 20 text_is '1 shell' \
-                && check "after Allow the service runs and its notification shows" ok \
-                || check "after Allow the service runs and its notification shows" bad "its text is '$(notification_text)'"
-        else
-            skipped "tapping Allow in the system's dialog" "the dialog could not be read with uiautomator on this image"
-        fi
+    # 3. the notification permission (Android 13 and later: before that there is no such permission to revoke or to ask for)
+    if [ "$sdk" -lt 33 ]; then
+        skipped "the notification permission revoked: the notification is not posted and nothing asks again" "Android 12 (API $sdk) has no runtime notification permission (it starts with Android 13, API 33)"
+        skipped "the system's dialog for the notification permission at the first start of a session, and Allow" "Android 12 (API $sdk) has no such dialog (it starts with Android 13, API 33)"
     else
-        check "the first start of a session asks for the notification permission" bad "no permission dialog within 90 s"
+        # the permission revoked: the service still runs, its notification is not posted, and nothing asks again
+        adbd shell pm revoke "$PKG" android.permission.POST_NOTIFICATIONS
+        sleep 3
+        # The app asks once: a debug build lets the script write the note that the ask was made, which is what a person who answered
+        # the dialog once leaves behind. (The dialog itself is driven at the end.)
+        as_app "sh -c 'mkdir -p shared_prefs && echo \"<map><boolean name=\\\"notifications_asked\\\" value=\\\"true\\\" /></map>\" > shared_prefs/holzwave_service.xml'"
+        adbd shell am start -n "$PKG/$ACTIVITY" >/dev/null 2>&1
+        wait_until 60 has_focus || die "the app has no focus after the revoked start"
+        pid=$(adbd shell pidof "$PKG" | tr -d '\r')
+        wait_until 60 service_up && check "with the permission revoked the service is still foreground" ok \
+            || check "with the permission revoked the service is still foreground" bad
+        sleep 3
+        notification_gone && check "with the permission revoked the notification is not posted" ok \
+            || check "with the permission revoked the notification is not posted" bad "$(notification_text)"
+        has_focus && check "with the permission revoked no dialog asks again" ok \
+            || check "with the permission revoked no dialog asks again" bad "$(adbd shell dumpsys window | grep mCurrentFocus)"
+        # The dialog: a fresh install state (no grant, nothing asked) asks once at the first start of a session, and Allow lets the
+        # notification show. The node is found by the resource id of the system's button, so the locale does not matter.
+        adbd shell pm clear "$PKG" >/dev/null 2>&1
+        adbd shell am start -n "$PKG/$ACTIVITY" >/dev/null 2>&1
+        dialog_up() { adbd shell dumpsys window | grep mCurrentFocus | grep -q GrantPermissionsActivity; }
+        if wait_until 90 dialog_up; then
+            check "the first start of a session asks for the notification permission" ok
+            if tap_node 'permission_allow_button'; then
+                wait_until 60 service_up && wait_until 20 text_is '1 shell' \
+                    && check "after Allow the service runs and its notification shows" ok \
+                    || check "after Allow the service runs and its notification shows" bad "its text is '$(notification_text)'"
+            else
+                skipped "tapping Allow in the system's dialog" "the dialog could not be read with uiautomator on this image"
+            fi
+        else
+            check "the first start of a session asks for the notification permission" bad "no permission dialog within 90 s"
+        fi
     fi
     adbd shell pm clear "$PKG" >/dev/null 2>&1
 fi
 
 
-if [ "$SECTION" = vault ] || [ "$SECTION" = tls ] || [ "$SECTION" = handover ] || [ "$SECTION" = clipboard ]; then
+if [ "$SECTION" = vault ] || [ "$SECTION" = tls ] || [ "$SECTION" = handover ] || [ "$SECTION" = clipboard ] || [ "$SECTION" = ssh ]; then
     notrun=0
     skipped() { # <description> <reason>: a check that was not done is said so, and never counts as ok
         echo "e2e $SECTION: not run $1 ($2)"
+        report "$SECTION" "$1" not-run "$2"
         notrun=$((notrun + 1))
     }
     sdk=$(adbd shell getprop ro.build.version.sdk | tr -d '\r')
@@ -614,7 +1155,12 @@ if [ "$SECTION" = vault ] || [ "$SECTION" = tls ] || [ "$SECTION" = handover ] |
         entered=
         seen_prompt=
         adbd logcat -c >/dev/null 2>&1
-        adbd shell am start -W -n "$PKG/$ACTIVITY" --es holzwave_selftest "$step" >/dev/null 2>&1 || die "the activity did not start for $step"
+        # STEP_ARGS holds the public values of a step (comma separated, only letters, digits and - _ . / + = , :), which need no quoting.
+        if [ -n "${STEP_ARGS:-}" ]; then
+            adbd shell am start -W -n "$PKG/$ACTIVITY" --es holzwave_selftest "$step" --es holzwave_selftest_args "$STEP_ARGS" >/dev/null 2>&1 || die "the activity did not start for $step"
+        else
+            adbd shell am start -W -n "$PKG/$ACTIVITY" --es holzwave_selftest "$step" >/dev/null 2>&1 || die "the activity did not start for $step"
+        fi
         waited=0
         line=
         while [ "$waited" -lt "$limit" ]; do
@@ -803,6 +1349,116 @@ if [ "$SECTION" = vault ] || [ "$SECTION" = tls ] || [ "$SECTION" = handover ] |
     sleep 5
     expect_ok vault-lost none "the screen lock removed: the vault is lost with key_gone, and a reset gives a new one" || true
     stop_app
+    elif [ "$SECTION" = ssh ]; then
+    # ---- the ssh section ------------------------------------------------------------------------------------------------------
+    echo "e2e ssh: image API $sdk; a saved SSH connection of the app to a throwaway OpenSSH server on this Mac's loopback, reached through adb reverse"
+    echo "e2e ssh: the PIN $PIN is set by this script (and cleared again) so that the vault is protected and can be locked"
+    ssh_info=$(sh scripts/android-ssh-server.sh start) || die "the throwaway server did not start (ssh-keygen and /usr/sbin/sshd are needed)"
+    ssh_field() { printf '%s\n' "$ssh_info" | sed -n "s/^$1=//p" | head -n 1; }
+    ssh_dir=$(ssh_field dir)
+    [ -n "$ssh_dir" ] || die "the throwaway server printed no folder"
+    ssh_port=$(ssh_field port)
+    ssh_user=$(ssh_field user)
+    ssh_key_type=$(ssh_field host_key_type)
+    ssh_key_blob=$(ssh_field host_key_blob)
+    ssh_proof=$(ssh_field proof)
+    ssh_log=$(ssh_field log)
+    ssh_fp=$(ssh_field fingerprint)
+    echo "e2e ssh: the server listens on 127.0.0.1:$ssh_port of the Mac as $ssh_user (host key $ssh_fp); one throwaway Ed25519 key opens it"
+    adbd reverse "tcp:$ssh_port" "tcp:$ssh_port" >/dev/null || die "adb reverse did not work"
+    ssh_reversed=$ssh_port
+    logins() { n=$(grep -c '^Accepted publickey for ' "$ssh_log" 2>/dev/null); echo "${n:-0}"; }
+    marker="HWPROOF$(date +%s)"
+    # A proof file of the Mac side appears within 20 seconds and holds the marker.
+    proof_file() { # <name>
+        waited=0
+        while [ "$waited" -lt 20 ]; do
+            [ "$(cat "$ssh_proof/$1" 2>/dev/null)" = "$marker" ] && return 0
+            sleep 1
+            waited=$((waited + 1))
+        done
+        return 1
+    }
+    send_proof() { # <name>: type the command into the open pane
+        STEP_ARGS="$ssh_proof,$1,$marker"
+        expect_ok ssh-send none "a command typed into the pane is sent over the session" || { STEP_ARGS=; return 1; }
+        STEP_ARGS=
+        return 0
+    }
+
+    expect_ok vault-info none "the self-test answers: the state of the new app" || stop_here "the self-test did not start"
+    case "$line" in
+        *"screen_lock=true"*) stop_here "the device already has a screen lock; this script never changes a lock it did not set" ;;
+    esac
+    adbd shell locksettings set-pin "$PIN" >/dev/null || stop_here "locksettings set-pin did not work on this image"
+    pin_set=1
+    sleep 5
+    expect_ok vault-create prompt "a screen lock exists: the first unlock makes a protected vault (system prompt, the PIN)" || stop_here "the vault could not be made"
+
+    # The sealed key and its passphrase go into the app's private folder on standard input: never an argument, never a log line.
+    adbd shell "run-as $PKG sh -c 'cat > selftest-ssh-key'" <"$ssh_dir/client_key" || stop_here "the key file could not be written into the app's folder"
+    adbd shell "run-as $PKG sh -c 'cat > selftest-ssh-pass'" <"$ssh_dir/client_pass" || stop_here "the passphrase file could not be written into the app's folder"
+    STEP_ARGS="$ssh_port,$ssh_user,$ssh_key_type,$ssh_key_blob"
+    expect_ok ssh-prepare none "a saved connection: the key file, its passphrase in the vault, exactly the server's host key trusted" || stop_here "the connection could not be saved"
+    STEP_ARGS=
+    kept=$(as_app "ls selftest-ssh-pass 2>&1" | head -n 1)
+    case "$kept" in
+        *"No such file"*) check "the passphrase file is removed by the step once the passphrase is in the vault" ok ;;
+        *) check "the passphrase file is removed by the step" bad "ls said '$kept'" ;;
+    esac
+    # The passphrase must be nowhere in plain: the vault file is ciphertext, the log and the argument lists do not hold it.
+    ssh_pass=$(cat "$ssh_dir/client_pass")
+    in_log=$(adbd logcat -d 2>/dev/null | grep -c -F "$ssh_pass")
+    [ "$in_log" = 0 ] && check "the passphrase of the key is not in the log" ok || check "the passphrase of the key is not in the log" bad "$in_log lines"
+
+    # a. the first connection, a command typed into the pane
+    expect_ok ssh-connect none "the saved connection opens as a pane and reaches the state connected (key login, host key from the known hosts)" 90 || stop_here "the SSH pane did not connect"
+    first_logins=$(logins)
+    [ "$first_logins" -ge 1 ] && check "the server logged a key login ($first_logins)" ok || check "the server logged a key login" bad "none in its log"
+    sleep 4 # the login shell prints its prompt; keys typed before it is ready may be lost to its start-up files
+    if send_proof one; then
+        proof_file one && check "the command typed into the pane left its file on the Mac side (the pane runs a shell of the server)" ok \
+            || check "the command typed into the pane left its file on the Mac side" bad "no file 'one' with the marker within 20 s"
+    fi
+
+    # b. the vault is locked: the open session carries on
+    expect_ok ssh-lock none "the vault is locked and the open pane is still connected" || stop_here "the vault could not be locked"
+    if send_proof two; then
+        proof_file two && check "a live SSH session continues while the vault is locked: a command typed after the lock left its file" ok \
+            || check "a live SSH session continues while the vault is locked" bad "no file 'two' with the marker within 20 s"
+    fi
+
+    # c. a new connect says locked, and the server sees no new login
+    before_locked=$(logins)
+    expect_ok ssh-connect-locked none "while the vault is locked a new connect is refused with the locked answer (not a network or key error)" || true
+    sleep 4
+    after_locked=$(logins)
+    [ "$after_locked" = "$before_locked" ] && check "the server logged no new login while the vault was locked ($before_locked before, $after_locked after)" ok \
+        || check "the server logged no new login while the vault was locked" bad "$before_locked before, $after_locked after"
+
+    # d. the unlock: a new connect works again
+    expect_ok ssh-unlock prompt "the unlock (system prompt, the PIN) opens the vault again" || stop_here "the vault could not be unlocked"
+    expect_ok ssh-connect none "after the unlock the saved connection opens again as a second pane" 90 || stop_here "the second SSH pane did not connect"
+    third_logins=$(logins)
+    # The panes of one saved connection share the login that is open (the core keeps one session per connection), so the second pane
+    # needs no second login; what the unlock is for is the connect itself, which reads the passphrase's account from the vault first.
+    # The count is printed and must not have gone down; a new login is not required.
+    [ "$third_logins" -ge "$before_locked" ] && check "after the unlock the second pane shares the open login (server logins: $before_locked before, $third_logins after)" ok \
+        || check "the server's login count did not go down" bad "$before_locked before, $third_logins after"
+    sleep 4
+    if send_proof three; then
+        proof_file three && check "a command typed into the new pane left its file on the Mac side" ok \
+            || check "a command typed into the new pane left its file on the Mac side" bad "no file 'three' with the marker within 20 s"
+    fi
+    # No key or passphrase in the argument lists of the device, and the known hosts file holds exactly the server's key.
+    in_args=$(adbd shell ps -A -o PID,ARGS 2>/dev/null | tr -d '\r' | grep -c -F "$ssh_pass")
+    [ "$in_args" = 0 ] && check "the passphrase is in no process's argument list" ok || check "the passphrase is in no process's argument list" bad "$in_args matches"
+    known=$(as_app "cat known_hosts" | grep -c -F "[127.0.0.1]:$ssh_port $ssh_key_type $ssh_key_blob")
+    [ "$known" = 1 ] && check "the app's known hosts file holds the server's key for that address and port, once" ok \
+        || check "the app's known hosts file holds the server's key once" bad "$known matching lines"
+    stop_app
+    # The PIN is cleared while the emulator is still there, the key goes with the app's folder at the next install.
+    adbd shell locksettings clear --old "$PIN" >/dev/null && pin_set=
     elif [ "$SECTION" = tls ]; then
     # ---- the tls section ------------------------------------------------------------------------------------------------
     echo "e2e tls: image API $sdk; the PIN $PIN is set by this script (and cleared again) for the vault steps"
@@ -929,26 +1585,6 @@ if [ "$SECTION" = vault ] || [ "$SECTION" = tls ] || [ "$SECTION" = handover ] |
     sha_device() { adbd exec-out run-as "$PKG" cat "$1" 2>/dev/null | shasum -a 256 | cut -d ' ' -f 1; }
     sha_mac() { shasum -a 256 "$1" | cut -d ' ' -f 1; }
 
-    # UI driving: a dump that cannot be read is tried again, and a dump that still cannot be read is a node that is not found.
-    ui_dump() { # <file>
-        tries=0
-        while [ "$tries" -lt 3 ]; do
-            adbd shell uiautomator dump /sdcard/hw-ui.xml >/dev/null 2>&1
-            adbd exec-out cat /sdcard/hw-ui.xml >"$1" 2>/dev/null
-            adbd shell rm -f /sdcard/hw-ui.xml >/dev/null 2>&1
-            grep -q '<hierarchy' "$1" 2>/dev/null && return 0
-            tries=$((tries + 1))
-            sleep 1
-        done
-        : >"$1"
-        return 1
-    }
-    ui_tap_text() { # <text, or id:resource-id>: tap the centre of the first node that matches; 1 when there is none
-        ui_dump "$tmp/hw-ui.xml" || return 1
-        xy=$(ui_center "$tmp/hw-ui.xml" "$1") || return 1
-        set -- $xy
-        adbd shell input tap "$1" "$2"
-    }
     # The open dialog: the file is in the list of recent files, or it is found by opening the roots drawer and the root `Downloads`,
     # at most three tries.
     want_name=
@@ -983,6 +1619,8 @@ if [ "$SECTION" = vault ] || [ "$SECTION" = tls ] || [ "$SECTION" = handover ] |
         driver=$2
         limit=${3:-90}
         driven=none
+        drives=0
+        drove_at=0
         adbd logcat -c >/dev/null 2>&1
         adbd shell am start -W -n "$PKG/$ACTIVITY" --es holzwave_selftest "$step" >/dev/null 2>&1 || die "the activity did not start for $step"
         waited=0
@@ -990,10 +1628,14 @@ if [ "$SECTION" = vault ] || [ "$SECTION" = tls ] || [ "$SECTION" = handover ] |
         while [ "$waited" -lt "$limit" ]; do
             line=$(step_line "$step")
             [ -n "$line" ] && break
-            if [ "$driven" = none ] && dialog_up; then
+            # The driver acts once the dialog is up. If the dialog is still in front 10 s after a successful drive (the tap came while
+            # the list was still being drawn and chose nothing), it is driven again, at most three times in all.
+            if { [ "$driven" = none ] || { [ "$driven" = ok ] && [ "$drives" -lt 3 ] && [ $((waited - drove_at)) -ge 10 ]; }; } && dialog_up; then
                 sleep 2
                 if "$driver"; then
                     driven=ok
+                    drives=$((drives + 1))
+                    drove_at=$waited
                 else
                     driven=notrun
                     adbd shell input keyevent KEYCODE_BACK
@@ -1002,7 +1644,12 @@ if [ "$SECTION" = vault ] || [ "$SECTION" = tls ] || [ "$SECTION" = handover ] |
             sleep 1
             waited=$((waited + 1))
         done
-        [ -n "$line" ] || line="holzwave-selftest $step: FAIL no line in the log after $limit s"
+        if [ -z "$line" ]; then
+            # What the screen and the log held when nothing came: the window in front, and the last lines of the app's own self-test log.
+            echo "e2e $SECTION: no answer of $step after $limit s; window in front: $(adbd shell dumpsys window | grep mCurrentFocus | head -n 1 | tr -d '\r'); dialog driven: $driven" >&2
+            adbd logcat -d 2>/dev/null | grep -i "holzwave-selftest" | tail -n 5 | cut -c1-240 >&2
+            line="holzwave-selftest $step: FAIL no line in the log after $limit s"
+        fi
     }
     # The back of a focus: after a step the app is in front again before the next one starts.
     wait_app_front() {
