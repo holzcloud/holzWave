@@ -12,4 +12,6 @@ object DebugHooks {
   fun intent(intent: Intent?) {}
 
   fun take(): String? = null
+
+  fun takeArgs(): String? = null
 }

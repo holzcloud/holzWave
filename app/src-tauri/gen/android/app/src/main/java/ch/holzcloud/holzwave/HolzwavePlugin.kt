@@ -524,7 +524,10 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
   fun debugTake(invoke: Invoke) {
     val answer = JSObject()
     val step = DebugHooks.take()
-    if (step != null) answer.put("step", step)
+    if (step != null) {
+      answer.put("step", step)
+      DebugHooks.takeArgs()?.let { answer.put("args", it) }
+    }
     invoke.resolve(answer)
   }
 

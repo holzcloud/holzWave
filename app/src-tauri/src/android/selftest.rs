@@ -22,6 +22,14 @@
 //! name and a size, a fixed test pattern's own path, or the fixed words of the clipboard steps; never the bytes of a file and
 //! never a text that came from the clipboard.
 //!
+//! The steps `ssh-prepare`, `ssh-unlock`, `ssh-connect`, `ssh-send`, `ssh-lock` and `ssh-connect-locked` run a saved SSH connection to
+//! a throwaway OpenSSH server that the emulator script starts on the Mac and forwards to the emulator's loopback address with `adb
+//! reverse`. The values a step needs and that are public (the port, the user name, the two words of the host's public key, a folder
+//! and a file name of the Mac) come in the intent's second extra; the sealed private key and its passphrase are two files that the
+//! script writes into the app's private folder through `run-as` with the bytes on standard input, and the step deletes the
+//! passphrase file after it moved the passphrase into the vault. Nothing secret, no command line typed into the session and no
+//! host answer is logged: a step says ok or one of the fixed reasons.
+//!
 //! The steps `tls-public`, `tls-untrusted`, `sync-save`, `sync-paused` and `sync-resume` run the two real network clients of the
 //! core (the WebDAV client of the sync and the client of the AI chat) against a public site and against a server with a
 //! self-signed certificate that the emulator script starts on the Mac and forwards to the emulator's loopback address with `adb
@@ -32,20 +40,25 @@
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use holzwave_core::ai::http::{Call, Framing, Http, HttpConfig, NetworkPolicy, Target};
 use holzwave_core::ai::profiles::KeySlot;
 use holzwave_core::ai::provider::{AiError, CancelToken, Flow};
+use holzwave_core::connections::SecretChange;
+use holzwave_core::layout::{MAIN_WINDOW, PaneId};
+use holzwave_core::profiles::{Auth, Profile};
 use holzwave_core::secrets::SecretStore;
 use holzwave_core::sync::webdav::{Backend, WebDav};
 use holzwave_core::vault::{Clock, LostReason, Protection, VaultError, VaultState, VaultStore};
 use holzwave_host::ai_host::ProfileInputMsg;
+use holzwave_host::commands::connections::{connect, connection_save, pane_connections};
 use holzwave_host::commands::handover::{HandoverOutcomeMsg, handover_in, handover_out};
-use holzwave_host::commands::vault::vault_unlock;
+use holzwave_host::commands::terminal::{key, start_pane, text};
+use holzwave_host::commands::vault::{vault_lock, vault_unlock};
 use holzwave_host::keystore_wire::RecentsMode;
-use holzwave_host::locked::is_locked;
+use holzwave_host::locked::{SECRETS_LOCKED, is_locked};
 use holzwave_host::seams::Host;
 use holzwave_host::state::AppCore;
 use serde_json::{Value, json};
@@ -90,7 +103,47 @@ const SYNC_PASSWORD_ACCOUNT: &str = "sync:password";
 const SYNC_PASSPHRASE_ACCOUNT: &str = "sync:passphrase";
 const SYNC_FILE: &str = "sync.json";
 
+/// The id of the saved connection of the SSH steps, the sealed key and the passphrase file in the app's private folder, and the
+/// address the app dials: the loopback address of the emulator, which `adb reverse` forwards to the throwaway server of the Mac.
+const SSH_ID: &str = "selftest-ssh";
+const SSH_KEY_FILE: &str = "selftest-ssh-key";
+const SSH_PASS_FILE: &str = "selftest-ssh-pass";
+const SSH_HOST: &str = "127.0.0.1";
+/// The file of the app's known host keys, in the app's data folder (`core/src/connections.rs`, `KNOWN_HOSTS_FILE`).
+const KNOWN_HOSTS: &str = "known_hosts";
+/// How long a pane has to connect.
+const SSH_CONNECT_SECS: u64 = 40;
+
 type Outcome = Result<String, String>;
+
+/// The comma separated public values of a step, as the debug hook of the activity hands them over.
+struct Args<'a>(Vec<&'a str>);
+
+impl<'a> Args<'a> {
+    fn of(text: &'a str) -> Args<'a> {
+        Args(if text.is_empty() { Vec::new() } else { text.split(',').collect() })
+    }
+
+    /// The `n`th value, when it is there and every character passes `allowed`, at most `max` characters.
+    fn get(&self, n: usize, max: usize, allowed: impl Fn(char) -> bool) -> Result<&'a str, String> {
+        match self.0.get(n) {
+            Some(value) if !value.is_empty() && value.chars().count() <= max && value.chars().all(allowed) => Ok(value),
+            _ => fail("a value of the step is missing or not of the allowed shape"),
+        }
+    }
+}
+
+fn is_word(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'
+}
+
+fn is_base64(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='
+}
+
+fn is_path(c: char) -> bool {
+    is_word(c) || c == '/'
+}
 
 /// How a request of one of the network clients ended.
 enum Reach {
@@ -190,6 +243,8 @@ struct Steps {
     host: Arc<AndroidHost>,
     vault: Arc<VaultStore>,
     data_dir: std::path::PathBuf,
+    /// The pane of the SSH connection the last `ssh-connect` opened, for the steps that follow in the same process.
+    ssh_pane: Mutex<Option<PaneId>>,
 }
 
 impl Steps {
@@ -225,7 +280,8 @@ impl Steps {
         }
     }
 
-    fn run(&self, step: &str) -> Outcome {
+    fn run(&self, step: &str, args: &str) -> Outcome {
+        let args = Args::of(args);
         match step {
             "vault-info" => {
                 let s = self.vault.status();
@@ -400,8 +456,132 @@ impl Steps {
             }
             // The clipboard written and read back through the plugin, the bound, and the sensitive mark.
             "clipboard-roundtrip" => clipboard_roundtrip(),
+            // A saved SSH connection to the throwaway server, its passphrase in the vault and its host key trusted.
+            "ssh-prepare" => self.ssh_prepare(&args),
+            // The vault is unlocked again after a lock (the system prompt, answered by the script).
+            "ssh-unlock" => {
+                self.expect_state(VaultState::Locked)?;
+                vault_unlock(&self.core).map_err(|e| format!("the unlock failed: {e}"))?;
+                self.expect_state(VaultState::Unlocked)?;
+                Ok("unlocked".into())
+            }
+            "ssh-connect" => self.ssh_connect(),
+            "ssh-send" => self.ssh_send(&args),
+            "ssh-lock" => {
+                self.expect_state(VaultState::Unlocked)?;
+                vault_lock(&self.core).map_err(|_| "the lock failed".to_owned())?;
+                self.expect_state(VaultState::Locked)?;
+                // The open session is not touched by a lock.
+                match self.ssh_state() {
+                    Some("connected") => Ok("locked, the open pane is still connected".into()),
+                    _ => fail("the open pane is not connected after the lock"),
+                }
+            }
+            "ssh-connect-locked" => {
+                self.expect_state(VaultState::Locked)?;
+                match connect(&self.core, MAIN_WINDOW, SSH_ID.to_owned()) {
+                    Err(text) if text == SECRETS_LOCKED => Ok("refused with the locked answer".into()),
+                    Err(_) => fail("the connect was refused, but not with the locked answer"),
+                    Ok(_) => fail("a connect succeeded while the vault was locked"),
+                }
+            }
             _ => fail("an unknown step"),
         }
+    }
+
+    /// The state word of the pane `ssh-connect` opened (`connecting`, `connected`, `reconnecting`, `failed`, `closed`), if it has one.
+    fn ssh_state(&self) -> Option<&'static str> {
+        let pane = (*self.ssh_pane.lock().unwrap_or_else(PoisonError::into_inner))?;
+        pane_connections(&self.core).into_iter().find(|view| view.pane == pane).map(|view| view.state)
+    }
+
+    /// The saved connection: key file (put there by the script), passphrase (moved into the vault through the connection manager,
+    /// the same call the page's form makes) and the host's public key as a known host, so only that key is accepted.
+    fn ssh_prepare(&self, args: &Args) -> Outcome {
+        self.expect_state(VaultState::Unlocked)?;
+        let port: u16 = args.get(0, 5, |c| c.is_ascii_digit())?.parse().map_err(|_| "the port is not a number".to_owned())?;
+        if port == 0 {
+            return fail("the port is 0");
+        }
+        let user = args.get(1, 32, is_word)?;
+        let key_type = args.get(2, 20, |c| c.is_ascii_alphanumeric() || c == '-')?;
+        let blob = args.get(3, 200, is_base64)?;
+        if key_type != "ssh-ed25519" {
+            return fail("the host key is not an Ed25519 key");
+        }
+        let key_path = self.data_dir.join(SSH_KEY_FILE);
+        if !key_path.is_file() {
+            return fail("the key file is missing");
+        }
+        let pass_path = self.data_dir.join(SSH_PASS_FILE);
+        let passphrase = std::fs::read_to_string(&pass_path).map_err(|_| "the passphrase file is missing".to_owned());
+        // The file is gone whatever happens next: the passphrase lives in the vault from here on.
+        let _ = std::fs::remove_file(&pass_path);
+        let passphrase = passphrase?;
+        let passphrase = passphrase.trim();
+        if passphrase.is_empty() || passphrase.len() > 256 {
+            return fail("the passphrase file is empty or too long");
+        }
+        // Trust exactly this host key, the way the connection's own check reads it: an OpenSSH known hosts line for the host and
+        // port. Any other key of that host and port is refused as a changed key; nothing here accepts a key it was not given.
+        let known = self.data_dir.join(KNOWN_HOSTS);
+        let head = format!("[{SSH_HOST}]:{port} ");
+        let mut lines: Vec<String> =
+            std::fs::read_to_string(&known).unwrap_or_default().lines().filter(|line| !line.starts_with(&head)).map(str::to_owned).collect();
+        lines.push(format!("{head}{key_type} {blob}"));
+        std::fs::write(&known, lines.join("\n") + "\n").map_err(|_| "the known hosts file could not be written".to_owned())?;
+        let mut profile = Profile::new(SSH_ID, "Selftest SSH", SSH_HOST);
+        profile.port = port;
+        profile.user = user.to_owned();
+        profile.auth = Auth::Key;
+        profile.key_path = key_path.to_string_lossy().into_owned();
+        profile.reconnect_attempts = 0;
+        let saved = connection_save(&self.core, profile, SecretChange::Set { value: passphrase.to_owned() })
+            .map_err(|_| "the connection was not saved".to_owned())?;
+        if !saved.has_secret {
+            return fail("the passphrase was not kept");
+        }
+        Ok("saved with the passphrase in the vault and the host key trusted".into())
+    }
+
+    /// Open the saved connection as a tab and wait for its pane to be connected (the page starts the pane when it sees the view).
+    fn ssh_connect(&self) -> Outcome {
+        let view = connect(&self.core, MAIN_WINDOW, SSH_ID.to_owned()).map_err(|e| {
+            if e == SECRETS_LOCKED { "the connect was refused as locked".to_owned() } else { "the connect was refused".to_owned() }
+        })?;
+        *self.ssh_pane.lock().unwrap_or_else(PoisonError::into_inner) = Some(view.focus);
+        // The page starts a pane when a view it asked for comes back; a connect made here is not announced to the page, so the step
+        // starts the pane with the same host function the page's start command calls.
+        start_pane(&self.core, view.focus, 80, 24, None, None).map_err(|_| "the pane could not be started".to_owned())?;
+        let deadline = Instant::now() + Duration::from_secs(SSH_CONNECT_SECS);
+        loop {
+            match self.ssh_state() {
+                Some("connected") => return Ok("connected".into()),
+                Some(word @ ("failed" | "closed")) => return Err(format!("the pane ended as {word}")),
+                _ => {}
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("the pane did not connect within {SSH_CONNECT_SECS} seconds (last state {})", self.ssh_state().unwrap_or("none")));
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
+    /// Type `echo <marker> > <folder>/<name>` and Enter into the open pane, the way the page types: committed text, then the Enter key.
+    fn ssh_send(&self, args: &Args) -> Outcome {
+        let folder = args.get(0, 200, is_path)?;
+        let name = args.get(1, 32, is_word)?;
+        let marker = args.get(2, 48, |c| c.is_ascii_alphanumeric() || c == '-')?;
+        if !folder.starts_with('/') || folder.contains("..") {
+            return fail("the folder is not an absolute path");
+        }
+        let pane = (*self.ssh_pane.lock().unwrap_or_else(PoisonError::into_inner)).ok_or_else(|| "no pane was opened".to_owned())?;
+        if self.ssh_state() != Some("connected") {
+            return fail("the pane is not connected");
+        }
+        text(&self.core, pane, format!("echo {marker} > {folder}/{name}")).map_err(|_| "the text was not typed".to_owned())?;
+        key(&self.core, pane, "Enter".into(), "Enter".into(), 0, false, false, false).map_err(|_| "the Enter key was not sent".to_owned())?;
+        Ok("typed".into())
     }
 
     /// The account of the sync steps: the password and the passphrase are the canary, so the canary scan covers them too.
@@ -581,14 +761,15 @@ fn word(error: &VaultError) -> &'static str {
 pub fn start(core: Arc<AppCore>, host: Arc<AndroidHost>) {
     let vault = host.vault_store().clone();
     let data_dir = host.private_dirs().and_then(|dirs| dirs.home.parent().map(std::path::Path::to_path_buf)).unwrap_or_default();
-    let steps = Steps { core, host, vault, data_dir };
+    let steps = Steps { core, host, vault, data_dir, ssh_pane: Mutex::new(None) };
     let spawned = std::thread::Builder::new().name("hw-selftest".into()).spawn(move || {
         loop {
             std::thread::sleep(Duration::from_millis(500));
             let Some(handle) = plugin::handle() else { continue };
             let Ok(answer) = handle.run_mobile_plugin::<Value>("debugTake", json!({})) else { continue };
             let Some(step) = answer.get("step").and_then(Value::as_str) else { continue };
-            match steps.run(step) {
+            let args = answer.get("args").and_then(Value::as_str).unwrap_or("");
+            match steps.run(step, args) {
                 Ok(detail) => eprintln!("holzwave-selftest {step}: ok {detail}"),
                 Err(reason) => eprintln!("holzwave-selftest {step}: FAIL {reason}"),
             }
