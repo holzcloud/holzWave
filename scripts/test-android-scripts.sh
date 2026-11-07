@@ -300,12 +300,29 @@ mkcase
 run android-e2e.sh
 [ "$rc" -eq 2 ] && ok "no argument is a usage error, exit 2" || bad "e2e usage (rc $rc)"
 mkcase
+run android-e2e.sh nonsense
+[ "$rc" -eq 2 ] && echo "$out" | grep -q 'tracer|service' && ok "an unknown section is a usage error that names both sections, exit 2" \
+  || bad "e2e unknown section (rc $rc): $out"
+mkcase
+rm -f "$c/bin/adb"
+run android-e2e.sh service
+[ "$rc" -eq 2 ] && nothing_left && ok "the service section without adb is exit 2" || bad "e2e service without adb (rc $rc): $out"
+mkcase
 : > "$LOG"
 run android-e2e.sh tracer
 if [ "$rc" -eq 1 ] && echo "$out" | grep -q 'the emulator did not boot' && nothing_left && [ "$(calls npm)" -eq 0 ]; then
   ok "an emulator that does not boot is exit 1, nothing is built, no temporary file is left"
 else
   bad "e2e with a dead emulator (rc $rc, left: $(ls -A "$c/tmpdir")): $out"
+fi
+
+mkcase
+: > "$LOG"
+run android-e2e.sh service
+if [ "$rc" -eq 1 ] && echo "$out" | grep -q 'the emulator did not boot' && nothing_left && [ "$(calls npm)" -eq 0 ]; then
+  ok "the service section with an emulator that does not boot is exit 1, nothing is built, no temporary file is left"
+else
+  bad "e2e service with a dead emulator (rc $rc, left: $(ls -A "$c/tmpdir")): $out"
 fi
 
 echo "test 6: nothing was installed, downloaded or signed"

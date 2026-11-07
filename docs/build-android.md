@@ -170,7 +170,7 @@ ARM or 32-bit x86 at all.
 sh scripts/android-e2e.sh tracer
 ```
 
-It starts the emulator if none runs (and stops it at the end only if it started it), builds and installs the debug APK, starts
+(The section `service` is described with the foreground service below.) It starts the emulator if none runs (and stops it at the end only if it started it), builds and installs the debug APK, starts
 the app, waits until the app has started a shell, taps the screen, types three lines with the real Android key path (`adb shell
 input text` and the Enter key), and reads the results back with `run-as`:
 
@@ -272,11 +272,59 @@ check the scheme.
 
 ## One list of permissions
 
-`app/src-tauri/android-permissions.txt` is the one list of the permissions the app may ask for (today `android.permission.INTERNET`).
+`app/src-tauri/android-permissions.txt` is the one list of the permissions the app may ask for (today the network, and the three of the foreground service described below).
 The `android_release` test requires the manifest to hold exactly these, and the APK check requires the same of a built APK, so a
 permission that is added anywhere else fails one of them. A feature that needs a permission adds its line to the file in its own
 commit, with the manifest line, and says in the message what it is for. A permission that installs packages, reads the screen, draws
 over other apps or reads contacts, messages or location is never on the list without a decision of its own.
+
+## The service that keeps sessions alive
+
+Android freezes or ends an app a few minutes after its screen turns off. A terminal that loses its SSH connection whenever the screen
+goes dark is not usable, so while a shell or a connection is alive the app runs a **foreground service**, which Android requires to
+show a notification.
+
+- **What the notification says.** The title is `holzWave is running` and the text is the counts and nothing else: `3 shells, 1
+  connection`, `1 shell`, `2 connections`. It never holds a host name, a command or any output of a shell, and on a locked screen only
+  the title shows. It is on a channel called `Running sessions` with low importance, no sound, no vibration and no badge, and it is
+  ongoing (it cannot be swiped away while sessions run). Tapping it opens the app.
+- **`Stop all`.** The notification has one action. It ends every shell and every connection of the app and removes the notification. It
+  does not close the app's window and does not delete any setting, layout, history or secret: the panes stay where they were and show
+  the state they show when a shell has ended on its own. A new pane starts a new shell and the service again.
+- **When it runs.** It starts when the first shell or connection is alive and stops when the last one has ended. The app counts them
+  every two seconds and tells the service only when the numbers change. A connection counts while it is up or is being made again after
+  a loss; one that is still connecting, failed or ended does not.
+- **Only while the app is in front.** Android 12 and later refuse a foreground service that is started from the background, so the app
+  starts it only while its window is visible. If Android refuses anyway, the app notes it and tries again the next time the window is in
+  front. Nothing starts it from a boot, a receiver or another app: the service is not exported, and there is no wake lock, no request
+  to leave the battery optimisation and no start-at-boot permission. The service holds the process and does no work of its own.
+- **In the manifest.** The service has the type `specialUse`, because no other type describes a terminal, and carries the public
+  sentence `Keeps terminal shells and SSH connections running while the app is in the background`, which stores and installers show.
+  Three permissions are in `android-permissions.txt` for it: `FOREGROUND_SERVICE` and `FOREGROUND_SERVICE_SPECIAL_USE` (the service and
+  its type) and `POST_NOTIFICATIONS` (its notification).
+- **The notification permission.** On Android 13 and later the system asks once, at the first start of a session. Whatever the answer
+  is, the app does not ask again. If it is denied the service still runs, but its notification is not shown, and Android lists the app
+  among the active apps; `Stop all` is then not reachable, and closing the panes ends the sessions as before.
+- **How Rust and Kotlin talk.** One Kotlin class of the app (`HolzwavePlugin`) is registered with Tauri's own plugin builder; no
+  `tauri-plugin-*` crate is used. It has no command on the Rust side, so the page cannot call it. The release build keeps the class by
+  name (R8 is on) with a rule in `gen/android/app/proguard-rules.pro`.
+
+**The known limit.** Android 12 and later may end the local shells of a backgrounded app under its limit on background processes
+(the phantom-process limit), even while the service runs. SSH connections are not affected: they live inside the app's own process,
+and a shell on a remote host keeps running there. This limit was **not observed** on the emulator, which does not apply it as phones
+do, and nothing was run on a device that applies it. Whether local shells survive an hour in the background on a real phone is open.
+
+```sh
+sh scripts/android-e2e.sh service
+```
+
+proves on the emulator image that the service is foreground with the type `specialUse` (dumpsys prints `types=0x40000000`), that the
+notification has the title, the counts, the action, the channel and no sound, that both shells are alive after 20 seconds in the
+background and the pane answers when the app comes back, that tapping `Stop all` in the notification shade ends the shells and removes
+the service and the notification while the app keeps its window, that a new shell starts the service again, and the three states of
+the notification permission (granted, revoked, and the system's dialog at the first start). **Not proved:** the limit above, a swipe
+of the app out of the recents list, doze and app standby over hours, the skins of phone makers, the permission dialog of another
+Android version or locale, and any real phone.
 
 ## Check a built APK
 
@@ -330,6 +378,8 @@ registry paths of the form `/cargo-home/registry/...`; whether those stay the sa
 - Any real phone or tablet: the soft keyboard and hardware keyboards, biometrics and the hardware keystore, background kills, the
   limit on background processes, real storage providers, mobile networks, touch feel, the WebView version of a phone, and the system
   shell of a phone maker.
+- The limit of Android 12 and later on background processes for local shells (the emulator does not apply it), a swipe of the app out
+  of the recents list, doze and app standby over hours, and the system's notification dialog on another version or locale.
 - Any Android version other than the emulator image the check ran on (the default is Android 37, arm64).
 - x86_64 and 32-bit images or builds, which are refused by design.
 - A signed release APK for distribution, installing from F-Droid or Obtainium, Play Protect or installer warnings for a self-signed APK, and a 16 KB page device other than the emulator image with that page size.
