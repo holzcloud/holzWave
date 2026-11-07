@@ -10,3 +10,8 @@
 # the app can send a broadcast to its own receivers, named <application id>.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION). It is not
 # in the manifest of the project but in the merged manifest of a built APK, and the APK check accepts exactly that name.
 android.permission.INTERNET
+# The foreground service that keeps shells and SSH connections running while the app is in the background: the service itself,
+# its type specialUse, and the notification it must show (asked once on Android 13 and later; a denial keeps the service).
+android.permission.FOREGROUND_SERVICE
+android.permission.FOREGROUND_SERVICE_SPECIAL_USE
+android.permission.POST_NOTIFICATIONS

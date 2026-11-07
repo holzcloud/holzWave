@@ -4,6 +4,13 @@
     <!-- The permissions below are the list in app/src-tauri/android-permissions.txt; a feature that needs one adds it there
          and here in the same commit. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- The three below are for the foreground service that keeps shells and SSH connections alive while the app is in the
+         background (HolzwaveService). FOREGROUND_SERVICE and FOREGROUND_SERVICE_SPECIAL_USE let it run with the type
+         specialUse; POST_NOTIFICATIONS lets its notification show (asked once, on Android 13 and later). There is no wake
+         lock, no boot receiver and no request to leave the battery optimisation. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- No backup of any kind: the app keeps its vault file and its history in its private folder, and a cloud backup or a
          device-to-device transfer must not copy them. allowBackup=false and the extraction rules say the same twice. The
@@ -27,6 +34,19 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- The foreground service that holds the process while shells or SSH connections run. Not exported: nothing but the
+             app itself starts it or sends it `Stop all`. The type is specialUse because no other type describes a terminal;
+             the property below is the public statement of what it is for, shown by the stores and by Obtainium. It starts
+             only while the app is visible, never from a boot or any other receiver. -->
+        <service
+            android:name=".HolzwaveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps terminal shells and SSH connections running while the app is in the background" />
+        </service>
 
         <!-- AndroidX's profile installer brings a receiver that is exported (guarded by the DUMP permission, which only the
              shell holds) for benchmarking tools. The app has one exported component, the launcher activity, so the receiver

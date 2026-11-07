@@ -524,6 +524,11 @@ const FORBIDDEN_PERMISSIONS: &[&str] = &[
     "android.permission.ACCESS_BACKGROUND_LOCATION",
     "android.permission.MANAGE_EXTERNAL_STORAGE",
     "android.permission.QUERY_ALL_PACKAGES",
+    // The foreground service holds the process and nothing else: no wake lock, no start at boot, no request to leave the
+    // battery optimisation.
+    "android.permission.WAKE_LOCK",
+    "android.permission.RECEIVE_BOOT_COMPLETED",
+    "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
 ];
 
 /// The manifest's `uses-permission` set equals the list, both ways; the list has no duplicate and none of the forbidden names;
@@ -584,8 +589,13 @@ fn the_manifest_asks_for_exactly_the_permissions_of_the_list() {
     );
     assert_eq!(
         listed_permissions(PERMISSION_LIST),
-        ["android.permission.INTERNET"],
-        "the list today is INTERNET alone"
+        [
+            "android.permission.INTERNET",
+            "android.permission.FOREGROUND_SERVICE",
+            "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
+            "android.permission.POST_NOTIFICATIONS",
+        ],
+        "the list today is the network and the three of the foreground service"
     );
 }
 
@@ -1525,5 +1535,375 @@ fn build_script_check_fails_on_bad_input() {
         ),
     ] {
         assert!(!build_script_problems(&bad).is_empty(), "{what} passed");
+    }
+}
+
+// ---- the foreground service (shells and connections kept alive in the background) ----------------------------------------
+
+const PLUGIN_RS: &str = include_str!("../src/android/plugin.rs");
+const SERVICE_KT: &str =
+    include_str!("../gen/android/app/src/main/java/ch/holzcloud/holzwave/HolzwaveService.kt");
+const PLUGIN_KT: &str =
+    include_str!("../gen/android/app/src/main/java/ch/holzcloud/holzwave/HolzwavePlugin.kt");
+const APP_RULES: &str = include_str!("../gen/android/app/proguard-rules.pro");
+
+/// The code of a Kotlin or Rust file: the text of comment lines (`//`, `*`, `/*`) left out.
+fn source_code(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            let line = line.trim_start();
+            !(line.starts_with("//") || line.starts_with('*') || line.starts_with("/*"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// What the manifest, the sources and the rules must say about the service, one sentence per problem. The service is the one
+/// component besides the launcher activity; it is not exported, has the type `specialUse` with the public sentence of what it
+/// is for, and nothing in the project starts it from a receiver, holds a wake lock, or puts anything but two counts into its
+/// notification. The page cannot call the plugin that drives it.
+fn service_problems(
+    manifest: &str,
+    service_kt: &str,
+    plugin_kt: &str,
+    plugin_rs: &str,
+    rules: &str,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let all = tags(manifest);
+    let services: Vec<usize> = all
+        .iter()
+        .enumerate()
+        .filter(|(_, tag)| tag.name == "service")
+        .map(|(at, _)| at)
+        .collect();
+    if services.len() != 1 {
+        problems.push(format!(
+            "the manifest has {} services, wanted exactly the foreground service",
+            services.len()
+        ));
+    }
+    if let Some(&at) = services.first() {
+        let tag = &all[at];
+        if tag.attr("android:name") != Some(".HolzwaveService") {
+            problems.push("the service is not .HolzwaveService".into());
+        }
+        if tag.attr("android:exported") != Some("false") {
+            problems.push("the service does not say android:exported=\"false\"".into());
+        }
+        if tag.attr("android:foregroundServiceType") != Some("specialUse") {
+            problems.push("the service is not of the type specialUse".into());
+        }
+        let property = all[at + 1..]
+            .iter()
+            .take_while(|next| !COMPONENTS.contains(&next.name.as_str()))
+            .find(|next| next.name == "property");
+        match property.and_then(|p| Some((p.attr("android:name")?, p.attr("android:value")?))) {
+            Some(("android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE", sentence))
+                if sentence.split_whitespace().count() >= 5 && !sentence[..sentence.len() - 1].contains('.') => {}
+            _ => problems.push(
+                "the service has no PROPERTY_SPECIAL_USE_FGS_SUBTYPE property with one plain sentence".into(),
+            ),
+        }
+    }
+    if all
+        .iter()
+        .any(|tag| tag.name == "receiver" && tag.attr("tools:node") != Some("remove"))
+    {
+        problems.push("the manifest has a receiver: nothing may start the service from one".into());
+    }
+
+    let service = source_code(service_kt);
+    let plugin = source_code(plugin_kt);
+    for needed in [
+        "const val TITLE = \"holzWave is running\"",
+        "const val CHANNEL = \"Running sessions\"",
+        "const val STOP_ALL = \"Stop all\"",
+        "noun(shells, \"shell\", \"shells\")",
+        "noun(connections, \"connection\", \"connections\")",
+        "if (count == 1) \"1 $one\" else \"$count $many\"",
+        "joinToString(\", \")",
+        "NotificationManager.IMPORTANCE_LOW",
+        "setSound(null, null)",
+        "enableVibration(false)",
+        "setShowBadge(false)",
+        "VISIBILITY_PRIVATE",
+        "FOREGROUND_SERVICE_TYPE_SPECIAL_USE",
+        "Intent(this, HolzwaveService::class.java).setAction(ACTION_STOP_ALL)",
+        "PendingIntent.FLAG_IMMUTABLE",
+        ".setOngoing(true)",
+    ] {
+        if !service.contains(needed) {
+            problems.push(format!("HolzwaveService.kt does not say {needed}"));
+        }
+    }
+    // The text of the notification is the counts, from one function, and nothing else is put into it.
+    let texts: Vec<&str> = service
+        .lines()
+        .filter(|line| {
+            line.contains("setContentText(")
+                || line.contains("setSubText(")
+                || line.contains("setTicker(")
+        })
+        .collect();
+    if texts.len() != 1 || !texts[0].contains("setContentText(SessionText.of(shells, connections))")
+    {
+        problems.push(
+            "the notification's text is not SessionText.of(shells, connections) alone".into(),
+        );
+    }
+    for banned in [
+        "BigTextStyle",
+        "InboxStyle",
+        "setStyle(",
+        "setContentInfo(",
+        "setSubText(",
+        "setTicker(",
+        "FLAG_MUTABLE",
+    ] {
+        if service.contains(banned) {
+            problems.push(format!("HolzwaveService.kt uses {banned}"));
+        }
+    }
+    for banned in [
+        "WakeLock",
+        "PowerManager",
+        "BOOT_COMPLETED",
+        "BroadcastReceiver",
+        "IGNORE_BATTERY",
+        "ProcessLifecycleOwner",
+    ] {
+        for (name, code) in [
+            ("HolzwaveService.kt", &service),
+            ("HolzwavePlugin.kt", &plugin),
+        ] {
+            if code.contains(banned) {
+                problems.push(format!("{name} uses {banned}"));
+            }
+        }
+    }
+    if service.contains("startForegroundService(") || !plugin.contains("startForegroundService(") {
+        problems.push("the service is started by the plugin and by nothing else".into());
+    }
+    if !plugin.contains("catch (e: ForegroundServiceStartNotAllowedException)") {
+        problems.push("a refused start is not caught".into());
+    }
+    if !plugin.contains("Lifecycle.State.STARTED") {
+        problems.push(
+            "the plugin does not check that the app is visible before it starts the service".into(),
+        );
+    }
+    if !plugin.contains("notifications_asked") {
+        problems.push("the notification permission is not asked once".into());
+    }
+
+    // The page cannot reach the plugin: it registers no handler and no command on the Rust side.
+    let rust = source_code(plugin_rs);
+    for banned in [
+        "invoke_handler",
+        "generate_handler",
+        "tauri::command",
+        "#[command",
+    ] {
+        if rust.contains(banned) {
+            problems.push(format!(
+                "plugin.rs has {banned}: the page could call the plugin"
+            ));
+        }
+    }
+    if !rust.contains("register_android_plugin(PACKAGE, CLASS)") {
+        problems.push("plugin.rs does not register the Kotlin class".into());
+    }
+
+    // R8 is on in the release and the Rust side finds the class by name.
+    let rules = rules
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !rules.contains("-keep class ch.holzcloud.holzwave.HolzwavePlugin")
+        || !rules.contains("@app.tauri.annotation.Command")
+        || !rules.contains("RuntimeVisibleAnnotations")
+    {
+        problems.push(
+            "the release rules do not keep HolzwavePlugin, its commands and its annotations".into(),
+        );
+    }
+    problems
+}
+
+#[test]
+fn the_service_is_not_exported_is_of_the_type_special_use_and_says_what_it_is_for() {
+    let files = project_text();
+    assert_none(
+        "the foreground service",
+        service_problems(
+            find(&files, "app/src/main/AndroidManifest.xml"),
+            SERVICE_KT,
+            PLUGIN_KT,
+            PLUGIN_RS,
+            APP_RULES,
+        ),
+    );
+}
+
+#[test]
+fn the_service_check_fails_on_bad_input() {
+    let files = project_text();
+    let manifest = find(&files, "app/src/main/AndroidManifest.xml").to_owned();
+    let ok = |manifest: &str, service: &str, plugin: &str, rust: &str, rules: &str| {
+        service_problems(manifest, service, plugin, rust, rules)
+    };
+    assert!(ok(&manifest, SERVICE_KT, PLUGIN_KT, PLUGIN_RS, APP_RULES).is_empty());
+    let manifest_cases = [
+        (
+            "exported",
+            manifest.replace(
+                "android:name=\".HolzwaveService\"\n            android:exported=\"false\"",
+                "android:name=\".HolzwaveService\"\n            android:exported=\"true\"",
+            ),
+        ),
+        (
+            "another type",
+            manifest.replace(
+                "foregroundServiceType=\"specialUse\"",
+                "foregroundServiceType=\"dataSync\"",
+            ),
+        ),
+        (
+            "no property",
+            manifest.replace(
+                "android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE",
+                "android.app.OTHER",
+            ),
+        ),
+        (
+            "two sentences",
+            manifest.replace("background\" />", "background. And more.\" />"),
+        ),
+        (
+            "a receiver",
+            manifest.replace(
+                "</application>",
+                "<receiver android:name=\".Boot\" android:exported=\"false\" /></application>",
+            ),
+        ),
+        (
+            "a second service",
+            manifest.replace(
+                "</application>",
+                "<service android:name=\".Other\" android:exported=\"false\" /></application>",
+            ),
+        ),
+    ];
+    for (what, bad) in manifest_cases {
+        assert!(
+            !ok(&bad, SERVICE_KT, PLUGIN_KT, PLUGIN_RS, APP_RULES).is_empty(),
+            "{what} passed"
+        );
+    }
+    let source_cases = [
+        (
+            "a host name in the text",
+            SERVICE_KT.replace(
+                "setContentText(SessionText.of(shells, connections))",
+                "setContentText(\"ssh \" + host)",
+            ),
+        ),
+        (
+            "a second text",
+            SERVICE_KT.replace(".setOngoing(true)", ".setOngoing(true).setSubText(name)"),
+        ),
+        ("a wake lock", format!("{SERVICE_KT}\nval l = WakeLock()\n")),
+        (
+            "a mutable intent",
+            SERVICE_KT.replace("FLAG_IMMUTABLE", "FLAG_MUTABLE"),
+        ),
+        (
+            "another plural",
+            SERVICE_KT.replace("\"connections\")", "\"links\")"),
+        ),
+        (
+            "a loud channel",
+            SERVICE_KT.replace("IMPORTANCE_LOW", "IMPORTANCE_DEFAULT"),
+        ),
+        (
+            "a sound",
+            SERVICE_KT.replace("setSound(null, null)", "setSound(uri, null)"),
+        ),
+        (
+            "a badge",
+            SERVICE_KT.replace("setShowBadge(false)", "setShowBadge(true)"),
+        ),
+        (
+            "an implicit stop",
+            SERVICE_KT.replace(
+                "Intent(this, HolzwaveService::class.java).setAction",
+                "Intent().setAction",
+            ),
+        ),
+    ];
+    for (what, bad) in source_cases {
+        assert!(
+            !ok(&manifest, &bad, PLUGIN_KT, PLUGIN_RS, APP_RULES).is_empty(),
+            "{what} passed"
+        );
+    }
+    let plugin_cases = [
+        (
+            "no visibility check",
+            PLUGIN_KT.replace("Lifecycle.State.STARTED", "Lifecycle.State.CREATED"),
+        ),
+        (
+            "a refusal that is not caught",
+            PLUGIN_KT.replace(
+                "catch (e: ForegroundServiceStartNotAllowedException)",
+                "catch (e: Exception)",
+            ),
+        ),
+        (
+            "a receiver",
+            format!("{PLUGIN_KT}\nclass Boot : BroadcastReceiver()\n"),
+        ),
+    ];
+    for (what, bad) in plugin_cases {
+        assert!(
+            !ok(&manifest, SERVICE_KT, &bad, PLUGIN_RS, APP_RULES).is_empty(),
+            "{what} passed"
+        );
+    }
+    let rust = format!("{PLUGIN_RS}\n.invoke_handler(tauri::generate_handler![a])\n");
+    assert!(
+        !ok(&manifest, SERVICE_KT, PLUGIN_KT, &rust, APP_RULES).is_empty(),
+        "a page-callable handler passed"
+    );
+    let rules = APP_RULES.replace("-keep class ch.holzcloud.holzwave.HolzwavePlugin", "# gone");
+    assert!(
+        !ok(&manifest, SERVICE_KT, PLUGIN_KT, PLUGIN_RS, &rules).is_empty(),
+        "no keep rule passed"
+    );
+}
+
+#[test]
+fn the_permission_file_and_the_service_agree_that_no_wake_lock_boot_start_or_battery_exemption_exists()
+ {
+    let listed = listed_permissions(PERMISSION_LIST);
+    for forbidden in [
+        "android.permission.WAKE_LOCK",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+    ] {
+        assert!(!listed.contains(&forbidden), "{forbidden} is listed");
+        assert!(
+            FORBIDDEN_PERMISSIONS.contains(&forbidden),
+            "{forbidden} is not on the forbidden list"
+        );
+    }
+    for needed in [
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
+        "android.permission.POST_NOTIFICATIONS",
+    ] {
+        assert!(listed.contains(&needed), "{needed} is not listed");
     }
 }

@@ -386,6 +386,10 @@ pub fn run() {
     // draw their own chrome and have no native menu at all (D-01, D-14).
     #[cfg(target_os = "macos")]
     let builder = builder.enable_macos_default_menu(false).menu(menu::build);
+    // Android: the in-app plugin through which Rust and the Kotlin side of the app talk (the foreground service that keeps
+    // sessions alive in the background). It has no command, so the page cannot call it.
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(android::plugin::init());
 
     // The exit events can come more than once (a requested exit, then the exit itself): the shutdown runs once.
     let mut ended = false;
@@ -430,6 +434,10 @@ pub fn run() {
             // `wsh` finds the app through a socket in a folder only this user can enter; every pane started from now on
             // gets its address and this run's secret. Without a socket the app works the same, `wsh` just has nothing to talk to.
             start_ipc(app.handle(), &core);
+            // Android: the foreground service that keeps shells and connections alive in the background is told how many
+            // there are, and its `Stop all` ends them.
+            #[cfg(target_os = "android")]
+            android::service::start(core.clone());
             // The scheduled sync: a first run shortly after the start, then every five minutes. It does nothing while sync
             // is off, and a failure is only the state the page shows.
             let background = core.clone();
