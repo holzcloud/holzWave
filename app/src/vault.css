@@ -9,31 +9,32 @@
 
 :root { --vault-target: max(44px, calc(44rem / 12)); }
 
-/* ---- the chip ---------------------------------------------------------------------------------------- */
+/* ---- the chip ----------------------------------------------------------------------------------------
+   The id is in the selectors so that they win over the phone strip's own button rule (`#phone-top button`). */
 
-.vault-chip {
+#vault-chip.vault-chip {
   -webkit-appearance: none; appearance: none; box-sizing: border-box; display: inline-flex; align-items: center; flex: none;
   gap: .417rem; min-width: var(--vault-target); min-height: var(--vault-target); margin: 0; padding: 0 .75rem;
   border: 1px solid var(--hw-line); border-radius: 999px; background: none; color: var(--hw-dim); font-family: inherit;
   white-space: nowrap; cursor: pointer; user-select: none; -webkit-user-select: none;
 }
-.vault-chip[data-state="locked"] { border-color: var(--hw-rose); color: var(--hw-rose); }
-.vault-chip[data-state="none"] { border-style: dashed; }
-.vault-chip:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
-.vault-chip:active { background: var(--hw-rose-wash); }
+#vault-chip.vault-chip[data-state="locked"] { border-color: var(--hw-rose); color: var(--hw-rose); }
+#vault-chip.vault-chip[data-state="none"] { border-style: dashed; }
+#vault-chip.vault-chip:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+#vault-chip.vault-chip:active { background: var(--hw-rose-wash); }
 .vault-glyph { flex: none; width: .75rem; height: .833rem; }
 /* The chip of the phone sits at the right end of the strip, with room to its right edge. */
-#phone-chip .vault-chip { margin-right: .167rem; }
+#phone-chip #vault-chip.vault-chip { margin-right: .167rem; }
 
 /* ---- the sheet and the dialogs ------------------------------------------------------------------------ */
 
 .dlg-backdrop.vault-backdrop { align-items: flex-end; }
-.dlg.vault-box { max-width: none; font-size: calc(14rem / 12); }
-.dlg.vault-sheet {
+.dlg.settings.vault-box { max-width: none; font-size: calc(14rem / 12); }
+.dlg.settings.vault-sheet {
   width: 100%; max-height: 85%; border-width: 1px 0 0; border-radius: 8px 8px 0 0;
   padding: 1rem .833rem calc(1rem + env(safe-area-inset-bottom, 0px));
 }
-.dlg.vault-lost, .dlg.vault-off { width: min(560px, calc(100vw - 1.667rem)); }
+.dlg.settings.vault-lost, .dlg.settings.vault-off { width: min(560px, calc(100vw - 1.667rem)); }
 .vault-box .dlg-title { font-size: calc(15rem / 12); }
 .vault-line { margin: 0 0 .667rem; color: var(--hw-ink-2); line-height: 1.5; overflow-wrap: anywhere; }
 .vault-quiet { margin: .5rem 0 0; color: var(--hw-dim); line-height: 1.4; min-height: 1.4em; overflow-wrap: anywhere; }
@@ -42,17 +43,17 @@
 
 /* The buttons of the vault: a solid rose one for the act, a plain one to leave; both 44 px. The dialogs' base rule resets buttons, so
    these are more specific. */
-.dlg.vault-box button, .vault-notice button {
+.dlg.settings.vault-box button, .vault-notice button {
   -webkit-appearance: none; appearance: none; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center;
   min-width: var(--vault-target); min-height: var(--vault-target); margin: 0; padding: 0 1rem; border: 1px solid var(--hw-line);
   border-radius: 6px; background: none; color: var(--hw-ink-2); font: inherit; font-size: calc(14rem / 12); cursor: pointer;
 }
-.dlg.vault-box button.vault-solid, .vault-notice button.vault-solid {
+.dlg.settings.vault-box button.vault-solid, .vault-notice button.vault-solid {
   background: var(--hw-rose-deep); border-color: var(--hw-rose-deep); color: var(--hw-on-accent); font-weight: 700;
 }
-.dlg.vault-box button.vault-text, .vault-notice button.vault-text { border-color: transparent; }
-.dlg.vault-box button:disabled { opacity: .6; cursor: default; }
-.dlg.vault-box button:focus-visible, .vault-notice button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.dlg.settings.vault-box button.vault-text, .vault-notice button.vault-text { border-color: transparent; }
+.dlg.settings.vault-box button:disabled { opacity: .6; cursor: default; }
+.dlg.settings.vault-box button:focus-visible, .vault-notice button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
 
 /* ---- what the page shows over the stage --------------------------------------------------------------- */
 
@@ -92,10 +93,10 @@
 /* ---- forced colours: system colours; the padlock, the word and the dashes stay ------------------------- */
 
 @media (forced-colors: active) {
-  :root .vault-chip { border-color: CanvasText; color: CanvasText; }
-  :root .vault-chip[data-state="locked"] { border-width: 2px; border-color: Highlight; }
-  :root .vault-notice, :root .dlg.vault-box { border-color: CanvasText; }
-  :root .dlg.vault-box button.vault-solid, :root .vault-notice button.vault-solid { border-color: Highlight; }
+  :root #vault-chip.vault-chip { border-color: CanvasText; color: CanvasText; }
+  :root #vault-chip.vault-chip[data-state="locked"] { border-width: 2px; border-color: Highlight; }
+  :root .vault-notice, :root .dlg.settings.vault-box { border-color: CanvasText; }
+  :root .dlg.settings.vault-box button.vault-solid, :root .vault-notice button.vault-solid { border-color: Highlight; }
   :root .dlg .vault-switch { border-color: CanvasText; color: CanvasText; }
   :root .dlg .vault-switch[data-on="true"] { border-width: 2px; border-color: Highlight; }
 }
