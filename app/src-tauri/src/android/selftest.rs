@@ -16,16 +16,27 @@
 //! file `selftest-canary` in the app's private folder, from which the emulator script reads it with `run-as`; it is never
 //! printed and never logged, and the script then searches for it in the app's files, the log and the process's environment,
 //! where it must not be found.
+//!
+//! The steps `tls-public`, `tls-untrusted`, `sync-save`, `sync-paused` and `sync-resume` run the two real network clients of the
+//! core (the WebDAV client of the sync and the client of the AI chat) against a public site and against a server with a
+//! self-signed certificate that the emulator script starts on the Mac (the emulator's name for the Mac is `10.0.2.2`). They show
+//! that the platform certificate verifier judges certificates, and that a locked vault pauses the sync and lets it run at the
+//! unlock. What they print about a failed request is the text of the client's own error (a fixed phrase or the transport's
+//! message, which holds no header, body, certificate or secret) cleaned to printable ASCII and cut short.
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use holzwave_core::ai::http::{Call, Framing, Http, HttpConfig, NetworkPolicy, Target};
 use holzwave_core::ai::profiles::KeySlot;
+use holzwave_core::ai::provider::{AiError, CancelToken, Flow};
 use holzwave_core::secrets::SecretStore;
+use holzwave_core::sync::webdav::{Backend, WebDav};
 use holzwave_core::vault::{Clock, LostReason, Protection, VaultError, VaultState, VaultStore};
 use holzwave_host::ai_host::ProfileInputMsg;
+use holzwave_host::commands::vault::vault_unlock;
 use holzwave_host::keystore_wire::RecentsMode;
 use holzwave_host::locked::is_locked;
 use holzwave_host::seams::Host;
@@ -45,7 +56,104 @@ const PROFILE_NAME: &str = "Selftest";
 /// The key the AI-key steps save. It is not a real key and it is not the canary.
 const AI_KEY: &str = "HW-SELFTEST-AI-KEY";
 
+/// A public site every network has, for the positive check of the verifier. The address is a constant of this debug module and
+/// not a setting. Nothing but a request without a body or a secret is sent to it.
+const PUBLIC_URL: &str = "https://example.com/";
+/// The emulator's name for the Mac, where the script runs a TLS server with a self-signed certificate on this port.
+const UNTRUSTED_URL: &str = "https://10.0.2.2:8443/";
+/// The sync account the steps save: the same server, a folder below it.
+const SYNC_ENDPOINT: &str = "https://10.0.2.2:8443/dav";
+const SYNC_USER: &str = "selftest";
+/// What the clients send to a server that is not the app's own: a dummy account, never a secret.
+const DUMMY_USER: &str = "selftest";
+const DUMMY_PASSWORD: &str = "selftest-dummy";
+/// The names of the sync's secrets and the file of its account, as `host/src/sync.rs` writes them (the host's own tests spell
+/// them the same way): the steps put an account in place the way a successful save would have, because a save against a server
+/// whose certificate is refused rolls itself back.
+const SYNC_PASSWORD_ACCOUNT: &str = "sync:password";
+const SYNC_PASSPHRASE_ACCOUNT: &str = "sync:passphrase";
+const SYNC_FILE: &str = "sync.json";
+
 type Outcome = Result<String, String>;
+
+/// How a request of one of the network clients ended.
+enum Reach {
+    /// The server answered at the HTTP level (any status): the handshake succeeded, so the certificate was accepted.
+    Answered(String),
+    /// The certificate was refused.
+    Certificate(String),
+    /// Anything else: no route, a refused connection, a time-out, the verifier not set up.
+    Other(String),
+}
+
+impl Reach {
+    fn is_answer(&self) -> bool {
+        matches!(self, Reach::Answered(_))
+    }
+
+    fn is_certificate(&self) -> bool {
+        matches!(self, Reach::Certificate(_))
+    }
+
+    fn text(&self) -> &str {
+        match self {
+            Reach::Answered(t) | Reach::Certificate(t) | Reach::Other(t) => t,
+        }
+    }
+}
+
+/// Printable ASCII only and at most 160 characters, so a client's text can go to the log as one line.
+fn clean(text: &str) -> String {
+    text.chars().map(|c| if c.is_ascii_graphic() || c == ' ' { c } else { '?' }).take(160).collect()
+}
+
+/// The text of a failure, sorted: a refused certificate, an answer of the server (a status the client reports as an error), or
+/// another failure.
+fn classify(text: &str) -> Reach {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("certificate") {
+        Reach::Certificate(clean(text))
+    } else if lower.contains("the server answered") || lower.contains("the server refused the user name") {
+        Reach::Answered(clean(text))
+    } else {
+        Reach::Other(clean(text))
+    }
+}
+
+/// The sync client against `url`: a PROPFIND of the folder, the cheapest call the client has.
+fn sync_reach(url: &str) -> Reach {
+    let Ok(backend) = WebDav::new(url, DUMMY_USER, DUMMY_PASSWORD) else { return Reach::Other("the client was refused its address".into()) };
+    match backend.list("") {
+        Ok(_) => Reach::Answered("the folder was listed".into()),
+        Err(e) => classify(&e.to_string()),
+    }
+}
+
+/// The AI client against `url`: a POST of an empty JSON object to the root, which no provider answers with anything but a
+/// status. The body of an answer is read and dropped; nothing of it is kept or printed.
+fn ai_reach(url: &str) -> Reach {
+    let Ok(target) = Target::parse(url, false) else { return Reach::Other("the address was refused".into()) };
+    let http = Http::new(HttpConfig::standard());
+    let call = Call::new(&target, NetworkPolicy::new(false, false), "/", b"{}", Framing::Sse);
+    match http.post_stream(&call, &mut |_frame| Flow::Continue, &CancelToken::new()) {
+        Ok(_) => Reach::Answered("answered".into()),
+        // Errors that exist only after the server answered.
+        Err(
+            AiError::Auth(_)
+            | AiError::RateLimited { .. }
+            | AiError::Overloaded
+            | AiError::ContextLength
+            | AiError::ContentFilter
+            | AiError::InvalidRequest(_)
+            | AiError::Protocol(_)
+            | AiError::Server { .. },
+        ) => Reach::Answered("answered with an error status or a body the adapter cannot read".into()),
+        Err(e) => {
+            let text = e.to_string();
+            if text.to_ascii_lowercase().contains("the server answered") { Reach::Answered(clean(&text)) } else { classify(&text) }
+        }
+    }
+}
 
 fn fail<T>(reason: &str) -> Result<T, String> {
     Err(reason.to_owned())
@@ -233,7 +341,118 @@ impl Steps {
                 self.expect_protection(Protection::Plain)?;
                 self.recents(false)
             }
+            // The platform verifier accepts what the system trusts: both clients reach a public site.
+            "tls-public" => {
+                let (sync, ai) = (sync_reach(PUBLIC_URL), ai_reach(PUBLIC_URL));
+                if !sync.is_answer() {
+                    return Err(format!("the sync client got no answer from the public site: {}", sync.text()));
+                }
+                if !ai.is_answer() {
+                    return Err(format!("the AI client got no answer from the public site: {}", ai.text()));
+                }
+                Ok(format!("sync client: {}; AI client: {}", sync.text(), ai.text()))
+            }
+            // And it refuses what the system does not trust: both clients refuse the self-signed certificate.
+            "tls-untrusted" => {
+                let (sync, ai) = (sync_reach(UNTRUSTED_URL), ai_reach(UNTRUSTED_URL));
+                if sync.is_answer() || ai.is_answer() {
+                    return fail("a client accepted a self-signed certificate");
+                }
+                if !sync.is_certificate() {
+                    return Err(format!("the sync client failed, but not as a refused certificate: {}", sync.text()));
+                }
+                if !ai.is_certificate() {
+                    return Err(format!("the AI client failed, but not as a refused certificate: {}", ai.text()));
+                }
+                Ok(format!("sync client: {}; AI client: {}", sync.text(), ai.text()))
+            }
+            // The vault is unlocked. A save through the real path is refused for the certificate and keeps nothing; then the
+            // account a successful save would have left is put in place, for the restart that follows.
+            "sync-save" => self.sync_save(),
+            // After a restart with the vault locked: the sync is paused, with no error text.
+            "sync-paused" => self.sync_paused(),
+            // The unlock (the system prompt, answered by the script) starts one run, which reaches the untrusted server.
+            "sync-resume" => self.sync_resume(),
             _ => fail("an unknown step"),
+        }
+    }
+
+    /// The account of the sync steps: the password and the passphrase are the canary, so the canary scan covers them too.
+    fn sync_save(&self) -> Outcome {
+        self.expect_state(VaultState::Unlocked)?;
+        let canary = match self.canary() {
+            Ok(text) => text,
+            Err(_) => {
+                // The first step that needs it makes it, the same file the vault steps use.
+                let text = canary_text();
+                std::fs::write(self.data_dir.join(CANARY_FILE), &text).map_err(|_| "the canary file could not be written".to_owned())?;
+                text
+            }
+        };
+        match self.core.sync_save(SYNC_ENDPOINT, SYNC_USER, &canary, &canary) {
+            Ok(_) => return fail("a save against a server with a refused certificate was accepted"),
+            Err(text) if text.to_ascii_lowercase().contains("certificate") => {}
+            Err(text) => return Err(format!("the save failed, but not as a refused certificate: {}", clean(&text.replace(&canary, "<canary>")))),
+        }
+        if self.core.sync_status().configured {
+            return fail("a refused save left an account behind");
+        }
+        self.vault.set(SYNC_PASSWORD_ACCOUNT, &canary).map_err(|_| "the password could not be saved".to_owned())?;
+        self.vault.set(SYNC_PASSPHRASE_ACCOUNT, &canary).map_err(|_| "the passphrase could not be saved".to_owned())?;
+        let account = json!({ "endpoint": SYNC_ENDPOINT, "user": SYNC_USER });
+        std::fs::write(self.data_dir.join(SYNC_FILE), account.to_string()).map_err(|_| "the account file could not be written".to_owned())?;
+        Ok("the save was refused as a certificate error and kept nothing; the account is in place for the restart".into())
+    }
+
+    fn sync_paused(&self) -> Outcome {
+        self.expect_state(VaultState::Locked)?;
+        let deadline = Instant::now() + Duration::from_secs(40);
+        loop {
+            let view = self.core.sync_status();
+            if !view.configured {
+                return fail("the account was not found after the restart");
+            }
+            if view.state == "paused" {
+                return if view.error.is_none() { Ok("state=paused, no error text".into()) } else { fail("paused, but with an error text") };
+            }
+            if view.state == "error" || view.state == "syncing" {
+                return Err(format!("the sync ran while the vault was locked (state={})", view.state));
+            }
+            if Instant::now() >= deadline {
+                return fail("the sync did not become paused within 40 seconds");
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
+    fn sync_resume(&self) -> Outcome {
+        if self.core.sync_status().state != "paused" {
+            return fail("the sync was not paused before the unlock");
+        }
+        vault_unlock(&self.core).map_err(|e| format!("the unlock failed: {e}"))?;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let view = self.core.sync_status();
+            match view.state {
+                "paused" | "syncing" => {}
+                "error" => {
+                    let text = view.error.unwrap_or_default();
+                    let lower = text.to_ascii_lowercase();
+                    return if lower.contains("certificate") {
+                        Ok(format!("one run started at the unlock and the server's certificate was refused: {}", clean(&text)))
+                    } else if lower.contains("secret") || lower.contains("keychain") || lower.contains("locked") || lower.contains("missing") {
+                        Err(format!("the run failed for a missing secret: {}", clean(&text)))
+                    } else {
+                        Err(format!("the run failed, but not as a refused certificate: {}", clean(&text)))
+                    };
+                }
+                "idle" => return fail("the run ended as a success: the certificate was accepted"),
+                _ => return fail("the sync is in an unexpected state"),
+            }
+            if Instant::now() >= deadline {
+                return fail("the sync stayed paused or syncing for 20 seconds after the unlock");
+            }
+            std::thread::sleep(Duration::from_millis(250));
         }
     }
 
