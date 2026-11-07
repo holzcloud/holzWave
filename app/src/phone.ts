@@ -70,6 +70,8 @@ interface Ui {
   paneRows: HTMLButtonElement[];
   /** The keyed lists' last rendering of the shown tab's active index, so the bottom bar scrolls only when it changed. */
   shownTab: number;
+  /** The captions and lists that later modules added with `addSheetRow`, so they can be made again. */
+  extra: HTMLElement[];
 }
 
 let ui: Ui | null = null;
@@ -171,10 +173,61 @@ function build(): Ui {
   title.addEventListener("click", () => openSheet(title));
   navSheet.addEventListener("click", () => openSheet(navSheet));
 
-  return {
+  const made: Ui = {
     top, title, workspace, tab, count, nav, navTabs, navPlus, navSheet, scrim, sheet, pills, pillPlus, tabsCap, tabsList,
-    panesCap, panesList, sheetClose, navItems: [], pillItems: [], tabRows: [], paneRows: [], shownTab: -1,
+    panesCap, panesList, sheetClose, navItems: [], pillItems: [], tabRows: [], paneRows: [], shownTab: -1, extra: [],
   };
+  mountExtraRows(made);
+  return made;
+}
+
+// ---- rows that a later module adds to the sheet -----------------------------------------------------
+
+/** A row of a group that another module owns (the file hand-over's two rows): its caption, its words and what a tap does. */
+interface SheetRow {
+  caption: string;
+  label: string;
+  run: () => void;
+}
+
+const extraRows: SheetRow[] = [];
+
+/**
+ * Add a row to the sheet, in the group named `caption` (the first row of a caption makes the group, after the panes and before
+ * the footer). A tap closes the sheet and then runs `run`; the focus is left where it is, because what runs may open a system
+ * dialog. The sheet exists on the phone only and is made again when the class changes, so the rows are kept here and put in each
+ * time it is made. Nothing is drawn on a tablet or a desktop.
+ */
+export function addSheetRow(caption: string, label: string, run: () => void): void {
+  extraRows.push({ caption, label, run });
+  if (ui) mountExtraRows(ui);
+}
+
+/** Make the groups of the added rows again, so a row added after the sheet was made shows and none shows twice. */
+function mountExtraRows(g: Ui): void {
+  for (const node of g.extra) node.remove();
+  g.extra = [];
+  const lists = new Map<string, HTMLElement>();
+  for (const row of extraRows) {
+    let list = lists.get(row.caption);
+    if (!list) {
+      const cap = el("div", "label phone-cap");
+      cap.textContent = row.caption;
+      list = el("div", "phone-list");
+      list.setAttribute("role", "group");
+      list.setAttribute("aria-label", row.caption);
+      g.sheet.insertBefore(cap, g.sheetClose);
+      g.sheet.insertBefore(list, g.sheetClose);
+      g.extra.push(cap, list);
+      lists.set(row.caption, list);
+    }
+    const node = button("phone-row", list);
+    el("span", "phone-row-name", node).textContent = row.label;
+    node.addEventListener("click", () => {
+      closeSheet("none");
+      row.run();
+    });
+  }
 }
 
 /** Remove everything `build` made, and anything the sheet changed on the page. */
@@ -409,6 +462,10 @@ export async function initPhone(): Promise<void> {
   await setLayout(layoutClass(facts()));
   window.addEventListener("resize", onResize);
   window.addEventListener("orientationchange", onResize);
-  // The vault's chip, sheet and notices exist on Android only, and the module is not fetched anywhere else.
-  if (state.os === "android") void import("./vault.js").then((m) => m.initVault()).catch(() => {});
+  // The vault's chip, sheet and notices, and the file hand-over's entries, exist on Android only, and neither module is fetched
+  // anywhere else.
+  if (state.os === "android") {
+    void import("./vault.js").then((m) => m.initVault()).catch(() => {});
+    void import("./handover.js").then((m) => m.initHandover()).catch(() => {});
+  }
 }
