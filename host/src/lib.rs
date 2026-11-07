@@ -23,6 +23,7 @@ pub mod ranges;
 pub mod seams;
 pub mod state;
 pub mod sync;
+pub mod tls_ready;
 pub mod windows;
 pub mod wsh_tunnel;
 

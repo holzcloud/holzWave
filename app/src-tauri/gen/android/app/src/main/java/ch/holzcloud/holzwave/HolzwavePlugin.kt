@@ -57,6 +57,9 @@ class RecentsArgs {
  * it starts the service while the app is visible and the counts are not both zero, updates it while it runs, and stops it
  * when both are zero. The action `Stop all` of the notification comes back through [requestStopAll].
  *
+ * Making it also sets up the platform certificate verifier ([initTls]) that both network clients of the core use, whose Kotlin
+ * component is the Gradle dependency `org.rustls:rustls-platform-verifier`.
+ *
  * It also carries the secret store's platform half: the commands `keystore*` create, use and remove the wrapping key in the
  * Android Keystore ([KeystoreBridge]), `elapsedRealtime` is the clock that counts the time the phone slept, and
  * `recentsHidden` hides the app's picture in the app switcher.
@@ -73,7 +76,19 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
 
   init {
     instance = this
+    // The certificate verifier of the platform is handed the application context once, before any network code can run: this
+    // class is made from the Rust side's setup, which is before the first sync run or AI request is possible. A second call
+    // (a restarted activity makes the class again) finds it set up and changes nothing. A failure is never fatal and never
+    // loosens a check: the Rust side keeps its readiness flag unset and every HTTPS request is refused as `tls_not_ready`.
+    try {
+      initTls(host.applicationContext)
+    } catch (e: Throwable) {
+      Log.e(TAG, "the platform certificate verifier could not be set up; HTTPS requests are refused")
+    }
   }
+
+  /** Implemented in Rust (`src/android/tls.rs`): gives the certificate verifier the application context. */
+  private external fun initTls(context: Context)
 
   // ---- the secret store's platform half ------------------------------------------------------------------------------
   // Every failure is one fixed word (the `code` of the rejection); the message is the same word, never text the system gave.

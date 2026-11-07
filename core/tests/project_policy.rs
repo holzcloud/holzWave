@@ -146,6 +146,11 @@ const WORKSPACE_ALLOWLIST: &[(&str, &[Dependency])] = &[
                  dependency sits in the macOS target table so Windows, Linux and mobile builds never compile it",
             ),
             (
+                "jni",
+                "the platform certificate verifier on Android needs a JNI environment of the same crate version to receive the \
+                 Android context once (android/tls.rs); already in the lock file through the verifier, Android target table only",
+            ),
+            (
                 "objc2",
                 "autorelease pool around the macOS pasteboard calls (clipboard.rs); already in the lock file through tao and \
                  muda, macOS target table only",

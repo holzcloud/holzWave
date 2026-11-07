@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Dependency verification for the one artifact that does not come from Google's repository or Maven Central: the Kotlin component
+     of the platform certificate verifier, a prebuilt Maven artifact that the verifier project publishes on GitHub. Its version is
+     the one of the Rust crate rustls-platform-verifier-android in Cargo.lock; when the crate is updated this file is updated in
+     the same commit (the build refuses an artifact with another checksum, and a text test of the repository compares the version
+     here with the lock file). The sums below are the SHA-256 of the files at that version, taken from a fresh download and
+     compared with the SHA-1 files the project publishes next to them.
+
+     Every other artifact is trusted as before: the trusted-artifacts rule trusts every group except org.rustls. -->
+<verification-metadata xmlns="https://schema.gradle.org/dependency-verification"
+                       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                       xsi:schemaLocation="https://schema.gradle.org/dependency-verification https://schema.gradle.org/dependency-verification/dependency-verification-1.3.xsd">
+   <configuration>
+      <verify-metadata>true</verify-metadata>
+      <verify-signatures>false</verify-signatures>
+      <trusted-artifacts>
+         <trust group="^(?!org\.rustls$).*" regex="true"/>
+      </trusted-artifacts>
+   </configuration>
+   <components>
+      <component group="org.rustls" name="rustls-platform-verifier" version="0.2.0">
+         <artifact name="rustls-platform-verifier-0.2.0.aar">
+            <sha256 value="aa021794230fbc2f0be355999e2cf67398dd563de066a2e17001ffbd0b69101b" origin="SHA-256 of the file downloaded from the project's maven archive; its published SHA-1 is 28b6b316c2749a7c94b4d19061f12c64759a0e27"/>
+         </artifact>
+         <artifact name="rustls-platform-verifier-0.2.0.pom">
+            <sha256 value="78dcb69a1a20e91e72017de9a67104bba1874a7ecc8e6dcdfb2fe1a85de6b362" origin="SHA-256 of the file downloaded from the project's maven archive; its published SHA-1 is dddf73207ac799537f9a47153ef0b953141dd140"/>
+         </artifact>
+      </component>
+   </components>
+</verification-metadata>

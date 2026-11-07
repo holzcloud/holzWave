@@ -340,8 +340,16 @@ fn build_type_problems(gradle: &str, manifest: &str) -> Vec<String> {
         Some(debug) if debug.contains("isDebuggable = true") => {}
         _ => problems.push("the debug build type is not debuggable (run-as and the emulator proof need it)".into()),
     }
+    // The Kotlin component of the platform certificate verifier brings a network security config of its own, which allows plain
+    // HTTP to the hosts of the revocation lists. The main manifest takes that attribute out, and the marker that does it is the
+    // one place the word may appear; naming a config (setting the attribute) stays in the debug source set.
+    const REMOVE_MARKER: &str = "tools:remove=\"android:networkSecurityConfig\"";
+    if !manifest.contains(REMOVE_MARKER) {
+        problems.push(format!("the main manifest does not carry {REMOVE_MARKER}: the verifier component's own network security config would reach the release"));
+    }
+    let without_marker = manifest.replace(REMOVE_MARKER, "");
     for needle in ["usesCleartextTraffic", "networkSecurityConfig"] {
-        if manifest.contains(needle) {
+        if without_marker.contains(needle) {
             problems.push(format!("the main manifest names {needle}: it belongs to the debug source set only"));
         }
     }
@@ -498,6 +506,10 @@ fn build_type_check_fails_on_bad_input() {
     assert!(!build_type_problems(APP_GRADLE, &in_main).is_empty());
     let netsec = MANIFEST.replace("<application", "<application android:networkSecurityConfig=\"@xml/network_security_config\"");
     assert!(!build_type_problems(APP_GRADLE, &netsec).is_empty());
+    let kept_marker = MANIFEST.replace("<application", "<application android:networkSecurityConfig=\"@xml/network_security_config\"");
+    assert!(!build_type_problems(APP_GRADLE, &kept_marker).is_empty(), "the marker does not excuse an attribute that sets a config");
+    let no_marker = MANIFEST.replace("tools:remove=\"android:networkSecurityConfig\"", "");
+    assert!(!build_type_problems(APP_GRADLE, &no_marker).is_empty(), "without the marker the verifier's own config reaches the release");
 }
 
 #[test]

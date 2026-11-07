@@ -158,6 +158,13 @@ impl AiFault {
         AiFault { code: "no_such_pane", reason: None, text: "that pane is not open".to_owned() }
     }
 
+    /// The platform certificate verifier is not set up, so no HTTPS request can be judged (Android only; the word is
+    /// [`crate::tls_ready::NOT_READY`]). The chat shows it as a network failure.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub(crate) fn tls_not_ready(word: &'static str) -> AiFault {
+        AiFault { code: "network", reason: Some(word), text: "the secure connection is not ready".to_owned() }
+    }
+
     /// An offer without picked items, or picked items without an offer.
     pub fn bad_pick() -> AiFault {
         context_fault(ContextRefusal::BadPick)
@@ -928,6 +935,8 @@ impl AppCore {
         model: Option<String>,
     ) -> Result<TicketView, AiFault> {
         self.open_pane(pane)?;
+        #[cfg(target_os = "android")]
+        crate::tls_ready::require().map_err(AiFault::tls_not_ready)?;
         self.refuse_if_vault_locked(profile.as_deref())?;
         self.ai().send(conversation, text, pane, profile, model)
     }
@@ -978,6 +987,8 @@ impl AppCore {
         picked: Vec<u32>,
     ) -> Result<TicketView, AiFault> {
         self.open_pane(pane)?;
+        #[cfg(target_os = "android")]
+        crate::tls_ready::require().map_err(AiFault::tls_not_ready)?;
         self.refuse_if_vault_locked(profile.as_deref())?;
         self.ai().send_with_offer(conversation, text, pane, profile, model, offer, picked)
     }

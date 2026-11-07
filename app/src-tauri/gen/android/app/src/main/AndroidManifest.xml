@@ -20,12 +20,18 @@
          template's AndroidTV lines (the leanback feature and launcher category) and its file provider, which shared the
          whole external storage and the cache and which nothing used, are removed: a terminal is not a TV app, and an
          unused component is attack surface. Cleartext traffic is allowed in the debug source set only (src/debug). -->
+    <!-- The Kotlin component of the platform certificate verifier brings its own manifest, which names a network security
+         config that allows plain HTTP to the hosts of the certificate authorities' revocation lists. The app takes the
+         attribute out: its release build allows no cleartext at all, and the verifier then asks for revocation as a soft
+         failure only (it never makes a chain valid that the system trust store refuses; online revocation over HTTP is
+         simply not done). -->
     <application
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
-        android:theme="@style/Theme.holzwave_app">
+        android:theme="@style/Theme.holzwave_app"
+        tools:remove="android:networkSecurityConfig">
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
             android:launchMode="singleTask"

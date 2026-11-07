@@ -15,3 +15,5 @@ pub mod plugin;
 #[cfg(all(target_os = "android", debug_assertions))]
 pub mod selftest;
 pub mod service;
+#[cfg(target_os = "android")]
+pub mod tls;

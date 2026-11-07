@@ -37,6 +37,7 @@
 //! - [`exec`]: the local runner of the agent's command tool: a separate process, a scrubbed environment, bounded output.
 //! - [`winshell`]: the PowerShell prompt wrapper that announces the directory, and the Windows reading of its OSC 7.
 //! - [`wshinstall`]: the one explicit act that puts the bundled `wsh` on a Linux host reached over SSH, and verifies it.
+//! - `platform_tls` (Android only): the one-time set-up of the certificate verifier both network clients use.
 
 pub mod ai;
 pub mod attention;
@@ -58,6 +59,8 @@ pub mod local_network;
 pub mod pane;
 pub mod persist;
 pub mod platform;
+#[cfg(target_os = "android")]
+pub mod platform_tls;
 pub mod pool;
 pub mod preview;
 pub mod profiles;

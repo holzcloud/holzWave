@@ -29,6 +29,13 @@ serde_json = "1"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 holzwave-core = { path = "../../core", features = ["keyring"] }
 
+# The platform certificate verifier of Android (src/android/tls.rs): its Rust half needs a JNI environment of the same crate
+# version the Kotlin component is called through, so the app names `jni` to hand it the Android context once. The version is the one
+# the lock file already holds for the verifier, pinned with `=` like every other direct dependency; the table is Android only, so
+# no other platform compiles or locks it differently. No TLS code of ours: the verifier is the one rustls already uses.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "=0.22.4"
+
 # The on-device model of macOS. The table is macOS only, so Windows, Linux and mobile builds (iOS is another target OS) never
 # compile Swift. The crate links Apple's framework weakly, and a library crate's link arguments do not reach the crates that
 # depend on it, so the build script of this crate repeats them (build.rs).

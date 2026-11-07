@@ -2118,3 +2118,353 @@ fn the_secret_store_check_fails_on_bad_input() {
     let nothing: Vec<(String, String)> = Vec::new();
     assert!(!ok(&nothing, KEYSTORE_KT, PLUGIN_KT, ANDROID_MOD_RS, &gradle).is_empty(), "no sources passed");
 }
+
+// ---- HTTPS on Android: the platform certificate verifier, its Kotlin component and its set-up ------------------------------
+
+const TLS_RS: &str = include_str!("../src/android/tls.rs");
+const APP_CARGO_TOML: &str = include_str!("../Cargo.toml");
+const CORE_CARGO_TOML: &str = include_str!("../../../core/Cargo.toml");
+const HOST_CARGO_TOML: &str = include_str!("../../../host/Cargo.toml");
+const CARGO_LOCK: &str = include_str!("../../../Cargo.lock");
+const VERIFICATION_METADATA: &str = include_str!("../gen/android/gradle/verification-metadata.xml");
+
+/// The place the verifier project publishes the Kotlin component, as a Maven repository.
+const VERIFIER_REPOSITORY: &str =
+    "https://github.com/rustls/rustls-platform-verifier/raw/maven-archive/android-release-support/maven/";
+
+/// The versions that `Cargo.lock` holds for the package `name`.
+fn lock_versions(lock: &str, name: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut lines = lock.lines();
+    while let Some(line) = lines.next() {
+        if line.trim() == format!("name = \"{name}\"")
+            && let Some(version) = lines.next().and_then(|next| next.trim().strip_prefix("version = \""))
+        {
+            found.push(version.trim_end_matches('"').to_owned());
+        }
+    }
+    found
+}
+
+/// The text between the first `"` after `marker` and the next one.
+fn quoted_after<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
+    let rest = &text[text.find(marker)? + marker.len()..];
+    let rest = &rest[rest.find('"')? + 1..];
+    Some(&rest[..rest.find('"')?])
+}
+
+/// The words that would make a request succeed against a certificate the system's trust store refuses, or that would bring a
+/// second set of trust roots. None may be in the code of the shell, the host or the core: the platform verifier is the only one.
+const TRUST_BYPASS_WORDS: &[&str] = &[
+    ".dangerous()",
+    "DangerousClientConfig",
+    "impl ServerCertVerifier",
+    "client::danger",
+    "with_root_certificates",
+    "with_custom_certificate_verifier",
+    "webpki_roots",
+    "webpki-roots",
+    "RootCerts::WebPki",
+    "RootCerts::Specific",
+    "native_certs",
+    "danger_accept_invalid",
+    "accept_invalid_certs",
+    "add_root_certificate",
+    "tls_built_in_root_certs",
+    "tls_built_in_webpki_certs",
+    "disable_verification",
+];
+
+/// What the Gradle files, the lock, the rules and the sources must say for HTTPS to work on Android and to be judged by the
+/// platform and by nothing else, one sentence per problem. `app_gradle_dir` is the folder of the Gradle project of the app,
+/// used to resolve the relative path to the lock file, which must name the real `Cargo.lock`.
+#[allow(clippy::too_many_arguments)]
+fn tls_problems(
+    app_gradle: &str,
+    app_gradle_dir: &Path,
+    rules: &str,
+    lock: &str,
+    verification: &str,
+    plugin_kt: &str,
+    tls_rs: &str,
+    app_manifest: &str,
+    other_manifests: &[(&str, &str)],
+    sources: &[(String, String)],
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let gradle = source_code(app_gradle);
+    // The repository: the verifier project's own, asked for its own group only.
+    if !gradle.contains(&format!("uri(\"{VERIFIER_REPOSITORY}\")")) {
+        problems.push("the Gradle project does not name the verifier project's Maven repository".into());
+    }
+    if !gradle.contains("includeGroup(\"org.rustls\")") {
+        problems.push("the verifier repository is not limited to the group org.rustls".into());
+    }
+    if gradle.matches("maven {").count() != 1 || gradle.contains("jitpack") || gradle.contains("mavenLocal") {
+        problems.push("the app's Gradle file names a repository besides the verifier's".into());
+    }
+    // The version of the component is read from the lock file, so the Kotlin and the Rust half cannot drift.
+    if !gradle.contains("const val CRATE_NAME = \"rustls-platform-verifier-android\"") {
+        problems.push("the version source does not read the crate rustls-platform-verifier-android".into());
+    }
+    if !gradle.contains("useVersion(rustlsPlatformVerifierVersion.get())")
+        || !gradle.contains("requested.group == \"org.rustls\" && requested.name == \"rustls-platform-verifier\"")
+    {
+        problems.push("the dependency's version is not taken from the lock file by the resolution rule".into());
+    }
+    match quoted_after(&gradle, "parameters.lockFile.set(layout.projectDirectory.file(") {
+        None => problems.push("the version source has no path to the lock file".into()),
+        Some(relative) => {
+            let resolved = app_gradle_dir.join(relative);
+            let expected = repository_root().join("Cargo.lock");
+            match (resolved.canonicalize(), expected.canonicalize()) {
+                (Ok(got), Ok(want)) if got == want => {}
+                _ => problems.push(format!("the path {relative:?} from the Gradle project does not resolve to the repository's Cargo.lock")),
+            }
+        }
+    }
+    // The dependency has no version of its own, and the group is the one the repository serves (`org.rustls`).
+    let dependency_lines: Vec<&str> = gradle.lines().filter(|line| line.contains("rustls-platform-verifier\"")).collect();
+    if !dependency_lines.iter().any(|line| line.trim() == "implementation(\"org.rustls:rustls-platform-verifier\")") {
+        problems.push("the dependency org.rustls:rustls-platform-verifier is not declared without a version".into());
+    }
+    if gradle.contains("org.rustls:rustls-platform-verifier:") || gradle.contains("\"rustls:rustls-platform-verifier") {
+        problems.push("the verifier dependency has a static version or the wrong group".into());
+    }
+    // The shrinker keeps the component and the native method.
+    if !rules.contains("-keep, includedescriptorclasses class org.rustls.platformverifier.** { *; }") {
+        problems.push("the rules do not keep the verifier component".into());
+    }
+    let native_rule = rules.find("-keepclasseswithmembernames class ch.holzcloud.holzwave.HolzwavePlugin").map(|at| &rules[at..]);
+    if !native_rule.is_some_and(|rule| rule[..rule.find('}').unwrap_or(rule.len())].contains("native <methods>;")) {
+        problems.push("the rules do not keep the name of the native method of HolzwavePlugin".into());
+    }
+    // The lock names the Android crate, and the checksums of that version are pinned.
+    let versions = lock_versions(lock, "rustls-platform-verifier-android");
+    match versions.as_slice() {
+        [version] => {
+            let component = format!("<component group=\"org.rustls\" name=\"rustls-platform-verifier\" version=\"{version}\">");
+            match verification.find(&component) {
+                None => problems.push(format!("the verification metadata has no component for version {version}, the one in Cargo.lock")),
+                Some(at) => {
+                    let block = &verification[at..at + verification[at..].find("</component>").unwrap_or(0)];
+                    for file in [format!("rustls-platform-verifier-{version}.aar"), format!("rustls-platform-verifier-{version}.pom")] {
+                        let pinned = block.find(&format!("<artifact name=\"{file}\">")).is_some_and(|start| {
+                            let rest = &block[start..];
+                            let sum = quoted_after(rest, "<sha256 value=");
+                            sum.is_some_and(|sum| sum.len() == 64 && sum.bytes().all(|b| b.is_ascii_hexdigit()))
+                        });
+                        if !pinned {
+                            problems.push(format!("the verification metadata does not pin a SHA-256 for {file}"));
+                        }
+                    }
+                }
+            }
+        }
+        other => problems.push(format!("Cargo.lock holds {} versions of rustls-platform-verifier-android, not one: {other:?}", other.len())),
+    }
+    if verification.matches("<trust ").count() != 1 || !verification.contains("<trust group=\"^(?!org\\.rustls$).*\" regex=\"true\"/>") {
+        problems.push("the verification metadata does not trust every group but org.rustls, and nothing else".into());
+    }
+    if !verification.contains("<verify-metadata>true</verify-metadata>") {
+        problems.push("the verification metadata does not verify the pom".into());
+    }
+    // The Kotlin side: one native method, called when the plugin is made, whose failure is not fatal.
+    let plugin = source_code(plugin_kt);
+    if !plugin.contains("private external fun initTls(context: Context)") {
+        problems.push("HolzwavePlugin does not declare the native method initTls(context)".into());
+    }
+    match plugin.find("initTls(host.applicationContext)") {
+        None => problems.push("HolzwavePlugin never calls initTls with the application context".into()),
+        Some(at) => {
+            let before = &plugin[..at];
+            let try_at = before.rfind("try {");
+            let init_at = before.rfind("init {");
+            if try_at.is_none() || init_at.is_none() || try_at < init_at || !plugin[at..].contains("catch (e: Throwable)") {
+                problems.push("initTls is not called inside a try block in the init block of the plugin".into());
+            }
+        }
+    }
+    // The Rust side: the exported name, the one call, the flag set only on success, the exception cleared on failure.
+    let rust = source_code(tls_rs);
+    if !rust.contains("#[jni_mangle(\"ch.holzcloud.holzwave.HolzwavePlugin\", \"initTls\")]") {
+        problems.push("tls.rs does not export Java_ch_holzcloud_holzwave_HolzwavePlugin_initTls".into());
+    }
+    match (rust.find("platform_tls::init_with_env(env, context)"), rust.find("Ok(()) => {"), rust.find("tls_ready::global().set()"), rust.find("Err(_) => {")) {
+        (Some(call), Some(ok), Some(set), Some(err)) if call < ok && ok < set && set < err => {}
+        _ => problems.push("tls.rs does not set the readiness flag in the success arm of the one call, before the failure arm".into()),
+    }
+    if rust.matches("tls_ready::global().set()").count() != 1 {
+        problems.push("the readiness flag is set in more than one place".into());
+    }
+    if !rust.contains("exception_clear()") {
+        problems.push("tls.rs does not clear a pending Java exception after a failed set-up".into());
+    }
+    if rust.contains("unsafe") {
+        problems.push("tls.rs has a line with the unsafe keyword".into());
+    }
+    // The dependencies: jni only, exactly pinned to the version the lock holds for the verifier, Android only.
+    let jni_in_lock = lock_versions(lock, "jni");
+    let table = "[target.'cfg(target_os = \"android\")'.dependencies]";
+    match app_manifest.find(table) {
+        None => problems.push("the app manifest has no Android-only dependency table".into()),
+        Some(at) => {
+            let rest = &app_manifest[at + table.len()..];
+            let body = &rest[..rest.find("\n[").unwrap_or(rest.len())];
+            let names: Vec<&str> = body.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).filter_map(|l| l.split('=').next()).map(str::trim).collect();
+            if names != ["jni"] {
+                problems.push(format!("the Android-only table names {names:?}, not only jni"));
+            }
+            let pin = quoted_after(body, "jni = ").unwrap_or("");
+            let wanted = jni_in_lock.iter().find(|v| v.starts_with("0.22.")).cloned().unwrap_or_default();
+            if pin != format!("={wanted}") || wanted.is_empty() {
+                problems.push(format!("jni is pinned as {pin:?}, not exactly the 0.22 version the lock holds ({wanted:?})"));
+            }
+        }
+    }
+    let outside = app_manifest.replace(table, "");
+    let outside_jni = outside.lines().filter(|l| l.trim_start().starts_with("jni")).count();
+    if outside_jni != 1 {
+        problems.push(format!("jni appears {outside_jni} times in the app manifest outside comments, not once"));
+    }
+    for (name, manifest) in other_manifests {
+        if manifest.lines().any(|l| l.trim_start().starts_with("jni") || l.trim_start().starts_with("rustls-platform-verifier-android")) {
+            problems.push(format!("{name} names jni or the Android verifier crate: only the app does"));
+        }
+    }
+    if !app_manifest.contains("tauri = ") || app_manifest.lines().any(|l| l.trim_start().starts_with("tauri-plugin-")) {
+        problems.push("the app manifest names a tauri-plugin crate".into());
+    }
+    // Nothing in the code bypasses the platform's judgment or brings another set of roots.
+    for (path, text) in sources {
+        let code = source_code(text);
+        for word in TRUST_BYPASS_WORDS {
+            if code.contains(word) {
+                problems.push(format!("{path} contains {word:?}"));
+            }
+        }
+    }
+    problems
+}
+
+/// The sources of the shell, the host and the core, without their tests, as `(path, text)`.
+fn tls_sources() -> Vec<(String, String)> {
+    fn walk(dir: &Path, out: &mut Vec<(String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                out.push((path.display().to_string(), text));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for dir in ["app/src-tauri/src", "host/src", "core/src"] {
+        walk(&repository_root().join(dir), &mut out);
+    }
+    out
+}
+
+fn tls_check(
+    mutate: impl Fn(&mut TlsInputs),
+) -> Vec<String> {
+    let mut inputs = TlsInputs {
+        app_gradle: include_str!("../gen/android/app/build.gradle.kts").to_owned(),
+        rules: APP_RULES.to_owned(),
+        lock: CARGO_LOCK.to_owned(),
+        verification: VERIFICATION_METADATA.to_owned(),
+        plugin_kt: PLUGIN_KT.to_owned(),
+        tls_rs: TLS_RS.to_owned(),
+        app_manifest: APP_CARGO_TOML.to_owned(),
+        sources: tls_sources(),
+    };
+    mutate(&mut inputs);
+    let gradle_dir = project_root().join("app");
+    tls_problems(
+        &inputs.app_gradle,
+        &gradle_dir,
+        &inputs.rules,
+        &inputs.lock,
+        &inputs.verification,
+        &inputs.plugin_kt,
+        &inputs.tls_rs,
+        &inputs.app_manifest,
+        &[("core/Cargo.toml", CORE_CARGO_TOML), ("host/Cargo.toml", HOST_CARGO_TOML)],
+        &inputs.sources,
+    )
+}
+
+struct TlsInputs {
+    app_gradle: String,
+    rules: String,
+    lock: String,
+    verification: String,
+    plugin_kt: String,
+    tls_rs: String,
+    app_manifest: String,
+    sources: Vec<(String, String)>,
+}
+
+#[test]
+fn https_on_android_is_the_platform_verifier_with_its_kotlin_component_set_up_once() {
+    assert_none("tls", tls_check(|_| {}));
+}
+
+#[test]
+fn the_sources_searched_for_a_trust_bypass_are_the_real_ones() {
+    let sources = tls_sources();
+    assert!(sources.len() > 50, "the sources were found: {}", sources.len());
+    for needed in ["core/src/ai/http.rs", "core/src/sync/webdav.rs", "app/src-tauri/src/android/tls.rs", "host/src/sync.rs"] {
+        assert!(sources.iter().any(|(path, _)| path.replace('\\', "/").ends_with(needed)), "{needed} is searched");
+    }
+    // Both clients choose the platform verifier, which is the thing the scan protects.
+    let http = &sources.iter().find(|(p, _)| p.ends_with("core/src/ai/http.rs")).expect("http.rs").1;
+    let webdav = &sources.iter().find(|(p, _)| p.ends_with("core/src/sync/webdav.rs")).expect("webdav.rs").1;
+    assert!(http.contains("with_platform_verifier()"));
+    assert!(webdav.contains("RootCerts::PlatformVerifier"));
+}
+
+#[test]
+fn the_tls_check_fails_on_bad_input() {
+    let version = lock_versions(CARGO_LOCK, "rustls-platform-verifier-android").remove(0);
+    let cases: Vec<(&str, Box<dyn Fn(&mut TlsInputs)>)> = vec![
+        ("no repository", Box::new(|i| i.app_gradle = i.app_gradle.replace(VERIFIER_REPOSITORY, "https://example.invalid/"))),
+        ("repository for every group", Box::new(|i| i.app_gradle = i.app_gradle.replace("includeGroup(\"org.rustls\")", ""))),
+        ("a second repository", Box::new(|i| i.app_gradle.push_str("\nrepositories { maven { url = uri(\"https://example.invalid/\") } }\n"))),
+        ("a static version", Box::new(|i| i.app_gradle = i.app_gradle.replace("\"org.rustls:rustls-platform-verifier\"", "\"org.rustls:rustls-platform-verifier:0.1.0\""))),
+        ("the wrong group", Box::new(|i| i.app_gradle = i.app_gradle.replace("implementation(\"org.rustls:", "implementation(\"rustls:"))),
+        ("no dependency", Box::new(|i| i.app_gradle = i.app_gradle.replace("implementation(\"org.rustls:rustls-platform-verifier\")", ""))),
+        ("a path to no lock file", Box::new(|i| i.app_gradle = i.app_gradle.replace("../../../../../Cargo.lock", "../../../../Cargo.lock"))),
+        ("another crate read", Box::new(|i| i.app_gradle = i.app_gradle.replace("const val CRATE_NAME = \"rustls-platform-verifier-android\"", "const val CRATE_NAME = \"x\""))),
+        ("no rule for the component", Box::new(|i| i.rules = i.rules.replace("org.rustls.platformverifier", "org.other"))),
+        ("no rule for the native method", Box::new(|i| i.rules = i.rules.replace("native <methods>;", ""))),
+        ("a lock without the crate", Box::new(|i| i.lock = i.lock.replace("name = \"rustls-platform-verifier-android\"", "name = \"other\""))),
+        ("another version in the metadata", Box::new(move |i| i.verification = i.verification.replace(&format!("version=\"{version}\""), "version=\"9.9.9\""))),
+        ("a short checksum", Box::new(|i| i.verification = i.verification.replace("aa021794230fbc2f", "aa02179"))),
+        ("everything trusted", Box::new(|i| i.verification = i.verification.replace("^(?!org\\.rustls$).*", ".*"))),
+        ("no call of initTls", Box::new(|i| i.plugin_kt = i.plugin_kt.replace("initTls(host.applicationContext)", "Unit"))),
+        ("no native declaration", Box::new(|i| i.plugin_kt = i.plugin_kt.replace("private external fun initTls(context: Context)", ""))),
+        ("an unguarded call", Box::new(|i| i.plugin_kt = i.plugin_kt.replace("catch (e: Throwable)", "catch (e: IllegalStateException)"))),
+        ("another exported name", Box::new(|i| i.tls_rs = i.tls_rs.replace("\"initTls\"", "\"init\""))),
+        ("a flag set before the call", Box::new(|i| i.tls_rs = i.tls_rs.replace("Err(_) => {", "Err(_) => {\n holzwave_host::tls_ready::global().set();"))),
+        ("no exception cleared", Box::new(|i| i.tls_rs = i.tls_rs.replace("env.exception_clear();", ""))),
+        ("an unsafe line", Box::new(|i| i.tls_rs.push_str("\nunsafe fn x() {}\n"))),
+        ("jni outside the Android table", Box::new(|i| i.app_manifest = i.app_manifest.replace("[target.'cfg(target_os = \"android\")'.dependencies]\njni = \"=0.22.4\"", "[dependencies]\njni = \"=0.22.4\""))),
+        ("jni with a range", Box::new(|i| i.app_manifest = i.app_manifest.replace("jni = \"=0.22.4\"", "jni = \"0.22\""))),
+        ("a second Android dependency", Box::new(|i| i.app_manifest = i.app_manifest.replace("jni = \"=0.22.4\"", "jni = \"=0.22.4\"\nrustls-platform-verifier = \"0.7.1\""))),
+        ("a tauri plugin", Box::new(|i| i.app_manifest.push_str("\ntauri-plugin-x = \"1\"\n"))),
+        ("a custom verifier", Box::new(|i| i.sources.push(("x.rs".into(), "let c = builder.dangerous();".into())))),
+        ("webpki roots", Box::new(|i| i.sources.push(("x.rs".into(), "use webpki_roots::TLS_SERVER_ROOTS;".into())))),
+        ("an accept-all setting", Box::new(|i| i.sources.push(("x.rs".into(), "client.danger_accept_invalid_certs(true);".into())))),
+    ];
+    for (what, mutate) in &cases {
+        assert!(!tls_check(mutate).is_empty(), "{what} passed");
+    }
+    // Comments may talk about these things.
+    let commented = tls_check(|i| i.sources.push(("x.rs".into(), "// no webpki_roots and no .dangerous() here\n".into())));
+    assert!(commented.is_empty(), "{commented:?}");
+}

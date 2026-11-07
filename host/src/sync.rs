@@ -294,6 +294,8 @@ impl SyncRuntime {
     }
 
     fn once(&self, account: &Account) -> Result<Report, Fault> {
+        #[cfg(target_os = "android")]
+        crate::tls_ready::require().map_err(Fault::from)?;
         let password = self.secrets.get(PASSWORD).map_err(Fault::of)?.ok_or("The app password is missing from the keychain.")?;
         let passphrase = self.secrets.get(PASSPHRASE).map_err(Fault::of)?.ok_or("The passphrase is missing from the keychain.")?;
         let backend = WebDav::new(&account.endpoint, &account.user, &password).map_err(Fault::of)?;

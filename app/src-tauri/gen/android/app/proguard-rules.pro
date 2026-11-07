@@ -32,3 +32,13 @@
 -keep @app.tauri.annotation.InvokeArg class ch.holzcloud.holzwave.** {
   *;
 }
+
+# The one native method of the class (`initTls`, in Rust: src/android/tls.rs) is found by the exact name the Java Native Interface
+# derives from the class and the method; a renamed method would never be linked and every HTTPS request would be refused.
+-keepclasseswithmembernames class ch.holzcloud.holzwave.HolzwavePlugin {
+  native <methods>;
+}
+
+# The Kotlin component of the platform certificate verifier is called from Rust through the JNI by class and method name, which
+# the shrinker cannot see (the rule is the one the verifier project gives).
+-keep, includedescriptorclasses class org.rustls.platformverifier.** { *; }
