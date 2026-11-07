@@ -125,15 +125,21 @@ function build(): Row {
   return { root, keys };
 }
 
-/** Put the row where the design has it: directly above the bottom bar on the phone, at the bottom of the window on the tablet. */
+/** Put the row where the design has it: directly above the bottom bar on the phone, directly above the status line on the tablet.
+ *  The row is moved in the document, not only drawn there with `order`, so the reading and tab order is the order on the screen. */
 function place(layout: Layout): void {
   const app = document.getElementById("app");
   if (!app || !row) return;
   const nav = document.getElementById("phone-nav");
   if (layout === "phone" && nav) {
     if (row.root.parentElement !== app || row.root.nextElementSibling !== nav) app.insertBefore(row.root, nav);
-  } else if (row.root.parentElement !== app || row.root !== app.lastElementChild) {
-    app.append(row.root);
+  } else {
+    const status = document.getElementById("status");
+    if (status && status.parentElement === app) {
+      if (row.root.parentElement !== app || row.root.nextElementSibling !== status) app.insertBefore(row.root, status);
+    } else if (row.root.parentElement !== app || row.root !== app.lastElementChild) {
+      app.append(row.root);
+    }
   }
 }
 

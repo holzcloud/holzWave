@@ -346,16 +346,18 @@ async function tabletCase(page, url) {
   await openPhone(page, url, { width: 1280, height: 800, screen: [1280, 800] });
   assert.equal(await page.evaluate(() => document.documentElement.classList.contains("layout-tablet")), true);
   const where = await page.evaluate(() => ({
-    last: document.getElementById("app").lastElementChild.id,
+    ids: [...document.getElementById("app").children].map((n) => n.id),
     nav: document.getElementById("phone-nav") !== null,
     vvh: document.documentElement.style.getPropertyValue("--hw-vvh"),
     row: document.getElementById("keyrow").getBoundingClientRect().toJSON(),
+    status: document.getElementById("status").getBoundingClientRect().toJSON(),
     h: innerHeight,
   }));
-  assert.equal(where.last, "keyrow", "the row is at the bottom of the window");
+  assert.deepEqual(where.ids.slice(-2), ["keyrow", "status"], "the row is directly above the status line, the last strip of the window");
   assert.equal(where.nav, false, "the tablet has no phone bar");
   assert.equal(where.vvh, "800px");
-  assert.ok(Math.abs(where.row.bottom - where.h) <= 1, "and touches the bottom edge");
+  assert.ok(Math.abs(where.row.bottom - where.status.top) <= 1, "and touches the status line");
+  assert.ok(Math.abs(where.status.bottom - where.h) <= 1, "which touches the bottom edge");
   await clearCalls(page);
   await page.locator('#keyrow [data-key="tab"]').click();
   assert.deepEqual(await keys(page), stroke("Tab"));

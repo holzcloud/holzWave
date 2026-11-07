@@ -1,5 +1,5 @@
 // The tablet layout: the desktop window with the changes a finger needs (44 px controls, a 24 px divider area, no tear-off, the key row at the
-// bottom, the height that follows the keyboard) and the phone and the desktop that stay as they were. An Android WebView, a real tablet, split
+// bottom of the window above the status line, the height that follows the keyboard) and the phone and the desktop that stay as they were. An Android WebView, a real tablet, split
 // screen, a hardware keyboard and a finger on a 24 px divider are NOT used: the platform is mocked (`app_info` answers `android`), the screen is
 // 1280 by 800 and the touches are synthetic pointer events, in desktop Chromium and WebKit.
 import assert from "node:assert/strict";
@@ -262,13 +262,16 @@ async function keyboardCase(page, url) {
   await openTablet(page, url);
   const where = await page.evaluate(() => ({
     row: document.getElementById("keyrow").getBoundingClientRect().toJSON(),
+    status: document.getElementById("status").getBoundingClientRect().toJSON(),
     stage: document.getElementById("stage").getBoundingClientRect().toJSON(),
-    last: document.getElementById("app").lastElementChild.id,
+    ids: [...document.getElementById("app").children].map((n) => n.id),
     h: innerHeight,
   }));
-  assert.equal(where.last, "keyrow", "the key row is the last element of the window");
+  // The design (section 6.6 and tablet.png) puts the row directly above the status line, which is the last strip of the window.
+  assert.deepEqual(where.ids.slice(-2), ["keyrow", "status"], "the key row is the strip right before the status line, which is last");
   assert.ok(where.row.top >= where.stage.bottom - 1, "below the stage");
-  assert.ok(where.row.bottom <= where.h + 1 && Math.abs(where.row.bottom - where.h) <= 1, "inside the viewport, at the bottom");
+  assert.ok(Math.abs(where.row.bottom - where.status.top) <= 1, "directly above the status line");
+  assert.ok(Math.abs(where.status.bottom - where.h) <= 1, "the status line is at the bottom edge of the viewport");
 
   // The on-screen keyboard takes height: the window follows the visual viewport and stays the tablet layout.
   const stageBefore = where.stage.height;
@@ -280,10 +283,11 @@ async function keyboardCase(page, url) {
     h: document.getElementById("app").getBoundingClientRect().height,
     stage: document.getElementById("stage").getBoundingClientRect().height,
     row: document.getElementById("keyrow").getBoundingClientRect().toJSON(),
+    statusH: document.getElementById("status").getBoundingClientRect().height,
   }));
   assert.ok(Math.abs(app.h - 500) <= 1, `the window is the visible 500 px (${app.h})`);
   assert.ok(app.stage < stageBefore - 250, "the stage is shorter by what the keyboard took");
-  assert.ok(app.row.bottom <= 501, "the key row is still inside the visible part");
+  assert.ok(app.row.bottom <= 501 - app.statusH + 1, "the key row is still inside the visible part, above the status line");
 
   // A key of a hardware keyboard hides the row; the rest of the layout stays.
   await page.keyboard.press("b");

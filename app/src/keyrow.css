@@ -10,8 +10,7 @@
   --key-target: max(44px, calc(44rem / 12));
 }
 
-/* The tablet's window is the page's full height; the phone's is set in phone.css. Both follow the visual viewport while the keyboard is up. */
-:root.layout-tablet #app { height: var(--hw-vvh, 100%); }
+/* The window's height follows the visual viewport while the keyboard is up: phone.css sets it for the phone and tablet.css for the tablet. */
 
 #keyrow {
   box-sizing: border-box; display: flex; flex: none; align-items: stretch; gap: .5rem; min-width: 0;
