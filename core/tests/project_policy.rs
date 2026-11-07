@@ -476,6 +476,13 @@ const PERMITTED_HITS: &[(&str, &str, &str)] = &[
          and asks the system resolver for the addresses of a host name; it opens no socket and listens on none",
     ),
     (
+        "core/src/reach.rs",
+        "std::net",
+        "the address types of the standard library: the file tells a local address from a public one and asks the system \
+         resolver for the addresses of a host name before a connection of the SSH, sync or chat code; it opens no socket \
+         and listens on none",
+    ),
+    (
         "core/src/integrate/args.rs",
         "std::net",
         "`IpAddr` only as the standard library's own address parser, to tell a node given as an IP literal from a host \
