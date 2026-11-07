@@ -13,6 +13,8 @@
 //!   vault commands drive).
 //! - While the vault is protected, the picture of the app in the app switcher is hidden ([`AndroidHost::sync_recents`]):
 //!   the host follows the vault's protection and tells the plugin when it changes. See [`holzwave_host::keystore_wire::recents_hidden`].
+//! - The single-file hand-over has the system's document dialogs ([`AndroidPicker`], over the plugin); the host only names the
+//!   dialogs, the names, limits and paths of a hand-over are decided in `holzwave_host::handover`.
 //! - Everything else is what a platform without the feature answers: no permission source for the local network, a text
 //!   size of 100, no limits, and the address of the file scheme from `files_protocol` (on Android the `http://holzfile.localhost/`
 //!   form).
@@ -25,9 +27,10 @@ use holzwave_core::secrets::SecretStore;
 use holzwave_core::vault::VaultStore;
 use holzwave_host::keystore_wire::{RecentsAnswer, recents_from_wire, recents_hidden, recents_to_wire};
 use holzwave_host::local_network::{Source, Unsupported};
-use holzwave_host::seams::{Host, HostLimits, Platform, PrivateDirs};
+use holzwave_host::seams::{FilePicker, Host, HostLimits, Platform, PrivateDirs};
 
 use crate::android::keystore::{AndroidClock, AndroidKeystore, Bridge};
+use crate::android::picker::AndroidPicker;
 
 /// The name of the shell's own folder inside the app's data directory.
 pub const HOME_FOLDER: &str = "home";
@@ -224,6 +227,11 @@ impl Host for AndroidHost {
     fn private_dirs(&self) -> Option<PrivateDirs> {
         Some(self.dirs.clone())
     }
+
+    /// The system's document dialogs, through the plugin: the picker of the single-file hand-over.
+    fn file_picker(&self) -> Option<Arc<dyn FilePicker>> {
+        Some(Arc::new(AndroidPicker::new(self.bridge.clone())))
+    }
 }
 
 #[cfg(test)]
@@ -325,6 +333,37 @@ mod tests {
         if cfg!(target_os = "android") {
             assert_eq!(host.file_url("abc"), "http://holzfile.localhost/abc");
         }
+    }
+
+    #[test]
+    fn the_host_has_the_document_dialogs_and_a_hand_over_runs_through_the_plugin() {
+        use crate::android::picker::{PICK_IN, SAVE_OUT};
+        use holzwave_host::handover::{self, Outcome};
+        let scratch = Scratch::new("picker");
+        let (host, recorder) = host_in(&scratch);
+        let picker = host.file_picker().expect("a picker on Android");
+        let home = host.private_dirs().expect("the folders").home;
+        // The person leaves the dialog: nothing is copied and no staging file stays in the folder.
+        recorder.answer(PICK_IN, Ok(json!({ "kind": "cancelled" })));
+        assert_eq!(handover::import(&home, picker.as_ref()), Outcome::Cancelled);
+        let calls = recorder.payloads(PICK_IN);
+        assert_eq!(calls.len(), 1);
+        let staging = std::path::PathBuf::from(calls[0]["staging_path"].as_str().expect("a staging path"));
+        assert!(staging.starts_with(home.join(handover::FOLDER)), "the staging file is inside the hand-over folder: {staging:?}");
+        assert_eq!(calls[0]["max_bytes"], json!(handover::MAX_HANDOVER_BYTES));
+        assert!(!staging.exists(), "the staging file is gone after a cancel");
+        // A plugin that fails every call is one fixed failure, and a copy out of a file that is not there never reaches it.
+        assert_eq!(handover::import(&home, picker.as_ref()), Outcome::Cancelled, "the last scripted answer stays");
+        assert_eq!(handover::export(&home, "missing.bin", picker.as_ref()), Outcome::Failed);
+        assert_eq!(recorder.count(SAVE_OUT), 0);
+        // A file of the shell's folder goes out with its real path and the cleaned name.
+        std::fs::write(home.join("a.bin"), b"abc").expect("a file");
+        recorder.answer(SAVE_OUT, Ok(json!({ "kind": "done", "size": 3 })));
+        assert!(matches!(handover::export(&home, "a.bin", picker.as_ref()), Outcome::Done { size: 3, .. }));
+        let sent = recorder.payloads(SAVE_OUT);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["suggested_name"], json!("a.bin"));
+        assert!(std::path::Path::new(sent[0]["source_path"].as_str().expect("a source path")).ends_with("a.bin"));
     }
 
     #[test]

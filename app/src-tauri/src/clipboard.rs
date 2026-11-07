@@ -9,7 +9,9 @@
 //!
 //! A text is never logged and never put into an error here: the answers of a failure are fixed words.
 
-/// The most bytes a clipboard text may have, in either direction (the paste limit of the core).
+/// The most bytes a clipboard text may have, in either direction (the paste limit of the core). Android has the lower bound
+/// below and does not use this one.
+#[cfg_attr(target_os = "android", allow(dead_code))]
 pub const MAX_BYTES: usize = 16 * 1024 * 1024;
 
 /// The most bytes a clipboard text may have on Android, in either direction. The system clipboard lives in another process and
@@ -33,6 +35,7 @@ pub fn check_len_for(len: usize, limit: usize) -> Result<(), String> {
 }
 
 /// Whether a text of `len` bytes may cross the boundary, with the bound of the core.
+#[cfg_attr(target_os = "android", allow(dead_code))]
 pub fn check_len(len: usize) -> Result<(), String> {
     check_len_for(len, MAX_BYTES)
 }
@@ -164,7 +167,7 @@ fn marked_of(answer: &serde_json::Value) -> Result<bool, String> {
 
 #[cfg(any(target_os = "android", test))]
 fn android_read(call: Call<'_>) -> Result<String, String> {
-    text_of(&call(READ, &serde_json::json!({}))?)
+    text_of(&call(READ, &serde_json::json!({ "max_bytes": ANDROID_MAX_BYTES }))?)
 }
 
 #[cfg(any(target_os = "android", test))]
@@ -262,10 +265,10 @@ mod tests {
         }
 
         #[test]
-        fn a_read_asks_for_nothing_and_takes_only_a_text_with_its_mark() {
+        fn a_read_passes_the_bound_and_takes_only_a_text_with_its_mark() {
             let plugin = Plugin::new(Ok(json!({ "text": "ls -l", "sensitive": false })));
             assert_eq!(android_read(&plugin.call()), Ok("ls -l".to_owned()));
-            assert_eq!(*plugin.seen.borrow(), vec![("clipboardRead".to_owned(), json!({}))]);
+            assert_eq!(*plugin.seen.borrow(), vec![("clipboardRead".to_owned(), json!({ "max_bytes": 524_288 }))]);
             // An empty clip is the empty text.
             let empty = Plugin::new(Ok(json!({ "text": "", "sensitive": false })));
             assert_eq!(android_read(&empty.call()), Ok(String::new()));

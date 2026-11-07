@@ -2468,3 +2468,164 @@ fn the_tls_check_fails_on_bad_input() {
     let commented = tls_check(|i| i.sources.push(("x.rs".into(), "// no webpki_roots and no .dangerous() here\n".into())));
     assert!(commented.is_empty(), "{commented:?}");
 }
+
+// ---- the single-file hand-over and the clipboard: the system's own dialogs, no storage permission, no grant kept --------------
+
+const FILES_KT: &str =
+    include_str!("../gen/android/app/src/main/java/ch/holzcloud/holzwave/HolzwaveFiles.kt");
+
+/// The permissions that would let the app read the shared storage, the media of other apps or the list of installed apps. A copy
+/// goes through the system's own document dialog, which needs none of them.
+const STORAGE_PERMISSIONS: &[&str] = &[
+    "READ_EXTERNAL_STORAGE",
+    "WRITE_EXTERNAL_STORAGE",
+    "MANAGE_EXTERNAL_STORAGE",
+    "READ_MEDIA_IMAGES",
+    "READ_MEDIA_VIDEO",
+    "READ_MEDIA_AUDIO",
+    "READ_MEDIA_VISUAL_USER_SELECTED",
+    "QUERY_ALL_PACKAGES",
+];
+
+/// What the project must say about handing one file over, one sentence per problem. No manifest names a storage or media
+/// permission or a `provider` element; nothing in the project opens a folder dialog or keeps a grant to a document; only a
+/// `content` address from the dialog is used; the two dialogs and the clipboard are asked for in the code; the code never
+/// turns a clip into text by `coerceToText`, never listens for changes of the clipboard and never logs.
+fn file_dialog_problems(files: &[(String, String)], plugin_kt: &str, files_kt: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (name, manifest) in manifests(files) {
+        for tag in tags(manifest) {
+            if tag.name == "provider" {
+                problems.push(format!("{name} declares a provider element"));
+            }
+            if tag.name.starts_with("uses-permission")
+                && let Some(permission) = tag.attr("android:name")
+                && STORAGE_PERMISSIONS.iter().any(|word| permission.ends_with(word))
+            {
+                problems.push(format!("{name} asks for {permission}"));
+            }
+        }
+    }
+    for (path, text) in files {
+        for word in ["takePersistableUriPermission", "ACTION_OPEN_DOCUMENT_TREE"] {
+            if text.contains(word) {
+                problems.push(format!("{path} contains {word}: a folder or a kept grant is what the hand-over does without"));
+            }
+        }
+    }
+    let plugin = source_code(plugin_kt);
+    let files_code = source_code(files_kt);
+    for needed in ["Intent.ACTION_OPEN_DOCUMENT)", "Intent.ACTION_CREATE_DOCUMENT)", "Intent.CATEGORY_OPENABLE"] {
+        if !plugin.contains(needed) {
+            problems.push(format!("the plugin does not use {needed}"));
+        }
+    }
+    if !plugin.contains("EXTRA_ALLOW_MULTIPLE, false") {
+        problems.push("the open dialog does not say one document".into());
+    }
+    if !files_code.contains("uri.scheme == ContentResolver.SCHEME_CONTENT") {
+        problems.push("a result of the dialog is not limited to a content address".into());
+    }
+    if plugin.matches("HolzwaveFiles.isContent(uri)").count() != 2 {
+        problems.push("both dialog results are not checked for a content address".into());
+    }
+    if !files_code.contains("EXTRA_IS_SENSITIVE") || !files_code.contains("Build.VERSION.SDK_INT >= 33") {
+        problems.push("a copied text is not marked sensitive from Android 13, guarded by the version".into());
+    }
+    if !files_code.contains("clip.getItemAt(0).text") || !files_code.contains("MIMETYPE_TEXT_PLAIN") {
+        problems.push("the clipboard is not read as the plain text of its first item".into());
+    }
+    for (path, text) in own_kotlin(files) {
+        let code = source_code(text);
+        for word in ["coerceToText", "addPrimaryClipChangedListener", "htmlText", "getItemAt(0).uri", "getItemAt(0).intent"] {
+            if code.contains(word) {
+                problems.push(format!("{path} uses {word}: the clipboard is plain text only and nobody listens to it"));
+            }
+        }
+    }
+    if files_code.contains("Log.") || files_code.contains("println") || files_code.contains("printStackTrace") {
+        problems.push("the file and clipboard code logs".into());
+    }
+    problems
+}
+
+#[test]
+fn the_hand_over_uses_the_system_dialogs_and_asks_for_no_storage_permission_and_keeps_no_grant() {
+    let files = project_text();
+    assert!(
+        files.iter().any(|(path, _)| path.ends_with("HolzwaveFiles.kt")),
+        "the project's file code was found"
+    );
+    assert_none("hand-over", file_dialog_problems(&files, PLUGIN_KT, FILES_KT));
+    // The permission list still has the lines it had before the dialogs: nothing was added for them.
+    let listed = listed_permissions(PERMISSION_LIST);
+    assert_eq!(listed.len(), 5, "{listed:?}");
+}
+
+#[test]
+fn the_hand_over_check_fails_on_bad_input() {
+    let files = project_text();
+    assert!(file_dialog_problems(&files, PLUGIN_KT, FILES_KT).is_empty(), "the project passes");
+    // A storage or media permission in any manifest of the project.
+    for word in STORAGE_PERMISSIONS {
+        let mut more = files.clone();
+        more.push((
+            "app/src/main/AndroidManifest.xml".into(),
+            format!("<manifest><uses-permission android:name=\"android.permission.{word}\" /></manifest>"),
+        ));
+        assert!(!file_dialog_problems(&more, PLUGIN_KT, FILES_KT).is_empty(), "{word} passed");
+    }
+    // A provider element.
+    let mut provider = files.clone();
+    provider.push((
+        "app/src/debug/AndroidManifest.xml".into(),
+        "<manifest><application><provider android:name=\"x\" /></application></manifest>".into(),
+    ));
+    assert!(!file_dialog_problems(&provider, PLUGIN_KT, FILES_KT).is_empty(), "a provider passed");
+    // A folder dialog and a kept grant, in code or in a comment.
+    for text in [
+        "val i = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)",
+        "// no ACTION_OPEN_DOCUMENT_TREE",
+        "resolver.takePersistableUriPermission(uri, 1)",
+    ] {
+        let mut more = files.clone();
+        more.push(("app/src/main/java/ch/holzcloud/holzwave/Other.kt".into(), format!("package x\n{text}\n")));
+        assert!(!file_dialog_problems(&more, PLUGIN_KT, FILES_KT).is_empty(), "{text} passed");
+    }
+    // The dialogs or their limits taken out.
+    for (from, to) in [
+        ("Intent.ACTION_OPEN_DOCUMENT)", "Intent.ACTION_GET_CONTENT)"),
+        ("Intent.ACTION_CREATE_DOCUMENT)", "Intent.ACTION_SEND)"),
+        ("Intent.CATEGORY_OPENABLE", "Intent.CATEGORY_DEFAULT"),
+        ("EXTRA_ALLOW_MULTIPLE, false", "EXTRA_ALLOW_MULTIPLE, true"),
+        ("HolzwaveFiles.isContent(uri)", "true"),
+    ] {
+        let changed = PLUGIN_KT.replace(from, to);
+        assert!(!file_dialog_problems(&files, &changed, FILES_KT).is_empty(), "{from} passed");
+    }
+    // The content address check, the sensitive mark, the plain text read, a log of a text.
+    for (from, to) in [
+        ("uri.scheme == ContentResolver.SCHEME_CONTENT", "uri.scheme != null"),
+        ("Build.VERSION.SDK_INT >= 33", "true"),
+        ("clip.getItemAt(0).text", "clip.getItemAt(0).coerceToText(null)"),
+        ("ClipDescription.MIMETYPE_TEXT_PLAIN", "ClipDescription.MIMETYPE_TEXT_HTML"),
+    ] {
+        let changed = FILES_KT.replace(from, to);
+        assert!(!file_dialog_problems(&files, PLUGIN_KT, &changed).is_empty(), "{from} passed");
+    }
+    let logs = format!("{FILES_KT}\nfun leak(t: String) {{ Log.d(\"x\", t) }}\n");
+    assert!(!file_dialog_problems(&files, PLUGIN_KT, &logs).is_empty(), "a log passed");
+    let mut listener = files.clone();
+    listener.push((
+        "app/src/main/java/ch/holzcloud/holzwave/Other.kt".into(),
+        "package x\nclipboard.addPrimaryClipChangedListener(l)\n".into(),
+    ));
+    assert!(!file_dialog_problems(&listener, PLUGIN_KT, FILES_KT).is_empty(), "a listener passed");
+    // A comment may name the words the code does not use.
+    let mut commented = files.clone();
+    commented.push((
+        "app/src/main/java/ch/holzcloud/holzwave/Other.kt".into(),
+        "package x\n// never coerceToText, never a listener\n".into(),
+    ));
+    assert!(file_dialog_problems(&commented, PLUGIN_KT, FILES_KT).is_empty(), "a comment about the words passed as bad");
+}

@@ -17,6 +17,11 @@
 //! printed and never logged, and the script then searches for it in the app's files, the log and the process's environment,
 //! where it must not be found.
 //!
+//! The steps `handover-in`, `handover-out` and `clipboard-roundtrip` run the single-file hand-over with the real document dialog of
+//! the system (the script of the emulator taps the dialog) and the real system clipboard. They log the outcome kind, a cleaned file
+//! name and a size, a fixed test pattern's own path, or the fixed words of the clipboard steps; never the bytes of a file and
+//! never a text that came from the clipboard.
+//!
 //! The steps `tls-public`, `tls-untrusted`, `sync-save`, `sync-paused` and `sync-resume` run the two real network clients of the
 //! core (the WebDAV client of the sync and the client of the AI chat) against a public site and against a server with a
 //! self-signed certificate that the emulator script starts on the Mac and forwards to the emulator's loopback address with `adb
@@ -37,6 +42,7 @@ use holzwave_core::secrets::SecretStore;
 use holzwave_core::sync::webdav::{Backend, WebDav};
 use holzwave_core::vault::{Clock, LostReason, Protection, VaultError, VaultState, VaultStore};
 use holzwave_host::ai_host::ProfileInputMsg;
+use holzwave_host::commands::handover::{HandoverOutcomeMsg, handover_in, handover_out};
 use holzwave_host::commands::vault::vault_unlock;
 use holzwave_host::keystore_wire::RecentsMode;
 use holzwave_host::locked::is_locked;
@@ -45,6 +51,7 @@ use holzwave_host::state::AppCore;
 use serde_json::{Value, json};
 
 use crate::android::host::AndroidHost;
+use crate::clipboard;
 use crate::android::keystore::{AndroidClock, PluginBridge};
 use crate::android::plugin;
 
@@ -52,6 +59,12 @@ use crate::android::plugin;
 const ACCOUNT: &str = "ssh:selftest";
 /// The file of the canary, in the app's private folder.
 const CANARY_FILE: &str = "selftest-canary";
+/// The file `handover-out` writes in the shell's folder and then copies out through the system's dialog: a fixed non-secret pattern
+/// of 4 KiB (the bytes 0 to 255, sixteen times).
+const OUT_FILE: &str = "hw-out-test.bin";
+/// The text the clipboard step writes and reads back, and the text over the bound it must refuse: neither is a secret.
+const CLIPBOARD_TEXT: &str = "holzwave clipboard test";
+const CLIPBOARD_BIG: usize = 600_000;
 /// The name of the profile the AI-key steps make.
 const PROFILE_NAME: &str = "Selftest";
 /// The key the AI-key steps save. It is not a real key and it is not the canary.
@@ -376,6 +389,17 @@ impl Steps {
             "sync-paused" => self.sync_paused(),
             // The unlock (the system prompt, answered by the script) starts one run, which reaches the untrusted server.
             "sync-resume" => self.sync_resume(),
+            // The system's open dialog, driven by the script: the outcome kind and, for a copy, the cleaned name and the size.
+            "handover-in" => handover_line(&handover_in(&self.core)),
+            // A fixed pattern is written to the shell's folder and copied out through the system's create dialog.
+            "handover-out" => {
+                let home = self.host.private_dirs().map(|dirs| dirs.home).ok_or_else(|| "the host has no shell folder".to_owned())?;
+                let pattern: Vec<u8> = (0..4096u32).map(|i| (i % 256) as u8).collect();
+                std::fs::write(home.join(OUT_FILE), pattern).map_err(|_| "the test pattern could not be written".to_owned())?;
+                handover_line(&handover_out(&self.core, OUT_FILE.to_owned()))
+            }
+            // The clipboard written and read back through the plugin, the bound, and the sensitive mark.
+            "clipboard-roundtrip" => clipboard_roundtrip(),
             _ => fail("an unknown step"),
         }
     }
@@ -500,6 +524,47 @@ impl Steps {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
+}
+
+/// The log line of a hand-over: the kind, and for a finished copy the cleaned name and the size. `failed` and `unavailable` are
+/// failures of the step; `cancelled` and `too_large` are outcomes the script asks for.
+fn handover_line(outcome: &HandoverOutcomeMsg) -> Outcome {
+    match outcome {
+        HandoverOutcomeMsg::Done { name, size, shown, renamed } => {
+            Ok(format!("done name={name:?} size={size} shown={shown:?} renamed={renamed}"))
+        }
+        HandoverOutcomeMsg::Cancelled => Ok("cancelled".to_owned()),
+        HandoverOutcomeMsg::TooLarge { name, size } => Ok(format!("too_large name={name:?} size={}", size.map_or("unknown".to_owned(), |n| n.to_string()))),
+        HandoverOutcomeMsg::Failed => fail("the hand-over failed"),
+        HandoverOutcomeMsg::Unavailable => fail("the build has no document dialog"),
+    }
+}
+
+/// A write, a read back and a refusal. A read right after the app came to the front may find the system's clipboard closed to an
+/// app that has no focus yet (it answers an empty clip), so the read is repeated for a few seconds; it is the text of this step
+/// that is compared, and only ok or a fixed reason is logged.
+fn clipboard_roundtrip() -> Outcome {
+    let marked = clipboard::write_text_marked(CLIPBOARD_TEXT).map_err(|_| "the clipboard write failed".to_owned())?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match clipboard::read_text() {
+            Ok(text) if text == CLIPBOARD_TEXT => break,
+            Ok(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(250)),
+            Ok(_) => return fail("the clipboard did not give back the text that was written"),
+            Err(_) => return fail("the clipboard read failed"),
+        }
+    }
+    let big = "x".repeat(CLIPBOARD_BIG);
+    match clipboard::write_text(&big) {
+        Err(error) if error.contains("the limit is 524288 bytes") => {}
+        Err(_) => return fail("the text over the bound was refused, but not with the fixed words"),
+        Ok(()) => return fail("a text over the bound was written"),
+    }
+    match clipboard::read_text() {
+        Ok(text) if text == CLIPBOARD_TEXT => {}
+        _ => return fail("the clipboard no longer holds the first text after the refused write"),
+    }
+    Ok(format!("written, read back, the oversized text refused, the first text kept, sensitive={marked}"))
 }
 
 /// The word of a failed vault call, as the page would get it.
