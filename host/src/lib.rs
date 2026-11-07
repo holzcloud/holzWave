@@ -19,6 +19,7 @@ pub mod keystore_wire;
 pub mod local_network;
 pub mod locked;
 pub mod login_prompt;
+pub mod picker_wire;
 pub mod ranges;
 pub mod seams;
 pub mod state;
