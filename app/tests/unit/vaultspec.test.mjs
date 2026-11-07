@@ -24,8 +24,9 @@ const quoted = (paragraph) => [...paragraph.matchAll(/`([^`]+)`/g)].map((m) => m
 
 const values = new Set(Object.values(STRINGS));
 const RULES = ["Lock chip", "Unlock sheet", "Locked answers", "Sync while locked", "No screen lock", "Preferences row", "Vault lost"];
-/** Backticked words of a rule that are not texts of the page: a counter-example and the names of style hooks. */
-const NOT_TEXT = new Set(["☁ sync error", "contrast-high", "forced-colors", ".label"]);
+/** Backticked words of a rule that are not texts of the vault's page: a counter-example, the names of style hooks and the two buttons of the
+ *  sync popover that already existed (sync.ts owns them; the rule only says that they stay available while the vault is locked). */
+const NOT_TEXT = new Set(["☁ sync error", "contrast-high", "forced-colors", ".label", "Close", "Sync now"]);
 
 test("section 6.6 exists with the rules the page builds", () => {
   assert.ok(start >= 0 && end > start, "docs/design.md has no section 6.6");

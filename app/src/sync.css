@@ -33,6 +33,8 @@
 .sync .sy-connect-row { display: flex; justify-content: flex-end; margin-top: .5rem; }
 .sync .dlg-actions { margin-top: .833rem; }
 .sync button:disabled { opacity: .5; cursor: default; }
+/* Turn off while the secrets are locked: dim (the opacity above) and a dashed border, so that it is not told by colour alone; the paused line is its reason. */
+.sync .sy-off:disabled { border-style: dashed; }
 .sync .sy-off[data-armed="true"] { color: var(--hw-danger); border-color: var(--hw-danger); }
 
 /* A sync that waits for the secrets to be unlocked is not an error: its line is quiet, with a pause mark before it (docs/design.md 6.6). */

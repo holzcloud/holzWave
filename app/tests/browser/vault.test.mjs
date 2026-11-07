@@ -27,6 +27,7 @@ export default async function ({ engine, page, url, errors }) {
   await noticeCase(page, url);
   await preferencesCase(page, url);
   await syncCase(page, url);
+  await turnOffWhenOpen(page, url);
   await visibilityCase(page, url);
   await otherPlatformsCase(page, url);
   await hostileCase(page, url);
@@ -511,8 +512,53 @@ async function syncCase(page, url) {
   assert.notEqual(line.chipColor, line.danger);
   // `Sync now` while the store is still locked says nothing wrong: the line stays the paused line.
   await page.locator(".dlg.sync button", { hasText: "Sync now" }).click();
-  await page.waitForFunction(() => !document.querySelector(".dlg.sync button[disabled]"));
+  await page.waitForFunction(() => !document.querySelector(".dlg.sync button.primary[disabled]"));
   assert.equal(await text(page, ".dlg.sync .set-status"), `${STRINGS.syncMark}${STRINGS.syncLine}`);
+  await turnOffWhileLocked(page);
+}
+
+/** While the secrets are locked `Turn off` waits, so that no sync secret is left behind in the vault; its reason is the paused line. */
+async function turnOffWhileLocked(page) {
+  const off = await page.evaluate(() => {
+    const b = [...document.querySelectorAll(".dlg.sync button")].find((n) => n.textContent === "Turn off");
+    const others = [...document.querySelectorAll(".dlg.sync button")].filter((n) => n !== b);
+    const note = document.querySelector(".dlg.sync .set-status");
+    const box = b?.getBoundingClientRect();
+    return b && {
+      disabled: b.disabled, border: getComputedStyle(b).borderTopStyle, opacity: Number(getComputedStyle(b).opacity),
+      describedBy: b.getAttribute("aria-describedby"), noteId: note.id, reason: note.textContent,
+      others: others.map((n) => ({ text: n.textContent, disabled: n.disabled, border: getComputedStyle(n).borderTopStyle })),
+      high: box.height,
+    };
+  });
+  assert.ok(off, "the popover has a Turn off button");
+  assert.equal(off.disabled, true, "Turn off is disabled while the secrets are locked");
+  assert.equal(off.border, "dashed", "a second cue besides the dim colour: a dashed border");
+  assert.ok(off.opacity < 1, "and it is dim");
+  assert.equal(off.describedBy, off.noteId, "the paused line is the description of the button");
+  assert.equal(off.reason, `${STRINGS.syncMark}${STRINGS.syncLine}`, "and that line is the existing one, with no new word");
+  for (const other of off.others) {
+    assert.equal(other.border === "dashed", false, `${other.text} does not look disabled`);
+  }
+  assert.equal(off.others.find((n) => n.text === "Close")?.disabled, false, "Close stays available");
+  assert.equal(off.others.find((n) => n.text === "Sync now")?.disabled, false, "Sync now stays available");
+  await page.locator(".dlg.sync button", { hasText: "Turn off" }).click({ force: true, timeout: 500 }).catch(() => {});
+  assert.equal(await page.evaluate(() => window.__MOCK__.callsOf("sync_off").length), 0, "nothing turns the sync off while locked");
+}
+
+/** Once the secrets are open the same button works as before: it asks with a second click, and only that one turns the sync off. */
+async function turnOffWhenOpen(page, url) {
+  await open(page, url, { vault: OPEN, sync: { ...SYNC_PAUSED, state: "idle" } });
+  await page.waitForFunction(() => document.querySelector(".sync-btn"));
+  await page.evaluate(() => window.__registry.runAction("sync.open"));
+  await page.waitForSelector(".dlg.sync .set-status");
+  const off = page.locator(".dlg.sync .sy-off");
+  assert.equal(await off.isDisabled(), false, "Turn off works when the secrets are open");
+  assert.equal(await off.evaluate((n) => getComputedStyle(n).borderTopStyle), "solid", "and has the plain border");
+  assert.equal(await off.evaluate((n) => n.hasAttribute("aria-describedby")), false);
+  await off.click();
+  assert.equal(await off.textContent(), "Click again to turn off", "it still asks with a second click");
+  assert.equal(await page.evaluate(() => window.__MOCK__.callsOf("sync_off").length), 0, "the first click turns nothing off");
 }
 
 async function visibilityCase(page, url) {

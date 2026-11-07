@@ -93,6 +93,7 @@ async function show(): Promise<void> {
         : "not set up";
       const note = el("p", "set-status", box);
       note.setAttribute("role", "status");
+      note.id = "sy-note";
       note.dataset.failed = failed ? "true" : "false";
       if (!message && status.state === "paused") {
         // The store of secrets is locked: not an error, so the line is quiet and has a pause mark before it (docs/design.md 6.6).
@@ -120,8 +121,14 @@ async function show(): Promise<void> {
         const off = el("button", "sy-off", actions);
         off.type = "button";
         off.textContent = "Turn off";
+        // While the secrets are locked the sync's own secrets cannot be removed from the vault, so turning the sync off would leave them
+        // behind: the button waits, and its reason is the paused line above it, the same words as the title-bar button's (docs/design.md 6.6).
+        const locked = status.state === "paused";
+        off.disabled = locked;
+        if (locked) off.setAttribute("aria-describedby", note.id);
         let armed = false;
         off.addEventListener("click", () => {
+          if (status.state === "paused") return;
           if (!armed) {
             armed = true;
             off.textContent = "Click again to turn off";
