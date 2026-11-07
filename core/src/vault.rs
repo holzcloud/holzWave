@@ -39,7 +39,9 @@ use std::time::Instant;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use serde::{Deserialize, Serialize};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroize;
+// The type `Keystore::unwrap` returns, so an adapter in another crate can build one without a dependency of its own.
+pub use zeroize::Zeroizing;
 
 use crate::persist;
 use crate::secrets::{MAX_LEN, SecretStore};

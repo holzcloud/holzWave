@@ -364,7 +364,7 @@ fn note_window(window: &Window) {
 }
 
 /// The host of this platform: the desktop's (system keychain, no private folders) or, on Android, the one that names the
-/// app's private folders and keeps no secret.
+/// app's private folders and whose secret store is the vault over the Android Keystore.
 #[cfg(not(target_os = "android"))]
 fn platform_host(_app: &tauri::App) -> Result<Arc<dyn Host>, Box<dyn std::error::Error>> {
     Ok(Arc::new(desktop::DesktopHost::new()))
@@ -376,7 +376,12 @@ fn platform_host(_app: &tauri::App) -> Result<Arc<dyn Host>, Box<dyn std::error:
 fn platform_host(app: &tauri::App) -> Result<Arc<dyn Host>, Box<dyn std::error::Error>> {
     let data = app.path().app_data_dir()?;
     let cache = app.path().app_cache_dir()?;
-    Ok(Arc::new(android::host::AndroidHost::new(&data, &cache)?))
+    let host = Arc::new(android::host::AndroidHost::new(&data, &cache)?);
+    // The watcher keeps the vault's clock rule and the app switcher picture in line with the vault; the debug self-test finds the
+    // host through the app's state.
+    android::host::start_watcher(host.clone());
+    app.manage(host.clone());
+    Ok(host)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -438,6 +443,9 @@ pub fn run() {
             // there are, and its `Stop all` ends them.
             #[cfg(target_os = "android")]
             android::service::start(core.clone());
+            // Android debug builds only: the steps of the emulator's self-test of the vault. Release builds do not contain it.
+            #[cfg(all(target_os = "android", debug_assertions))]
+            android::selftest::start(core.clone(), app.state::<Arc<android::host::AndroidHost>>().inner().clone());
             // The scheduled sync: a first run shortly after the start, then every five minutes. It does nothing while sync
             // is off, and a failure is only the state the page shows.
             let background = core.clone();

@@ -594,8 +594,9 @@ fn the_manifest_asks_for_exactly_the_permissions_of_the_list() {
             "android.permission.FOREGROUND_SERVICE",
             "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
             "android.permission.POST_NOTIFICATIONS",
+            "android.permission.USE_BIOMETRIC",
         ],
-        "the list today is the network and the three of the foreground service"
+        "the list today is the network, the three of the foreground service and the prompt of the secret store"
     );
 }
 
@@ -1906,4 +1907,214 @@ fn the_permission_file_and_the_service_agree_that_no_wake_lock_boot_start_or_bat
     ] {
         assert!(listed.contains(&needed), "{needed} is not listed");
     }
+}
+
+// ---- the secret store: the Keystore, the prompt, the app switcher picture and the debug-only self-test ---------------------
+
+const KEYSTORE_KT: &str =
+    include_str!("../gen/android/app/src/main/java/ch/holzcloud/holzwave/KeystoreBridge.kt");
+const ANDROID_MOD_RS: &str = include_str!("../src/android/mod.rs");
+
+/// The name of the intent extra that starts a step of the self-test. It may exist in the debug source set and nowhere else.
+const SELFTEST_TRIGGER: &str = "holzwave_selftest";
+
+/// The Kotlin of the project itself, every source set: path below `gen/android/app/src` and the text.
+fn own_kotlin(files: &[(String, String)]) -> Vec<(&str, &str)> {
+    files
+        .iter()
+        .filter(|(path, _)| {
+            path.starts_with("app/src/")
+                && path.contains("/java/ch/holzcloud/holzwave/")
+                && path.ends_with(".kt")
+        })
+        .map(|(path, text)| (path.as_str(), text.as_str()))
+        .collect()
+}
+
+/// What the project must say about the secret store, one sentence per problem. The key is an AES-256 GCM key of the Android
+/// Keystore that needs the person for every use, through the framework prompt with the cipher as its crypto object and with no
+/// library; the app switcher picture is hidden by the framework call and by nothing else; the window is never made secure,
+/// so screenshots stay possible; and the self-test and the name of its trigger exist in the debug source set only.
+fn secret_store_problems(
+    files: &[(String, String)],
+    keystore_kt: &str,
+    plugin_kt: &str,
+    mod_rs: &str,
+    gradle: &[(String, String)],
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let kotlin = own_kotlin(files);
+    if kotlin.is_empty() {
+        problems.push("no Kotlin source of the project was found".into());
+    }
+    // The decision that screenshots stay possible: the text of the secure-window flag is in none of the project's Kotlin, not
+    // even in a comment, so the decision cannot drift silently.
+    for (path, text) in &kotlin {
+        for banned in ["FLAG_SECURE", "setSecure"] {
+            if text.contains(banned) {
+                problems.push(format!("{path} writes {banned}: screenshots must stay possible"));
+            }
+        }
+    }
+    let plugin = source_code(plugin_kt);
+    if !plugin.contains("setRecentsScreenshotEnabled(!hidden)") {
+        problems.push("the plugin does not hide the app switcher picture with setRecentsScreenshotEnabled".into());
+    }
+    if !plugin.contains("Build.VERSION.SDK_INT >= 33") {
+        problems.push("the app switcher call is not guarded by the Android 13 check".into());
+    }
+    if !plugin.contains("\"unsupported\"") {
+        problems.push("the plugin does not say that Android 12 has no app switcher protection".into());
+    }
+
+    let key = source_code(keystore_kt);
+    for needed in [
+        "KeyProperties.KEY_ALGORITHM_AES",
+        "setKeySize(256)",
+        "KeyProperties.BLOCK_MODE_GCM",
+        "KeyProperties.ENCRYPTION_PADDING_NONE",
+        "setUserAuthenticationRequired(true)",
+        "setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL)",
+        "setIsStrongBoxBacked(true)",
+        "FEATURE_STRONGBOX_KEYSTORE",
+        "BiometricPrompt.CryptoObject(cipher)",
+        "BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL",
+        "KeyPermanentlyInvalidatedException",
+        "isDeviceSecure",
+        "AES/GCM/NoPadding",
+        "KeyInfo",
+        "SECURITY_LEVEL_STRONGBOX",
+    ] {
+        if !key.contains(needed) {
+            problems.push(format!("KeystoreBridge.kt does not say {needed}"));
+        }
+    }
+    // No timeout window, no weaker authentication, no library prompt, and no text of the system in an answer.
+    if key.contains("setUserAuthenticationValidityDurationSeconds") {
+        problems.push("KeystoreBridge.kt uses a validity duration: every use must need the person".into());
+    }
+    if key.contains("androidx.biometric") || !key.contains("BiometricPrompt.Builder(host)") {
+        problems.push("KeystoreBridge.kt does not use the framework BiometricPrompt alone".into());
+    }
+    if key.contains("errString.toString()") || key.contains("e.message") || key.contains("e.toString()") {
+        problems.push("KeystoreBridge.kt puts text of the system into a failure".into());
+    }
+    for (name, text) in gradle {
+        if text.contains("androidx.biometric") || text.contains("biometric:") {
+            problems.push(format!("{name} depends on a biometric library"));
+        }
+    }
+
+    // The self-test: the name of its trigger is in the debug source set only, and its Rust is compiled for debug builds only.
+    for (path, text) in files {
+        if text.contains(SELFTEST_TRIGGER) && !path.starts_with("app/src/debug/") {
+            problems.push(format!("{path} holds the name of the self-test trigger outside the debug source set"));
+        }
+    }
+    if !files
+        .iter()
+        .any(|(path, text)| path.starts_with("app/src/debug/") && text.contains(SELFTEST_TRIGGER))
+    {
+        problems.push("the debug source set does not hold the self-test trigger".into());
+    }
+    let release_hook = files
+        .iter()
+        .find(|(path, _)| path == "app/src/release/java/ch/holzcloud/holzwave/DebugHooks.kt");
+    match release_hook {
+        Some((_, text)) if text.contains("fun take(): String? = null") => {}
+        _ => problems.push("the release source set does not hold the hook that never answers".into()),
+    }
+    let mod_code = source_code(mod_rs);
+    if !mod_code.contains("#[cfg(all(target_os = \"android\", debug_assertions))]\npub mod selftest;") {
+        problems.push("the self-test module is not compiled for debug builds only".into());
+    }
+    problems
+}
+
+fn gradle_texts(files: &[(String, String)]) -> Vec<(String, String)> {
+    files
+        .iter()
+        .filter(|(path, _)| path.ends_with(".gradle.kts") || path.ends_with(".gradle"))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn the_secret_store_is_the_keystore_the_system_prompt_and_nothing_hand_made() {
+    let files = project_text();
+    let gradle = gradle_texts(&files);
+    assert_none(
+        "secret store",
+        secret_store_problems(&files, KEYSTORE_KT, PLUGIN_KT, ANDROID_MOD_RS, &gradle),
+    );
+}
+
+#[test]
+fn the_project_never_makes_its_window_secure_and_hides_the_app_switcher_picture() {
+    let files = project_text();
+    let kotlin = own_kotlin(&files);
+    assert!(kotlin.len() >= 5, "the project's Kotlin was found: {}", kotlin.len());
+    for (path, text) in &kotlin {
+        assert!(
+            !text.contains("FLAG_SECURE") && !text.contains("setSecure"),
+            "{path} makes the window secure"
+        );
+    }
+    assert!(
+        kotlin.iter().any(|(_, text)| text.contains("setRecentsScreenshotEnabled")),
+        "the app switcher call is in the project"
+    );
+}
+
+#[test]
+fn the_secret_store_check_fails_on_bad_input() {
+    let files = project_text();
+    let gradle = gradle_texts(&files);
+    let ok = |files: &[(String, String)], key: &str, plugin: &str, rs: &str, gradle: &[(String, String)]| {
+        secret_store_problems(files, key, plugin, rs, gradle)
+    };
+    assert!(ok(&files, KEYSTORE_KT, PLUGIN_KT, ANDROID_MOD_RS, &gradle).is_empty(), "the project passes");
+
+    // The secure-window flag, in a source or in a comment.
+    for flag in ["window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)", "// not FLAG_SECURE", "window.setSecure(true)"] {
+        let mut more = files.clone();
+        more.push((
+            "app/src/main/java/ch/holzcloud/holzwave/Other.kt".into(),
+            format!("package x\n{flag}\n"),
+        ));
+        assert!(!ok(&more, KEYSTORE_KT, PLUGIN_KT, ANDROID_MOD_RS, &gradle).is_empty(), "{flag} passed");
+    }
+    // The picture is not hidden, or the call is not guarded.
+    let no_call = PLUGIN_KT.replace("setRecentsScreenshotEnabled(!hidden)", "noop()");
+    assert!(!ok(&files, KEYSTORE_KT, &no_call, ANDROID_MOD_RS, &gradle).is_empty(), "no call passed");
+    let unguarded = PLUGIN_KT.replace("Build.VERSION.SDK_INT >= 33", "true");
+    assert!(!ok(&files, KEYSTORE_KT, &unguarded, ANDROID_MOD_RS, &gradle).is_empty(), "unguarded passed");
+    // A key that needs nobody, a time window, a library prompt, a message of the system in a failure.
+    for (from, to) in [
+        ("setUserAuthenticationRequired(true)", "setUserAuthenticationRequired(false)"),
+        ("setUserAuthenticationParameters(0,", "setUserAuthenticationParameters(30,"),
+        ("BiometricPrompt.CryptoObject(cipher)", "null"),
+        ("setKeySize(256)", "setKeySize(128)"),
+    ] {
+        let weak = KEYSTORE_KT.replace(from, to);
+        assert!(!ok(&files, &weak, PLUGIN_KT, ANDROID_MOD_RS, &gradle).is_empty(), "{from} passed");
+    }
+    let window = format!("{KEYSTORE_KT}\nval w = setUserAuthenticationValidityDurationSeconds(10)\n");
+    assert!(!ok(&files, &window, PLUGIN_KT, ANDROID_MOD_RS, &gradle).is_empty(), "a window passed");
+    let message = format!("{KEYSTORE_KT}\nval m = errString.toString()\n");
+    assert!(!ok(&files, &message, PLUGIN_KT, ANDROID_MOD_RS, &gradle).is_empty(), "a message passed");
+    let mut library = gradle.clone();
+    library.push(("app/extra.gradle.kts".into(), "implementation(\"androidx.biometric:biometric:1.1.0\")".into()));
+    assert!(!ok(&files, KEYSTORE_KT, PLUGIN_KT, ANDROID_MOD_RS, &library).is_empty(), "a library passed");
+    // The trigger outside the debug source set, a self-test compiled into every build.
+    let mut leaked = files.clone();
+    leaked.push((
+        "app/src/main/java/ch/holzcloud/holzwave/Leak.kt".into(),
+        "val extra = \"holzwave_selftest\"".into(),
+    ));
+    assert!(!ok(&leaked, KEYSTORE_KT, PLUGIN_KT, ANDROID_MOD_RS, &gradle).is_empty(), "a leaked trigger passed");
+    let always = ANDROID_MOD_RS.replace("#[cfg(all(target_os = \"android\", debug_assertions))]\npub mod selftest;", "pub mod selftest;");
+    assert!(!ok(&files, KEYSTORE_KT, PLUGIN_KT, &always, &gradle).is_empty(), "an always-on self-test passed");
+    let nothing: Vec<(String, String)> = Vec::new();
+    assert!(!ok(&nothing, KEYSTORE_KT, PLUGIN_KT, ANDROID_MOD_RS, &gradle).is_empty(), "no sources passed");
 }
