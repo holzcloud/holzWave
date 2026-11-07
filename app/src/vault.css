@@ -39,14 +39,15 @@
 .vault-line { margin: 0 0 .667rem; color: var(--hw-ink-2); line-height: 1.5; overflow-wrap: anywhere; }
 .vault-quiet { margin: .5rem 0 0; color: var(--hw-dim); line-height: 1.4; min-height: 1.4em; overflow-wrap: anywhere; }
 .vault-quiet:empty { display: none; }
-.vault-actions { display: flex; flex-wrap: wrap; justify-content: flex-start; align-items: center; gap: .5rem; margin-top: .667rem; }
+.vault-box .vault-actions, .vault-notice .vault-actions { display: flex; flex-wrap: wrap; justify-content: flex-start; align-items: center; gap: .5rem; margin-top: .667rem; }
 
 /* The buttons of the vault: a solid rose one for the act, a plain one to leave; both 44 px. The dialogs' base rule resets buttons, so
    these are more specific. */
 .dlg.settings.vault-box button, .vault-notice button {
   -webkit-appearance: none; appearance: none; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center;
   min-width: var(--vault-target); min-height: var(--vault-target); margin: 0; padding: 0 1rem; border: 1px solid var(--hw-line);
-  border-radius: 6px; background: none; color: var(--hw-ink-2); font: inherit; font-size: calc(14rem / 12); cursor: pointer;
+  border-radius: 6px; background: none; color: var(--hw-ink-2); font: inherit; font-size: calc(14rem / 12); letter-spacing: normal;
+  text-transform: none; cursor: pointer;
 }
 .dlg.settings.vault-box button.vault-solid, .vault-notice button.vault-solid {
   background: var(--hw-rose-deep); border-color: var(--hw-rose-deep); color: var(--hw-on-accent); font-weight: 700;
