@@ -515,8 +515,8 @@ const PERMITTED_HITS: &[(&str, &str, &str)] = &[
         "app/src-tauri/src/android/selftest.rs",
         "https://",
         "the emulator self-test (compiled for debug builds of the Android app only) names three addresses for its TLS checks: a \
-         public site, the emulator's alias of the development machine and the throwaway test server the emulator script starts \
-         there; the file connects to none of them, the core's own two clients do, and only when a script launches that step",
+         public site and the loopback address behind which the emulator script forwards a throwaway test server of the \
+         development machine; the file connects to none of them, the core's own two clients do, and only when a script launches that step",
     ),
     (
         "app/src/sync.ts",

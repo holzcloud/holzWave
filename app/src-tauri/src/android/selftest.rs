@@ -19,7 +19,8 @@
 //!
 //! The steps `tls-public`, `tls-untrusted`, `sync-save`, `sync-paused` and `sync-resume` run the two real network clients of the
 //! core (the WebDAV client of the sync and the client of the AI chat) against a public site and against a server with a
-//! self-signed certificate that the emulator script starts on the Mac (the emulator's name for the Mac is `10.0.2.2`). They show
+//! self-signed certificate that the emulator script starts on the Mac and forwards to the emulator's loopback address with `adb
+//! reverse`. They show
 //! that the platform certificate verifier judges certificates, and that a locked vault pauses the sync and lets it run at the
 //! unlock. What they print about a failed request is the text of the client's own error (a fixed phrase or the transport's
 //! message, which holds no header, body, certificate or secret) cleaned to printable ASCII and cut short.
@@ -59,10 +60,12 @@ const AI_KEY: &str = "HW-SELFTEST-AI-KEY";
 /// A public site every network has, for the positive check of the verifier. The address is a constant of this debug module and
 /// not a setting. Nothing but a request without a body or a secret is sent to it.
 const PUBLIC_URL: &str = "https://example.com/";
-/// The emulator's name for the Mac, where the script runs a TLS server with a self-signed certificate on this port.
-const UNTRUSTED_URL: &str = "https://10.0.2.2:8443/";
+/// The loopback address of the emulator, where `adb reverse` forwards the port of the TLS server with a self-signed certificate that
+/// the script runs on the Mac. (The emulator's own name for the Mac, 10.0.2.2, is a local-network address, which an app that
+/// targets Android 17 may not reach without the local-network permission; the loopback address needs none.)
+const UNTRUSTED_URL: &str = "https://127.0.0.1:8443/";
 /// The sync account the steps save: the same server, a folder below it.
-const SYNC_ENDPOINT: &str = "https://10.0.2.2:8443/dav";
+const SYNC_ENDPOINT: &str = "https://127.0.0.1:8443/dav";
 const SYNC_USER: &str = "selftest";
 /// What the clients send to a server that is not the app's own: a dummy account, never a secret.
 const DUMMY_USER: &str = "selftest";
