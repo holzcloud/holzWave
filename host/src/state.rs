@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use holzwave_core::ai::service::AskEvent;
 use holzwave_core::blocks::{Block, BlockKind, BlockView, Blocks, Grant, LOCAL, Opened, Saved};
+use holzwave_core::conn::ConnState;
 use holzwave_core::connections::{ConnView, Connections, ProfileView, SecretChange, home_dir as user_home};
 use holzwave_core::files::{Entry, FileSource, Listing};
 use holzwave_core::integrate::run::Launch as PaneLaunch;
@@ -68,6 +69,43 @@ const SESSION_DELAY: Duration = Duration::from_secs(2);
 
 /// The most time `shutdown` spends waiting for the shells to end.
 const SHUTDOWN_BOUND: Duration = Duration::from_secs(3);
+
+/// The most time `stop_all` spends waiting for the shells to end. A shell that ignores a hangup is killed by the pane's own
+/// close path after its short grace period, so this is a bound for a pane that cannot be reached at all.
+const STOP_ALL_BOUND: Duration = Duration::from_secs(2);
+
+/// How many shells and how many connections these pane states are, in that order. A pane on this computer
+/// ([`ConnState::Local`]) is a shell; a pane whose saved connection is up ([`ConnState::Connected`]) or is making the
+/// connection again after a loss ([`ConnState::Reconnecting`], the session is still the person's and the process must
+/// stay alive for it) is a connection. A connection that is being made for the first time, that failed or that ended is
+/// neither: nothing lives yet or any more. Pure, so that every state has its answer in a test.
+pub fn count_sessions(states: impl IntoIterator<Item = ConnState>) -> (usize, usize) {
+    let mut counts = (0, 0);
+    for state in states {
+        match state {
+            ConnState::Local => counts.0 += 1,
+            ConnState::Connected | ConnState::Reconnecting { .. } => counts.1 += 1,
+            ConnState::Connecting | ConnState::Failed | ConnState::Closed => {}
+        }
+    }
+    counts
+}
+
+/// Keeps `AppCore::stopping` raised for the length of one `stop_all`, also when it unwinds.
+struct Stopping<'a>(&'a AtomicUsize);
+
+impl<'a> Stopping<'a> {
+    fn raise(counter: &'a AtomicUsize) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self(counter)
+    }
+}
+
+impl Drop for Stopping<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// The bytes in one MiB of the `image_memory_mib` setting.
 const IMAGE_MIB_BYTES: u64 = 1024 * 1024;
@@ -949,6 +987,9 @@ pub struct AppCore {
     /// The app is ending (the last pane closed or ended, or `shutdown` ran): panes that end from now on stay in the
     /// layout, and windows that close from now on stay in it too, so that what is saved is what the user had.
     exiting: AtomicBool,
+    /// How many [`AppCore::stop_all`] calls are running. While one is, a shell that ends stays in the layout (as when the
+    /// app ends) and is told to its window as an ended pane, so that the layout, the windows and the app survive it.
+    stopping: AtomicUsize,
     /// Whether animated pictures may move: the page's reduced-motion fact (`set_image_animation`), applied to every
     /// running pane and given to each pane that starts. It is the person's window that asks for reduced motion, not a
     /// pane, so there is one value for the whole core; it starts `true`.
@@ -1243,6 +1284,7 @@ impl AppCore {
                 saver,
                 writes,
                 exiting: AtomicBool::new(false),
+                stopping: AtomicUsize::new(0),
                 image_animation: AtomicBool::new(true),
                 view_rev: AtomicU64::new(0),
                 me: me.clone(),
@@ -3125,6 +3167,56 @@ impl AppCore {
         self.saver.flush();
     }
 
+    /// How many shells and how many connections are alive right now, as `(shells, connections)` (see [`count_sessions`]).
+    /// A pane whose program has ended and that is held on the screen until Enter is not alive, and a pane that is still
+    /// starting is not yet. It only reads: the lock of the panes is held for the length of one pass over a small map, and
+    /// nothing is started, stopped or written. The vault plays no part: a live session counts whether the secrets are
+    /// locked or not.
+    pub fn session_counts(&self) -> (usize, usize) {
+        let live: Vec<(PaneId, ConnState)> = lock(&self.panes)
+            .iter()
+            .filter_map(|(pane, slot)| match slot {
+                Slot::Running(handle) => Some((*pane, handle.conn_state())),
+                Slot::Starting(_) => None,
+            })
+            .collect();
+        let held = lock(&self.held);
+        count_sessions(live.into_iter().filter(|(pane, _)| !held.contains_key(pane)).map(|(_, state)| state))
+    }
+
+    /// End every shell and every connection of every pane and wait for them, for at most two seconds. The layouts, the
+    /// windows, the settings, the history and the secrets are left as they are: a pane whose shell ends here stays in its
+    /// window and the window is told `pane-exit` for it, which is what it is told when a shell ends by itself. The app
+    /// keeps running. A shell that ignores a hangup is killed by the pane's own close path. Harmless when nothing runs,
+    /// and when called again.
+    pub fn stop_all(&self) {
+        let _stopping = Stopping::raise(&self.stopping);
+        let deadline = Instant::now() + STOP_ALL_BOUND;
+        // On an engine thread a join would wait for itself.
+        let on_engine_thread = std::thread::current().name().is_some_and(|n| n.starts_with("hw-pane-"));
+        loop {
+            let handles = self.running();
+            let starting = lock(&self.panes).values().any(|slot| matches!(slot, Slot::Starting(_)));
+            if handles.is_empty() && !starting {
+                return;
+            }
+            for handle in &handles {
+                handle.close();
+            }
+            if !on_engine_thread {
+                for handle in &handles {
+                    handle.join(deadline.saturating_duration_since(Instant::now()));
+                }
+            }
+            if Instant::now() >= deadline {
+                eprintln!("holzwave: a session did not end within the stop bound");
+                return;
+            }
+            // A pane that was starting becomes a handle on the next pass (and is closed as it is promoted).
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// The handle of a running pane. `None` for an unknown pane and for one that is still starting.
     fn handle(&self, pane: PaneId) -> Option<PaneHandle> {
         match lock(&self.panes).get(&pane) {
@@ -3538,8 +3630,9 @@ impl AppCore {
                 if let Some(size) = wanted {
                     let _ = handle.resize(size.cols, size.rows, size.cell_px);
                 }
-                if self.exiting.load(Ordering::SeqCst) {
-                    // The app began to end while this shell started; `shutdown` did not see it.
+                if self.exiting.load(Ordering::SeqCst) || self.stopping.load(Ordering::SeqCst) > 0 {
+                    // The app began to end (or every session is being stopped) while this shell started; `shutdown` and
+                    // `stop_all` did not see it.
                     handle.close();
                 }
                 drop(panes);
@@ -3572,8 +3665,9 @@ impl AppCore {
             // The window the pane is in; a pane that is in no layout (the user closed it) leaves it in `closing`.
             let label = lock(&self.routes).live.get(&pane).cloned();
             let closed_in = |routes: &Mutex<Routes>| lock(routes).closing.remove(&pane);
-            if self.exiting.load(Ordering::SeqCst) {
-                // The app is ending: what the user had stays in the layout.
+            if self.exiting.load(Ordering::SeqCst) || self.stopping.load(Ordering::SeqCst) > 0 {
+                // The app is ending, or every session is being stopped: what the user had stays in the layout, and the
+                // window hears that the pane ended.
                 exit_to = label.or_else(|| closed_in(&self.routes));
             } else {
                 match set.close_pane(pane) {
