@@ -311,6 +311,9 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
   // thread of its own. One dialog at a time (the host also takes one turn); a second call is a failure, because the manager
   // keeps one result handler.
 
+  /** The shell's own folder, the only place a path from Rust may point into. */
+  private fun shellHome() = HolzwaveFiles.shellHome(host.dataDir)
+
   /** A dialog is open or a copy is running. */
   private val filesBusy = AtomicBoolean(false)
 
@@ -350,8 +353,8 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
     }
     try {
       val args = invoke.parseArgs(PickInArgs::class.java)
-      val target = HolzwaveFiles.insideFiles(host.filesDir, args.staging_path)
-      // The host gives a file it just made: empty, regular, inside the private folder. Anything else is not the host's.
+      val target = HolzwaveFiles.insideFiles(shellHome(), args.staging_path)
+      // The host gives a file it just made: empty, regular, inside the shell's folder. Anything else is not the host's.
       if (target == null || args.max_bytes <= 0 || target.length() != 0L) {
         failFiles(invoke)
         return
@@ -388,7 +391,7 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
       }
       val args = invoke.parseArgs(PickInArgs::class.java)
       // Checked again now that the person has chosen: the path must still be the host's empty file.
-      val target = HolzwaveFiles.insideFiles(host.filesDir, args.staging_path)
+      val target = HolzwaveFiles.insideFiles(shellHome(), args.staging_path)
       if (target == null || args.max_bytes <= 0 || target.length() != 0L) {
         failFiles(invoke)
         return
@@ -416,7 +419,7 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
     }
     try {
       val args = invoke.parseArgs(SaveOutArgs::class.java)
-      if (HolzwaveFiles.insideFiles(host.filesDir, args.source_path) == null) {
+      if (HolzwaveFiles.insideFiles(shellHome(), args.source_path) == null) {
         failFiles(invoke)
         return
       }
@@ -450,7 +453,7 @@ class HolzwavePlugin(private val host: Activity) : Plugin(host) {
         return
       }
       val args = invoke.parseArgs(SaveOutArgs::class.java)
-      val source = HolzwaveFiles.insideFiles(host.filesDir, args.source_path)
+      val source = HolzwaveFiles.insideFiles(shellHome(), args.source_path)
       if (source == null) {
         failFiles(invoke)
         return

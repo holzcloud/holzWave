@@ -19,13 +19,20 @@ import java.nio.file.Files
  * over, the bounded copies, and the clipboard's plain text rules. The plugin ([HolzwavePlugin]) shows the dialogs and answers
  * the calls; everything that touches a byte or a path is here.
  *
- * Nothing here trusts what it is given or what it receives. A path from Rust must be inside the app's private files folder
- * (the host only gives such paths; this is a second line). A document is another app's: its name is passed on as raw text and
+ * Nothing here trusts what it is given or what it receives. A path from Rust must be inside the shell's own folder, `home`
+ * in the app's private data folder (the host only gives such paths; this is a second line, and it keeps the app's own files
+ * beside `home`, the vault's file among them, out of reach of a wrong path). A document is another app's: its name is passed on as raw text and
  * never decides a path, its reported size is only a hint and the bytes are counted while they are copied, and nothing is kept of
  * its address after the call. No message of the system or of a provider ever leaves a function here: a failure is a plain
  * outcome, and the text of a clip is never logged, never put in an exception and never kept.
  */
 object HolzwaveFiles {
+  /**
+   * The name of the shell's own folder in the app's private data folder: the folder `home` that the host makes and names
+   * (`HOME_FOLDER` of the Rust side). A test of the project keeps the two the same.
+   */
+  const val HOME_FOLDER = "home"
+
   /** The copy block. */
   private const val BLOCK = 64 * 1024
 
@@ -46,23 +53,26 @@ object HolzwaveFiles {
 
   // ---- the paths of Rust ---------------------------------------------------------------------------------------------------
 
+  /** The shell's own folder: `home` in the app's private data folder. */
+  fun shellHome(dataDir: File): File = File(dataDir, HOME_FOLDER)
+
   /**
-   * The file at [path] when it is an absolute path of a regular file that is inside [filesDir] by its canonical form, none of
+   * The file at [path] when it is an absolute path of a regular file that is inside [root] by its canonical form, none of
    * whose last component is a link. `null` otherwise. The canonical form of the folder and of the file's own folder is used, so a
    * link in the middle of the path or a `..` cannot lead out.
    */
-  fun insideFiles(filesDir: File, path: String): File? {
+  fun insideFiles(root: File, path: String): File? {
     if (path.isEmpty() || path.length > 4096 || path.indexOf('\u0000') >= 0) return null
     val file = File(path)
     if (!file.isAbsolute) return null
     return try {
-      val root = filesDir.canonicalFile
+      val base = root.canonicalFile
       val parent = file.parentFile?.canonicalFile ?: return null
       if (!parent.isDirectory) return null
       val canonical = File(parent, file.name)
       // The folder is canonical and the name is the last component as it was given: the file is where the path says, inside the
       // private folder, and it is not itself a link.
-      if (!(canonical.path == root.path || canonical.path.startsWith(root.path + File.separator))) return null
+      if (!(canonical.path == base.path || canonical.path.startsWith(base.path + File.separator))) return null
       if (file.name == "." || file.name == ".." || file.name.isEmpty()) return null
       if (Files.isSymbolicLink(canonical.toPath())) return null
       if (!Files.isRegularFile(canonical.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS)) return null

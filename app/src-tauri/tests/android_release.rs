@@ -2520,6 +2520,17 @@ fn file_dialog_problems(files: &[(String, String)], plugin_kt: &str, files_kt: &
             problems.push(format!("the plugin does not use {needed}"));
         }
     }
+    // The folder a path from Rust must point into is the shell's own, with the name the host gives it.
+    let host_rs = include_str!("../src/android/host.rs");
+    if !host_rs.contains("pub const HOME_FOLDER: &str = \"home\";") || !files_code.contains("const val HOME_FOLDER = \"home\"") {
+        problems.push("the shell's folder is not named the same in the host and in the Kotlin jail".into());
+    }
+    if plugin.contains("filesDir") || files_code.contains("filesDir") {
+        problems.push("a path is checked against the files folder, not against the shell's own folder".into());
+    }
+    if !plugin.contains("HolzwaveFiles.shellHome(host.dataDir)") {
+        problems.push("the jail of the paths is not the shell's folder".into());
+    }
     if !plugin.contains("EXTRA_ALLOW_MULTIPLE, false") {
         problems.push("the open dialog does not say one document".into());
     }
@@ -2599,6 +2610,7 @@ fn the_hand_over_check_fails_on_bad_input() {
         ("Intent.CATEGORY_OPENABLE", "Intent.CATEGORY_DEFAULT"),
         ("EXTRA_ALLOW_MULTIPLE, false", "EXTRA_ALLOW_MULTIPLE, true"),
         ("HolzwaveFiles.isContent(uri)", "true"),
+        ("HolzwaveFiles.shellHome(host.dataDir)", "host.filesDir"),
     ] {
         let changed = PLUGIN_KT.replace(from, to);
         assert!(!file_dialog_problems(&files, &changed, FILES_KT).is_empty(), "{from} passed");
@@ -2613,6 +2625,8 @@ fn the_hand_over_check_fails_on_bad_input() {
         let changed = FILES_KT.replace(from, to);
         assert!(!file_dialog_problems(&files, PLUGIN_KT, &changed).is_empty(), "{from} passed");
     }
+    let renamed = FILES_KT.replace("const val HOME_FOLDER = \"home\"", "const val HOME_FOLDER = \"shell\"");
+    assert!(!file_dialog_problems(&files, PLUGIN_KT, &renamed).is_empty(), "another folder name passed");
     let logs = format!("{FILES_KT}\nfun leak(t: String) {{ Log.d(\"x\", t) }}\n");
     assert!(!file_dialog_problems(&files, PLUGIN_KT, &logs).is_empty(), "a log passed");
     let mut listener = files.clone();
