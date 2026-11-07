@@ -1,18 +1,18 @@
 //! The one seam between the core and the shell that runs it: everything the shell decides is asked of a [`Host`].
 //!
 //! The desktop app, the Android app and the server build the same [`AppCore`](crate::state::AppCore) and differ in
-//! exactly these nine answers: which platform the page is told it runs on (and so which table of default key chords it gets), where
+//! exactly these ten answers: which platform the page is told it runs on (and so which table of default key chords it gets), where
 //! passwords, key passphrases, provider keys and integration secrets are kept, where the answer of the Local Network
 //! permission comes from, which text size the system asks for, how many panes and lines of scrollback a person may
 //! have, at which address the page finds a file it was granted, whether the machine's process table may be shown, and
-//! which private folders the shell of a pane lives in (only Android names them), and the vault that is the secret store
-//! (only Android has one).
+//! which private folders the shell of a pane lives in (only Android names them), the vault that is the secret store
+//! (only Android has one), and the system's document dialog that hands single files over (only Android has one).
 //! [`NeutralHost`] answers for a build that is given no host: the platform of the build, secrets in memory, no
 //! permission source, a text scale of 100, no limits, the address `/files/<token>`, a process list that may be shown
-//! no private folders and no vault.
+//! no private folders, no vault and no document dialog.
 //! Every constructor that does not take a host uses it, so a test or a tool never touches a keychain.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use holzwave_core::secrets::{MemoryStore, SecretStore};
@@ -91,6 +91,49 @@ pub struct HostLimits {
     pub max_image_bytes: Option<usize>,
 }
 
+/// A document the person chose in the system's dialog and the picker copied to the staging file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PickedIn {
+    /// The provider's display name of the document. Another app's text: the host cleans it before it names anything.
+    pub name: String,
+    /// The bytes the picker copied.
+    pub size: u64,
+}
+
+/// A copy out that the picker finished.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PickedOut {
+    /// The bytes the picker copied to the document the person named.
+    pub size: u64,
+}
+
+/// Why the system's dialog gave no file. Carries no text from the provider or the system: a failure may name a path or an
+/// app, and the page matches fixed words.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PickError {
+    /// The person left the dialog.
+    Cancelled,
+    /// The document is larger than the limit given to the picker; `size` is there when the provider said it or the copy
+    /// counted it.
+    TooLarge { name: String, size: Option<u64> },
+    /// Anything else.
+    Failed,
+}
+
+/// The system's document dialogs, for handing one file over at a time between the person's apps and the shell's folder.
+///
+/// Only the Android host has one. Both calls block until the person has chosen or left, so a caller runs them off the main
+/// thread. The picker copies through the system's content resolver and never gives the shell a path of a provider.
+pub trait FilePicker: Send + Sync {
+    /// Show the open dialog and copy the chosen document to `staging` (a file that exists and is the app's own), at most
+    /// `max_bytes`: more is [`PickError::TooLarge`] and the copy stops there.
+    fn pick_in(&self, staging: &Path, max_bytes: u64) -> Result<PickedIn, PickError>;
+
+    /// Show the create-document dialog with `suggested_name` and copy `source` (a regular file of the shell's folder that
+    /// the host has checked) to the document the person names.
+    fn save_out(&self, source: &Path, suggested_name: &str) -> Result<PickedOut, PickError>;
+}
+
 /// Everything the shell decides for the core. Object safe; the core keeps an `Arc<dyn Host>`.
 pub trait Host: Send + Sync + 'static {
     /// The platform the page is told it runs on.
@@ -133,6 +176,13 @@ pub trait Host: Send + Sync + 'static {
     /// store [`secrets`](Host::secrets) hands out, so the commands that lock, unlock and reset it reach the store the core
     /// reads. Everywhere else the answer is `None`: the secret commands of the page then say there is no vault.
     fn vault(&self) -> Option<Arc<VaultStore>> {
+        None
+    }
+
+    /// The system's document dialogs that hand a single file over between the person's apps and the shell's folder. Only the
+    /// Android host answers it; everywhere else the answer is `None` and the two hand-over commands say they are not
+    /// available.
+    fn file_picker(&self) -> Option<Arc<dyn FilePicker>> {
         None
     }
 }
@@ -241,6 +291,7 @@ mod tests {
         assert!(!host.local_network().applies());
         assert_eq!(host.private_dirs(), None, "no private folders unless the Android host names them");
         assert!(host.vault().is_none(), "no vault unless the Android host has one");
+        assert!(host.file_picker().is_none(), "no document dialog unless the Android host has one");
         // One store, however often it is asked for.
         host.secrets().set("ssh:a", "one").expect("set");
         assert_eq!(host.secrets().get("ssh:a").expect("get").as_deref(), Some("one"));

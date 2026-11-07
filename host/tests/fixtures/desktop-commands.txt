@@ -128,3 +128,5 @@ vault_lock|none|sync||VaultStatusMsg|String
 vault_protect|none|async|on|VaultStatusMsg|String
 vault_reset|none|sync||VaultStatusMsg|String
 vault_hidden|none|sync|hidden|()|String
+handover_in|none|async||HandoverOutcomeMsg|-
+handover_out|none|async|path|HandoverOutcomeMsg|-

@@ -823,6 +823,18 @@ macro_rules! host_commands {
                 answers: (), fails: String,
                 run: vault::vault_hidden, web: unavailable
             }
+            {
+                name: handover_in, shell: generated, group: handover, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: HandoverOutcomeMsg,
+                run: handover::handover_in, web: unavailable
+            }
+            {
+                name: handover_out, shell: generated, group: handover, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [path: String],
+                answers: HandoverOutcomeMsg,
+                run: handover::handover_out, web: unavailable
+            }
         }
     };
 }

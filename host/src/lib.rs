@@ -12,6 +12,7 @@ pub mod ai_host;
 pub mod ai_tools;
 pub mod ai_write;
 pub mod commands;
+pub mod handover;
 pub mod host_shell;
 pub mod integrate_host;
 pub mod local_network;

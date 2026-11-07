@@ -138,6 +138,8 @@
     "allow-vault-lock",
     "allow-vault-protect",
     "allow-vault-reset",
-    "allow-vault-hidden"
+    "allow-vault-hidden",
+    "allow-handover-in",
+    "allow-handover-out"
   ]
 }

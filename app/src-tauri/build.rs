@@ -167,6 +167,8 @@ fn main() {
     "vault_protect",
     "vault_reset",
     "vault_hidden",
+    "handover_in",
+    "handover_out",
   ]);
   tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest)).expect("tauri build failed");
 }

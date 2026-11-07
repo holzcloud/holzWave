@@ -1183,6 +1183,10 @@
     ],
     "get_layout": [],
     "get_settings": [],
+    "handover_in": [],
+    "handover_out": [
+      "path"
+    ],
     "history_clear": [],
     "history_delete": [
       "cmd"

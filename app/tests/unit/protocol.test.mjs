@@ -1016,6 +1016,7 @@ test("the two image commands are pinned: a pixel read by pane, image, generation
   // Motion is a property of the person's window, not of one pane.
   assert.deepEqual(golden.commands.set_image_animation, ["enabled"]);
   assert.ok(!golden.commands.set_image_animation.includes("pane"));
-  // The golden has every command once: 124, and the six that drive the vault of a phone make 130.
-  assert.equal(Object.keys(golden.commands).length, 130);
+  // The golden has every command once: 124, the six that drive the vault of a phone make 130, and the two that hand a file
+  // over on a phone make 132.
+  assert.equal(Object.keys(golden.commands).length, 132);
 });
