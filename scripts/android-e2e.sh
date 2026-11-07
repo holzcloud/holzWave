@@ -5,6 +5,8 @@
 #   sh scripts/android-e2e.sh service
 #   sh scripts/android-e2e.sh vault
 #   sh scripts/android-e2e.sh tls
+#   sh scripts/android-e2e.sh handover
+#   sh scripts/android-e2e.sh clipboard
 #
 # What `tracer` does, in order:
 #   1. starts the emulator when none runs (and stops it at the end only if it started it), builds the debug APK for
@@ -94,6 +96,34 @@
 # certificate authorities, proxies and TLS inspection, captive portals, certificate pinning, revocation and mobile networks; a real
 # WebDAV server or a real AI provider.
 #
+# What `handover` does (it starts like `vault`: emulator, debug APK, fresh install; no shell is waited for) is hand single files over
+# through the real document dialog of the image, which the script drives with uiautomator: it dumps the screen, finds a node by its
+# exact text, content description or resource id (the parser is proved without an emulator by scripts/test-android-scripts.sh), and
+# taps its centre. A step of the debug-only self-test opens the dialog; the script waits for the focused window of the documents
+# app, taps, and reads the line the step logs. The files are pushed to the shared Download folder first and removed again at every way
+# out, on the emulator and on the Mac. One line per check:
+#   a. an open: a pushed file of 1 MiB (random bytes made for this run) is chosen in the dialog and the host reports it copied, with
+#      the name and the size;
+#   b. the copy in the shell's `home/handover` folder has the SHA-256 of the source;
+#   c. the copy has mode -rw------- and no staging file is left in the folder;
+#   d. a second copy of the same file is numbered (`-2`), has the same checksum, and the first copy is unchanged;
+#   e. the dialog dismissed with Back is `cancelled` and the folder is exactly as before;
+#   f. a file of 300 MiB (made on the emulator with truncate) is refused as `too_large` with its name, and nothing new is in the folder;
+#   g. a file whose name has a space and a letter outside ASCII is copied in with the cleaned name the host chose (printed as seen);
+#   h. a copy out: a fixed 4 KiB pattern is written to the shell's folder, the create dialog is answered with its Save button, and the
+#      file the script pulls from the Download folder has the pattern's SHA-256 and the size.
+# A check that cannot be driven (the file is not in view after three tries, a button is not found) ends `not run` with the reason and
+# is never printed as ok. What it does NOT prove: another provider than the system's own (a cloud drive, a USB stick, an SD card,
+# another app) which may report no or a wrong size, a revoked document, huge files on a phone, the dialogs of other Android
+# versions and skins, and any real phone.
+#
+# What `clipboard` does (same start as `handover`) is run the debug-only step that writes the fixed test text through the app's
+# clipboard path, reads it back, tries a text over the 512 KiB bound (which must be refused while the first text stays), and reports
+# whether the clip carries the sensitive mark, which the system knows from Android 13 on: the script requires it from API 33 and
+# requires its absence below. The clipboard of the system is then listed with `dumpsys clipboard` for information only (what the
+# image shows there is printed, and is not a pass condition). What it does NOT prove: the clipboard strips of third party
+# keyboards, the clipboard managers of phone makers, multi-window and foldable focus rules, and any real phone.
+#
 # Environment: HOLZWAVE_EMULATOR_PORT (default 5554) picks the emulator; HOLZWAVE_E2E_SKIP_BUILD=1 reuses the debug APK that
 # is already built (for a repeated run).
 #
@@ -113,9 +143,9 @@ SERIAL=emulator-$PORT
 export ANDROID_SERIAL=$SERIAL
 
 case "$SECTION" in
-    tracer | service | vault | tls) ;;
+    tracer | service | vault | tls | handover | clipboard) ;;
     *)
-        echo "usage: sh scripts/android-e2e.sh tracer|service|vault|tls" >&2
+        echo "usage: sh scripts/android-e2e.sh tracer|service|vault|tls|handover|clipboard" >&2
         exit 2
         ;;
 esac
@@ -136,6 +166,12 @@ cleanup() {
     [ -n "$rooted" ] && adb -s "$SERIAL" unroot >/dev/null 2>&1
     # The canary the self-test wrote into the debug app's private folder is removed with the rest of what the run left.
     { [ "$SECTION" = vault ] || [ "$SECTION" = tls ]; } && adb -s "$SERIAL" shell run-as "$PKG" rm -f selftest-canary >/dev/null 2>&1
+    # The files the handover section pushed to or made in the shared Download folder of the emulator (they all start with `hw-`), and
+    # what it copied into the app's own folders. The Mac side is in $tmp, which is removed below.
+    if [ "$SECTION" = handover ]; then
+        adbd shell "rm -f /sdcard/Download/hw-* '/sdcard/Download/hw späce.bin' '/sdcard/Download/hw-out-test (1).bin'" >/dev/null 2>&1
+        adbd shell run-as "$PKG" sh -c "'rm -f home/handover/hw-* home/handover/hw\ * home/hw-out-test.bin'" >/dev/null 2>&1
+    fi
     # The throwaway TLS server of the tls section; its certificate and key are in $tmp, which is removed below.
     [ -n "$reversed" ] && adb -s "$SERIAL" reverse --remove tcp:8443 >/dev/null 2>&1
     if [ -n "$server_pid" ]; then
@@ -175,6 +211,46 @@ adbd() { adb -s "$SERIAL" "$@"; }
 # the shell of the device, so the whole command is one argument and its own quotes are written for that shell.
 as_app() { adbd shell "run-as $PKG $*" | tr -d '\r'; }
 
+# The centre of the first node of a `uiautomator dump` (the file $1) whose text or content description is exactly $2, or, when $2
+# starts with `id:`, whose resource id is the rest. Prints `x y` and returns 0; prints nothing and returns 1 when there is no node
+# with bounds that match (the caller then says `not run`, never ok). The dump writes one `<node .../>` per element with its
+# attributes in double quotes, the five predefined entities and `&#10;` for a line break in a value, and bounds as `[x1,y1][x2,y2]`.
+# Entities that stand for a character outside ASCII are not decoded (the dump writes such text as it is, in UTF-8). The first match
+# in the file wins. This is the whole parser the dialog driver relies on; it is tested without an emulator.
+ui_center() {
+    [ -r "$1" ] && [ -n "$2" ] && [ "$2" != "id:" ] || return 1
+    awk -v want="$2" '
+        function unesc(s) {
+            gsub(/&lt;/, "<", s); gsub(/&gt;/, ">", s); gsub(/&quot;/, "\"", s); gsub(/&apos;/, "\047", s)
+            gsub(/&#10;/, "\n", s); gsub(/&#13;/, "\r", s); gsub(/&#9;/, "\t", s)
+            gsub(/&amp;/, "\\&", s)
+            return s
+        }
+        function attr(node, name,    key, at) {
+            key = " " name "=\""
+            at = index(node, key)
+            if (at == 0) return "\001"
+            node = substr(node, at + length(key))
+            return unesc(substr(node, 1, index(node, "\"") - 1))
+        }
+        BEGIN { RS = "<"; byid = (substr(want, 1, 3) == "id:"); if (byid) want = substr(want, 4) }
+        {
+            b = attr($0, "bounds")
+            if (b == "\001") next
+            if (byid) hit = (attr($0, "resource-id") == want)
+            else hit = (attr($0, "text") == want || attr($0, "content-desc") == want)
+            if (!hit) next
+            if (!match(b, /^\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]$/)) next
+            gsub(/\[|\]/, " ", b); gsub(/,/, " ", b)
+            split(b, p, " ")
+            printf "%d %d\n", int((p[1] + p[3]) / 2), int((p[2] + p[4]) / 2)
+            found = 1
+            exit
+        }
+        END { exit found ? 0 : 1 }
+    ' "$1"
+}
+
 start_time=$(date +%s)
 
 # 1. the emulator, the build, the install
@@ -209,7 +285,7 @@ if [ "$(adbd shell getprop ro.build.version.sdk | tr -d '\r')" -ge 33 ]; then
     adbd shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS || die "the notification permission could not be granted"
 fi
 
-if [ "$SECTION" != vault ] && [ "$SECTION" != tls ]; then
+if [ "$SECTION" != vault ] && [ "$SECTION" != tls ] && [ "$SECTION" != handover ] && [ "$SECTION" != clipboard ]; then
 # 2. start the app and wait for its window
 adbd logcat -c >/dev/null 2>&1
 adbd shell am start -W -n "$PKG/$ACTIVITY" >"$tmp/start.txt" 2>&1 || die "the activity did not start: $(cat "$tmp/start.txt")"
@@ -499,7 +575,7 @@ if [ "$SECTION" = service ]; then
 fi
 
 
-if [ "$SECTION" = vault ] || [ "$SECTION" = tls ]; then
+if [ "$SECTION" = vault ] || [ "$SECTION" = tls ] || [ "$SECTION" = handover ] || [ "$SECTION" = clipboard ]; then
     notrun=0
     skipped() { # <description> <reason>: a check that was not done is said so, and never counts as ok
         echo "e2e $SECTION: not run $1 ($2)"
@@ -727,7 +803,7 @@ if [ "$SECTION" = vault ] || [ "$SECTION" = tls ]; then
     sleep 5
     expect_ok vault-lost none "the screen lock removed: the vault is lost with key_gone, and a reset gives a new one" || true
     stop_app
-    else
+    elif [ "$SECTION" = tls ]; then
     # ---- the tls section ------------------------------------------------------------------------------------------------
     echo "e2e tls: image API $sdk; the PIN $PIN is set by this script (and cleared again) for the vault steps"
     command -v openssl >/dev/null 2>&1 || die "openssl is missing: the throwaway TLS server needs it"
@@ -844,6 +920,274 @@ if [ "$SECTION" = vault ] || [ "$SECTION" = tls ]; then
     # the PIN is cleared while the emulator is still there, and the app stopped
     stop_app
     adbd shell locksettings clear --old "$PIN" >/dev/null && pin_set=
+    elif [ "$SECTION" = handover ]; then
+    # ---- the handover section -------------------------------------------------------------------------------------------------
+    echo "e2e handover: image API $sdk; the system's own document dialog (the documents app of the image) is driven with uiautomator"
+    dl=/sdcard/Download
+    dialog_up() { adbd shell dumpsys window | grep mCurrentFocus | grep -qi documentsui; }
+    handover_listing() { as_app "ls -l home/handover 2>/dev/null" | awk 'NR > 1 { print $1, $5, $NF }' | sort; }
+    sha_device() { adbd exec-out run-as "$PKG" cat "$1" 2>/dev/null | shasum -a 256 | cut -d ' ' -f 1; }
+    sha_mac() { shasum -a 256 "$1" | cut -d ' ' -f 1; }
+
+    # UI driving: a dump that cannot be read is tried again, and a dump that still cannot be read is a node that is not found.
+    ui_dump() { # <file>
+        tries=0
+        while [ "$tries" -lt 3 ]; do
+            adbd shell uiautomator dump /sdcard/hw-ui.xml >/dev/null 2>&1
+            adbd exec-out cat /sdcard/hw-ui.xml >"$1" 2>/dev/null
+            adbd shell rm -f /sdcard/hw-ui.xml >/dev/null 2>&1
+            grep -q '<hierarchy' "$1" 2>/dev/null && return 0
+            tries=$((tries + 1))
+            sleep 1
+        done
+        : >"$1"
+        return 1
+    }
+    ui_tap_text() { # <text, or id:resource-id>: tap the centre of the first node that matches; 1 when there is none
+        ui_dump "$tmp/hw-ui.xml" || return 1
+        xy=$(ui_center "$tmp/hw-ui.xml" "$1") || return 1
+        set -- $xy
+        adbd shell input tap "$1" "$2"
+    }
+    # The open dialog: the file is in the list of recent files, or it is found by opening the roots drawer and the root `Downloads`,
+    # at most three tries.
+    want_name=
+    drive_open() {
+        tries=0
+        while [ "$tries" -lt 3 ]; do
+            ui_tap_text "$want_name" && return 0
+            ui_tap_text "Show roots" && {
+                sleep 1
+                ui_tap_text "Downloads"
+            }
+            sleep 2
+            tries=$((tries + 1))
+        done
+        return 1
+    }
+    # The create dialog: the button Save of the dialog (the system draws its text in capitals, so the resource id is the way in).
+    drive_save() {
+        ui_tap_text "id:android:id/button1" && return 0
+        ui_tap_text "SAVE" && return 0
+        ui_tap_text "Save"
+    }
+    drive_back() {
+        adbd shell input keyevent KEYCODE_BACK
+        return 0
+    }
+    # run_dialog_step <step> <driver> [seconds]: start the step, wait for the focused window of the documents app, call the driver
+    # once, and wait for the line the step logs. A driver that cannot do its work (a node was not found) presses Back so that the step
+    # ends, and the check is `not run`. Sets $line and $driven (ok, notrun, none when no dialog showed).
+    run_dialog_step() {
+        step=$1
+        driver=$2
+        limit=${3:-90}
+        driven=none
+        adbd logcat -c >/dev/null 2>&1
+        adbd shell am start -W -n "$PKG/$ACTIVITY" --es holzwave_selftest "$step" >/dev/null 2>&1 || die "the activity did not start for $step"
+        waited=0
+        line=
+        while [ "$waited" -lt "$limit" ]; do
+            line=$(step_line "$step")
+            [ -n "$line" ] && break
+            if [ "$driven" = none ] && dialog_up; then
+                sleep 2
+                if "$driver"; then
+                    driven=ok
+                else
+                    driven=notrun
+                    adbd shell input keyevent KEYCODE_BACK
+                fi
+            fi
+            sleep 1
+            waited=$((waited + 1))
+        done
+        [ -n "$line" ] || line="holzwave-selftest $step: FAIL no line in the log after $limit s"
+    }
+    # The back of a focus: after a step the app is in front again before the next one starts.
+    wait_app_front() {
+        waited=0
+        while [ "$waited" -lt 30 ]; do
+            adbd shell dumpsys window | grep mCurrentFocus | grep -q "$PKG/$ACTIVITY" && return 0
+            sleep 1
+            waited=$((waited + 1))
+        done
+        return 1
+    }
+
+    command -v shasum >/dev/null 2>&1 || die "shasum is missing (the checksums of the copies are made with it)"
+    head -c 1048576 /dev/urandom >"$tmp/hw-handover-test.bin" || die "no random bytes for the test file"
+    src_sha=$(sha_mac "$tmp/hw-handover-test.bin")
+    adbd push "$tmp/hw-handover-test.bin" "$dl/hw-handover-test.bin" >/dev/null || die "the test file could not be pushed to the emulator"
+    echo "e2e handover: the test file hw-handover-test.bin (1 MiB of random bytes, SHA-256 ${src_sha}) is in $dl on the emulator"
+    # The app is started once, so that its folders exist and the self-test route answers.
+    expect_ok vault-info none "the self-test answers" || stop_here "the self-test did not start"
+
+    # a. an open
+    want_name=hw-handover-test.bin
+    run_dialog_step handover-in drive_open
+    got_first=
+    case "$driven:$line" in
+        ok:*"handover-in: ok done name=\"hw-handover-test.bin\" size=1048576 "*)
+            check "an open: the chosen file is copied, the host reports its name and its size [${line#*"handover-in: ok "}]" ok
+            got_first=1
+            ;;
+        notrun:* | none:*) skipped "an open through the dialog" "the dialog could not be driven (driven=$driven; $line)" ;;
+        *) check "an open: the chosen file is copied" bad "$line" ;;
+    esac
+    wait_app_front || die "the app did not come back to the front after the dialog"
+
+    # b. the checksum of the copy
+    if [ -n "$got_first" ]; then
+        copy_sha=$(sha_device home/handover/hw-handover-test.bin)
+        [ "$copy_sha" = "$src_sha" ] && check "the copy in home/handover has the SHA-256 of the source" ok \
+            || check "the copy in home/handover has the SHA-256 of the source" bad "source $src_sha, copy '$copy_sha'"
+        # c. the mode, and no staging file
+        listing=$(as_app "ls -la home/handover")
+        mode=$(echo "$listing" | awk '$NF == "hw-handover-test.bin" { print $1 }')
+        [ "$mode" = "-rw-------" ] && check "the copy has mode -rw------- (the app alone reads it)" ok \
+            || check "the copy has mode -rw-------" bad "mode '$mode'"
+        if echo "$listing" | awk 'NR > 1 { print $NF }' | grep -q '^\.incoming-'; then
+            check "no staging file is left in the folder" bad "$(echo "$listing" | grep incoming)"
+        else
+            check "no staging file is left in the folder" ok
+        fi
+        before_second=$(handover_listing)
+
+        # d. a second copy of the same file is numbered
+        run_dialog_step handover-in drive_open
+        case "$driven:$line" in
+            ok:*"handover-in: ok done name=\"hw-handover-test.bin\" size=1048576 shown=\"~/handover/hw-handover-test-2.bin\" renamed=true"*)
+                second_sha=$(sha_device home/handover/hw-handover-test-2.bin)
+                first_sha=$(sha_device home/handover/hw-handover-test.bin)
+                if [ "$second_sha" = "$src_sha" ] && [ "$first_sha" = "$src_sha" ]; then
+                    check "a second copy of the same file is numbered hw-handover-test-2.bin, has the same checksum, and the first copy is unchanged" ok
+                else
+                    check "a second copy is numbered and both copies have the checksum of the source" bad "first '$first_sha', second '$second_sha'"
+                fi
+                ;;
+            notrun:* | none:*) skipped "the second copy" "the dialog could not be driven (driven=$driven; $line)" ;;
+            *) check "a second copy of the same file is numbered" bad "$line" ;;
+        esac
+        wait_app_front || die "the app did not come back to the front after the dialog"
+        before_cancel=$(handover_listing)
+
+        # e. a dismissed dialog
+        run_dialog_step handover-in drive_back
+        case "$driven:$line" in
+            ok:*"handover-in: ok cancelled"*)
+                [ "$(handover_listing)" = "$before_cancel" ] && check "a dismissed dialog is cancelled and the folder is exactly as before" ok \
+                    || check "a dismissed dialog changes nothing" bad "the folder changed"
+                ;;
+            none:*) skipped "the dismissed dialog" "no dialog showed" ;;
+            *) check "a dismissed dialog is cancelled" bad "$line" ;;
+        esac
+        wait_app_front || die "the app did not come back to the front after the dialog"
+
+        # f. a file above the limit
+        adbd shell truncate -s 300M "$dl/hw-big.bin" >/dev/null 2>&1
+        before_big=$(handover_listing)
+        want_name=hw-big.bin
+        run_dialog_step handover-in drive_open 120
+        case "$driven:$line" in
+            ok:*"handover-in: ok too_large name=\"hw-big.bin\""*)
+                [ "$(handover_listing)" = "$before_big" ] && check "a file of 300 MiB is refused as too_large with its name and nothing new is in the folder [${line#*"handover-in: ok "}]" ok \
+                    || check "a file above the limit adds nothing" bad "the folder changed"
+                ;;
+            notrun:* | none:*) skipped "the file above the limit" "the dialog could not be driven (driven=$driven; $line)" ;;
+            *) check "a file above the limit is refused as too_large" bad "$line" ;;
+        esac
+        wait_app_front || die "the app did not come back to the front after the dialog"
+    else
+        skipped "the checks b to f, which need the first copy" "the first open could not be driven"
+    fi
+
+    # g. a name with a space and a letter outside ASCII
+    odd="hw sp\303\244ce.bin"
+    odd_name=$(printf "$odd")
+    head -c 4096 /dev/urandom >"$tmp/$odd_name" || die "no random bytes for the second test file"
+    odd_sha=$(sha_mac "$tmp/$odd_name")
+    adbd push "$tmp/$odd_name" "$dl/$odd_name" >/dev/null || die "the file with the odd name could not be pushed"
+    want_name=$odd_name
+    run_dialog_step handover-in drive_open
+    case "$driven:$line" in
+        ok:*"handover-in: ok done "*)
+            seen_name=$(echo "$line" | sed -n 's/.*handover-in: ok done name="\([^"]*\)".*/\1/p')
+            case "$seen_name" in
+                */* | *\\* | "") check "a name with a space and a letter outside ASCII keeps no separator" bad "name '$seen_name'" ;;
+                *)
+                    final=$(as_app "ls home/handover" | grep -F -x -- "$seen_name" | head -n 1)
+                    if [ "$final" = "$seen_name" ] && [ "$(sha_device "home/handover/$seen_name")" = "$odd_sha" ]; then
+                        check "a name with a space and a letter outside ASCII is copied in as '$seen_name' (the cleaned name, no separator), with the checksum of the source" ok
+                    else
+                        check "the file with the odd name is in the folder under the name the host reported" bad "reported '$seen_name', found '$final'"
+                    fi
+                    ;;
+            esac
+            ;;
+        notrun:* | none:*) skipped "the odd name" "the dialog could not be driven (driven=$driven; $line)" ;;
+        *) check "a name with a space and a letter outside ASCII is copied in" bad "$line" ;;
+    esac
+    wait_app_front || die "the app did not come back to the front after the dialog"
+
+    # h. a copy out
+    adbd shell "rm -f $dl/hw-out-test.bin" >/dev/null 2>&1
+    run_dialog_step handover-out drive_save
+    case "$driven:$line" in
+        ok:*"handover-out: ok done name=\"hw-out-test.bin\" size=4096 "*)
+            if adbd pull "$dl/hw-out-test.bin" "$tmp/hw-out-pulled.bin" >/dev/null 2>&1; then
+                pattern_sha=
+                if command -v perl >/dev/null 2>&1; then
+                    perl -e 'binmode STDOUT; print map { chr } ((0 .. 255) x 16)' >"$tmp/hw-out-pattern.bin" && pattern_sha=$(sha_mac "$tmp/hw-out-pattern.bin")
+                fi
+                made_sha=$(sha_device home/hw-out-test.bin)
+                pulled_sha=$(sha_mac "$tmp/hw-out-pulled.bin")
+                pulled_size=$(wc -c <"$tmp/hw-out-pulled.bin" | tr -d ' ')
+                if [ -n "$pattern_sha" ] && [ "$pulled_sha" = "$pattern_sha" ] && [ "$pulled_size" = 4096 ]; then
+                    check "a copy out: the file pulled from the Download folder has the SHA-256 and the size (4096 bytes) of the pattern the step wrote" ok
+                elif [ -z "$pattern_sha" ] && [ "$pulled_sha" = "$made_sha" ] && [ "$pulled_size" = 4096 ]; then
+                    check "a copy out: the file pulled from the Download folder equals the file in the shell's folder (perl is missing, the pattern itself was not recomputed)" ok
+                else
+                    check "a copy out: the pulled file equals the pattern" bad "pulled $pulled_sha ($pulled_size bytes), written $made_sha, pattern '$pattern_sha'"
+                fi
+            else
+                check "a copy out: the saved file could be pulled from the Download folder" bad "adb pull failed"
+            fi
+            ;;
+        notrun:* | none:*) skipped "a copy out through the create dialog" "the dialog could not be driven (driven=$driven; $line)" ;;
+        *) check "a copy out through the create dialog" bad "$line" ;;
+    esac
+    wait_app_front || true
+    stop_app
+    else
+    # ---- the clipboard section --------------------------------------------------------------------------------------------------
+    echo "e2e clipboard: image API $sdk"
+    expect_ok clipboard-roundtrip none "the clipboard is written and read back through the plugin as plain text, a text over 512 KiB is refused and the first text stays" \
+        || stop_here "the clipboard step did not run"
+    case "$line" in
+        *"sensitive=true"*)
+            if [ "$sdk" -ge 33 ]; then
+                check "the clip carries the sensitive mark on API $sdk (Android 13 and later hide its preview)" ok
+            else
+                check "the clip carries the sensitive mark only from API 33" bad "API $sdk reported sensitive=true"
+            fi
+            ;;
+        *"sensitive=false"*)
+            if [ "$sdk" -lt 33 ]; then
+                check "below API 33 the clip carries no sensitive mark (the system has none; the text is written all the same)" ok
+            else
+                check "the clip carries the sensitive mark on API $sdk" bad "sensitive=false"
+            fi
+            ;;
+        *) check "the step reports whether the clip is marked sensitive" bad "$line" ;;
+    esac
+    dump=$(adbd shell dumpsys clipboard 2>/dev/null | tr -d '\r')
+    if echo "$dump" | grep -q -F "holzwave clipboard test"; then
+        echo "e2e clipboard: information: dumpsys clipboard lists the test text ($(echo "$dump" | wc -l | tr -d ' ') lines)"
+    else
+        echo "e2e clipboard: information: dumpsys clipboard does not list the test text ($(echo "$dump" | wc -l | tr -d ' ') lines; not a pass condition)"
+    fi
+    stop_app
     fi
 fi
 

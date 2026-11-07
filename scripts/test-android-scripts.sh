@@ -301,7 +301,7 @@ run android-e2e.sh
 [ "$rc" -eq 2 ] && ok "no argument is a usage error, exit 2" || bad "e2e usage (rc $rc)"
 mkcase
 run android-e2e.sh nonsense
-[ "$rc" -eq 2 ] && echo "$out" | grep -q 'tracer|service|vault|tls' && ok "an unknown section is a usage error that names the four sections, exit 2" \
+[ "$rc" -eq 2 ] && echo "$out" | grep -q 'tracer|service|vault|tls|handover|clipboard' && ok "an unknown section is a usage error that names the six sections, exit 2" \
   || bad "e2e unknown section (rc $rc): $out"
 mkcase
 rm -f "$c/bin/adb"
@@ -359,6 +359,79 @@ if grep -q 'locksettings' "$LOG" || grep -q 's_server' "$LOG"; then
   bad "the tls section touched the screen lock or started a server before the emulator was up"
 else
   ok "the tls section calls neither locksettings nor a TLS server before the emulator is up"
+fi
+
+
+mkcase
+rm -f "$c/bin/adb"
+run android-e2e.sh handover
+[ "$rc" -eq 2 ] && nothing_left && ok "the handover section without adb is exit 2" || bad "e2e handover without adb (rc $rc): $out"
+mkcase
+rm -f "$c/bin/adb"
+run android-e2e.sh clipboard
+[ "$rc" -eq 2 ] && nothing_left && ok "the clipboard section without adb is exit 2" || bad "e2e clipboard without adb (rc $rc): $out"
+for section in handover clipboard; do
+  mkcase
+  : > "$LOG"
+  run android-e2e.sh "$section"
+  if [ "$rc" -eq 1 ] && echo "$out" | grep -q 'the emulator did not boot' && nothing_left && [ "$(calls npm)" -eq 0 ]; then
+    ok "the $section section with an emulator that does not boot is exit 1, nothing is built, no temporary file is left"
+  else
+    bad "e2e $section with a dead emulator (rc $rc, left: $(ls -A "$c/tmpdir")): $out"
+  fi
+  if grep -q 'locksettings' "$LOG"; then
+    bad "the $section section touched the screen lock"
+  else
+    ok "the $section section never calls locksettings"
+  fi
+done
+
+echo "test 5b: the parser of the dialog driver finds a node in a uiautomator dump"
+# The function under test is the one in the script, cut out by its first and last line, so what is proved is what runs.
+sed -n '/^ui_center() {/,/^}/p' "$here/android-e2e.sh" > "$tmp/ui_center.sh"
+if [ "$(wc -l < "$tmp/ui_center.sh" | tr -d ' ')" -gt 10 ]; then
+  . "$tmp/ui_center.sh"
+  # A dump in the format `uiautomator dump` writes: one line, one node per element, attributes in double quotes.
+  cat > "$tmp/dump-a.xml" <<'XML'
+<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation="0"><node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="com.android.documentsui" content-desc="" bounds="[0,0][1080,2400]"><node index="1" text="Downloads" resource-id="" class="android.widget.TextView" content-desc="" bounds="[157,163][421,234]" /><node index="2" text="" resource-id="" class="android.widget.ImageButton" content-desc="Show roots" bounds="[0,136][147,262]" /><node index="3" text="SAVE" resource-id="android:id/button1" class="android.widget.Button" content-desc="" bounds="[812,2148][1043,2274]" /><node index="4" text="hw späce &amp; &lt;x&gt; &quot;q&quot; it&apos;s.bin" resource-id="" class="android.widget.TextView" content-desc="" bounds="[196,1043][497,1094]" /><node index="5" text="hw-big.bin" resource-id="android:id/title" class="android.widget.TextView" content-desc="" bounds="[100,300][300,400]" /><node index="6" text="hw-big.bin" resource-id="android:id/title" class="android.widget.TextView" content-desc="" bounds="[500,900][700,1000]" /><node index="7" text="Huge" resource-id="" class="android.widget.TextView" content-desc="" bounds="[2147483000,10][2147483600,50]" /><node index="8" text="No bounds" resource-id="" class="android.widget.TextView" content-desc="" /><node index="9" text="Odd bounds" resource-id="" class="android.widget.TextView" content-desc="" bounds="[a,b][c,d]" /><node index="10" text="Downloads folder" resource-id="com.android.documentsui:id/breadcrumb_text" class="android.widget.TextView" content-desc="" bounds="[0,262][288,388]" /></node></hierarchy>
+XML
+  # The same screen in the layout of an older dump: one node per line.
+  cat > "$tmp/dump-b.xml" <<'XML'
+<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy rotation="0">
+  <node index="0" text="Recent files" content-desc="" resource-id="x" bounds="[63,388][890,546]" />
+  <node index="1" text="" content-desc="Preview the file report.pdf" resource-id="" bounds="[891,546][1080,735]" />
+  <node index="2" text="report.pdf" content-desc="" resource-id="android:id/title" bounds="[189,585][581,642]" />
+</hierarchy>
+XML
+  expect_xy() { # <file> <what> <wanted "x y"> <description>
+    got=$(ui_center "$1" "$2"); status=$?
+    if [ "$status" -eq 0 ] && [ "$got" = "$3" ]; then ok "ui_center: $4 ($got)"; else bad "ui_center: $4 (status $status, got '$got', wanted '$3')"; fi
+  }
+  expect_none() { # <file> <what> <description>
+    got=$(ui_center "$1" "$2"); status=$?
+    if [ "$status" -eq 1 ] && [ -z "$got" ]; then ok "ui_center: $3 (status 1, nothing printed)"; else bad "ui_center: $3 (status $status, got '$got')"; fi
+  }
+  expect_xy "$tmp/dump-a.xml" Downloads "289 198" "a node found by its text has its centre computed from its bounds"
+  expect_xy "$tmp/dump-a.xml" "Show roots" "73 199" "a node found by its content description"
+  expect_xy "$tmp/dump-a.xml" "id:android:id/button1" "927 2211" "a node found by its resource id (the Save button of the create dialog)"
+  expect_xy "$tmp/dump-a.xml" 'hw späce & <x> "q" it'"'"'s.bin' "346 1068" "a text with a letter outside ASCII and escaped characters (&amp; &lt; &gt; &quot; &apos;) is compared after it is unescaped"
+  expect_none "$tmp/dump-a.xml" 'hw späce &amp; <x>' "a text is compared after unescaping, not as written in the dump"
+  expect_xy "$tmp/dump-a.xml" hw-big.bin "200 350" "a node that is found twice: the first match wins"
+  expect_xy "$tmp/dump-a.xml" Huge "2147483300 30" "bounds with a large number"
+  expect_xy "$tmp/dump-b.xml" report.pdf "385 613" "the layout with one node per line"
+  expect_xy "$tmp/dump-b.xml" "Preview the file report.pdf" "985 640" "a content description that holds the name of a file is not mistaken for the file's own node"
+  expect_none "$tmp/dump-a.xml" "Nothing like this" "a node that is not there"
+  expect_none "$tmp/dump-a.xml" Down "a text that is only the start of another text is not a match"
+  expect_none "$tmp/dump-a.xml" "id:button1" "a resource id is matched whole"
+  expect_none "$tmp/dump-a.xml" "No bounds" "a node without bounds is not tapped"
+  expect_none "$tmp/dump-a.xml" "Odd bounds" "bounds that are not numbers are not tapped"
+  expect_none "$tmp/dump-b.xml" "id:" "an empty resource id names no node"
+  : > "$tmp/dump-empty.xml"
+  expect_none "$tmp/dump-empty.xml" Downloads "an empty dump"
+  expect_none "$tmp/dump-missing.xml" Downloads "a dump that does not exist"
+else
+  bad "the function ui_center was not found in android-e2e.sh"
 fi
 
 echo "test 6: nothing was installed, downloaded or signed"

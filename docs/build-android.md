@@ -170,7 +170,7 @@ ARM or 32-bit x86 at all.
 sh scripts/android-e2e.sh tracer
 ```
 
-(The section `service` is described with the foreground service below, the section `vault` with the secret store, and the section `tls` with HTTPS and certificates.) It starts the emulator if none runs (and stops it at the end only if it started it), builds and installs the debug APK, starts
+(The section `service` is described with the foreground service below, the section `vault` with the secret store, the section `tls` with HTTPS and certificates, and the sections `handover` and `clipboard` with the single-file hand-over and the clipboard.) It starts the emulator if none runs (and stops it at the end only if it started it), builds and installs the debug APK, starts
 the app, waits until the app has started a shell, taps the screen, types three lines with the real Android key path (`adb shell
 input text` and the Enter key), and reads the results back with `run-as`:
 
@@ -424,6 +424,69 @@ chain is judged by the system trust store through the platform's own trust manag
   config, so none is expected to be trusted, and that was not tried), corporate proxies and TLS inspection, captive portals,
   certificate pinning (the app pins nothing), revocation behaviour, mobile networks, a real WebDAV server and a real AI provider
   from a phone.
+
+## Handing one file over
+
+The shell lives in a folder of the app's own storage, and Android does not let a program there open a folder in another app's
+storage. A folder dialog could grant a whole tree, and that grant would have to be kept and managed; the app does without it. What
+it offers instead is a copy of **one file at a time** through the system's own document dialog, in either direction.
+
+- **Copy in.** The palette entry and the sheet row open the system's open-document dialog (`ACTION_OPEN_DOCUMENT`, one document, only
+  documents that can be opened). The chosen document is copied to `home/handover/` of the shell's folder, under a name the app
+  decides: the provider's display name is another app's text, so the host cleans it to one safe file name (no separator, no `..`, no
+  control or direction character, at most 255 bytes) and numbers it when the name is taken (`report.pdf`, `report-2.pdf`). The file
+  has mode 0600. A file larger than **256 MiB** is refused: a size the provider reports above the limit is refused before a byte is
+  read, and the bytes are counted while they are copied, so a provider that reports no size or a wrong one is stopped at the limit
+  and the partial file is removed.
+- **Copy out.** The page asks for the path of a file in the shell's folder, the host checks that it is a regular file that stays
+  inside the folder, and the system's create-document dialog opens with its name; the file is copied to the document the person
+  names. Nothing outside the shell's folder can be copied out.
+- **What the app asks Android for.** Nothing: no storage permission, no media permission, no `provider` element in the manifest, no
+  folder dialog, and no kept grant to a document (a document's address is used once and dropped). A text test fails if any of
+  these appears anywhere in the Android project. The permission list is the same as before the dialogs.
+- **Where the work is done.** The Kotlin part of the app shows the dialog and copies the bytes on a thread of its own, never on the
+  main thread, and the call into it waits on a blocking worker of the host, so a dialog that stays open for minutes blocks neither
+  the page nor the window. A path that comes from the Rust side must be inside the shell's folder and must not be a link, and a
+  result of the dialog is used only when it is a `content` address; both are checked again in Kotlin. One hand-over runs at a time;
+  a second one answers `Could not copy the file` at once. A dismissed dialog changes nothing.
+- **What the emulator run proved.** `sh scripts/android-e2e.sh handover` drives the real dialog of the image (the documents app of
+  the system, window `com.android.documentsui/.picker.PickActivity`) with `uiautomator`. On the Android 37 image
+  (`system-images;android-37.0;default;arm64-v8a`) and on the Android 12 image (`android-31`), every check was ok: a pushed file of
+  1 MiB of random bytes was chosen and its copy has the SHA-256 of the source, mode `-rw-------` and no staging file beside it; a
+  second copy of the same file is `hw-handover-test-2.bin` with the same checksum and the first copy is unchanged; a dialog
+  dismissed with Back changes nothing; a file of 300 MiB (made on the emulator) is refused as too large with its name; a file named
+  `hw späce.bin` (a space and a letter outside ASCII) is copied in under exactly that name; and a copy out of a fixed 4 KiB pattern
+  to the Download folder has the pattern's SHA-256. The script removes every file it pushed, made or copied.
+- **What it did not prove.** Real providers: a cloud drive, a USB stick, an SD card or another app's provider, which may report no
+  or a wrong size, revoke a document or stream slowly; very large files on a phone with little free storage; the dialogs of other
+  Android versions and phone makers' skins (the emulator has the plain system dialog of two images); a dialog result that arrives
+  after the app's window was recreated (two attempts to force that on the emulator, a change of the font scale and the developer
+  setting that destroys activities, did not recreate the window, so it was not tried); the touch feel; and any real phone.
+
+## The clipboard
+
+Paste on Android does not rely on the web view's own clipboard permission. The page asks the app for the clipboard first, after the
+person's own paste (the paste chord or the menu's Paste), and the app answers through the Kotlin part of the app; a copy of the
+terminal selection goes the same way.
+
+- **Plain text only.** The clipboard is read as the plain text of the first item of the primary clip and nothing else: a link, a
+  picture or a page of HTML gives an empty text, and nothing is converted into text. A copy writes a plain text clip.
+- **Bounded, never cut.** A text of more than **512 KiB** (UTF-8) is refused in either direction, with the same message form as the
+  desktop's much larger bound, and a refused write leaves the clipboard as it was. The system clipboard lives in another process and
+  a clip crosses to it in one transaction whose buffer is about 1 MiB, so the bound is below the desktop's.
+- **Marked sensitive.** On Android 13 and later a copy marks the clip as sensitive, so the system's confirmation does not show the
+  text. Android 12 has no such mark; the text is written all the same.
+- **Read only inside a person's own paste.** The Kotlin part has no listener for clipboard changes and no entry the page can call:
+  only the Rust code of the app reaches it, and the page's `clipboard_text` is a read with the same limits as on the desktop.
+  Android 10 and later refuse a read to an app that is not in front, and Android 12 and later show a short message when an app reads
+  a clip that another app wrote; the app works around neither. A text is never logged and never put in an error message.
+- **What the emulator run proved.** `sh scripts/android-e2e.sh clipboard` writes a fixed text through the app's own path, reads it
+  back and gets the same text, tries a text of 600 000 bytes (refused, and the first text is still on the clipboard), and reports
+  the sensitive mark: set on the Android 37 image, absent on the Android 12 image, as the script requires. `dumpsys clipboard` lists
+  nothing about the clip on either image; that line is printed for information and is not a pass condition.
+- **What it did not prove.** The paste through the page itself (the menu's Paste into a running pane) was not run on the emulator;
+  the clipboard strips of third party keyboards, the clipboard managers of phone makers, multi-window and foldable focus rules, how
+  a real phone's system shows or hides the preview of a sensitive clip, and any real phone.
 
 ## Check a built APK
 
