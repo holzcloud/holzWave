@@ -1,11 +1,12 @@
 # Test plan
 
-Eleven parts: how to run everything locally, the per-platform manual list for hardware the owner owns, the record of the
+Thirteen parts: how to run everything locally, the per-platform manual list for hardware the owner owns, the record of the
 macOS acceptance of Phase 2, the Windows and Linux list of Phase 2.2 (Part 4), connections (Part 5), files and previews
 with the extras (Part 6), the AI chat with the Apple on-device model and the rest of the extras (Part 7), the local
-network notice of macOS (Part 8), the native integrations with Kubernetes, Talos, Azure CLI and GAM7 (Part 9), and the web
-build with its server, image and browser page (Part 10), and the rows for pictures, hyperlinks, signed releases and the limits
-of the measurements (Part 11). All of it runs locally; nothing here needs GitHub (D-04).
+network notice of macOS (Part 8), the native integrations with Kubernetes, Talos, Azure CLI and GAM7 (Part 9), the web
+build with its server, image and browser page (Part 10), the rows for pictures, hyperlinks, signed releases and the limits
+of the measurements (Part 11), the Linux desktops, other architectures and the Store package that nobody has run (Part 12), and
+Android, which was built and run on arm64 emulators and never on a phone or a tablet (Part 13). All of it runs locally; nothing here needs GitHub (D-04).
 
 ## Part 1: run everything locally
 
@@ -150,6 +151,23 @@ here says `NOT RUN` with the reason and exits non-zero, and a missing Docker is 
 terminal engine needs another Zig than the Dockerfile's default is built with `HOLZWAVE_ZIG_VERSION=<version>`, and
 `HOLZWAVE_WEB_CONTEXT=<directory>` builds from another tree, such as an export of a commit. `docker compose` and `helm
 template` render the same three kinds of deployment that [server.md](server.md) describes.
+
+The Android app has commands of its own. They need the Android toolchain of [build-android.md](build-android.md) (the JDK, the
+SDK, the NDK, the Rust target `aarch64-linux-android` and, for the two lines that run an emulator, the arm64 system images of
+the SDK manager), and they talk to emulators only: a phone on the cable is never addressed. Nothing here is a test on a phone.
+
+```sh
+. scripts/android-env.sh && sh scripts/android-env-check.sh   # the toolchain, one line per tool; reads, installs nothing
+sh scripts/android-check.sh                  # compiles core, host, ipc and the app for aarch64-linux-android with the pinned NDK
+sh scripts/test-android-scripts.sh           # the stand-in tests of the Android scripts (shims, no Android software)
+sh scripts/android-e2e.sh all                # every emulator section on one arm64 emulator: tracer, service, vault, tls, handover, clipboard, touch, ssh, pagesize
+sh scripts/android-e2e.sh matrix             # the same set on the newest image, then Android 12 and the 16 KB page image, one emulator at a time
+sh scripts/android-gate.sh                   # the checks that need no emulator (toolchain, compile gate, stand-in tests, workspace, page, design, release APK); --emulator adds the matrix
+```
+
+Each prints a last line that says `ok` or names what failed and exits non-zero on a failure, and exit status 2 means a tool, an image or the Rust target is
+missing (the line that would fix it is printed, never run). The emulator runs print one table per image in which a check that
+could not be made is `not run` and named; `not run` is not a pass.
 
 Notes:
 
@@ -687,6 +705,123 @@ Machines the rows need:
 - MSX1 and MSX2: a clean Windows 10 and a clean Windows 11 machine or virtual machine, and the MSIX file of a release.
 - FPK1 to FPK7: a Linux machine with a desktop, `flatpak` and `flatpak-builder`, and the Flatpak built with `sh scripts/build-flatpak.sh` (the container build on a Mac only shows that it builds). FPK5 needs an SSH agent with a key and a server you own, FPK6 a Secret Service (GNOME Keyring or KWallet) and, for its last step, a session without one, and FPK7 one machine or virtual machine per desktop. Row L10 of Part 4 keeps the network checks of the Flatpak.
 
+## Part 13: Android
+
+Nothing in this part is verified until you run the row and write `pass`, or `fail` with a line of what was seen, in its Result
+column. Android was built and run on **arm64 emulators only**: Android 12, the newest image and a 16 KB page image, never on a
+phone and never on a tablet. The emulator runs showed the page in the real Android web view, the local shell, SSH, the secret
+store behind the Android Keystore with the system prompt, HTTPS, the document dialog, the clipboard, the touch page and the
+foreground service ([build-android.md](build-android.md) says what each run showed and what it did not). The rows below need
+exactly what an emulator cannot give: a real phone or tablet, a real keyboard, a real sensor, a real network, a real provider and a
+person's hands. A row that you do not run stays empty. A failing row becomes a task of its own.
+
+| # | Area | What to do | Expected | Result |
+|---|---|---|---|---|
+| AND1 | Soft keyboards | On a phone with Gboard, then with a second soft keyboard (the phone maker's or a third-party one), tap a pane and type a sentence with suggestions and auto-correct on, type a word by swiping, hold a letter for its alternatives, hold Backspace, enter an emoji, use dictation and press Enter. Tap `ctrl` in the key row and type `c`; then try the same with `alt`. Open and close the keyboard and watch the key row and the last line of the shell. | The text appears once, as it was typed, with no doubled or lost letter; Backspace and Enter reach the shell and a held Backspace repeats; `ctrl` then `c` interrupts a running command; the key row sits directly above the keyboard and the last line of the shell stays visible. Composition with an armed modifier is known to act when the composition ends and not at once: record what happens. Record the keyboards and their versions: ____. | |
+| AND2 | Hardware keyboards | Connect a Bluetooth keyboard to a phone and a USB keyboard (or a keyboard case) to a tablet. In a pane type, then press `Esc`, `Tab`, the arrows, `F1`, `Page Up`, `Ctrl+C`, `Alt` with a letter and `Ctrl+Shift+P`. Touch the on-screen keyboard again and press a key of the hardware keyboard again. | The keys reach the shell as they do on a computer; the key row hides when a key that the on-screen keyboard does not have is pressed and comes back when the on-screen keyboard is used; the desktop chords work on the tablet. The rule that hides the key row is held by unit tests only: no emulator could trigger it. Record the keyboards: ____. | |
+| AND3 | The secret store with a real sensor and the app switcher card | On a phone with a screen lock and a fingerprint or face sensor: save an SSH password, lock the store and unlock it again, restart the app, enrol one more finger, then remove the screen lock and set it again. Repeat on a phone that has no screen lock. Where the phone has a secure chip (StrongBox), look at what the Security group of the Settings dialog says. With the protected store on, open the app switcher with the app unlocked, then locked, and take a screenshot. | The system prompt appears on every unlock and the saved password survives a restart; the new finger changes nothing; removing the screen lock gives the dialog for a lost store and only a reset starts a new one; the phone with no screen lock shows the notice that the secrets are protected by the device key only, and its app switcher card is not hidden. With the protected store the app switcher card shows no terminal content while the app is in the background, on Android 13 and later; a screenshot still works, because only the card is hidden. On Android 12 and 12L nothing hides the card and it may show terminal content: record what the phone shows, it is a known limit. Record the phone, the Android version and whether StrongBox was reported: ____. | |
+| AND4 | Background behaviour | Start a local shell and an SSH session, turn the screen off for an hour with the battery optimisation of the phone left on, and then use both. Open the notification and tap `Stop all`. On Android 13 and later start the app from a clean install and answer the notification question once with Allow and once with Don't allow. Start several local shells and watch which ones survive in the background. After the system has recreated the window (change the system font size or the display size while the app runs), tap `Stop all`, then start a new shell. | The notification says `holzWave is running` with the counts only; `Stop all` ends every shell and connection and keeps the window; the SSH session is still there after an hour, because the limit of Android on background processes can end local shells and does not touch the app's own connections: record how many local shells were left and when. With Don't allow the service runs and no notification shows. After the window was recreated, a new shell should bring the service back: an emulator showed that it did not (see Known defects below), so record what the phone does. Record the phone, its battery settings and the Android version: ____. | |
+| AND5 | One-file hand-over with real providers | With the palette entry or the sheet row copy one file in from the Downloads folder, from a cloud storage app, from an SD card or a USB stick, from a provider that gives no size (a streamed file), a file of about 250 MB, a file of more than 256 MB and a file whose name has a space, a quote and a letter outside ASCII; then copy a file of the shell's folder out to each place that allows it. Dismiss a dialog once. | Each copy in lands in the `handover` folder of the shell's folder under a clean name that does not overwrite another file, with the checksum of the source; the file over 256 MB is refused with its name and size and leaves nothing behind; a provider that gives no size is stopped at the limit and its partial file is removed; a dismissed dialog changes nothing; a copy out has the content of the file. Record the providers: ____. | |
+| AND6 | Real networks | Open an SSH connection over mobile data and again over Wi-Fi, switch between the two and walk out of the range of one access point. Set up the sync against a real Nextcloud over mobile data. Install a private certificate authority on the phone and connect to a server whose certificate it signed (an HTTPS WebDAV server, a local AI server). Try a server on the home network by its private address on Android 17. | SSH reconnects after the network changes and the pane says so; the sync runs and says so; a server whose certificate was signed by a private authority that you installed on the phone is expected to be refused, because Android applies a user-installed authority to an app only as the app's network security configuration allows and this app has none: record what happens; on Android 17 a private address is not reachable (the app does not ask for the local-network permission): record what the phone says. Record the network types and the Android versions: ____. | |
+| AND7 | Touch feel | Select words and lines by a long press, drag both handles, scroll the history by a swipe with a fling, scroll and pinch in the same gesture, touch the screen with the palm while writing with a stylus, split the screen with another app, use a foldable folded and unfolded, and pinch with two fingers to change the size of the interface. | The long press takes the word under the finger after half a second; the handles are easy to hit and the menu shows `Copy` and `Paste`; a swipe scrolls and a fling decays and stops; a palm does not select or scroll; the layout follows the window in split screen and on a fold; the two-finger pinch changes the interface size in steps of 5 percent between 75 and 200 and the label `UI scale` shows it (the emulator input command has no two-finger gesture, so the pinch was never driven). Record the device and what feels wrong: ____. | |
+| AND8 | The real web view and performance | Note the version of the Android System WebView in the phone's settings. Run a command that prints a very large output (for example `yes` for a minute, then `cat` of a large file) and look at the frame rate and the heat of the phone. Open many apps until the system ends the app's process, then return to it. On a phone with Android 12 and three-button navigation, look at the bottom bar of the page. | The page draws and scrolls smoothly during output and the phone does not throttle to a standstill; after a memory kill the app starts again with the layout it had; the bottom bar (the tabs and the plus) is fully above the three navigation buttons. An emulator with Android 12 and WebView 91 drew the bar under the buttons because that web view reports no safe-area inset (see Known defects below): record whether an up-to-date web view on a phone does. Record the WebView version and the phone: ____. | |
+| AND9 | A 16 KB page phone from a vendor | On a phone that runs with 16 KB memory pages (`adb shell getconf PAGE_SIZE` prints 16384; Developer options on Android 15 and later may offer the mode), start the app, open a pane, run a command and open an SSH connection. | The app starts, the shell echoes and the SSH session connects. An emulator image with 16 KB pages showed the app start with every mapping of its library aligned to 16384 bytes; no phone was tried. Record the phone: ____. | |
+| AND10 | First start and update of an APK on a phone | Build and sign an APK with the owner's own key as [build-android.md](build-android.md) describes, install it on a phone and note every prompt and warning of the system installer and of the phone's protection service for an app from outside a store. Save a connection and change the layout, then install a build with a higher version code over it. | The installer's own prompts are written down, not judged; the update keeps the saved connection, the layout and the secret store; an APK with a lower version code is refused. What a channel listed on the distribution page adds is that page's and not part of this row. Record the phone and the Android version: ____. | |
+| AND11 | The AI chat and the sync from a phone | In the chat pane of the phone add a real cloud provider with a key and send a message; add a local AI server on the network and send one; set up the sync against a real WebDAV server with an app password; lock the secret store and try to send and to sync, then unlock it. | A message to each provider is answered; a locked store pauses the sync without an error and the chat says `Locked: unlock to send` and sends after the unlock; the sync runs once at the unlock. Nothing of this ran against a real provider or a real WebDAV server from a phone. Record the providers and the server: ____. | |
+| AND12 | Accessibility | Turn on TalkBack and move through the top strip, the bottom bar, the sheet and the key row. Set the font size and the display size to their largest and look at every screen, then switch on high contrast text and reduced motion. | Every control has a name that says what it does and its state (`ctrl` says armed or locked); nothing is cut off at the largest sizes; high contrast and reduced motion are followed. The page's nodes are readable by the automated test tool of the emulator, which is not TalkBack. Record the TalkBack version: ____. | |
+| AND13 | The tablet layout on a real tablet | On a tablet whose window is at least 840 CSS pixels wide and whose screen has a short side of at least 480, open a layout with several panes, drag a divider by touch, look for the tear-off controls, rotate the tablet, use split screen and a freeform window, and open the soft keyboard. | The panes are tiled as on a computer, the dividers can be grabbed by a finger (the touch area is 24 px around a 1 px line), the tear-off controls are absent, the layout follows rotation and split screen and the key row sits above the keyboard. Controls of the status line and the sidebar are smaller than 44 px: record whether that matters. Record the tablet: ____. | |
+| AND14 | Clipboard and paste | Copy text in another app and paste it into a shell pane by the menu's Paste and by the paste chord of a keyboard; copy from the terminal and paste into another app; copy a text of more than 512 KiB; use a keyboard whose clipboard strip offers a recent text; watch the system's confirmation on Android 13 and later. | The text arrives once; the preview that the system shows for a copy from the terminal is hidden on Android 13 and later; a text over 512 KiB is refused with a message and the clipboard keeps what it held; an HTML-only copy pastes nothing. The paste through the page itself was not run on an emulator. Record the keyboard and the Android version: ____. | |
+| AND15 | The local shell on vendor ROMs | On at least two phones of different makers start a pane and run `echo $0`, `pwd`, `ls`, `readlink /proc/$$/exe`, a command that runs for a minute, resize the window and type `exit`. | `/system/bin/sh` starts, the working folder is the `home` folder of the app's private storage, `ls` works, the shell follows a resize, and the program list is whatever the system ships (no extra programs are installed by the app). Record the makers and the Android versions: ____. | |
+
+Machines the rows need:
+
+- AND1, AND2, AND3, AND4, AND5, AND6, AND7, AND8, AND11, AND12 and AND14: a phone with Android 12 or later (also one with Android 12 and
+  one with Android 13 or later, for the rows that name the version), a Bluetooth keyboard and a stylus for AND2 and AND7.
+- AND3: a phone with a fingerprint or face sensor and one with no screen lock; AND4: a phone from a maker whose battery manager is known to
+  be aggressive, and a second SSH host. AND5: a cloud storage app, an SD card or a USB stick. AND6 and AND11: a WebDAV server, a local AI
+  server and a private certificate authority.
+- AND9: a phone that runs with 16 KB pages, if one is available. AND10: the owner's signing key and a phone. AND13: a tablet.
+- AND15: phones of at least two makers.
+
+### What the emulators showed
+
+Every statement below is about an arm64 emulator image, never a phone. `sh scripts/android-e2e.sh matrix` runs the sections on one
+image at a time and ends with one table per image. **No single full run of the matrix was all green.** The fourth and last full run:
+
+- **Android 17 (API 37, default image, 4 KB pages, WebView 145):** tracer 6 ok, service 25, vault 23, TLS 17, hand-over 10,
+  clipboard 2, touch 13 ok and 3 not run, SSH 21, page size 0 ok and 1 FAIL (a broken pipe from the activity manager at the start;
+  run alone afterwards it was 5 ok). Total 117 ok, 3 not run, 1 FAIL. The hand-over section failed in three earlier full runs
+  (the document dialog was in front, the driver tapped and the tap chose nothing) and passed run alone and in the fourth run; the
+  driver now drives again when the dialog is still in front, and it cannot be said that the retry made it pass.
+- **Android 12 (API 31, default image, WebView 91):** tracer 6 ok, service 20 ok and 3 not run, vault 22, page size 5. Total 53 ok, 3 not
+  run. The hand-over, clipboard and TLS sections were run on Android 12 as part of their own runs and passed there; the closing matrix
+  runs them on the newest image only.
+- **16 KB page image (API 37, Google APIs, page size 16384):** tracer 6 ok, service 25, page size 5. Total 36 ok. Every mapping of the
+  app's library is aligned to 16384 bytes.
+
+Checks that ended **not run** and why: the hardware-keyboard rule (the emulator's input command never made the page see a hardware
+keyboard; unit tests hold the rule), the two-finger pinch (the input command has no two-finger gesture), text composed by a soft keyboard
+(the input command sends key events), the foreground service type `specialUse` on Android 12 (Android reads it from Android 14), and the
+notification permission that was revoked, and its system dialog, on Android 12 (they start with Android 13).
+
+What else the emulators showed, with the proof each time a script and not a person's hand unless said: the page in the real web view
+and a shell in the app's private `home` folder; the foreground service with its notification, the counts, `Stop all` tapped in the
+notification shade and the service stopping and starting again; the secret store: a plain store, the switch to the protected store
+with the system prompt answered by a PIN, the lock after the page was hidden, a lost store after the screen lock was removed, a
+canary secret found in no file, log, environment or argument list; the real fingerprint prompt answered by a virtual finger once, by
+hand; the app switcher picture hidden for the protected store on Android 17 (the system's own snapshot of the task was a blank
+placeholder) and shown on Android 12; HTTPS through the system trust store, a public site accepted and a self-signed server
+refused by both clients, and the sync paused while the store was locked; the system's document dialog, one file in and one file out
+with the checksums equal, a file of 300 MB refused, a name with a space and a letter outside ASCII kept; the clipboard written and
+read through the app's own path; the phone and tablet layouts, the key row above the soft keyboard, sticky `ctrl`, scrolling and a
+long-press selection with `Copy` and `Paste`; a saved SSH connection whose passphrase is in the store, kept alive when the store is
+locked, a new connect refused while locked with no login at the server; and a release APK that passes the APK check and is unsigned.
+
+### Known defects, not fixed
+
+Two defects of the app were found by the emulator runs and are **not fixed**:
+
+- **The bottom bar under the system buttons.** On the Android 12 image with three-button navigation and WebView 91 the page does not
+  get a safe-area inset for the navigation bar, so its bottom bar (the tabs and the plus) is drawn under the system buttons. Whether a
+  phone with an up-to-date web view shows it was not tried (row AND8). The check of the service switches that image to gesture
+  navigation, so the check measures the service and not this layout.
+- **The service after a recreated window.** After the system recreates the app's window while the app runs (seen when the navigation
+  mode changed), a shell started after `Stop all` runs but the foreground service does not start again and no notification shows, although
+  the core tells the plugin the new counts. The same steps without the recreation work. The likely cause (the plugin keeps the window
+  that was destroyed and its check for a visible app reads that one) was not verified. A phone recreates the window for other
+  reasons too, so row AND4 asks for it.
+
+### Not tried
+
+This is every claim of this part that no suite or emulator supports. It is listed so that no reader assumes it was shown.
+
+- Nothing ran on a phone or a tablet: no keyboard, sensor, network, storage provider or touch screen of a real device, no vendor skin
+  and no TalkBack. The emulators were three arm64 images from the SDK; there was no image of Android 13, 14, 15 or 16, so what
+  those versions change was not seen, and for Android 12 only the sections named above ran.
+- The limit of Android on background processes (Android 12 and later may end local shells of a backgrounded app even while the service
+  runs; SSH connections are not affected) was not observed: the emulator does not apply it. A swipe out of the recents list, doze and
+  app standby over hours and the battery managers of phone makers were not tried.
+- The protected store was driven with a PIN and, once by hand, with a virtual fingerprint. A real sensor, a face, StrongBox (the
+  emulator has none), a key that a vendor's Keystore loses in its own way, and a new finger invalidating nothing (the key is made to
+  survive an enrolment) were not tried. The app switcher card of a real phone was not seen.
+- Real storage providers (a cloud drive, an SD card, a USB stick), a provider that gives no size or a wrong one (the stop at the limit
+  while copying never ran against such a provider), a revoked document, and a result of the dialog that arrives after the window was
+  recreated (two attempts to force it did not recreate the window) were not run. The fallback of the test driver that opens the roots
+  drawer of the dialog was never needed and never ran.
+- The SSH check reached one throwaway OpenSSH server on the computer's loopback address with one Ed25519 key. Password login, other key
+  types, a server on a network, a slow or dropping server and the local-network permission for a real address were not tried. A real
+  WebDAV server, a real AI provider and a user-installed certificate authority were not tried; no revocation behaviour was seen.
+- The release APK was built, checked and is unsigned; it was never installed from a channel. To see that the minified build starts, one copy
+  was signed once with the SDK's public debug key and run on an emulator. Obtainium, F-Droid, updates across two sources, the warnings of the
+  phone's protection service for an APK from outside a store and the developer verification of 2027 were not tried.
+- The build is arm64 only and was never built for x86_64 or 32-bit ARM: the terminal engine does not build there and the emulator on
+  an Apple silicon Mac cannot run an x86_64 image. Two builds of the release APK in one folder on one machine were byte for byte equal;
+  another folder, another machine and F-Droid's build server were not tried.
+- The Kotlin component that carries the platform certificate verifier is a prebuilt artifact that Gradle fetches from the verifier
+  project's own repository; a build from source of it was not made.
+- The unit and browser tests of the page used a mocked Android platform in desktop Chromium and WebKit with synthetic touch and key
+  events; they are not an Android web view and not a finger.
+
 ## What to expect
 
 Known limits of this build, so they are not reported as defects:
@@ -724,7 +859,14 @@ Known limits of this build, so they are not reported as defects:
   until it closes (the sockets of macOS and Linux have them).
 - The system monitor over SSH covers Linux hosts; another system is shown as not supported, and an unknown host key is never
   learned by it. Commands typed on other hosts are not recorded in the history, and the history is not synced.
-- Provider keys are not available on mobile yet, so the chat refuses to send there.
+- On Android the chat sends once the secret store is unlocked, and a locked store pauses the sync and refuses a send with a quiet line;
+  against a real provider or a real WebDAV server from a phone this is untested (row AND11).
+- Android was built and run on arm64 emulators only, never on a phone or a tablet, and the build is arm64 only. Android may end the
+  local shells of a backgrounded app; SSH connections are not affected. The local shell is the system shell with no extra programs.
+  Files move one at a time through the Android file dialog. The cloud AI providers are part of the Android build. The shell can read
+  the secret store's file, which holds ciphertext only. While the store is protected the app switcher card hides the terminal whenever
+  the app is not in front, on Android 13 and later; screenshots are not blocked, and on Android 12 and 12L nothing hides the card.
+  Two defects found on an emulator are not fixed (Known defects in Part 13).
 - The title-bar buttons are smaller than 44 px in a window of 640 px and narrower ([design.md](design.md) names the exception).
 - The Apple model needs macOS 26 or later, Apple Silicon and Apple Intelligence, and building it needs the Xcode 26 SDK; an
   older SDK builds the app without it. Where it is missing it cannot be chosen, and nothing falls back to another provider.

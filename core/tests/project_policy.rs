@@ -2932,6 +2932,45 @@ fn the_row_check_of_the_test_plan_sees_missing_duplicate_and_empty_rows_and_igno
     assert!(test_plan_row_problems(done, &["W1".to_owned()]).is_empty());
 }
 
+/// The rows of the Android part of `docs/test-plan.md` (Part 13), in the order of the table: what only a phone, a tablet
+/// or a person shows, and what no emulator run could drive. Every id is in the document exactly once, with an area, an
+/// instruction and an expected result; the Result cell is the owner's and this test never reads it.
+const ANDROID_TEST_PLAN_ROWS: [&str; 15] = [
+    "AND1", "AND2", "AND3", "AND4", "AND5", "AND6", "AND7", "AND8", "AND9", "AND10", "AND11", "AND12", "AND13", "AND14",
+    "AND15",
+];
+
+fn android_test_plan_row_ids() -> Vec<String> {
+    ANDROID_TEST_PLAN_ROWS.iter().map(|id| (*id).to_owned()).collect()
+}
+
+#[test]
+fn test_plan_has_every_android_row_exactly_once() {
+    let problems = test_plan_row_problems(&read("docs/test-plan.md"), &android_test_plan_row_ids());
+    assert!(problems.is_empty(), "docs/test-plan.md, the Android part: {problems:?}");
+}
+
+#[test]
+fn the_android_row_ids_are_fifteen_and_no_other_part_of_the_test_plan_uses_one_of_them() {
+    let ids = android_test_plan_row_ids();
+    let mut distinct = ids.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(distinct.len(), 15, "the Android ids are fifteen distinct ids");
+    let others: Vec<String> = windows_and_linux_row_ids()
+        .into_iter()
+        .chain(ai_test_plan_row_ids())
+        .chain(integration_test_plan_row_ids())
+        .chain(web_test_plan_row_ids())
+        .collect();
+    for id in &ids {
+        assert!(!others.contains(id), "{id} is also an id of another part of the test plan");
+    }
+    // In the document the prefix belongs to the Android table alone: exactly fifteen rows start with it.
+    let rows = read("docs/test-plan.md").lines().filter_map(table_cells).filter(|c| c.first().is_some_and(|id| id.starts_with("AND"))).count();
+    assert_eq!(rows, 15, "a table row whose id starts with AND is outside the Android table or missing from it");
+}
+
 // ---- Part 7 of the test plan ------------------------------------------------------------------------------
 
 /// The rows of Part 7 of `docs/test-plan.md` (the AI chat, the Apple on-device model and the rest of the extras), in the
