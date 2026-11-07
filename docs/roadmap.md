@@ -24,6 +24,10 @@ The `wsh`, K8s, Talos, Azure and GAM7 row means built and tested against fake to
 did not run on Windows or Linux hardware, the Flatpak build does not run them, and a real cluster or account is open on
 macOS too (Part 9 of [test-plan.md](test-plan.md)).
 
+The Android column means built and run on arm64 emulators of Android 12, the newest Android and an image with 16 KB memory pages,
+never on a phone or a tablet. Its Docker, WSL, `wsh` and integration cells are `❌` because the build leaves them out, and what no
+emulator can show is open in Part 13 of [test-plan.md](test-plan.md).
+
 The browser is a platform too, through the web build (phase 11): the same window served by one container, built and tested in containers, with its rows open (Part 10 of [test-plan.md](test-plan.md), [server.md](server.md)). It is not a column above because the table lists what each desktop or mobile app does; the browser build has its own limits (see the web build lines in [status.md](status.md)).
 
 Not included on any platform: a web browser block. iOS is not planned (no Apple developer account).
@@ -174,12 +178,22 @@ Status: built, rows open (test-plan Part 10). Built and tested against a test id
 
 ## Phase 7 — Mobile
 
+Status: built, rows open (test-plan Part 13). Android was built and run on arm64 emulators of Android 12, the newest Android and an
+image with 16 KB memory pages, never on a phone or a tablet. **Built:** the app for arm64 only; the system shell in the app's private
+folder; SSH; the secret store behind the Android Keystore with the system prompt; HTTPS through the system's trust store; the touch page
+(one pane per screen, the key row, selection by long press, scrolling, the pinch) and the tablet layout; one-file hand-over through
+the system's document dialog; the clipboard through the app's own code; and a foreground service with a `Stop all` notification.
+**Not tried:** everything that only a phone, a keyboard, a sensor, a network, a storage provider or a person shows, listed as rows
+with empty results in Part 13 of [test-plan.md](test-plan.md); how it is built and what each emulator run showed is in
+[build-android.md](build-android.md). Two defects found on an emulator are not fixed (the bottom bar under the system buttons with
+three-button navigation on Android 12, and the service not coming back after the system recreated the window).
+
 - Android: local shell plus SSH. iOS is out of scope (no Apple developer account).
 - Touch UI, a soft keyboard with special keys, a simplified layout (one block per screen).
 - Dropped on mobile: Docker/WSL, a local `wsh`, and the K8s/Talos/Azure/GAM7 wrappers (only where it makes sense).
 - Sync and the secret store work on mobile too.
-- The AI chat core builds for mobile, but provider keys need a mobile secret store, so the chat refuses to send on mobile until
-  there is one.
+- The AI chat sends on Android once the secret store is unlocked, and the cloud providers are part of the Android build. It was tried
+  against test servers and scripted providers only, never against a real provider from a phone.
 
 ## Phase 8 — Polish
 

@@ -4,12 +4,24 @@ For the owner's own Mac (Apple silicon). Everything here is built and run locall
 here costs money. The toolchain, the SDK, the NDK, the emulator and the system images are free downloads from their vendors.
 
 > [!IMPORTANT]
-> **Status.** The Android app is being built in stages, and this is an early one. What exists: the toolchain and its check, a
-> compile gate for the Rust code, a script that builds a debug APK, scripts that create and start arm64 emulators, and a set of end
-> to end checks on them, run with one command (see [the end to end check](#the-end-to-end-check) and
-> [the whole set](#the-whole-set-on-three-images)). They were run on **three** arm64 emulator images (Android 17 with API 37,
-> Android 12 with API 31, and the 16 KB page image), and on no phone. Everything that only a real phone shows is **not run**: see
-> [what was not tried](#what-was-not-tried).
+> **Status.** The Android app is built, and it was run on **arm64 emulators only**: Android 17 (API 37), Android 12 (API 31) and an
+> image with 16 KB memory pages, never on a phone and never on a tablet. What exists: the toolchain and its check, a compile gate for
+> the Rust code, a script that builds a debug APK and an unsigned release APK, a check of a built APK, scripts that create and start
+> arm64 emulators, and a set of end to end checks run with one command (see [the end to end check](#the-end-to-end-check) and
+> [the whole set](#the-whole-set-on-three-images)). **No single full run of that set was all green**, and several checks ended
+> `not run`: [What ran and what did not](#what-ran-and-what-did-not) says which. Everything that only a real phone or tablet shows is
+> **not run**: see [what was not tried](#what-was-not-tried) and Part 13 of [test-plan.md](test-plan.md). Two defects found on an
+> emulator are [not fixed](#what-the-three-images-showed).
+
+Contents: [What to install](#what-to-install-all-free) · [arm64 only](#arm64-only-and-why) · [Check it](#check-it) ·
+[Compile the Rust code](#compile-the-rust-code-for-android) · [Build the APK](#build-the-debug-apk) · [The emulator](#the-emulator) ·
+[The end to end check](#the-end-to-end-check) · [The whole set](#the-whole-set-on-three-images) ·
+[The committed project](#the-committed-project) · [The version code](#the-version-code) · [The manifest](#what-the-manifest-decides) ·
+[Permissions](#one-list-of-permissions) · [The service](#the-service-that-keeps-sessions-alive) · [The secret store](#the-secret-store) ·
+[HTTPS](#https-and-certificates) · [Hand-over](#handing-one-file-over) · [The clipboard](#the-clipboard) ·
+[Check an APK](#check-a-built-apk) · [Unsigned release](#the-release-is-unsigned) · [Reproducibility](#reproducibility) ·
+[What was not tried](#what-was-not-tried) · [What ran and what did not](#what-ran-and-what-did-not) ·
+[Facts for whoever offers the app](#facts-for-whoever-offers-the-app)
 
 ## What to install, all free
 
@@ -251,6 +263,8 @@ the page size is 16384, on the other two 4096.
 
 The run of the whole set on the three images (one emulator at a time) ended with these tables. A check that could not be made is
 `not run` and was not proved; the reasons are printed with every run.
+
+**No single full run of the set was all green.** In the last full run Android 17 had 117 checks `ok`, 3 `not run` and 1 `FAIL` (the page size section, a broken pipe from the activity manager when the app was started; run alone afterwards it had 5 `ok`), Android 12 had 53 `ok` and 3 `not run`, and the 16 KB image had 36 `ok`. The hand-over section on Android 17 failed in three earlier full runs (the system's document dialog was in front and the tap chose nothing) and passed run alone and in the last full run; the driver now taps again when the dialog is still in front, and it cannot be said whether that retry made it pass. The retry for the broken pipe was added after the failing run and was not exercised by a later full run.
 
 | Image | Android | WebView | Page size | Sections | Not run |
 |---|---|---|---|---|---|
@@ -632,3 +646,98 @@ registry paths of the form `/cargo-home/registry/...`; whether those stay the sa
   permission for a real address were not tried.
 - x86_64 and 32-bit images or builds, which are refused by design.
 - A signed release APK for distribution, installing from F-Droid or Obtainium, Play Protect or installer warnings for a self-signed APK, and a 16 KB page device other than the emulator image with that page size.
+
+## What ran and what did not
+
+Everything below ran on arm64 emulators of the Android SDK on one Mac (Apple silicon), on the images of the table above, and on no
+phone or tablet. `not run` means the check could not be made and was not proved.
+
+**What ran.** On Android 17 (API 37, the default image, 4 KB pages, WebView 145): the tracer (the page loads in the real web view, a
+pane starts the system shell in the app's own folder, keys from the Android input path reach it), the service, the secret store, HTTPS,
+the hand-over through the real document dialog, the clipboard, the touch page driven in the real web view, a saved SSH connection
+against a throwaway server on this computer's loopback address, and the page size check. On Android 12 (API 31, WebView 91): the tracer,
+the service (three checks `not run`), the secret store and the page size check in the closing matrix, and the HTTPS, hand-over and
+clipboard sections in their own runs. On the 16 KB image (API 37, Google APIs, page size 16384): the tracer, the service and the page
+size check, with every mapping of the app's library aligned to 16384 bytes. The release APK was built, passes the APK check and is
+unsigned. The whole workspace test run, the page tests and the stand-in tests of the scripts ran on the Mac without an emulator.
+
+**What ended `not run`**, with the reason: the rule that hides the key row for a hardware keyboard (the emulator's input command
+never made the page see a hardware keyboard; unit tests hold the rule), the two-finger pinch (the input command has no two-finger
+gesture), text composed by a soft keyboard (the input command sends key events), the foreground service type `specialUse` on Android 12
+(Android reads it from Android 14) and the notification permission that was revoked, and its system dialog, on Android 12 (they start
+with Android 13). The app switcher picture was looked at on Android 17 and Android 12 only (below), never on a phone.
+
+**The app switcher picture while the vault is protected.** On Android 13 and later the app hides it whenever the app is not in
+front, locked or unlocked, and the emulator image of Android 17 showed a blank placeholder in place of the app's picture. Screenshots
+are not blocked. On Android 12 and 12L nothing hides it and it may show terminal content: a known limit, observed on the Android 12 image.
+
+**The things that only a real device or a person shows**, all untested; each is a row of Part 13 of [test-plan.md](test-plan.md) with
+an empty result:
+
+1. **Soft keyboards (Gboard and others).** An emulator showed the stock keyboard opening and the key row sitting above it, and the
+   sticky `ctrl` key working with keys sent by `adb shell input`. Composition, auto-correct, key repeat, emoji, dictation and
+   third-party keyboards are untested.
+2. **Hardware keyboards.** The rule is held by unit tests; the emulator could not trigger it. Layouts, modifier combinations and the
+   desktop chords on a tablet with a keyboard case are untested.
+3. **Real biometrics.** A PIN prompt was driven by the keys of the real input path, and a virtual fingerprint was enrolled and touched
+   once by hand. StrongBox, a real sensor or a face, a new enrolment, the removal of the lock and device-admin resets on a phone are
+   untested.
+4. **Background behaviour and vendor skins.** The service and its notification ran on all three images. The limit of Android on
+   background processes (the emulator does not apply it), battery optimisation, task killers, doze over hours and the notification
+   behaviour of a vendor are untested.
+5. **Real storage providers.** The system's own document dialog of two images was driven for one file in and one file out. A cloud
+   drive, an SD card, a USB stick, a provider that gives no size or a wrong one, and a revoked document are untested.
+6. **Real mobile networks.** SSH ran against a loopback server through `adb reverse`; HTTPS and the sync's refusal of a bad certificate
+   ran against a local throwaway server and a public site. Cellular data, Wi-Fi roaming, the sync over mobile data and a private
+   certificate authority on a phone are untested.
+7. **Touch feel.** Long-press selection with `Copy` and `Paste`, scrolling by a drag and the phone and tablet layouts were seen in the
+   real web view. The timing of a long press, the precision of the handles, a pinch together with a scroll, a palm, a stylus, foldables
+   and multi-window are untested, and the pinch itself never ran.
+8. **Real web views, graphics and memory.** WebView 145 and WebView 91 were each seen on one image. Updates of the system web view,
+   canvas speed, thermal throttling during output floods and memory kills are untested.
+9. **A 16 KB-page device from a vendor.** The emulator image showed the app, its shell and its library mappings on 16 KB pages; a
+   vendor's phone was not tried. x86_64 and 32-bit builds are refused by design.
+10. **An APK on a phone.** The unsigned release APK passes the APK check and was never installed or signed for use. The prompts of the
+    system installer, updates over an installed copy, the warnings of a phone's protection service and the developer verification
+    that Google plans for 2027 are untested.
+11. **The AI chat and the sync from a phone.** Not part of any emulator check: the sync's refusal of a bad certificate ran against a
+    local server only, and no real provider or WebDAV server was used.
+12. **Accessibility.** The page's nodes can be read by the emulator's automated test tool, which is not TalkBack. TalkBack, large font
+    sizes and high contrast on a phone are untested.
+
+Also untested: the tablet layout on a tablet, the paste through the page's own menu into a running pane, and the local shell on the
+shells of phone makers.
+
+**Two defects, not fixed.** The page's bottom bar lies under the system buttons on the Android 12 image with three-button navigation
+(see [what the three images showed](#what-the-three-images-showed)); and a shell started after `Stop all` does not bring the service back
+once the system has recreated the activity. Both are in Part 13 of the test plan as rows to look at on a phone.
+
+## Facts for whoever offers the app
+
+These are the facts a listing, a store form or an update checker asks for, as the project stands. Nothing here says the app is offered
+anywhere: no package has been signed for use and no channel exists.
+
+- **Application id:** `ch.holzcloud.holzwave` (`ch.holzcloud.holzwave.debug` for a debug build). **One ABI:** `arm64-v8a`; no other
+  ABI is built or listed. **Android versions:** minimum 31 (Android 12), target 37.
+- **Version code:** explicit, from `sh scripts/android-version-code.sh <version>` (the scheme is in [the version code](#the-version-code));
+  `0.0.1-beta2` is 1202. A build for a listing comes from `sh scripts/android-build.sh release`, which builds the APK **unsigned**.
+- **Permissions** (the one list, `app/src-tauri/android-permissions.txt`): the network (`INTERNET`), the foreground service
+  (`FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE`), the notification (`POST_NOTIFICATIONS`) and the system prompt of the secret
+  store (`USE_BIOMETRIC`). No storage, media, contacts, location, install-packages or boot permission, no wake lock, no Google services,
+  no tracker and no updater.
+- **The foreground service type:** `specialUse`, with the public text `Keeps terminal shells and SSH connections running while the app
+  is in the background`.
+- **Network services the app talks to:** the SSH hosts, the WebDAV server of the sync and the AI providers that a person adds; the
+  cloud AI providers are part of every Android build, and the app contacts one only after a person has added it and sends a message.
+- **A component fetched from outside the usual archives.** The Kotlin component that carries the platform certificate verifier
+  (`org.rustls:rustls-platform-verifier`) is a **prebuilt artifact** that Gradle downloads from the verifier project's own Maven
+  archive on GitHub (`https://github.com/rustls/rustls-platform-verifier/raw/maven-archive/android-release-support/maven/`), which is
+  neither Maven Central nor Google's repository. Its version is read from `Cargo.lock` and its SHA-256 is pinned in
+  `app/src-tauri/gen/android/gradle/verification-metadata.xml`, which protects what is downloaded and does not change where it comes
+  from. A build that must be made from source only may refuse it; the Rust workspace of the crate holds the Kotlin sources, so the
+  component can be built from source at the pinned version.
+- **The self-test:** the debug build holds a self-test that the emulator scripts drive; it is compiled out of the release build, and
+  the APK check fails a release APK that holds its trigger.
+- **Reproducibility:** two builds of the release APK in one folder on one machine were byte for byte equal; another folder, another
+  machine and another build server were not tried.
+

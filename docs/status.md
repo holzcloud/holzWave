@@ -72,8 +72,8 @@ differs from it):
 
 Builds that were never run: the Linux desktops (GNOME, KDE Plasma, Xfce, Cinnamon, MATE, Sway, Hyprland, i3), Linux aarch64
 on real hardware, Windows ARM64, the Flatpak on any machine, the Microsoft Store package (it was never built into an installed
-package), and Android (no app exists). No release has been signed with a real key; the rows that will hold the results are in
-Part 12 of [test-plan.md](test-plan.md).
+package), and Android on a phone or a tablet (the Android app is built and was run on arm64 emulators only). No release has been
+signed with a real key; the rows that will hold the results are in Part 12 of [test-plan.md](test-plan.md), and for Android in Part 13.
 
 ## What it aims to do differently
 
@@ -113,11 +113,11 @@ invitations and roles, an encrypted store of each person's saved passwords, one 
 from files, ACME or a proxy, and the Compose file and the Helm chart ([server.md](server.md)). Built and tested against a test identity provider, virtual authenticators, the container tests and a Pebble certificate authority on the author's machines; not yet run against a real cluster, a real identity provider, hardware authenticators or real networks. The rows that are
 still open (a cluster at the baseline level and a stricter one, an identity provider, passkeys and PRF keys, a certificate
 authority, a reverse proxy, the four browsers, both architectures, two real people, restart, backup and capacity) are Part 10
-of [test-plan.md](test-plan.md); the suites that need Linux ran in a container only. Not built:
+of [test-plan.md](test-plan.md); the suites that need Linux ran in a container only. Android is built too, and tested on three arm64 emulator images (Android 12, the newest Android and an image with 16 KB memory pages), **never on a phone or a tablet**. It has a local shell, SSH, the sync, a secret store behind the Android Keystore with the system prompt, a touch page with a key row, selection and pinch, a tablet layout, one-file hand-over through the system's document dialog, a foreground service that keeps sessions running, and HTTPS through the system's trust store; the cloud AI providers are part of the build. The emulator runs and the checks that ended not run are in [build-android.md](build-android.md), and what only a phone or a person shows is open in Part 13 of [test-plan.md](test-plan.md): keyboards, biometrics, background behaviour, real storage providers and networks, touch feel, real web views, accessibility and the vendors' shells. No single full run of the emulator set was all green (the runs, the one failure that passed when run alone and the one that failed three times and passed alone are in Part 13). Android may end the local shells of an app in the background; SSH connections are not affected. Two defects found on an emulator are **not fixed**: with three-button navigation on Android 12 the page's bottom bar is drawn under the system buttons (its old web view gives the page no safe-area inset), and after the system recreates the app's window a shell started after `Stop all` does not bring the foreground service back. Not built:
 
 | Phase | Planned |
 |---|---|
-| 9 | Android (local shell and SSH; iOS is out, no Apple developer account), widgets on mobile, AI provider keys on mobile (they need a mobile secret store) |
+| 9 | Android is built (the paragraph above). Not built or not run: widgets on the phone layout (the sidebar that holds them is not drawn on a phone; the tablet layout keeps the desktop's sidebar, whose widgets were not tried on Android), anything on a phone or a tablet, and the rows of Part 13 of [test-plan.md](test-plan.md). The AI chat on Android sends once the secret store is unlocked; a server on a private address needs a local-network permission that the app does not declare, so a home server is not reachable on Android 17. iOS is out, no Apple developer account |
 | Web build, left out | shared panes between people; an installable web app; a mobile layout of the web page; a long-lived token for scripts; an operator for Kubernetes; compression of the WebSocket (measured, not adopted). As the browser answers them: the two tear-off controls and the local network list say `Not available in the browser.`, the Apple on-device model is not offered, and updating is the operator's job (build and run the new image). Upload takes a file dropped on a shell pane only, and download covers images, video, audio and PDF files |
 
 Deliberately not included: a web browser block. Kitty graphics, hyperlinks, the baseline and the guard, and the signing of the Linux packages are built and are described in the list at the top, together with what nobody has tried; the rows for those are Part 11 of [test-plan.md](test-plan.md). Phase numbers here follow the project plan summary; the detailed

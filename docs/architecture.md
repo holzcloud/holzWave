@@ -136,7 +136,7 @@ Each boundary is a trait in `holzwave-core` with at least one real implementatio
 |---|---|---|---|
 | `TerminalEngine` ✅ | `feed`, `resize`, `scroll`, `update` (dirty rows), `take_replies`, `encode_key`, `encode_text`, `paste`, `mouse`, `wheel`, `select`, `search`, `copy_mode`, `set_theme` | `GhosttyEngine` ✅, `AlacrittyEngine` | `libghostty-vt` is young and its API moved already between 0.2.2 and master |
 | `Connection` (`core/src/pool.rs`) | `session(open)`, the shell channel (`SshLink::attach`), `sftp()`, exec channels through `SshExec::on`, `lease()` | SSH, through the pool: one login per saved profile. WSL and Docker are local commands that run in a pane (`wsl.exe -d`, `docker exec -it`) and have no file access yet (open) | the terminal, the files and the commands of a saved SSH connection share one login |
-| `SecretStore` | `get`, `set`, `delete` | macOS Keychain, Windows Credential Manager, Secret Service, the Android keystore | secrets never reach a file |
+| `SecretStore` | `get`, `set`, `delete` | macOS Keychain, Windows Credential Manager, Secret Service; on Android a vault: one file of ciphertext only, its data key wrapped by a key of the Android Keystore, with the states new, locked, unlocked and lost ([build-android.md](build-android.md#the-secret-store)) | secrets never reach a file in plaintext |
 | `SyncBackend` | `list`, `get`, `put`, `delete` with ETag | WebDAV (`opendal` or `reqwest_dav`) | Nextcloud today, others later |
 | `Provider` ✅ | `id`, `capabilities(model)`, `stream(request, callback, cancel) → completion` (blocking, with a cancel token) | `HttpProvider` ✅ over five wire adapters (local servers, cloud APIs, gateways), `AppleProvider` ✅ (Foundation Models), `ScriptedProvider` (the test double) | consent and context rules live above it: a provider accepts only context the gate approved |
 | `Integration` ✅ | `spec`, `argv`, `view` (section 9) | `Kube`, `Talos`, `Azure`, `Gam`, each built and tested against fake tools and recorded fixtures | one engine and a closed verb catalogue for four tools |
@@ -805,9 +805,40 @@ Windows and Linux are written and cross-checked from a Mac, and the author has r
   separator of `KUBECONFIG`, the refusal of UNC and device paths) are tested with injected facts on the Mac; the five tests that
   use the real system are in `core/tests/integrate_windows.rs`, have never been compiled for Windows and never run, and the
   Windows and Linux cross-check did not run for this part. Mobile: the code that starts a process is compiled out and the
-  answer is `Unsupported`; the compile for an iOS or Android target did not run. Flatpak: the runner is built disabled, so
+  answer is `Unsupported`; the compile for Android runs in `sh scripts/android-check.sh` and none was made for iOS. Flatpak: the runner is built disabled, so
   every tool reads `unsupported` and no process starts; no real sandbox ran. Rows INT-W1 to INT-W4 and INT-L1 of
   [test-plan.md](test-plan.md) are the owner's.
+
+### Android
+
+Android is built for arm64 only and was run on arm64 emulators of Android 12, the newest Android and an image with 16 KB memory
+pages, never on a phone or a tablet ([test-plan.md](test-plan.md) Part 13 is the list of what only a phone shows; the build, the
+pins and each emulator run are in [build-android.md](build-android.md)). The core is the same one; what Android adds is a thin set of
+layers around it:
+
+- **The seams.** `Host` names the platform and the private folders (`AndroidHost`), `SecretStore` is the vault below, and `FilePicker`
+  is the one-file hand-over through the system's document dialog. The host crate decides every name, path and size of a hand-over; the
+  Kotlin side shows the dialog and copies bytes.
+- **The in-app plugin.** One first-party Kotlin class (`HolzwavePlugin`) is registered with Tauri's own plugin builder inside the app
+  crate; no `tauri-plugin-*` crate is used and the page cannot call it. It carries the Keystore calls, the foreground service, the two
+  dialogs, the clipboard and the setting of the app switcher picture. Rust calls it from worker threads, never from the window's thread.
+- **The vault.** `core/src/vault.rs` is pure Rust over a `Keystore` trait: one XChaCha20-Poly1305 file (`vault.bin` in the app's data
+  folder) whose data key is wrapped by an AES-256-GCM key that never leaves the Android Keystore, with the states new, locked, unlocked
+  and lost and the protections `auth` (the screen lock or a strong biometric for every unwrap, through the system prompt) and `plain` (a
+  device with no screen lock). It locks five minutes after the page was hidden, by a clock that counts the time the phone slept.
+- **The foreground service.** A service of the type `specialUse` holds the process while a shell or a connection is alive, with one
+  notification (the counts only) and a `Stop all` action; `AppCore::stop_all` ends every pane and keeps the windows.
+- **The phone view.** The page applies one pure transform to the core's view (`phoneview.ts`): the focused pane alone at full size. The
+  core's layout is untouched, so a layout saved on a desktop is the same layout on a phone.
+- **The layout classes.** The page decides phone, tablet or desktop from the window width and the screen's short side, and only for
+  Android; every other platform is the desktop class.
+
+Accepted limits, said where a reader needs them: the shell runs as the same user as the app and can read the vault file, which holds
+ciphertext only (its key never leaves the Keystore), so the folder the shell starts in is a guard against accidents and not a
+security boundary; screenshots and screen recordings are not blocked; while the vault is protected, the app switcher picture is hidden
+by a system call whenever the app is not in front, on Android 13 and later, and on Android 12 and 12L nothing hides it and it may
+show terminal content, which is a known limit; Android may end the local shells of a background app (SSH connections live in the
+app's own process and are not affected).
 
 ## 12. Quality strategy
 
@@ -1021,7 +1052,19 @@ All of it runs locally; GitHub builds only on request.
 
 ## 15. Open questions
 
-1. Tauri 3 stability for Android, to be checked when phase 9 starts.
+1. ~~Tauri 3 stability for Android, to be checked when phase 9 starts.~~ Answered on alpha.5: the app built and ran on three arm64
+   emulator images (never on a phone), and the two Android bugs that were open upstream (an event emitted on the event-loop thread
+   deadlocks the window thread, and reading a web view's address freezes it for ten seconds) were still open on 2026-11-06 and were not
+   triggered by any run; the app never reads that address and calls its own plugin from worker threads. alpha.6 exists since
+   2026-11-06 and was not taken: no Android file differs between the two, and it breaks window event handling that the desktop depends
+   on. What the first build needed, each one a workaround and not a fix upstream: `tauri android init` with `--skip-targets-install`
+   (without it the command line adds three more Rust targets); the four ABIs of the generated project cut to arm64-v8a in the
+   project's own build plugin; the window restore code (it calls `maximize`, which Android does not have) and the `keyring` crate
+   feature compiled out of the Android build; the Gradle flavour that the command line builds is called `universal` and holds the one
+   ABI; the template's manifest hardened (no backup, its file provider and TV lines removed, a receiver of a library removed from the
+   merged manifest); the plugin type is erased (`DynRuntime`) in alpha.5; and a key event of the Android web view with an empty `code`
+   gets its code from its `key` in the page. Text tests of the Android project and the APK check keep the ABI, the manifest and the
+   permission list in place.
 2. `opendal` against `reqwest_dav` for sync (size and TLS stack).
 3. ~~Whether the frame diff needs per-cell damage or per-row is enough.~~ Answered in Phase 2: per row, compared
    against the rows last sent (section 6); a full-frame encode costs 0.47 ms on 160x50.

@@ -6,7 +6,7 @@ with the extras (Part 6), the AI chat with the Apple on-device model and the res
 network notice of macOS (Part 8), the native integrations with Kubernetes, Talos, Azure CLI and GAM7 (Part 9), the web
 build with its server, image and browser page (Part 10), the rows for pictures, hyperlinks, signed releases and the limits
 of the measurements (Part 11), the Linux desktops, other architectures and the Store package that nobody has run (Part 12), and
-Android, which was built and run on arm64 emulators and never on a phone or a tablet (Part 13). All of it runs locally; nothing here needs GitHub (D-04).
+Android, which was built and run on arm64 emulators and never on a phone or a tablet (Part 13). All of it runs locally; nothing here needs GitHub.
 
 ## Part 1: run everything locally
 
@@ -162,6 +162,7 @@ sh scripts/android-check.sh                  # compiles core, host, ipc and the 
 sh scripts/test-android-scripts.sh           # the stand-in tests of the Android scripts (shims, no Android software)
 sh scripts/android-e2e.sh all                # every emulator section on one arm64 emulator: tracer, service, vault, tls, handover, clipboard, touch, ssh, pagesize
 sh scripts/android-e2e.sh matrix             # the same set on the newest image, then Android 12 and the 16 KB page image, one emulator at a time
+cargo test --locked --offline -p holzwave-core --test android_docs   # the guard that no public text claims more about Android than was run
 sh scripts/android-gate.sh                   # the checks that need no emulator (toolchain, compile gate, stand-in tests, workspace, page, design, release APK); --emulator adds the matrix
 ```
 

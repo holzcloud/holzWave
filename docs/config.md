@@ -14,6 +14,7 @@ change that forgets the document fails a test.
 - [`host_shell.json`](#host_shelljson)
 - [`layout.json`](#layoutjson)
 - [Accessibility](#accessibility)
+- [Android](#android)
 - [Privacy](#privacy)
 - [`ai.json`](#aijson)
 - [`integrations.json` and `integration_local.json`](#integrationsjson-and-integration_localjson)
@@ -683,6 +684,44 @@ An explicit setting beats the OS in both directions: `motion: "full"` keeps tran
 them, `contrast: "normal"` ignores the OS preference, `cursor_blink: "on"` blinks under reduced motion. The OS
 preferences are followed while the app runs, without a restart. Whether macOS's Reduce motion and Increase contrast
 reach the web view is part of the human checklist in [test-plan.md](test-plan.md).
+
+## Android
+
+What Android adds, as built. It was run on arm64 emulators only and never on a phone or a tablet, so the places below are what the
+emulator images showed ([build-android.md](build-android.md), Part 13 of [test-plan.md](test-plan.md)). The files of the table above
+are written to the data directory of the app as on the other platforms; on the emulator images that directory was
+`/data/user/0/ch.holzcloud.holzwave/` (`ch.holzcloud.holzwave.debug` for a debug build). Android adds:
+
+| Path in the data directory | Holds | Notes |
+|---|---|---|
+| `vault.bin` | the secret store: saved SSH passwords and key passphrases, the sync password and passphrase, the AI provider keys | one file of ciphertext (XChaCha20-Poly1305 under a data key that the Android Keystore wraps); machine-local; no secret is in any other file. The shell runs as the same user and can read it, and it holds ciphertext only |
+| `home/` | the start folder of every local shell and its `HOME`, mode 0700 | `~/` in a saved path means this folder on Android; the app's own files are beside it and not inside it |
+| `home/handover/` | the files copied in through the system's document dialog, mode 0600 | a clean name that is never an existing file's; a copy out reads a regular file inside `home/` only |
+
+The cache folder of the app is the shell's `TMPDIR`. A backup of the data directory is switched off (the cloud backup and the transfer
+to another phone take none of it).
+
+Three values are Android's own and are **not** keys of `settings.json`:
+
+- **Protect secrets with the screen lock** (the switch in the `Security` group of the Settings dialog, Android only, after
+  Accessibility). It is on by default when the device has a screen lock. It is stored in the vault file itself, as the protection
+  of the file (`auth` or `plain`, one byte in its header), together with the requirement of the Keystore key that wraps the data key. It is
+  not a setting and no settings command can change it: the page calls the vault's own command, and turning it off asks first. It does
+  not travel with the sync and is not part of any file of the table above. A device with no screen lock keeps the store in `plain`
+  mode and the page says so in a notice.
+- **The UI scale of this device.** A pinch with two fingers on a phone or a tablet layout changes the size of the interface in steps of 5
+  percent from 75 to 200. The value is the plain decimal text (`125`) under the key `hw.deviceScale` in the page's own storage
+  (`localStorage` of the web view), never in `settings.json` and never synced, so a pinch on a phone cannot resize a desktop. While it
+  exists it replaces the shared `ui_scale` on this device and only on the phone and tablet layouts (a desktop ignores it), and the
+  terminal's font becomes `font_size` times that scale divided by 100, rounded and held to the range of `font_size` (8 to 40). Changing the
+  UI scale in the Settings dialog on this device removes the stored value, so the shared setting applies again. A value that is not a
+  multiple of 5 from 75 to 200 as plain digits is ignored. Clearing the app's data removes it.
+- **The key row and a hardware keyboard.** The row `esc tab ctrl alt up down` has no setting. It is drawn on a phone or a tablet layout
+  while the terminal has the focus and the keys come from the on-screen keyboard. A key that an on-screen keyboard does not have (`Esc`,
+  `Tab`, an arrow, `Home`, `End`, `Page Up`, `Page Down`, `Insert`, `Delete`, `F1` to `F24`) or a key that types one character with a
+  key code counts as a hardware keyboard and hides the row; a key of the on-screen keyboard (key code 229, or a composition) brings it
+  back. It starts as no hardware keyboard. The rule is held by unit tests; no emulator could trigger it, so it is untried with a real
+  keyboard.
 
 ## Privacy
 
