@@ -130,11 +130,11 @@ Every build passes `--target aarch64`, and the scripts never name another target
 sh scripts/android-build.sh debug      # or: release
 ```
 
-This runs `npm --prefix app run tauri -- android build --ci --target aarch64 --apk --debug` after sourcing the environment,
-and prints the path of the APK as its last line
+This runs `npm --prefix app run tauri -- android build --ci --target aarch64 --apk --debug -- --locked` after sourcing the
+environment and setting the reproducibility variables (below), and prints the path of the APK as its last line
 (`app/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`; the flavour is called `universal` but holds the one ABI, arm64-v8a). The debug build has the application id
-`ch.holzcloud.holzwave.debug`, is debuggable and may use cleartext HTTP (so that an emulator can reach the host machine); the
-release build is neither.
+`ch.holzcloud.holzwave.debug`, is debuggable and may use cleartext HTTP to the emulator's alias of the host machine, `10.0.2.2`, and to
+nothing else; the release build is neither.
 
 `release` builds the APK **without a signature** and says so. Signing is your own step with your own key: the script never signs,
 never creates a key and never calls `keytool` or `apksigner`, and no key belongs in the repository.
@@ -214,7 +214,116 @@ The generated template lists four ABIs; the committed project lists one, so no c
 build can add another. `local.properties`, the build folders, the generated Tauri settings and every key file are ignored by the
 project's own `.gitignore`, and `cargo test -p holzwave-app --test android_project` reads the committed files to check the id, the
 minimum SDK, the one ABI, that no machine path, key, Google service or installer permission is in them, that the manifest asks for the
-`INTERNET` permission only, and that only the debug build is debuggable and may use cleartext.
+permissions of the list below only, and that only the debug build is debuggable and may use cleartext.
+
+## The version code
+
+Android refuses an update whose `versionCode` is not higher than the installed one, and stores and update checkers order builds by it.
+The code the Tauri command line derives when none is written down is `major * 1000000 + minor * 1000 + patch`, which ignores the
+pre-release part: `0.0.1-beta2` and `0.0.1` would both be 1. So the code is written down in `app/src-tauri/tauri.android.conf.json`
+(`bundle.android.versionCode`), computed by `scripts/android-version-code.sh`, and a test fails when it no longer follows the version
+in `tauri.conf.json`.
+
+```text
+versionCode = major * 10000000 + minor * 100000 + patch * 1000 + stage * 100 + number
+```
+
+| Part | Range | Meaning |
+|---|---|---|
+| major | 0 to 209 | the code must stay below Android's limit of 2100000000, so 209.99.99 is the last version |
+| minor, patch | 0 to 99 | |
+| stage | 1, 2, 3, 9 | alpha, beta, release candidate (`rc`), final |
+| number | 1 to 99, or 0 for a final | the number after the stage word: `alpha1`, `beta2`, `rc1` |
+
+| Version | Code |
+|---|---|
+| `0.0.1-alpha1` | 1101 |
+| `0.0.1-beta1` | 1201 |
+| `0.0.1-beta2` | 1202 |
+| `0.0.1-rc1` | 1301 |
+| `0.0.1` | 1900 |
+| `0.0.2-alpha1` | 2101 |
+| `0.1.0` | 100900 |
+| `1.0.0` | 10000900 |
+
+Inside one patch alpha is below beta, beta below release candidate and release candidate below final, and every build of one patch is
+below every build of the next. A number out of range, a leading zero, an unknown stage word and build metadata are refused with exit
+status 2 (nothing is clamped). When the version of the app changes, run `sh scripts/android-version-code.sh <version>` and write the
+number into `tauri.android.conf.json` in the same commit; `sh scripts/test-android-version-code.sh` and the `android_release` test
+check the scheme.
+
+## What the manifest decides
+
+- **No backup.** `allowBackup` is false and `data_extraction_rules.xml` excludes every domain, for the cloud backup and for the
+  transfer to another phone. The app keeps its vault file and its history in its private folder, and those must not be copied to a
+  backup service or to another device. There is no `fullBackupContent` file.
+- **Cleartext HTTP only in the debug build, and only to `10.0.2.2`.** The debug source set (`app/src/debug`) adds a network security
+  config that permits cleartext to the emulator's alias of the host machine and refuses it everywhere else. The release build has
+  neither the attribute nor the file.
+- **One exported component:** the launcher activity. Every other activity, service, receiver and provider says `exported="false"`.
+  A receiver that a library adds (the profile installer's, guarded by the shell-only DUMP permission) is removed from the merged
+  manifest.
+- **No TV launcher, no file provider.** The template's Android TV lines and its file provider (which shared the whole external
+  storage and the cache, and which nothing used) are removed.
+- **No Google services, no tracker, no updater.** No build file names a Google service, Firebase, Crashlytics, an analytics library or
+  the Play core library, and the APK check looks for their classes in the dex files. The release is not debuggable, keeps the R8
+  setting of the template, and leaves the commit out of the APK (`vcsInfo`) and the dependency block that only Google Play can read
+  (`dependenciesInfo`).
+
+## One list of permissions
+
+`app/src-tauri/android-permissions.txt` is the one list of the permissions the app may ask for (today `android.permission.INTERNET`).
+The `android_release` test requires the manifest to hold exactly these, and the APK check requires the same of a built APK, so a
+permission that is added anywhere else fails one of them. A feature that needs a permission adds its line to the file in its own
+commit, with the manifest line, and says in the message what it is for. A permission that installs packages, reads the screen, draws
+over other apps or reads contacts, messages or location is never on the list without a decision of its own.
+
+## Check a built APK
+
+```sh
+sh scripts/android-apk-check.sh <apk> [debug|release]
+```
+
+It reads the real file with the pinned `aapt2`, `zipalign`, `apksigner` and the NDK's `llvm-readelf` and prints one line per check,
+`FAIL <what>: found <x>, wanted <y>` for each problem, and `android-apk-check: ok` when none failed (exit 1 when a check failed, 2
+when a tool or the file is missing). It checks the package name (with the `.debug` suffix for debug only), the version code against
+the scheme, `minSdkVersion` 31, the native code (arm64-v8a and nothing else, and no file under `lib/` of another ABI), the permissions
+against the list, `allowBackup`, the extraction rules inside the APK, the exported components of the **merged** manifest (including
+those of libraries), `debuggable` and cleartext in debug only, `zipalign -c -P 16 -v 4`, the alignment of every `LOAD` segment of
+every native library (at least `0x4000`, the 16 KB page size that Android 15 and later devices may use), the absence of Google Play
+services and Firebase classes, and the signature (a release APK must be unsigned; a debug APK carries the debug certificate). It
+installs nothing and writes only to a temporary folder that it removes on every way out.
+`sh scripts/test-android-apk-check.sh` proves every rule once passing and once failing with stand-in tools, without any Android
+software.
+
+The target SDK is printed and not judged: what minimum a store such as F-Droid asks for today was not verified.
+
+## The release is unsigned
+
+`sh scripts/android-build.sh release` builds `app-universal-release-unsigned.apk`. No script of the repository signs, creates a key
+or reads a keystore password, and the Gradle project has no signing configuration. Signing is the owner's own step, with the owner's
+own key kept outside the repository, when a release is published. An unsigned APK cannot be installed. To see that the minified release (R8 is on) still starts, a copy of the release APK was signed
+once, by hand and outside the repository, with the Android SDK's public debug key, installed on the arm64 emulator (Android 37), and
+started: the native library loaded, the page appeared and a pane started the system shell. That copy was removed afterwards and is not
+a build output of any script.
+
+## Reproducibility
+
+Every build sets `SOURCE_DATE_EPOCH` (the date of the last commit, or the value already in the environment), replaces `RUSTFLAGS` by
+`--remap-path-prefix` flags for the repository folder, the Cargo home and the NDK folder, and passes `--locked` to Cargo; it prints
+the NDK path and the Rust version it used. The Gradle project leaves the commit and Google's dependency block out of the APK.
+
+**Measured:** two builds of the unsigned release, one after the other, in the same folder, on the same machine, with the same
+`SOURCE_DATE_EPOCH`, with `app/src-tauri/gen/android/app/build`, `app/dist` and the whole `target/aarch64-linux-android/release`
+folder removed in between (so the Rust code, the terminal engine and the page were built again, not reused). The two APK files were
+byte for byte the same (the same SHA-256), and so were the native library, the dex file, `resources.arsc` and the manifest. The
+release native library holds no machine path: a search for the home folder, the repository folder and the NDK folder found none
+(the debug library, which keeps its debug information, still names paths of the C code of some dependencies and of the Zig cache;
+the compiler flags above only cover Rust code).
+
+**Not proved:** a rebuild in another folder or under another user name, a rebuild on another machine or operating system, a rebuild
+with another Rust, Zig, NDK or Gradle version, and a rebuild by F-Droid's build server. The release library carries remapped
+registry paths of the form `/cargo-home/registry/...`; whether those stay the same in another place was not tried.
 
 ## What was not tried
 
@@ -223,4 +332,4 @@ minimum SDK, the one ABI, that no machine path, key, Google service or installer
   shell of a phone maker.
 - Any Android version other than the emulator image the check ran on (the default is Android 37, arm64).
 - x86_64 and 32-bit images or builds, which are refused by design.
-- A signed release APK, installing from F-Droid or Obtainium, and a 16 KB page device other than the emulator image with that page size.
+- A signed release APK for distribution, installing from F-Droid or Obtainium, Play Protect or installer warnings for a self-signed APK, and a 16 KB page device other than the emulator image with that page size.
