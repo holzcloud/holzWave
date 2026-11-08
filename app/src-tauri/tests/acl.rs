@@ -18,9 +18,16 @@ const MENU_RS: &str = include_str!("../src/menu.rs");
 const TAURI_CONF: &str = include_str!("../tauri.conf.json");
 const CAPABILITY: &str = include_str!("../capabilities/default.json");
 
-/// Permissions of the windows that are not commands of the app: the defaults of the core plugin set and the one
-/// permission the own-drawn title bar needs (`data-tauri-drag-region`; `core:default` does not contain it).
-const FIXED_PERMISSIONS: [&str; 2] = ["core:default", "core:window:allow-start-dragging"];
+/// Permissions of the windows that are not commands of the app: the defaults of the core plugin set and the four the
+/// own-drawn title bar needs: `start-dragging` (`data-tauri-drag-region`; `core:default` does not contain it) and the
+/// window buttons of the own frame (minimise, toggle maximise, close).
+const FIXED_PERMISSIONS: [&str; 5] = [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+];
 
 /// The text between `open` and the first `]` after it, with line comments removed.
 fn list_after(source: &str, open: &str) -> Option<String> {
@@ -136,6 +143,32 @@ fn capability_permissions() -> Result<BTreeSet<String>, String> {
 
 fn set(names: &[&str]) -> BTreeSet<String> {
     names.iter().map(|n| (*n).to_owned()).collect()
+}
+
+/// The page may do exactly this to its window: be dragged, minimised, maximised and closed. A page script that pane output
+/// could reach must not get more, so a later grant of `destroy`, `hide`, `set-decorations` or `set-always-on-top` fails here.
+#[test]
+fn the_page_gets_exactly_four_window_permissions() {
+    let window: BTreeSet<String> =
+        capability_permissions().expect("capability permissions").into_iter().filter(|p| p.starts_with("core:window:")).collect();
+    assert_eq!(
+        window,
+        set(&[
+            "core:window:allow-start-dragging",
+            "core:window:allow-minimize",
+            "core:window:allow-toggle-maximize",
+            "core:window:allow-close",
+        ]),
+        "the window permissions of the capability changed"
+    );
+    // The windows the capability reaches stay the two the app makes.
+    let windows: Vec<String> = capability()["windows"]
+        .as_array()
+        .expect("a windows array")
+        .iter()
+        .map(|w| w.as_str().expect("a label").to_owned())
+        .collect();
+    assert_eq!(windows, ["main", "window-*"]);
 }
 
 #[test]
@@ -260,34 +293,35 @@ fn window_events_are_not_commands() {
     }
 }
 
+/// The fixed permissions plus the command permissions `names`.
+fn with_fixed(names: &[&str]) -> BTreeSet<String> {
+    let mut all: BTreeSet<String> = FIXED_PERMISSIONS.iter().map(|p| (*p).to_owned()).collect();
+    all.extend(names.iter().map(|n| (*n).to_owned()));
+    all
+}
+
 #[test]
 fn a_command_added_to_one_list_only_fails_with_its_name() {
     let handler = set(&["get_layout", "paste", "brand_new"]);
     let manifest = set(&["get_layout", "paste"]);
-    let permissions = set(&["core:default", "core:window:allow-start-dragging", "allow-get-layout", "allow-paste"]);
+    let permissions = with_fixed(&["allow-get-layout", "allow-paste"]);
     let problems = parity_problems(&handler, &manifest, &permissions);
     assert_eq!(problems, ["command brand_new is in the invoke handler but not in the build.rs manifest"]);
 
     // In the manifest and the handler but never granted.
     let handler = set(&["get_layout", "scroll_to_bottom"]);
     let manifest = set(&["get_layout", "scroll_to_bottom"]);
-    let permissions = set(&["core:default", "core:window:allow-start-dragging", "allow-get-layout"]);
+    let permissions = with_fixed(&["allow-get-layout"]);
     assert_eq!(
         parity_problems(&handler, &manifest, &permissions),
         ["permission allow-scroll-to-bottom is missing from capabilities/default.json"]
     );
 
     // A permission nobody asked for.
-    let permissions = set(&[
-        "core:default",
-        "core:window:allow-start-dragging",
-        "allow-get-layout",
-        "allow-scroll-to-bottom",
-        "core:window:allow-close",
-    ]);
+    let permissions = with_fixed(&["allow-get-layout", "allow-scroll-to-bottom", "core:window:allow-destroy"]);
     assert_eq!(
         parity_problems(&handler, &manifest, &permissions),
-        ["permission core:window:allow-close in capabilities/default.json belongs to no manifest command"]
+        ["permission core:window:allow-destroy in capabilities/default.json belongs to no manifest command"]
     );
 }
 

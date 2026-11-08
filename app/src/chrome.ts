@@ -15,6 +15,7 @@ import { paneLabel, renamePane, setPaneCloseHandler, setPaneRenameHandler } from
 import { startRename } from "./rename.js";
 import { state } from "./state.js";
 import type { View } from "./types.js";
+import { initWindowFrame } from "./windowframe.js";
 
 const bar = document.getElementById("bar") as HTMLDivElement;
 
@@ -391,5 +392,7 @@ export async function initChrome(): Promise<void> {
       // the page stays usable without its chrome styles; the layout tests would notice
     }),
     loadInfo(),
+    // The window buttons of an own frame (Windows): in the bar before the first measurement.
+    initWindowFrame(bar),
   ]);
 }

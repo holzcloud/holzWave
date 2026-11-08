@@ -46,6 +46,9 @@ mod state;
 // The operating system's text size is read by the desktop host; Android's host does not read it yet.
 #[cfg(not(target_os = "android"))]
 mod textscale;
+// The frame of a desktop window is decided before the window exists (see the module); a phone has one window the system makes.
+#[cfg(not(target_os = "android"))]
+mod windowframe;
 
 use std::sync::Arc;
 
@@ -116,7 +119,7 @@ impl Sink for TauriSink {
     }
 
     fn open_window(&self, label: &str, place: &Place) -> Result<(), String> {
-        let window = build_window(&self.app, label)?;
+        let window = build_window(&self.app, label, false)?;
         // A position is in the shared space of `windows.rs` (points on macOS, physical pixels elsewhere), and the
         // offsets that are given in points are scaled into it. Where the window system does not say where the
         // pointer or a window is (Wayland) there is nothing to compute, and the window opens where it puts it.
@@ -160,18 +163,23 @@ impl Sink for TauriSink {
 
 // ---- windows: building them, and finding them under the pointer ---------------------------------------------------
 
-/// Build the window `label` like the one of the configuration (size, minimum size, overlay title bar), hidden: its page
-/// shows it with `window_ready` once it has drawn, so that it never flashes empty. A label that exists is an error.
-/// Never call it with a lock of the core held (a window event of the new window takes them), nor from a synchronous
-/// command (Windows deadlocks there, wry 583).
-fn build_window(app: &AppHandle, label: &str) -> Result<WebviewWindow, String> {
+/// Build the window `label` from the window of the configuration (size, minimum size, overlay title bar), the one
+/// source of what every window is like; the configuration itself creates none on a desktop (see `run`). `visible` says
+/// whether it shows at once: the first window does, as a configuration window always did; a later window is hidden and its
+/// page shows it with `window_ready` once it has drawn, so that it never flashes empty. When the system decided an own frame
+/// ([`windowframe::decide`], held in the app's state) the window has no system title bar and its page gets the facts before
+/// it runs. A label that exists is an error. Never call it with a lock of the core held (a window event of the new window
+/// takes them), nor from a synchronous command (Windows deadlocks there, wry 583).
+fn build_window(app: &AppHandle, label: &str, visible: bool) -> Result<WebviewWindow, String> {
     let mut conf = app.config().app.windows.first().cloned().ok_or("the configuration has no window")?;
     conf.label = label.to_owned();
-    WebviewWindowBuilder::from_config(app, &conf)
-        .map_err(|e| e.to_string())?
-        .visible(false)
-        .build()
-        .map_err(|e| e.to_string())
+    let builder = WebviewWindowBuilder::from_config(app, &conf).map_err(|e| e.to_string())?.visible(visible);
+    #[cfg(not(target_os = "android"))]
+    let builder = match app.try_state::<windowframe::FrameFacts>() {
+        Some(facts) => builder.decorations(false).initialization_script(facts.script()),
+        None => builder,
+    };
+    builder.build().map_err(|e| e.to_string())
 }
 
 /// What the pixels of a window's own coordinates are divided by to reach the shared space of `windows.rs`: on macOS
@@ -398,6 +406,14 @@ pub fn run() {
 
     // The exit events can come more than once (a requested exit, then the exit itself): the shutdown runs once.
     let mut ended = false;
+    // A desktop builds every window itself, the first one in `setup` (see `build_window`): the configuration stays as the
+    // one description of a window, but creates none. A phone keeps the window of the configuration.
+    #[cfg_attr(target_os = "android", allow(unused_mut))]
+    let mut context = tauri::generate_context!();
+    #[cfg(not(target_os = "android"))]
+    for window in &mut context.config_mut().app.windows {
+        window.create = false;
+    }
     builder
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
@@ -423,14 +439,19 @@ pub fn run() {
             // A phone has one window that the system sizes: no frame is restored, and no second window is built.
             #[cfg(not(target_os = "android"))]
             {
-                if let Some(window) = app.get_webview_window("main") {
-                    restore_window(&window, &core, "main");
+                // The frame is decided before any window exists, because it cannot be changed on a window that is built.
+                if let Some(facts) = windowframe::decide(OS) {
+                    app.manage(facts);
                 }
-                // The windows of the last session other than `main` (which the configuration makes): each is built
-                // hidden with its own frame, and shown when its page is ready. A window that cannot be built keeps its
-                // entry in the layout, so the next start tries again.
+                // The first window is built here like every other (the configuration creates none), and visible at once as
+                // a configuration window was. A failure stops the start with the reason: a process with no window is worse.
+                let main = build_window(app.handle(), "main", true)?;
+                restore_window(&main, &core, "main");
+                // The windows of the last session other than `main`: each is built hidden with its own frame, and shown
+                // when its page is ready. A window that cannot be built keeps its entry in the layout, so the next start
+                // tries again.
                 for label in core.restored_windows() {
-                    match build_window(app.handle(), &label) {
+                    match build_window(app.handle(), &label, false) {
                         Ok(window) => restore_window(&window, &core, &label),
                         Err(e) => eprintln!("holzwave: cannot restore the window {label}: {e}"),
                     }
@@ -498,7 +519,7 @@ pub fn run() {
         // `tauri::generate_handler!` into the handler (the generated wrappers and the three that need the window shell),
         // and there is no hand-written list.
         .invoke_handler(desktop_table::handler())
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building holzWave")
         .run(move |app, event| {
             // The pending layout and session go to disk and every shell ends before the process does (DESK-16,

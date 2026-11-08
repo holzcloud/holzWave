@@ -1,0 +1,39 @@
+/* ---- window buttons of the own frame (docs/design.md section 6.33) ----------------------------------------------- */
+
+/* Under `frame-own` the shell built the window without the system title bar and the bar's title row holds the window
+   buttons after the host name and the clock: a fourth column of the grid (the tab row still spans every column), flush
+   with the window edge, so the bar's side padding on that side is cancelled. */
+.frame-own #bar { grid-template-columns: auto 1fr auto auto; }
+.frame-own.frame-right #bar .bar-info { margin-right: var(--bar-pad); }
+.bar-window {
+  grid-row: 1; grid-column: 4; display: flex; align-items: stretch; margin-right: calc(-1 * var(--bar-pad));
+}
+
+/* Flat: 46 by 32 px, the glyph alone, drawn with 1 px strokes in the current colour so it is the same on every platform and
+   does not depend on a font. The floor of 28 px holds at any UI scale. */
+#bar .bar-window .wf-btn {
+  position: relative; width: max(28px, calc(46rem / 12)); height: max(28px, calc(32rem / 12)); min-width: 0; max-width: none;
+  padding: 0; border: 0; border-radius: 0; background: none; color: var(--hw-dim); line-height: 1;
+}
+#bar .bar-window .wf-btn:hover { background: var(--hw-rose-wash); color: var(--hw-ink); }
+/* On Windows the close button under the pointer is the one red thing: the filled box and the inverted glyph are its cues. */
+.os-windows #bar .bar-window .wf-btn[data-button="close"]:hover { background: var(--hw-danger); color: var(--hw-ground); }
+#bar .bar-window .wf-btn:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
+
+/* The close glyph: two crossing diagonals of 10 px by 10 px. */
+.wf-btn[data-button="close"]::before, .wf-btn[data-button="close"]::after {
+  content: ""; position: absolute; left: 50%; top: 50%; width: calc(14rem / 12); height: 1px; margin: -.5px 0 0 calc(-7rem / 12);
+  background: currentColor;
+}
+.wf-btn[data-button="close"]::before { transform: rotate(45deg); }
+.wf-btn[data-button="close"]::after { transform: rotate(-45deg); }
+
+:root:not(.motion-reduce) #bar .bar-window .wf-btn {
+  transition: background-color 160ms cubic-bezier(.2, .7, .3, 1), color 160ms cubic-bezier(.2, .7, .3, 1);
+}
+
+@media (forced-colors: active) {
+  :root #bar .bar-window .wf-btn { color: ButtonText; forced-color-adjust: none; background: none; }
+  :root #bar .bar-window .wf-btn:hover, :root #bar .bar-window .wf-btn:focus-visible { color: HighlightText; background: Highlight; }
+  :root #bar .bar-window .wf-btn:focus-visible { outline: 2px solid ButtonText; }
+}
