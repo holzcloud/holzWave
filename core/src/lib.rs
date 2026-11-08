@@ -76,6 +76,7 @@ pub mod textread;
 pub mod theme;
 pub mod vault;
 pub mod widgets;
+pub mod window_frame;
 pub mod wire;
 pub mod winshell;
 pub mod wshinstall;

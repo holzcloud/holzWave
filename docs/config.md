@@ -12,6 +12,7 @@ change that forgets the document fails a test.
 - [`session.json`](#sessionjson)
 - [`local_network.json`](#local_networkjson)
 - [`host_shell.json`](#host_shelljson)
+- [`window_frame.json`](#window_framejson)
 - [`layout.json`](#layoutjson)
 - [Accessibility](#accessibility)
 - [Android](#android)
@@ -43,6 +44,7 @@ against scratch directories and never touch the real one.
 | `session.json` | the working directory of each pane and the window frame | 2 s after the first change of a burst, and on quit | yes |
 | `local_network.json` | whether the notice about the Local Network permission of macOS was answered (macOS 15 or later only) | when you answer the notice | yes |
 | `host_shell.json` | whether panes start on the host computer instead of inside the sandbox (inside a Flatpak only) | when you switch Host shell | yes |
+| `window_frame.json` | which frame the window has and which window buttons are drawn (Windows and Linux only) | when you change them in the Settings | yes |
 | `connections.json` | the saved SSH, WSL and Docker connections, without secrets | when a connection is saved or deleted | no |
 | `pane_connections.json` | which pane runs which connection | when it changes | yes (the assignments travel inside the layout, see [sync.md](sync.md)) |
 | `known_hosts` | the host keys SSH has learned (OpenSSH format) | when a new host is trusted | yes |
@@ -612,6 +614,52 @@ chose. macOS, Windows, a Linux session that is not a Flatpak and the browser bui
 {
   "version": 1,
   "host_shell": true
+}
+```
+
+## `window_frame.json`
+
+Read and written on Windows and Linux only. On those two systems holzWave can draw its own bar as the window bar, with the
+three window buttons in it, or leave the system's title bar above the page. The file keeps two choices you make in the
+Settings, in the group **Window frame**. macOS, Android and the browser build never read or write it.
+
+```json
+{
+  "version": 1,
+  "window_frame": "auto",
+  "window_buttons": "auto"
+}
+```
+
+- `window_frame` is one of three words. `auto` follows the system and draws holzWave's own bar as the window bar, and on Linux
+  that includes a Wayland session. `own` draws the own bar whatever the system says. `system` keeps the system's title bar
+  above holzWave's bar and draws no window buttons of its own.
+- `window_buttons` is one of three words and matters on Linux only (Windows buttons are always flat). `auto` follows the
+  desktop: round on GNOME, flat on every other desktop. `flat` and `round` choose the style whatever the desktop is.
+- Only an exact lowercase word counts. A different case, a number, `null`, a missing key or any other text reads as `auto`
+  for that key alone, so a bad `window_frame` does not cost a good `window_buttons`. A missing file means `auto` for both.
+- **A change applies after the next start.** A window cannot change its frame while it is open, so holzWave builds its windows
+  from the file when it starts, and the Settings say `Applies after the next start.` while the file and the open windows
+  differ.
+- **Machine-local, and not a setting.** The file is not part of `settings.json` and is never synced, and the sync refuses it
+  by name. `settings.json` travels to every computer; the round buttons of a GNOME computer must not reach another desktop,
+  and a choice made to get a movable window must not reach a computer where the window works.
+- A damaged file costs the choice and never the start: text that is not JSON, a version this build does not know, a word
+  outside its table or a file over 4 KiB reads as `auto`, and the original bytes are kept as `window_frame.json.bad`. An
+  unknown key is ignored.
+- **If the window cannot be moved or resized**, you can get the system's own title bar back by hand: close the window with the
+  keyboard (`Alt+F4` on Windows and most Linux desktops, or your desktop's own shortcut), set `"window_frame": "system"` in
+  this file with any editor, and start holzWave again. Deleting the file has the same effect as `auto`, which is the own
+  frame, so edit it to `system` instead of deleting it.
+- Not run: the own frame has never been seen on a real Windows or Linux window. Whether a Wayland session can move and resize
+  such a window is unknown, and this file is tested with scratch directories and sample text only.
+
+<!-- example: window_frame.json -->
+```json
+{
+  "version": 1,
+  "window_frame": "system",
+  "window_buttons": "round"
 }
 ```
 
