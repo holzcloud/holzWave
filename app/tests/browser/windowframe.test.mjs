@@ -176,7 +176,7 @@ async function buttonsCase(page, url) {
 
 // ---- the shell's fixture and the Linux styles ---------------------------------------------------------------------------
 
-/** The cases of the shell's tests (`window-frame.json`, written by plan 14-06): the choices, the facts and the script text. */
+/** The cases of the shell's tests (`window-frame.json`, the same file the Rust tests of the shell read): the choices, the facts and the script text. */
 const FIXTURE = JSON.parse(readFileSync(join(APP_DIR, "tests/fixtures/window-frame.json"), "utf8"));
 
 /** The bar's side padding in CSS px at the base size: `--bar-pad` is `calc(8rem / 12)`. */

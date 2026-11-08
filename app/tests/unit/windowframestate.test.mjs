@@ -397,3 +397,17 @@ test("the flat size of the design record is 46 by 32 px with a glyph of 10 px an
   assert.ok(flat[3].includes("10 px"), flat[3]);
   assert.match(section(), /the floor is written as `max\(28px, …\)`/);
 });
+
+test("the round size of the design record is 28 by 28 px, a circle of 24 px with a 1 px ring, 6 px between and a glyph of 8 px, and the sheet writes those numbers", () => {
+  const round = table(section(), "Style").find((cells) => cells[0] === "Round");
+  assert.ok(round[1].includes("GNOME"), round[1]);
+  assert.ok(round[2].startsWith("28 by 28 px, 6 px between them"), round[2]);
+  assert.ok(round[2].includes("inset from the window edge by the bar's padding and centred in the 32 px row"), round[2]);
+  assert.ok(round[3].includes("a circle of 24 px") && round[3].includes("1 px `--hw-line` ring") && round[3].includes("8 px glyph"), round[3]);
+  assert.match(section(), /Linux close under the pointer \| the normal wash, not red/);
+  const sheet = readFileSync(new URL("../../src/windowframe.css", import.meta.url), "utf8");
+  for (const written of ["max(28px, calc(28rem / 12))", "calc(24rem / 12)", "calc(6rem / 12)", "calc(8rem / 12)", "calc(10rem / 12)", "calc(46rem / 12)"]) {
+    assert.ok(sheet.includes(written), `the sheet writes ${written}`);
+  }
+  assert.match(sheet, /border: 1px solid var\(--hw-line\)/, "the ring is --hw-line");
+});

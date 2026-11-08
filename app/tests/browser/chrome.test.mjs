@@ -94,7 +94,7 @@ async function open(page, url, info = INFO, frame = undefined) {
 /** What the shell tells the page for a Windows window with the own frame. */
 const WINDOWS_FRAME = { os: "windows", style: "flat", side: "right", buttons: ["minimize", "maximize", "close"] };
 
-/** The cases of the shell's tests (window-frame.json, plan 14-06): the facts the shell decides for a desktop, by the case's name. */
+/** The cases of the shell's tests (window-frame.json): the facts the shell decides for a desktop, by the case's name. */
 const FIXTURE = JSON.parse(readFileSync(join(APP_DIR, "tests/fixtures/window-frame.json"), "utf8"));
 function shellFacts(name) {
   const item = FIXTURE.find((c) => c.name === name);
