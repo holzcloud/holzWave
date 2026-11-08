@@ -95,6 +95,12 @@ The Android pictures are the design, rendered from the design page, not screensh
 |---|---|---|
 | ![holzWave on macOS](docs/design/platforms/macos.png) | ![holzWave on Windows](docs/design/platforms/windows.png) | ![holzWave on Linux](docs/design/platforms/linux.png) |
 
+The own window frame of Windows and Linux (the page's bar is the window bar, with the window buttons of the system) is specified and drawn here, and it was never seen on a real Windows or Linux window: these two pictures are drawings of the design, not screenshots.
+
+| The window buttons: three styles, both sides and the states | The Settings group Window frame |
+|---|---|
+| ![Drawing of the design: the title bar with flat buttons on Windows, round buttons on GNOME with one close button or three, round buttons on the left, flat buttons on other Linux desktops, and the states rest, hover, close under the pointer, keyboard focus and maximised](docs/design/window-frame.png) | ![Drawing of the design: the group Window frame of the Settings dialog on Windows with the row Frame, and on Linux with the rows Frame and Buttons and the note that a change applies after the next start](docs/design/window-frame-settings.png) |
+
 <table>
 <tr><th>AI chat in a pane</th><th>Sharing a pane</th><th>Approving a tool call</th></tr>
 <tr>
