@@ -7727,14 +7727,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/tao/tao-0.37.1.crate",
-        "sha256": "f37f381f4e048e6cdf038b5705f8cf14ad108279d46eb968140a7b291aba9400",
-        "dest": "cargo/vendor/tao-0.37.1"
+        "url": "https://static.crates.io/crates/tao/tao-0.37.2.crate",
+        "sha256": "d5777b06fe6435126ae8d816eba269e050e1e10d302cf5461e9c49eccabc3548",
+        "dest": "cargo/vendor/tao-0.37.2"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"f37f381f4e048e6cdf038b5705f8cf14ad108279d46eb968140a7b291aba9400\", \"files\": {}}",
-        "dest": "cargo/vendor/tao-0.37.1",
+        "contents": "{\"package\": \"d5777b06fe6435126ae8d816eba269e050e1e10d302cf5461e9c49eccabc3548\", \"files\": {}}",
+        "dest": "cargo/vendor/tao-0.37.2",
         "dest-filename": ".cargo-checksum.json"
     },
     {
