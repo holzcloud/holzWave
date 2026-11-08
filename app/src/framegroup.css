@@ -1,0 +1,17 @@
+/* The group `Window frame` of the Settings dialog (framegroup.ts, docs/design.md section 6.33). Loaded with
+   `loadStyles("./framegroup.css")` after dialogs.css and settings.css, whose group, choice-row, radio and focus-ring styles it
+   builds on: the rows use the page's own `set-choice` and `set-options`, and the 2 px keyboard ring comes from the rule for
+   inputs in settings.css. Only what those do not give is here. Every colour is a `--hw-*` token and every size is in rem, so the
+   UI scale moves it with the rest of the chrome; a pixel value appears only for the 28 px desktop minimum of a target. Flat and
+   hairline: no gradient, no blur, no shadow. Nothing here moves. */
+/* The slot that keeps the group in its place before the buttons takes no box of its own. */
+.settings .set-fr-slot { display: contents; }
+.settings .set-fr-meta { margin-left: .667rem; color: var(--hw-dim); }
+.settings .set-fr-row .set-option { box-sizing: border-box; min-height: max(28px, calc(28rem / 12)); }
+.settings .set-fr-advice { margin: .167rem 0 .333rem; color: var(--hw-dim); overflow-wrap: anywhere; }
+/* The status line is a live region that stays in the document and takes no height while it is empty. */
+.settings .set-fr-line { margin: .333rem 0 0; color: var(--hw-dim); overflow-wrap: anywhere; }
+.settings .set-fr-line:empty { margin: 0; }
+/* While a command is in flight the radios are disabled; the dimming is the second cue to the pointer that shows `progress`. */
+.settings .set-fr[aria-busy="true"] .set-option { cursor: progress; }
+.settings .set-fr-radio:disabled { opacity: .6; }

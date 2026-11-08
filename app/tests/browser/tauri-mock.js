@@ -56,6 +56,20 @@
 //                      while the state is `unavailable` or `applies` is false rejects with the shell's reason; otherwise the state
 //                      becomes `on` or `off` by `enabled` and the new view is the answer
 //       reset()        back to the default
+//     windowFrame      the window frame switch of Windows and Linux (docs/design.md 6.33): the commands `window_frame_status` and
+//                      `window_frame_set`, answered from this hook. The default view does not apply, so no other test sees the group
+//       view           a copy of the answer of both commands: `{ applies, frame, buttons, pending }`, by default
+//                      `{ applies: false, frame: "auto", buttons: "auto", pending: false }`
+//       set(partial)   change members of `view`
+//       started        the pair `{ frame, buttons }` the running windows were built with (default `auto`, `auto`); `window_frame_set`
+//                      sets `pending` to whether the stored pair differs from it; `setStarted({ frame, buttons })` changes it
+//       calls          every call of the two commands as `[command, args]`, oldest first
+//       hold(), release()  the answer of `window_frame_status` waits until `release()`; the call is recorded at once
+//       statusFails(text)  `window_frame_status` rejects with `text` (a string, as the shell's error); statusFails(null) stops it
+//       setFails(text)     `window_frame_set` rejects with `text` (any value: a string, an error, a number) and changes nothing;
+//                      setFails(null) stops it. Without it the command validates both words as the host does (a word outside the
+//                      tables rejects with a fixed string and changes nothing), stores them, and answers the new view
+//       reset()        back to the default
 //     ai               the AI chat of the core, played from the shapes of app/tests/fixtures/ai_stream.json:
 //       profiles       the `profiles` member of the answer of `ai_profiles` (default none). A profile view carries the
 //                      members of the core's `ProfileView` and the mock-only member `locality` (`on_device`,
@@ -1692,6 +1706,70 @@
     },
   };
 
+  // The window frame switch of the shell: one view, the pair the running windows were built with, the calls, and the knobs of
+  // the header comment.
+  const FRAME_WORDS = ["auto", "own", "system"];
+  const BUTTON_WORDS = ["auto", "flat", "round"];
+  const frameStart = () => ({
+    view: { applies: false, frame: "auto", buttons: "auto", pending: false },
+    started: { frame: "auto", buttons: "auto" },
+    calls: [], held: false, waiters: [], statusError: null, setError: null,
+  });
+  let frameState = frameStart();
+  const frameCommands = {
+    async window_frame_status(args) {
+      frameState.calls.push(["window_frame_status", args]);
+      if (frameState.statusError !== null) throw frameState.statusError;
+      if (frameState.held) await new Promise((go) => frameState.waiters.push(go));
+      return structuredClone(frameState.view);
+    },
+    async window_frame_set(args) {
+      frameState.calls.push(["window_frame_set", args]);
+      if (frameState.setError !== null) throw frameState.setError;
+      if (!FRAME_WORDS.includes(args.frame) || !BUTTON_WORDS.includes(args.buttons)) {
+        throw "the window frame words are not known";
+      }
+      frameState.view.frame = args.frame;
+      frameState.view.buttons = args.buttons;
+      frameState.view.pending = args.frame !== frameState.started.frame || args.buttons !== frameState.started.buttons;
+      return structuredClone(frameState.view);
+    },
+  };
+  const windowFrame = {
+    get view() {
+      return structuredClone(frameState.view);
+    },
+    set(partial) {
+      Object.assign(frameState.view, structuredClone(partial));
+    },
+    get started() {
+      return structuredClone(frameState.started);
+    },
+    setStarted(pair) {
+      Object.assign(frameState.started, structuredClone(pair));
+    },
+    get calls() {
+      return structuredClone(frameState.calls);
+    },
+    hold() {
+      frameState.held = true;
+    },
+    release() {
+      frameState.held = false;
+      for (const go of frameState.waiters.splice(0)) go();
+    },
+    statusFails(text) {
+      frameState.statusError = text ?? null;
+    },
+    setFails(text) {
+      frameState.setError = text ?? null;
+    },
+    reset() {
+      for (const go of frameState.waiters.splice(0)) go();
+      frameState = frameStart();
+    },
+  };
+
   // The integration commands of the core. Without a script (`on`) each answers what a machine without the tools would: empty
   // lists and nothing, so a test that does not use an integration block sees no difference.
   const integrationDefaults = {
@@ -1719,6 +1797,7 @@
     if (Object.hasOwn(aiCommands, cmd)) return aiCommands[cmd](args ?? {}) ?? null;
     if (Object.hasOwn(netCommands, cmd)) return netCommands[cmd](args ?? {});
     if (Object.hasOwn(shellCommands, cmd)) return shellCommands[cmd](args ?? {});
+    if (Object.hasOwn(frameCommands, cmd)) return frameCommands[cmd](args ?? {});
     if (Object.hasOwn(integrationDefaults, cmd)) return integrationDefaults[cmd](args ?? {});
     if (LAYOUT_COMMANDS.has(cmd) && layoutError !== null) throw layoutError; // Tauri rejects with the error text
     if (cmd === "set_ratio") setRatio(args);
@@ -1763,6 +1842,7 @@
       mockAi.reset();
       localNetwork.reset();
       hostShell.reset();
+      windowFrame.reset();
     },
     get ai() {
       return mockAi;
@@ -1772,6 +1852,9 @@
     },
     get hostShell() {
       return hostShell;
+    },
+    get windowFrame() {
+      return windowFrame;
     },
   };
 
