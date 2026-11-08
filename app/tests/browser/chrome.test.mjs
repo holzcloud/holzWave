@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { APP_DIR, callsOf, emit } from "./lib.mjs";
+import { APP_DIR, callsOf, currentBackend, emit } from "./lib.mjs";
 
 export default async function ({ page, url }) {
   await barCase(page, url);
@@ -78,12 +78,21 @@ const heads = (page) =>
  * Open the page against the stub. `info` is what `app_info` answers (null: the stub's own default). Every case
  * registers one, because an init script of an earlier case would otherwise still answer.
  */
-async function open(page, url, info = INFO) {
+async function open(page, url, info = INFO, frame = undefined) {
   await page.addInitScript((i) => window.__MOCK__.on("app_info", () => i), info);
+  // The facts of the shell (`windowframe.rs`): written before the page runs, or absent. Every load sets or deletes the global,
+  // because the init scripts of an earlier load stay registered on the page.
+  await page.addInitScript(([facts, present]) => {
+    if (present) window.__HW_FRAME__ = facts;
+    else delete window.__HW_FRAME__;
+  }, [frame === undefined ? null : frame, frame !== undefined]);
   await page.goto(`${url}index.html?renderer=canvas`);
   await page.waitForSelector(".divider");
   await page.waitForFunction(() => window.__MOCK__.callsOf("start_pane").length >= 2);
 }
+
+/** What the shell tells the page for a Windows window with the own frame. */
+const WINDOWS_FRAME = { os: "windows", style: "flat", side: "right", buttons: ["minimize", "maximize", "close"] };
 
 /** Show `view` the way the core would announce a new layout. */
 async function showView(page, view) {
@@ -253,6 +262,14 @@ async function platformCase(page, url) {
   assert.doesNotMatch(await platform(), /os-macos/);
   assert.ok((await padding()) < 24, `no room for traffic lights outside macOS: ${await padding()} px`);
 
+  // macOS keeps its overlay bar: the shell never sends the facts there, and the page draws no window buttons if something
+  // arrives anyway (it reads only the contract of the shell for Windows), so there is no group and no frame class.
+  await open(page, url, { ...INFO, os: "macos" }, { ...WINDOWS_FRAME, os: "macos" });
+  assert.match(await platform(), /\bos-macos\b/);
+  assert.doesNotMatch(await platform(), /frame-/, "no frame class on macOS");
+  assert.equal(await page.locator("#bar .bar-window").count(), 0, "no window buttons on macOS");
+  assert.ok((await padding()) >= 64, `the bar still clears the traffic lights: ${await padding()} px of padding`);
+
   await frameCase(page, url);
 
   // The stub's own answer (null): every field is an empty string and the page still starts.
@@ -264,10 +281,12 @@ async function platformCase(page, url) {
 }
 
 /**
- * Windows and Linux keep the native title bar (owner decision of 2026-10-12): it sits above the page, so the page's
- * own bar needs no room for traffic lights and nothing else changes. Under every platform class the regions lie
- * where they lie under macOS apart from the bar's left padding: the same heights, in the same order, no overlap, and
- * the bar's free area still carries the drag attribute.
+ * The page's bar is the window bar on Windows and Linux when the shell sends the facts of the own frame (docs/design.md 6.33):
+ * the system's title bar is gone, so the bar is the first strip of the page and the window buttons sit in its title row. The bar
+ * of a platform without the facts is unchanged: it needs no room for traffic lights and nothing else moves. Under every platform
+ * class the regions lie where they lie under macOS apart from the bar's left padding: the same heights, in the same order, no
+ * overlap, and the bar's free area still carries the drag attribute. With the facts for Windows the same holds, the group of
+ * buttons is inside the title row and flush with the right edge of the window, and it takes its room from the free space.
  */
 async function frameCase(page, url) {
   const layout = () =>
@@ -300,10 +319,12 @@ async function frameCase(page, url) {
     seen[os] = await layout();
     const l = seen[os];
     assert.ok(l.drag.length > 0 && l.drag.every(Boolean), `${os}: the bar's free area drags the window`);
-    assert.equal(l.bar.top, 0, `${os}: the bar is the first strip of the page, directly under the native frame`);
+    assert.equal(l.bar.top, 0, `${os}: the bar is the first strip of the page`);
     assert.equal(l.stage.top, l.bar.top + l.bar.height, `${os}: the stage starts where the bar ends`);
     assert.equal(l.status.top, l.stage.top + l.stage.height, `${os}: the status line starts where the stage ends`);
     assert.ok(l.headHeights.length > 0, `${os}: the pane headers are drawn`);
+    assert.equal(await page.locator("#bar .bar-window").count(), 0, `${os}: no window buttons without the facts of the shell`);
+    assert.doesNotMatch(await page.evaluate(() => document.documentElement.className), /frame-/, `${os}: no frame class without facts`);
   }
   assert.equal(seen.macos.padding, 80, "macOS: the room for the traffic lights");
   for (const os of ["windows", "linux", null]) {
@@ -314,6 +335,69 @@ async function frameCase(page, url) {
     // The bar's width is the same; its content starts further left, so only the left edges of the tabs move.
     assert.deepEqual(rest, same, `${os}: the regions lie where they lie under macOS`);
   }
+
+  // A browser (the ws backend) has no window to draw buttons for: the facts of the shell change nothing there.
+  if (currentBackend() !== "tauri") {
+    await open(page, url, { ...INFO, os: "windows" }, WINDOWS_FRAME);
+    await showView(page, BAR_VIEW);
+    assert.equal(await page.locator("#bar .bar-window").count(), 0, "no window buttons in a browser");
+    const { padding: other, ...rest } = await layout();
+    assert.deepEqual(rest, (({ padding, ...r }) => r)(seen.windows), "the bar of a browser is the same with the facts");
+    return;
+  }
+
+  // Windows with the facts of the shell: the own frame. The regions lie where they lie under macOS apart from the left padding.
+  const parts = () =>
+    page.evaluate(() => {
+      const rect = (selector) => {
+        const r = document.querySelector(selector).getBoundingClientRect();
+        return { left: r.left, top: r.top, right: r.right, width: r.width, height: r.height };
+      };
+      return {
+        group: document.querySelector("#bar .bar-window") === null ? null : rect("#bar .bar-window"),
+        workspaces: rect("#bar .bar-workspaces"),
+        fill: rect("#bar .bar-fill"),
+        info: rect("#bar .bar-info"),
+        tabs: rect("#bar .bar-tabs"),
+        bar: rect("#bar"),
+        edge: window.innerWidth,
+      };
+    });
+  await open(page, url, { ...INFO, os: "windows" });
+  await showView(page, BAR_VIEW);
+  const plain = await parts();
+  await open(page, url, { ...INFO, os: "windows" }, WINDOWS_FRAME);
+  await showView(page, BAR_VIEW);
+  const own = await layout();
+  const withGroup = await parts();
+  assert.match(await page.evaluate(() => document.documentElement.className), /\bframe-own\b.*\bos-windows\b|\bos-windows\b.*\bframe-own\b/);
+  assert.equal(await page.locator("#bar .bar-window button").count(), 3, "windows with the facts: the three window buttons");
+  {
+    const { padding: other, ...rest } = own;
+    const { padding: mac, ...same } = seen.macos;
+    assert.equal(other, seen[null].padding, "own frame: the base padding of the bar");
+    assert.deepEqual(rest, same, "own frame: the regions lie where they lie under macOS");
+    assert.deepEqual(rest, (({ padding, ...r }) => r)(seen.windows), "own frame: and where they lie on Windows without the facts");
+  }
+  const g = withGroup.group;
+  assert.ok(g !== null, "the group is drawn");
+  assert.equal(g.top, withGroup.bar.top, "the group is inside the title row: its top is the bar's top");
+  assert.equal(g.height, withGroup.tabs.top - withGroup.bar.top, "and it is as high as the title row");
+  assert.ok(Math.abs(g.right - withGroup.edge) < 0.01, `its right edge is the window's right edge: ${g.right} of ${withGroup.edge}`);
+  assert.equal(withGroup.bar.right, withGroup.edge, "the bar reaches the window edge");
+  // It takes room from the bar's free space and from nothing else: the workspaces keep their box, the host name and the clock
+  // keep their size and row (they end before the group), and the free space is narrower by exactly the group.
+  assert.deepEqual(withGroup.workspaces, plain.workspaces, "the workspaces keep their box");
+  assert.deepEqual(
+    [withGroup.info.width, withGroup.info.height, withGroup.info.top],
+    [plain.info.width, plain.info.height, plain.info.top],
+    "the host name and the clock keep their size and row",
+  );
+  assert.ok(withGroup.info.right <= g.left + 0.01, "the host name and the clock end before the group");
+  assert.ok(Math.abs(plain.fill.width - withGroup.fill.width - g.width) < 0.01, `the free space gives up exactly the group: ${plain.fill.width} to ${withGroup.fill.width}, group ${g.width}`);
+  assert.equal(withGroup.fill.left, plain.fill.left, "and starts where it started");
+  assert.deepEqual(withGroup.tabs, plain.tabs, "the tab row is not touched");
+  assert.equal(plain.group, null);
 }
 
 async function statusCase(page, url) {
