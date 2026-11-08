@@ -1,7 +1,9 @@
 // The own window frame (docs/design.md section 6.33): the shell tells the page, through one global written before the page runs,
 // that the window has no system title bar, and the page draws the three window buttons in the bar's title row: minimise,
-// maximise (the restore drawing while the window is maximised) and close. Everything else (no facts, a browser, hostile
-// facts) draws nothing. The Tauri global here is a stub and the window is a variable of the test: no window was ever started
+// maximise (the restore drawing while the window is maximised) and close. On Linux the shell also decides the style (round on
+// GNOME, flat elsewhere), the side (the desktop's button layout may name the left) and the set and order of the buttons; the
+// page draws what it is told, and every case of the shell's shared fixture (`window-frame.json`) is drawn here through the real
+// page, so the Rust decision and the page cannot drift apart. Everything else (no facts, a browser, hostile facts) draws nothing. The Tauri global here is a stub and the window is a variable of the test: no window was ever started
 // on Windows for this test, so it shows what the page draws and sends, not what a real window does.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -12,6 +14,7 @@ export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(5000);
   if (currentBackend() === "tauri") {
     await buttonsCase(page, url);
+    await roundCase(page, url);
     await sizeCase(page, url);
     await pressCase(page, url);
     await followCase(page, url);
@@ -42,7 +45,7 @@ const WORDS = ["minimize", "maximize", "close"];
  * `full` are the functions behind the two commands, which a test replaces to make an answer slow, odd or a failure. The init
  * scripts of an earlier load stay registered on the page and run first, so every load sets or deletes the global.
  */
-async function open(page, url, { facts, os = "windows" }) {
+async function open(page, url, { facts, os = "windows", script = null }) {
   await page.addInitScript(
     ([value, name, present]) => {
       window.__MOCK__.on("app_info", () => ({ version: "0.0.1-alpha1", os: name, hostname: "woodbox" }));
@@ -67,6 +70,9 @@ async function open(page, url, { facts, os = "windows" }) {
     },
     [facts === undefined ? null : facts, os, facts !== undefined],
   );
+  // The text of a case of the shell's fixture, registered as it is: the script's own validity is part of the test. It runs after
+  // the init script above, which has just deleted the global, so it is the only value the page can see.
+  if (script !== null) await page.addInitScript(script);
   await page.goto(`${url}index.html?renderer=canvas`);
   await page.waitForSelector(".divider");
   await page.waitForFunction(() => window.__MOCK__.callsOf("window_ready").length >= 1);
@@ -141,7 +147,8 @@ async function buttonsCase(page, url) {
     assert.deepEqual(glyph, ["SPAN", "true", word, ""], `${word}: a drawn glyph that is hidden from the accessibility tree and holds no text`);
   }
   const root = await page.evaluate(() => [...document.documentElement.classList]);
-  for (const name of ["frame-own", "frame-flat", "frame-right"]) assert.ok(root.includes(name), `root class ${name}`);
+  for (const name of ["frame-own", "frame-flat", "frame-right", "frame-windows"]) assert.ok(root.includes(name), `root class ${name}`);
+  assert.ok(!root.includes("frame-linux") && !root.includes("frame-round") && !root.includes("frame-left"), "and no class of another shape");
   assert.deepEqual(await maximizeLook(page), { glyph: "maximize", title: "Maximize", label: "Maximize", group: false });
 
   // Where the group sits: in the title row, flush with the right edge of the window, after the host name and the clock.
@@ -165,6 +172,384 @@ async function buttonsCase(page, url) {
   assert.ok(shape.top < 0.6, "in the title row, at the top of the bar");
   assert.ok(shape.bottom <= shape.tabsTop + 0.5, "the group stays in the title row");
   assert.ok(shape.infoRight <= shape.left + 0.5, "the host name and the clock end before the buttons");
+}
+
+// ---- the shell's fixture and the Linux styles ---------------------------------------------------------------------------
+
+/** The cases of the shell's tests (`window-frame.json`, written by plan 14-06): the choices, the facts and the script text. */
+const FIXTURE = JSON.parse(readFileSync(join(APP_DIR, "tests/fixtures/window-frame.json"), "utf8"));
+
+/** The bar's side padding in CSS px at the base size: `--bar-pad` is `calc(8rem / 12)`. */
+const PAD = 8;
+const near = (a, b, what) => assert.ok(Math.abs(a - b) < 0.6, `${what}: ${a} is not ${b}`);
+
+/** The boxes of the bar's regions and of the parts the frame must not move, as one object. */
+const regions = (page) =>
+  page.evaluate(() => {
+    const rect = (selector) => {
+      const r = document.querySelector(selector).getBoundingClientRect();
+      return [r.left, r.top, r.right, r.bottom].map((n) => Math.round(n * 100) / 100);
+    };
+    return {
+      bar: rect("#bar"),
+      tabs: rect("#bar .bar-tabs"),
+      tab: rect("#bar .tab"),
+      stage: rect("#stage"),
+      status: rect("#status"),
+      heads: [...document.querySelectorAll("#overlay .panehead")].map((n) => Math.round(n.getBoundingClientRect().height * 100) / 100),
+      // The outer ends of the title row's content: where the first pill starts and where the host name and the clock end.
+      pill: Math.round(document.querySelector("#bar .ws-item").getBoundingClientRect().left * 100) / 100,
+      infoEnd: Math.round((window.innerWidth - document.querySelector("#bar .bar-info").getBoundingClientRect().right) * 100) / 100,
+    };
+  });
+
+/** What the group and its buttons are, measured: boxes, the drawn circle, classes and the order of the words. */
+const shapeOf = (page) =>
+  page.evaluate(() => {
+    const group = document.querySelector("#bar .bar-window");
+    const bar = document.getElementById("bar").getBoundingClientRect();
+    const buttons = [...group.querySelectorAll(".wf-btn")];
+    const circle = (n) => {
+      const style = getComputedStyle(n, "::before");
+      return [style.width, style.height, style.borderTopWidth, style.borderTopStyle];
+    };
+    const g = group.getBoundingClientRect();
+    return {
+      classes: [...document.documentElement.classList],
+      words: buttons.map((n) => n.dataset.button),
+      boxes: buttons.map((n) => {
+        const r = n.getBoundingClientRect();
+        return { left: r.left, right: r.right, top: r.top - bar.top, width: r.width, height: r.height };
+      }),
+      circles: buttons.map(circle),
+      glyphs: buttons.map((n) => {
+        const r = n.querySelector(".wf-glyph").getBoundingClientRect();
+        return [r.width, r.height];
+      }),
+      group: { left: g.left, right: g.right, top: g.top - bar.top, height: g.height },
+      pill: document.querySelector("#bar .ws-item").getBoundingClientRect().left,
+      workspaces: document.querySelector("#bar .bar-workspaces").getBoundingClientRect().left,
+      info: document.querySelector("#bar .bar-info").getBoundingClientRect().right,
+      infoLeft: document.querySelector("#bar .bar-info").getBoundingClientRect().left,
+      width: window.innerWidth,
+      parent: group.parentElement.id,
+      first: document.getElementById("bar").firstElementChild === group,
+      tabsTop: document.querySelector("#bar .bar-tabs").getBoundingClientRect().top - bar.top,
+    };
+  });
+
+/** The drawn fill of a button: the button's own background when flat, the circle's when round. */
+const fillOf = (page, word, round) =>
+  page.evaluate(
+    ([selector, circle]) => {
+      const button = document.querySelector(selector);
+      return getComputedStyle(button, circle ? "::before" : null).backgroundColor;
+    },
+    [BUTTON(word), round],
+  );
+
+/**
+ * Every case of the shell's fixture that has facts, drawn through the real page (run by `windowframefixture.test.mjs`, a file of its
+ * own so that a run of all the cases keeps clear of the time limit of one test file): the script text of the case is the init script.
+ * Cases with the same text draw the same page, so each distinct text is drawn once and every case that shares it is named in
+ * the message of a failure. Per text: the classes, the buttons in the shell's order, the side, the style and every size, the
+ * regions that must not move, the hover of the close button (red on Windows only), the press of each button, the floor of 28 px
+ * at the smallest scale and full screen. The cases without facts are checked as no page at all: nothing is drawn for them.
+ */
+export async function fixtureCase(page, url) {
+  const plain = {};
+  for (const os of ["windows", "linux"]) {
+    await open(page, url, { facts: undefined, os });
+    await settle(page);
+    plain[os] = await regions(page);
+  }
+  const resolve = resolver(page);
+  const byScript = new Map();
+  for (const item of FIXTURE) {
+    if (item.facts === null) continue;
+    const list = byScript.get(item.script) ?? { facts: item.facts, os: item.os, names: [] };
+    list.names.push(item.name);
+    byScript.set(item.script, list);
+  }
+  assert.ok(byScript.size >= 8, `the fixture has several different scripts (${byScript.size})`);
+
+  let styles = new Set();
+  let sides = new Set();
+  for (const [script, { facts, names }] of byScript) {
+    const label = `${names[0]}${names.length > 1 ? ` (and ${names.length - 1} more with the same script)` : ""}`;
+    await page.emulateMedia({ forcedColors: null, reducedMotion: "reduce", contrast: "no-preference" });
+    await open(page, url, { facts: undefined, os: facts.os, script });
+    await page.waitForSelector(BUTTON(facts.buttons[0]));
+    await settle(page);
+    const round = facts.style === "round";
+    const left = facts.side === "left";
+    styles.add(facts.style);
+    sides.add(facts.side);
+
+    const shape = await shapeOf(page);
+    for (const name of ["frame-own", `frame-${facts.style}`, `frame-${facts.side}`, `frame-${facts.os}`]) {
+      assert.ok(shape.classes.includes(name), `${label}: root class ${name}`);
+    }
+    const other = { flat: "round", round: "flat", left: "right", right: "left", windows: "linux", linux: "windows" };
+    for (const word of [facts.style, facts.side, facts.os]) assert.ok(!shape.classes.includes(`frame-${other[word]}`), `${label}: no class frame-${other[word]}`);
+    assert.deepEqual(shape.words, facts.buttons, `${label}: the buttons in the shell's order and only those it named`);
+    assert.equal(shape.parent, "bar", `${label}: the group is a child of the bar`);
+    assert.equal(shape.first, left, `${label}: the group is the first child of the bar for the left, the last for the right`);
+    assert.ok(shape.group.top < 0.6 && shape.group.height <= shape.tabsTop + 0.6, `${label}: the group lies in the title row`);
+
+    // The side: flat is flush with its window edge, round is inset by the bar's padding.
+    const first = shape.boxes[0];
+    const last = shape.boxes.at(-1);
+    if (left) {
+      near(first.left, round ? PAD : 0, `${label}: the left edge of the group`);
+      assert.ok(last.right <= shape.pill + 0.6, `${label}: the group ends at or before the first workspace pill`);
+      near(shape.workspaces - last.right, PAD, `${label}: and the workspaces start a padding away (the pill keeps its own margin)`);
+    } else {
+      near(shape.width - last.right, round ? PAD : 0, `${label}: the right edge of the group`);
+      assert.ok(shape.info <= first.left + 0.6, `${label}: the host name and the clock end before the group`);
+      near(first.left - shape.info, PAD, `${label}: and they are a padding away`);
+    }
+
+    // Sizes and the spacing.
+    for (const [i, box] of shape.boxes.entries()) {
+      if (round) {
+        near(box.width, 28, `${label}: hit box width`);
+        near(box.height, 28, `${label}: hit box height`);
+        near(box.top, 2, `${label}: the hit box is centred in the 32 px row`);
+        assert.deepEqual(shape.circles[i], ["24px", "24px", "1px", "solid"], `${label}: a 24 px circle with a 1 px ring`);
+        near(shape.glyphs[i][0], 8, `${label}: glyph`);
+        near(shape.glyphs[i][1], 8, `${label}: glyph`);
+        if (i > 0) near(box.left - shape.boxes[i - 1].right, 6, `${label}: 6 px between the buttons`);
+      } else {
+        near(box.width, 46, `${label}: flat width`);
+        near(box.height, 32, `${label}: flat height`);
+        near(box.top, 0, `${label}: flat buttons are the whole title row`);
+        assert.equal(shape.circles[i][2], "0px", `${label}: no ring when flat`);
+        near(shape.glyphs[i][0], 10, `${label}: glyph`);
+        if (i > 0) near(box.left - shape.boxes[i - 1].right, 0, `${label}: flat buttons touch`);
+      }
+    }
+    if (round) {
+      const ring = await page.evaluate((s) => getComputedStyle(document.querySelector(s), "::before").borderTopColor, BUTTON(facts.buttons[0]));
+      assert.equal(ring, await resolve("var(--hw-line)"), `${label}: the ring is --hw-line`);
+    }
+
+    // The bar's other regions lie where they lie without the facts (the left group moves the pills; nothing else).
+    const now = await regions(page);
+    for (const key of ["bar", "tabs", "tab", "stage", "status"]) assert.deepEqual(now[key], plain[facts.os][key], `${label}: ${key} keeps its box`);
+    assert.deepEqual(now.heads, plain[facts.os].heads, `${label}: the pane headers keep their height`);
+
+    // The close hover: red on Windows only; on Linux the wash, in both styles.
+    const wash = await resolve("var(--hw-rose-wash)", "backgroundColor");
+    const danger = await resolve("var(--hw-danger)", "backgroundColor");
+    const ground = await resolve("var(--hw-ground)");
+    const ink = await resolve("var(--hw-ink)");
+    const dim = await resolve("var(--hw-dim)");
+    const clear = await resolve("transparent", "backgroundColor");
+    await page.mouse.move(500, 300);
+    await settle(page);
+    for (const word of facts.buttons) {
+      assert.equal(await fillOf(page, word, round), clear, `${label}: ${word} has no fill at rest`);
+      assert.equal((await look(page, BUTTON(word))).glyph, dim, `${label}: ${word} rests in --hw-dim`);
+    }
+    for (const word of facts.buttons) {
+      await page.hover(BUTTON(word));
+      await settle(page);
+      const hover = await look(page, BUTTON(word));
+      if (word === "close" && facts.os === "windows") {
+        assert.equal(await fillOf(page, word, round), danger, `${label}: Windows close hovers red`);
+        assert.equal(hover.glyph, ground, `${label}: with the inverted glyph`);
+      } else {
+        assert.equal(await fillOf(page, word, round), wash, `${label}: ${word} hovers with the wash, not red`);
+        assert.notEqual(await fillOf(page, word, round), danger, `${label}: ${word} is not red`);
+        assert.equal(hover.glyph, ink, `${label}: ${word} takes --hw-ink under the pointer`);
+      }
+      if (round) assert.equal(hover.background, clear, `${label}: the hit box itself stays clear, the circle is filled`);
+    }
+    await page.mouse.move(500, 300);
+
+    // Keyboard focus: the 2 px ring on the hit box.
+    await page.keyboard.press("Shift");
+    for (const word of facts.buttons) {
+      await page.evaluate((s) => document.querySelector(s).focus(), BUTTON(word));
+      await settle(page);
+      assert.deepEqual((await look(page, BUTTON(word))).outline, ["solid", "2px", "-2px", ink], `${label}: the ring of ${word}`);
+    }
+    await page.evaluate(() => document.activeElement.blur());
+
+    // The floor of 28 px at the smallest scale.
+    await page.evaluate(() => (document.documentElement.style.fontSize = "9px"));
+    await settle(page);
+    const small = await shapeOf(page);
+    for (const box of small.boxes) assert.ok(box.width >= 28 - 0.01 && box.height >= 28 - 0.01, `${label}: no hit box below 28 px at 75 %: ${box.width} by ${box.height}`);
+    await page.evaluate(() => (document.documentElement.style.fontSize = ""));
+    await settle(page);
+
+    // The press of every button: its own command, and the state asked again only after the maximise press.
+    for (const word of facts.buttons) {
+      const before = (await windowCalls(page)).length;
+      await page.locator(BUTTON(word)).click();
+      await settle(page);
+      const sent = (await windowCalls(page)).slice(before).sort();
+      const command = { minimize: ["plugin:window|minimize"], close: ["plugin:window|close"],
+        maximize: ["plugin:window|is_fullscreen", "plugin:window|is_maximized", "plugin:window|toggle_maximize"] }[word];
+      assert.deepEqual(sent, command, `${label}: the press of ${word}`);
+    }
+
+    // Maximised: the restore drawing when there is a maximise button, and nothing to change when there is none.
+    await page.evaluate(() => (window.__WIN.maximized = true));
+    await resize(page);
+    await page.waitForFunction(() => document.querySelector("#bar .bar-window").hasAttribute("data-maximized"));
+    await settle(page);
+    if (facts.buttons.includes("maximize")) {
+      assert.deepEqual((await maximizeLook(page)).glyph, "restore", `${label}: the restore drawing`);
+    } else {
+      assert.equal(await page.locator(BUTTON("maximize")).count(), 0, `${label}: no maximise button is drawn`);
+    }
+    await page.evaluate(() => (window.__WIN.maximized = false));
+
+    // Full screen hides the group and the rest of the bar is as before.
+    await page.evaluate(() => (window.__WIN.fullscreen = true));
+    await resize(page);
+    await page.waitForFunction(() => document.querySelector("#bar .bar-window").hidden === true);
+    assert.equal(await page.locator("#bar .bar-window").isVisible(), false, `${label}: no group in full screen`);
+    const during = await regions(page);
+    for (const key of ["bar", "tabs", "tab", "stage", "status"]) assert.deepEqual(during[key], plain[facts.os][key], `${label}: ${key} in full screen`);
+    assert.equal(during.pill, plain[facts.os].pill, `${label}: in full screen the first pill starts where it starts without the facts`);
+    assert.equal(during.infoEnd, plain[facts.os].infoEnd, `${label}: and the host name and the clock end where they end without the facts`);
+  }
+  assert.deepEqual([...styles].sort(), ["flat", "round"], "the fixture draws both styles");
+  assert.deepEqual([...sides].sort(), ["left", "right"], "and both sides");
+
+  // A case without facts is no page at all: nothing is drawn, no class, no call.
+  const none = FIXTURE.filter((item) => item.facts === null);
+  for (const os of new Set(none.map((item) => item.os))) {
+    await open(page, url, { facts: undefined, os: ["windows", "linux"].includes(os) ? os : "linux" });
+    assert.equal(await page.locator("#bar .bar-window").count(), 0, `${os}: nothing is drawn for a case without facts`);
+    assert.equal(await page.evaluate(() => document.documentElement.className.includes("frame-")), false);
+    assert.deepEqual(await windowCalls(page), [], `${os}: nothing is asked`);
+  }
+  await page.emulateMedia({ reducedMotion: null });
+}
+
+/** The round style's own cues: the pointer wash is the circle, the ring stays, the focus ring is on the hit box, and the drawings. */
+async function roundCase(page, url) {
+  const facts = { os: "linux", style: "round", side: "right", buttons: ["minimize", "maximize", "close"] };
+  await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: "no-preference" });
+  await open(page, url, { facts });
+  await page.waitForSelector(BUTTON("close"));
+  await settle(page);
+  const resolve = resolver(page);
+  const ink = await resolve("var(--hw-ink)");
+
+  // Transition: the circle's fill fades like the other bar buttons, 160 ms, and not under motion-reduce.
+  const circle = (word) => page.evaluate((s) => getComputedStyle(document.querySelector(s), "::before").transitionDuration, BUTTON(word));
+  await page.evaluate(() => document.documentElement.classList.remove("motion-reduce"));
+  assert.match(await circle("close"), /0\.16s/, "the circle fades in 160 ms");
+  await page.evaluate(() => document.documentElement.classList.add("motion-reduce"));
+  assert.equal(await circle("close"), "0s", "no transition under motion-reduce");
+  await page.evaluate(() => document.documentElement.classList.remove("motion-reduce"));
+
+  // The four drawings are painted in the 8 px box: every glyph paints something and keeps inside its box.
+  for (const maximized of [false, true]) {
+    await page.evaluate((m) => (window.__WIN.maximized = m), maximized);
+    await resize(page);
+    await page.waitForFunction((m) => (document.querySelector("#bar .bar-window [data-button=maximize] .wf-glyph").dataset.glyph === "restore") === m, maximized);
+    await settle(page);
+    const drawn = await page.evaluate(() =>
+      [...document.querySelectorAll("#bar .bar-window .wf-glyph")].map((n) => {
+        const box = n.getBoundingClientRect();
+        const parts = ["::before", "::after"].map((p) => getComputedStyle(n, p));
+        return {
+          glyph: n.dataset.glyph,
+          size: [box.width, box.height],
+          paints: parts.some((s) => s.display !== "none" && (s.backgroundColor !== "rgba(0, 0, 0, 0)" || s.borderTopWidth !== "0px" || s.borderRightWidth !== "0px")),
+          squares: parts.filter((s) => s.display !== "none").map((s) => [s.width, s.height]),
+        };
+      }),
+    );
+    for (const d of drawn) {
+      assert.deepEqual(d.size, [8, 8], `${d.glyph}: an 8 px glyph`);
+      assert.ok(d.paints, `${d.glyph}: drawn`);
+    }
+    assert.deepEqual(drawn.map((d) => d.glyph), ["minimize", maximized ? "restore" : "maximize", "close"]);
+    const m = drawn[1];
+    if (maximized) assert.deepEqual(m.squares, [["6px", "6px"], ["6px", "6px"]], "restore: two squares of 6 px in the 8 px box");
+    else assert.equal(m.squares.length, 1, "maximise: one square outline");
+  }
+  await page.evaluate(() => (window.__WIN.maximized = false));
+
+  // The ring of the keyboard is on the hit box and has the 2 px, -2 px of the other bar buttons; the circle keeps its own ring.
+  await page.mouse.move(500, 300);
+  await page.keyboard.press("Shift");
+  await page.evaluate(() => document.querySelector('#bar .bar-window [data-button="close"]').focus());
+  await settle(page);
+  const state = await page.evaluate(() => {
+    const button = document.querySelector('#bar .bar-window [data-button="close"]');
+    const s = getComputedStyle(button);
+    const c = getComputedStyle(button, "::before");
+    const r = button.getBoundingClientRect();
+    return { outline: [s.outlineStyle, s.outlineWidth, s.outlineOffset, s.outlineColor], size: [r.width, r.height], ring: c.borderTopWidth, ringStyle: c.borderTopStyle };
+  });
+  assert.deepEqual(state.outline, ["solid", "2px", "-2px", ink]);
+  assert.deepEqual(state.size, [28, 28], "the ring is drawn on the 28 by 28 px hit box");
+  assert.deepEqual([state.ring, state.ringStyle], ["1px", "solid"], "the circle keeps its ring under focus");
+  await page.evaluate(() => document.activeElement.blur());
+
+  // Higher contrast: the glyph at rest takes the stronger tone through --hw-dim like the rest of the bar.
+  const tone = (word) => page.evaluate((s) => getComputedStyle(document.querySelector(s)).color, BUTTON(word));
+  const normal = await tone("minimize");
+  await page.evaluate(() => document.documentElement.classList.add("contrast-high"));
+  await settle(page);
+  assert.notEqual(await tone("minimize"), normal, "the idle tone changes in higher contrast");
+  assert.equal(await tone("minimize"), await resolve("var(--hw-ink-2)"));
+  await page.evaluate(() => document.documentElement.classList.remove("contrast-high"));
+
+  // Forced colours: the ring and the glyph are ButtonText; under the pointer and the keyboard they are Highlight, the ring is 2 px
+  // under the pointer (a second cue besides the colour), and the focus ring stays 2 px.
+  await page.emulateMedia({ forcedColors: "active" });
+  await open(page, url, { facts });
+  await page.waitForSelector(BUTTON("close"));
+  await settle(page);
+  const text = await resolve("ButtonText");
+  const highlight = await resolve("Highlight");
+  const forced = (word) =>
+    page.evaluate((s) => {
+      const button = document.querySelector(s);
+      const style = getComputedStyle(button);
+      const c = getComputedStyle(button, "::before");
+      return { color: style.color, border: style.borderTopWidth, ring: [c.borderTopWidth, c.borderTopStyle, c.borderTopColor] };
+    }, BUTTON(word));
+  for (const word of ["minimize", "maximize", "close"]) {
+    const rest = await forced(word);
+    assert.equal(rest.color, text, `${word}: the glyph is ButtonText`);
+    assert.deepEqual(rest.ring, ["1px", "solid", text], `${word}: the ring is ButtonText`);
+    assert.equal(rest.border, "0px", `${word}: no square border on the hit box`);
+  }
+  for (const word of ["minimize", "maximize", "close"]) {
+    await page.hover(BUTTON(word));
+    await settle(page);
+    const hover = await forced(word);
+    assert.equal(hover.color, highlight, `${word}: Highlight under the pointer`);
+    assert.deepEqual(hover.ring, ["2px", "solid", highlight], `${word}: a 2 px Highlight ring under the pointer`);
+    assert.equal(hover.border, "0px", `${word}: the square box has no border`);
+  }
+  await page.mouse.move(500, 300);
+  await page.keyboard.press("Shift");
+  await page.evaluate(() => document.querySelector('#bar .bar-window [data-button="maximize"]').focus());
+  await settle(page);
+  const ring = await look(page, BUTTON("maximize"));
+  assert.deepEqual(ring.outline.slice(0, 3), ["solid", "2px", "-2px"], "the focus ring stays 2 px");
+  assert.equal(ring.outline[3], highlight, "in Highlight");
+  await page.emulateMedia({ forcedColors: null });
+
+  // The style sheet writes the round numbers once, in rem with the 28 px floor, and keeps the Windows red to Windows.
+  const sheet = readFileSync(join(APP_DIR, "src/windowframe.css"), "utf8");
+  assert.match(sheet, /frame-round/);
+  assert.match(sheet, /frame-left/);
+  assert.match(sheet, /\.frame-windows[^{]*\[data-button="close"\]:hover/, "the red close hover is for Windows only");
+  assert.doesNotMatch(sheet, /\.os-windows|\.os-linux/, "the facts decide the classes, not the platform name of the page");
+  assert.match(sheet, /max\(28px, calc\(28rem \/ 12\)\)/, "the round hit box floor");
 }
 
 /** 46 by 32 px at the base scale, never below 28 by 28 px, and in rem so the UI scale moves them. */
@@ -606,8 +991,14 @@ async function absentCase(page, url) {
 async function hostileCase(page, url) {
   const hostile = [
     "windows", 42, null, {}, [], [WINDOWS],
-    { ...WINDOWS, os: "linux" },
     { ...WINDOWS, os: "macos" },
+    { ...WINDOWS, os: "Linux" },
+    { ...WINDOWS, os: "android" },
+    { os: "linux", style: "round", side: "right", buttons: [] },
+    { os: "linux", style: "round", side: "right", buttons: ["close", "close"] },
+    { os: "linux", style: "round", side: "right", buttons: ["minimize", "maximize", "close", "close"] },
+    { os: "linux", style: "square", side: "right", buttons: ["close"] },
+    { os: "linux", style: "flat", side: "top", buttons: ["close"] },
     { ...WINDOWS, style: "round" },
     { ...WINDOWS, side: "left" },
     { ...WINDOWS, extra: "x" },

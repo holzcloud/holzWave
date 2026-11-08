@@ -22,6 +22,9 @@ function show(button: HTMLButtonElement, row: ButtonRow): void {
   if (glyph !== null) glyph.dataset.glyph = row.glyph;
 }
 
+/** The row of the table for a word of the shell (the reader only lets the words of the table through). */
+const ROWS: ReadonlyMap<string, ButtonRow> = new Map(BUTTONS.map((row) => [row.word, row]));
+
 /**
  * Draw the window buttons in `bar` when the shell asked for an own frame. Returns once the style sheet is there, so the first
  * measurement of the page already includes the group. Does nothing in a browser or when the facts are not the shell's.
@@ -32,9 +35,12 @@ export async function initWindowFrame(bar: HTMLElement): Promise<void> {
   if (facts === null) return;
 
   const root = document.documentElement;
-  root.classList.add("frame-own", "frame-flat", "frame-right");
-  // Not a drag region: a press on a button is a press on the button.
+  // The classes name the facts, and the style sheet draws the style, the side and the Windows red from them.
+  root.classList.add("frame-own", `frame-${facts.style}`, `frame-${facts.side}`, `frame-${facts.os}`);
+  // Not a drag region: a press on a button is a press on the button. On the right the group is the last child of the bar, on the
+  // left the first one (the tab row still spans the whole bar); the grid puts it in its column, this puts it in the tab order.
   const group = el("div", "bar-window", bar);
+  if (facts.side === "left") bar.prepend(group);
   const buttons = new Map<string, HTMLButtonElement>();
   let state: WindowState = { maximized: false, fullscreen: false };
   let counter = 0; // the number of the newest question: an older answer arriving later is dropped
@@ -58,8 +64,9 @@ export async function initWindowFrame(bar: HTMLElement): Promise<void> {
     apply();
   };
 
-  for (const row of BUTTONS) {
-    if (!facts.buttons.includes(row.word)) continue;
+  for (const word of facts.buttons) {
+    const row = ROWS.get(word);
+    if (row === undefined) continue;
     const button = el("button", "wf-btn", group);
     button.type = "button";
     button.dataset.button = row.word;

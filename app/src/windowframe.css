@@ -1,17 +1,28 @@
 /* ---- window buttons of the own frame (docs/design.md section 6.33) ----------------------------------------------- */
 
 /* Under `frame-own` the shell built the window without the system title bar and the bar's title row holds the window
-   buttons after the host name and the clock: a fourth column of the grid (the tab row still spans every column), flush
-   with the window edge, so the bar's side padding on that side is cancelled. */
+   buttons. The root carries the facts as classes: `frame-flat` or `frame-round`, `frame-left` or `frame-right`, and
+   `frame-windows` or `frame-linux`. On the right the group is a fourth column of the grid after the host name and the clock;
+   on the left it is a first column and the other three move one to the right. The tab row still spans every column. Flat
+   buttons are flush with their window edge, so the bar's side padding on that side is cancelled; round ones are inset by it. */
 .frame-own #bar { grid-template-columns: auto 1fr auto auto; }
+.frame-own.frame-left #bar { grid-template-columns: auto auto 1fr auto; }
+.frame-own.frame-left #bar .bar-workspaces { grid-column: 2; margin-left: var(--bar-pad); }
+.frame-own.frame-left #bar .bar-fill { grid-column: 3; }
+.frame-own.frame-left #bar .bar-info { grid-column: 4; }
 .frame-own.frame-right #bar .bar-info { margin-right: var(--bar-pad); }
-.bar-window {
-  grid-row: 1; grid-column: 4; display: flex; align-items: stretch; margin-right: calc(-1 * var(--bar-pad));
-}
+.bar-window { grid-row: 1; grid-column: 4; display: flex; align-items: stretch; }
+.frame-left .bar-window { grid-column: 1; }
+.frame-flat.frame-right .bar-window { margin-right: calc(-1 * var(--bar-pad)); }
+.frame-flat.frame-left .bar-window { margin-left: calc(-1 * var(--bar-pad)); }
+/* Round: the 28 px hit boxes are centred in the 32 px row with 6 px between them. */
+.frame-round .bar-window { align-items: center; gap: calc(6rem / 12); }
 /* In full screen the group is not drawn (the attribute is set from the window's state): `display: flex` above would win
-   over the browser's own rule for `hidden`. With no buttons the host name and the clock end at the bar's padding. */
+   over the browser's own rule for `hidden`. With no buttons the host name and the clock end at the bar's padding, and on the
+   left the first pill starts at it. */
 .bar-window[hidden] { display: none; }
 .frame-own.frame-right #bar:has(.bar-window[hidden]) .bar-info { margin-right: 0; }
+.frame-own.frame-left #bar:has(.bar-window[hidden]) .bar-workspaces { margin-left: 0; }
 
 /* Flat: 46 by 32 px, the glyph alone, drawn with 1 px strokes in the current colour so it is the same on every platform and
    does not depend on a font. The floor of 28 px holds at any UI scale. */
@@ -21,13 +32,26 @@
   padding: 0; border: 0; border-radius: 0; background: none; color: var(--hw-dim); line-height: 1;
 }
 #bar .bar-window .wf-btn:hover { background: var(--hw-rose-wash); color: var(--hw-ink); }
-/* On Windows the close button under the pointer is the one red thing: the filled box and the inverted glyph are its cues. */
-.os-windows #bar .bar-window .wf-btn[data-button="close"]:hover { background: var(--hw-danger); color: var(--hw-ground); }
+/* On Windows the close button under the pointer is the one red thing: the filled box and the inverted glyph are its cues.
+   On Linux it hovers with the wash like the others, in both styles. */
+.frame-windows #bar .bar-window .wf-btn[data-button="close"]:hover { background: var(--hw-danger); color: var(--hw-ground); }
 #bar .bar-window .wf-btn:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
 
-/* The glyph: a box of 10 px by 10 px that the two pseudo elements draw in, so a press on it is a press on the button. The
+/* Round: the hit box is 28 by 28 px (floor 28 px at every scale); the drawn shape is a circle of 24 px with a 1 px `--hw-line`
+   ring, made by the button's own pseudo element so there is still one focusable element. The wash of the pointer fills the
+   circle, the glyph is 8 px, and the 2 px keyboard ring stays on the hit box. */
+.frame-round #bar .bar-window .wf-btn { width: max(28px, calc(28rem / 12)); height: max(28px, calc(28rem / 12)); }
+.frame-round #bar .bar-window .wf-btn:hover { background: none; }
+.frame-round #bar .bar-window .wf-btn::before {
+  content: ""; position: absolute; inset: 0; margin: auto; box-sizing: border-box; border-radius: 50%;
+  width: calc(24rem / 12); height: calc(24rem / 12); border: 1px solid var(--hw-line); background: none; pointer-events: none;
+}
+.frame-round #bar .bar-window .wf-btn:hover::before { background: var(--hw-rose-wash); }
+
+/* The glyph: a box of 10 px by 10 px (8 px when round, one variable `--g`) that the two pseudo elements draw in, so a press on it is a press on the button. The
    maximise button of a maximised window shows the restore drawing: that is a shape, not a colour, and its name changes too. */
-.wf-glyph { position: relative; display: block; flex: none; width: calc(10rem / 12); height: calc(10rem / 12); pointer-events: none; }
+.wf-glyph { --g: calc(10rem / 12); position: relative; display: block; flex: none; width: var(--g); height: var(--g); pointer-events: none; }
+.frame-round .wf-glyph { --g: calc(8rem / 12); }
 .wf-glyph::before, .wf-glyph::after { content: ""; position: absolute; box-sizing: border-box; display: none; }
 
 /* Minimise: one horizontal line. */
@@ -39,16 +63,16 @@
 /* Restore: two square outlines. The front one sits at the bottom left, the back one 2 px up and to the right, drawn by its top
    and right edge only. */
 .wf-glyph[data-glyph="restore"]::before {
-  display: block; left: 0; bottom: 0; width: calc(8rem / 12); height: calc(8rem / 12); border: 1px solid currentColor;
+  display: block; left: 0; bottom: 0; width: calc(var(--g) - 2rem / 12); height: calc(var(--g) - 2rem / 12); border: 1px solid currentColor;
 }
 .wf-glyph[data-glyph="restore"]::after {
-  display: block; right: 0; top: 0; width: calc(8rem / 12); height: calc(8rem / 12);
+  display: block; right: 0; top: 0; width: calc(var(--g) - 2rem / 12); height: calc(var(--g) - 2rem / 12);
   border-top: 1px solid currentColor; border-right: 1px solid currentColor;
 }
 
-/* Close: two crossing diagonals, each as long as the diagonal of the 10 px box. */
+/* Close: two crossing diagonals, each as long as the diagonal of the box (1.4 times its side). */
 .wf-glyph[data-glyph="close"]::before, .wf-glyph[data-glyph="close"]::after {
-  display: block; left: 50%; top: 50%; width: calc(14rem / 12); height: 1px; margin: -.5px 0 0 calc(-7rem / 12);
+  display: block; left: 50%; top: 50%; width: calc(var(--g) * 1.4); height: 1px; margin: -.5px 0 0 calc(var(--g) * -.7);
   background: currentColor;
 }
 .wf-glyph[data-glyph="close"]::before { transform: rotate(45deg); }
@@ -57,6 +81,7 @@
 :root:not(.motion-reduce) #bar .bar-window .wf-btn {
   transition: background-color 160ms cubic-bezier(.2, .7, .3, 1), color 160ms cubic-bezier(.2, .7, .3, 1);
 }
+:root.frame-round:not(.motion-reduce) #bar .bar-window .wf-btn::before { transition: background-color 160ms cubic-bezier(.2, .7, .3, 1); }
 
 /* Higher contrast needs no rule of its own: the rest tone is `--hw-dim`, which `contrast-high` swaps for the stronger token
    like the rest of the bar (chrome.css). Forced colours: the strokes are the system's text colour, the button under the pointer
@@ -64,7 +89,14 @@
 @media (forced-colors: active) {
   :root #bar .bar-window .wf-btn { color: ButtonText; background: none; }
   :root #bar .bar-window .wf-btn:hover,
-  :root.os-windows #bar .bar-window .wf-btn[data-button="close"]:hover,
+  :root.frame-windows #bar .bar-window .wf-btn[data-button="close"]:hover,
   :root #bar .bar-window .wf-btn:focus-visible { color: Highlight; background: none; border: 1px solid Highlight; }
   :root #bar .bar-window .wf-btn:focus-visible { outline: 2px solid Highlight; }
+  /* Round: the ring is the visible shape, ButtonText at rest and a 2 px Highlight ring under the pointer or the keyboard (the
+     thicker line is the cue that does not depend on the colour); the square hit box takes no border. */
+  :root.frame-round #bar .bar-window .wf-btn::before { background: none; border-color: ButtonText; }
+  :root.frame-round #bar .bar-window .wf-btn:hover,
+  :root.frame-round #bar .bar-window .wf-btn:focus-visible { border: 0; }
+  :root.frame-round #bar .bar-window .wf-btn:hover::before,
+  :root.frame-round #bar .bar-window .wf-btn:focus-visible::before { background: none; border: 2px solid Highlight; }
 }
