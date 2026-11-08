@@ -43,20 +43,33 @@ export function maximizeRow(maximized: boolean): ButtonRow {
 /** The words of the table, for the reader. */
 const WORDS: readonly string[] = BUTTONS.map((row) => row.word);
 
-/** One accepted contract of the shell: the whole facts object, member by member. */
+/** One accepted contract of the shell: the platform, the styles and sides it may name and the lists of buttons it may send. */
 interface Contract {
   readonly os: string;
-  readonly style: string;
-  readonly side: string;
-  readonly buttons: readonly string[];
+  readonly styles: readonly string[];
+  readonly sides: readonly string[];
+  readonly lists: readonly (readonly string[])[];
+}
+
+/** Every non-empty list of distinct words of the table, in every order: 3 + 6 + 6 = 15 lists. */
+function orderedSubsets(words: readonly string[]): readonly (readonly string[])[] {
+  const out: string[][] = [];
+  const walk = (taken: string[]): void => {
+    if (taken.length > 0) out.push(taken);
+    for (const word of words) if (!taken.includes(word)) walk([...taken, word]);
+  };
+  walk([]);
+  return out;
 }
 
 /**
- * The contracts the page draws, as data. Windows only: flat, on the right, the three buttons in this order. A later plan adds
- * the Linux shapes as rows of this table; the reader does not change.
+ * The contracts the page draws, as data (design 6.33, side and set). Windows: flat, on the right, the three buttons in this one
+ * order. Linux: flat or round, left or right, and any non-empty list of distinct buttons in any order (the shell reads the
+ * layout of the desktop and never sends an empty list: a window that cannot be closed by pointer is not drawn by guesswork).
  */
 const CONTRACTS: readonly Contract[] = [
-  { os: "windows", style: "flat", side: "right", buttons: ["minimize", "maximize", "close"] },
+  { os: "windows", styles: ["flat"], sides: ["right"], lists: [["minimize", "maximize", "close"]] },
+  { os: "linux", styles: ["flat", "round"], sides: ["left", "right"], lists: orderedSubsets(WORDS) },
 ];
 
 /** The keys of the facts, in the order the shell writes them. */
@@ -83,9 +96,10 @@ function sameWords(list: unknown, words: readonly string[]): list is string[] {
 
 /**
  * The facts of the shell, or `null` for anything else. The value must be a plain object (the prototype `Object.prototype`) with
- * exactly the four own data members, and they must equal one row of the table of contracts word for word. The result is a new
- * object made of the table's own words; nothing of the input is kept, so a hostile value can neither reach the page nor be
- * changed afterwards.
+ * exactly the four own data members, and they must be one row of the table of contracts word for word: the platform, a style
+ * and a side the row names, and a list of at most three buttons that is one of the row's lists (the length is looked at before
+ * an element is). Each member is read once. The result is a new object made of the table's own words; nothing of the input is
+ * kept, so a hostile value can neither reach the page nor be changed afterwards.
  */
 export function readFrame(raw: unknown): FrameFacts | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
@@ -94,13 +108,18 @@ export function readFrame(raw: unknown): FrameFacts | null {
   const style = data(raw, "style");
   const side = data(raw, "side");
   const buttons = data(raw, "buttons");
-  const contract = CONTRACTS.find((row) => row.os === os && row.style === style && row.side === side && sameWords(buttons, row.buttons));
+  if (!Array.isArray(buttons) || buttons.length < 1 || buttons.length > WORDS.length) return null;
+  const contract = CONTRACTS.find((row) => row.os === os);
   if (contract === undefined) return null;
+  const chosenStyle = contract.styles.find((word) => word === style);
+  const chosenSide = contract.sides.find((word) => word === side);
+  const list = contract.lists.find((words) => sameWords(buttons, words));
+  if (chosenStyle === undefined || chosenSide === undefined || list === undefined) return null;
   return {
     os: contract.os,
-    style: contract.style,
-    side: contract.side,
-    buttons: contract.buttons.filter((word): word is ButtonWord => WORDS.includes(word)),
+    style: chosenStyle,
+    side: chosenSide,
+    buttons: list.filter((word): word is ButtonWord => WORDS.includes(word)),
   };
 }
 

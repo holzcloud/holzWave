@@ -8,6 +8,9 @@ import { BUTTONS, maximizeRow, readFrame, windowState } from "../../dist/windowf
 
 const spec = readFileSync(new URL("../../../docs/design.md", import.meta.url), "utf8");
 
+/** The cases the shell's own tests pass (app/tests/fixtures/window-frame.json): the facts it writes and the script text. */
+const FIXTURE = JSON.parse(readFileSync(new URL("../fixtures/window-frame.json", import.meta.url), "utf8"));
+
 /** The hostile word of these tests; it appears in test code only. */
 const CANARY = "zq-window-frame-7d41";
 
@@ -30,9 +33,13 @@ test("the reader gives nothing for anything else", () => {
     undefined, null, "windows", 7, true, [], [WINDOWS()], () => WINDOWS(), Symbol("facts"), {},
     { os: "windows", style: "flat", side: "right" },
     { ...WINDOWS(), extra: CANARY },
-    { ...WINDOWS(), os: "linux" },
     { ...WINDOWS(), os: "macos" },
+    { ...WINDOWS(), os: "android" },
+    { ...WINDOWS(), os: "ios" },
     { ...WINDOWS(), os: "Windows" },
+    { ...WINDOWS(), os: "Linux" },
+    { ...WINDOWS(), os: "linux " },
+    { ...WINDOWS(), os: "" },
     { ...WINDOWS(), style: "round" },
     { ...WINDOWS(), side: "left" },
     { ...WINDOWS(), buttons: [] },
@@ -72,6 +79,176 @@ test("the reader refuses a prototype, an own __proto__, a getter and a sparse or
   assert.equal(readFrame({ ...WINDOWS(), buttons: Words.from(["minimize", "maximize", "close"]) }), null, "a subclassed list");
   const symbol = { ...WINDOWS(), [Symbol("x")]: 1 };
   assert.equal(readFrame(symbol), null, "a symbol key is an extra key");
+});
+
+// ---- the contract of the shell for Linux, and the shared fixture ----------------------------------------------------------
+
+const LINUX = (over = {}) => ({ os: "linux", style: "flat", side: "right", buttons: ["minimize", "maximize", "close"], ...over });
+const WORD_LIST = ["minimize", "maximize", "close"];
+
+/** Every non-empty ordered subset of the three words: 3 + 6 + 6 = 15 lists. */
+function orderedSubsets() {
+  const out = [];
+  const walk = (taken) => {
+    if (taken.length > 0) out.push(taken);
+    for (const word of WORD_LIST) if (!taken.includes(word)) walk([...taken, word]);
+  };
+  walk([]);
+  return out;
+}
+
+test("every case of the shared fixture that has facts is read back as written, every case without facts is not a page's concern", () => {
+  assert.ok(FIXTURE.length > 50, "the fixture is the big one of the shell's tests");
+  let withFacts = 0;
+  let without = 0;
+  for (const item of FIXTURE) {
+    if (item.facts === null) {
+      without += 1;
+      assert.ok(item.script === null || item.script === undefined || item.script === "", `${item.name}: no facts, no script`);
+      continue;
+    }
+    withFacts += 1;
+    const read = readFrame(structuredClone(item.facts));
+    assert.deepEqual(read, item.facts, `${item.name}: the facts are read as the shell decided them`);
+    assert.equal(Object.getPrototypeOf(read), Object.prototype, `${item.name}: a plain object`);
+    assert.deepEqual(Object.keys(read), ["os", "style", "side", "buttons"], `${item.name}: the members in the order of the shell`);
+    // The script text itself carries the same value: the page reads what the script writes.
+    const match = /^window\.__HW_FRAME__ = (\{.*\});$/.exec(item.script);
+    assert.ok(match, `${item.name}: the script assigns one object literal to the global`);
+    assert.deepEqual(readFrame(JSON.parse(match[1])), item.facts, `${item.name}: the script's value is the case's facts`);
+  }
+  assert.ok(withFacts > 40 && without > 10, `${withFacts} with facts, ${without} without`);
+  // The fixture covers both styles, both sides and each of the three words.
+  const facts = FIXTURE.filter((item) => item.facts !== null).map((item) => item.facts);
+  for (const [member, values] of [["style", ["flat", "round"]], ["side", ["left", "right"]], ["os", ["windows", "linux"]]]) {
+    for (const value of values) assert.ok(facts.some((f) => f[member] === value), `the fixture has ${member} ${value}`);
+  }
+});
+
+test("Linux accepts both styles, both sides and every non-empty ordered subset of the three buttons", () => {
+  const subsets = orderedSubsets();
+  assert.equal(subsets.length, 15);
+  for (const style of ["flat", "round"]) {
+    for (const side of ["left", "right"]) {
+      for (const buttons of subsets) {
+        const input = LINUX({ style, side, buttons: [...buttons] });
+        const read = readFrame(input);
+        assert.deepEqual(read, LINUX({ style, side, buttons }), `${style} ${side} ${buttons.join(",")}`);
+        assert.notEqual(read.buttons, input.buttons, "a fresh list");
+      }
+    }
+  }
+});
+
+test("Windows is exactly flat, right and the three buttons in order, and nothing else", () => {
+  for (const style of ["flat", "round", "Flat", "", "rounded"]) {
+    for (const side of ["left", "right", "Right", "", "top"]) {
+      for (const buttons of [...orderedSubsets(), []]) {
+        const expected = style === "flat" && side === "right" && buttons.join() === WORD_LIST.join();
+        const read = readFrame({ os: "windows", style, side, buttons: [...buttons] });
+        assert.equal(read !== null, expected, `windows ${style || "(empty)"} ${side || "(empty)"} ${buttons.join(",") || "(none)"}`);
+      }
+    }
+  }
+});
+
+test("Linux ignores an empty list, four entries, a repeat, another case or a trailing space and a non-word", () => {
+  const bad = [
+    [], ["minimize", "maximize", "close", "close"], ["minimize", "maximize", "close", "minimize"],
+    ["close", "close"], ["minimize", "minimize"], ["maximize", "maximize", "maximize"],
+    ["Close"], ["close "], [" close"], ["CLOSE"], ["Minimize"], ["maximise"], ["minimise"], ["close\n"], ["close\0"],
+    [""], ["destroy"], ["appmenu"], ["menu", "close"], ["restore"],
+    [1], [null], [undefined], [true], [{}], [["close"]], [Symbol("close")], [{ toString: () => "close" }],
+    ["minimize", "maximize", "close", "x"], ["a", "b", "c", "d", "e"],
+  ];
+  for (const buttons of bad) assert.equal(readFrame(LINUX({ buttons })), null, `${buttons.map(String).join("|") || "(empty)"}`);
+  assert.equal(readFrame(LINUX({ buttons: "close" })), null, "a string");
+  assert.equal(readFrame(LINUX({ buttons: "minimize,maximize,close" })), null, "a joined string");
+  assert.equal(readFrame(LINUX({ buttons: { 0: "close", length: 1 } })), null, "an array-like object");
+  assert.equal(readFrame(LINUX({ buttons: new Set(["close"]) })), null, "a set");
+  assert.equal(readFrame(LINUX({ buttons: null })), null);
+  assert.equal(readFrame(LINUX({ buttons: undefined })), null);
+  const sparse = new Array(3);
+  sparse[2] = "close";
+  assert.equal(readFrame(LINUX({ buttons: sparse })), null, "a sparse list with holes");
+  const longSparse = [];
+  longSparse[2] = "close";
+  assert.equal(readFrame(LINUX({ buttons: longSparse })), null, "holes before the entry");
+  assert.equal(readFrame(LINUX({ buttons: new Array(2 ** 20) })), null, "a huge sparse list is refused by its length, nothing is built from it");
+  assert.equal(readFrame(LINUX({ buttons: new Array(4).fill("close") })), null, "four entries");
+  const extraKey = ["close"];
+  extraKey.extra = "x";
+  assert.equal(readFrame(LINUX({ buttons: extraKey })), null, "a list with a named member");
+});
+
+test("Linux ignores every other word for the os, the style and the side, and every other shape of the facts", () => {
+  for (const os of ["Linux", "LINUX", "linux ", " linux", "linux\n", "gnu/linux", "macos", "android", "ios", "freebsd", "", null, undefined, 1, {}, ["linux"]]) {
+    assert.equal(readFrame(LINUX({ os })), null, `os ${String(os)}`);
+  }
+  for (const style of ["Flat", "ROUND", "round ", "rounded", "square", "", null, undefined, 0, ["flat"]]) {
+    assert.equal(readFrame(LINUX({ style })), null, `style ${String(style)}`);
+  }
+  for (const side of ["Left", "RIGHT", "left ", "top", "center", "both", "", null, undefined, 0, ["left"]]) {
+    assert.equal(readFrame(LINUX({ side })), null, `side ${String(side)}`);
+  }
+  for (const key of ["os", "style", "side", "buttons"]) {
+    const missing = LINUX();
+    delete missing[key];
+    assert.equal(readFrame(missing), null, `missing ${key}`);
+    assert.equal(readFrame({ ...LINUX(), extra: 1 }), null, "an extra key");
+  }
+  // An inherited member is not a member, whatever the own ones are.
+  for (const key of ["os", "style", "side", "buttons"]) {
+    const own = LINUX();
+    const inherited = { [key]: own[key] };
+    delete own[key];
+    assert.equal(readFrame(Object.assign(Object.create(inherited), own)), null, `inherited ${key}`);
+  }
+  assert.equal(readFrame(Object.assign(Object.create(null), LINUX())), null, "no prototype");
+  assert.equal(readFrame(new (class Frame { constructor() { Object.assign(this, LINUX()); } })()), null, "a class instance");
+  assert.equal(readFrame([LINUX()]), null);
+});
+
+test("the result is never the input, shares nothing with it, and each member is read once", () => {
+  const input = LINUX({ style: "round", side: "left", buttons: ["close", "minimize"] });
+  const read = readFrame(input);
+  assert.notEqual(read, input);
+  assert.notEqual(read.buttons, input.buttons);
+  assert.deepEqual(read, LINUX({ style: "round", side: "left", buttons: ["close", "minimize"] }));
+  input.style = "flat";
+  input.buttons.push(CANARY);
+  input.buttons[0] = "minimize";
+  assert.deepEqual(read, LINUX({ style: "round", side: "left", buttons: ["close", "minimize"] }), "changing the input afterwards changes nothing");
+  const before = [...input.buttons];
+  read.buttons.push(CANARY);
+  assert.deepEqual(input.buttons, before, "and changing the result does not reach the input");
+
+  // A getter that throws or changes its answer is never run: the member is not an own data value.
+  let runs = 0;
+  for (const key of ["os", "style", "side", "buttons"]) {
+    const trap = LINUX();
+    const value = trap[key];
+    Object.defineProperty(trap, key, { enumerable: true, get() { runs += 1; if (runs % 2 === 0) throw new Error(CANARY); return value; } });
+    assert.equal(readFrame(trap), null, `a getter for ${key}`);
+  }
+  assert.equal(runs, 0, "no getter was run");
+  const entry = LINUX({ buttons: ["minimize", "close"] });
+  let entryRuns = 0;
+  Object.defineProperty(entry.buttons, "1", { enumerable: true, get() { entryRuns += 1; return "close"; } });
+  assert.equal(readFrame(entry), null, "a getter on an entry of the list");
+  assert.equal(entryRuns, 0);
+  // A frozen input is read the same as a plain one, and the result is not frozen.
+  const frozen = Object.freeze(LINUX({ buttons: Object.freeze(["close"]) }));
+  const out = readFrame(frozen);
+  assert.deepEqual(out, LINUX({ buttons: ["close"] }));
+  assert.equal(Object.isFrozen(out), false);
+});
+
+test("the contract is one table: the reader lists no word that is not a button of the table", () => {
+  const source = readFileSync(new URL("../../src/windowframestate.ts", import.meta.url), "utf8");
+  assert.match(source, /round/, "the table names the round style");
+  assert.match(source, /left/, "and the left side");
+  assert.doesNotMatch(source, /document\.|window\.|innerHTML/, "the reader is free of the DOM");
 });
 
 test("the button table has exactly the three words of the shell, each row complete", () => {
