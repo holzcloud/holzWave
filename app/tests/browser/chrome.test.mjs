@@ -94,6 +94,14 @@ async function open(page, url, info = INFO, frame = undefined) {
 /** What the shell tells the page for a Windows window with the own frame. */
 const WINDOWS_FRAME = { os: "windows", style: "flat", side: "right", buttons: ["minimize", "maximize", "close"] };
 
+/** The cases of the shell's tests (window-frame.json, plan 14-06): the facts the shell decides for a desktop, by the case's name. */
+const FIXTURE = JSON.parse(readFileSync(join(APP_DIR, "tests/fixtures/window-frame.json"), "utf8"));
+function shellFacts(name) {
+  const item = FIXTURE.find((c) => c.name === name);
+  assert.ok(item?.facts, `the shared fixture has the case \`${name}\` with facts`);
+  return item.facts;
+}
+
 /** Show `view` the way the core would announce a new layout. */
 async function showView(page, view) {
   await page.evaluate((v) => window.__MOCK__.setView(v), view);
@@ -270,6 +278,11 @@ async function platformCase(page, url) {
   assert.equal(await page.locator("#bar .bar-window").count(), 0, "no window buttons on macOS");
   assert.ok((await padding()) >= 64, `the bar still clears the traffic lights: ${await padding()} px of padding`);
 
+  // Android has no window buttons: the facts are not its contract either, so there is no group and no class.
+  await open(page, url, { ...INFO, os: "android" }, { ...WINDOWS_FRAME, os: "android" });
+  assert.doesNotMatch(await platform(), /frame-/, "no frame class on Android");
+  assert.equal(await page.locator("#bar .bar-window").count(), 0, "no window buttons on Android");
+
   await frameCase(page, url);
 
   // The stub's own answer (null): every field is an empty string and the page still starts.
@@ -343,6 +356,13 @@ async function frameCase(page, url) {
     assert.equal(await page.locator("#bar .bar-window").count(), 0, "no window buttons in a browser");
     const { padding: other, ...rest } = await layout();
     assert.deepEqual(rest, (({ padding, ...r }) => r)(seen.windows), "the bar of a browser is the same with the facts");
+    for (const name of ["gnome stock", "gnome left layout", "flat desktop KDE"]) {
+      await open(page, url, { ...INFO, os: "linux" }, shellFacts(name));
+      await showView(page, BAR_VIEW);
+      assert.equal(await page.locator("#bar .bar-window").count(), 0, `no window buttons in a browser, whatever the facts of ${name}`);
+      assert.doesNotMatch(await page.evaluate(() => document.documentElement.className), /frame-/, `no frame class in a browser (${name})`);
+      assert.deepEqual((({ padding, ...r }) => r)(await layout()), (({ padding, ...r }) => r)(seen.linux), `the bar of a browser is the one of Linux (${name})`);
+    }
     return;
   }
 
@@ -398,6 +418,79 @@ async function frameCase(page, url) {
   assert.equal(withGroup.fill.left, plain.fill.left, "and starts where it started");
   assert.deepEqual(withGroup.tabs, plain.tabs, "the tab row is not touched");
   assert.equal(plain.group, null);
+
+  // Linux with the facts of the shell: the desktops of the shared fixture (stock GNOME with one round close button, Ubuntu with
+  // three, a layout with the buttons on the left, KDE flat). The regions lie where they lie under macOS and on Linux without the
+  // facts, apart from the pills of the left layout, which start after the group.
+  await open(page, url, { ...INFO, os: "linux" });
+  await showView(page, BAR_VIEW);
+  const linuxPlain = await parts();
+  const PAD = 8;
+  const near = (a, b, what) => assert.ok(Math.abs(a - b) < 0.01, `${what}: ${a} is not ${b}`);
+  for (const name of ["gnome stock", "gnome ubuntu", "gnome left layout", "flat desktop KDE"]) {
+    const facts = shellFacts(name);
+    const round = facts.style === "round";
+    const left = facts.side === "left";
+    await open(page, url, { ...INFO, os: "linux" }, facts);
+    await showView(page, BAR_VIEW);
+    const l = await layout();
+    const p = await parts();
+    const classes = await page.evaluate(() => [...document.documentElement.classList]);
+    for (const c of ["frame-own", `frame-${facts.style}`, `frame-${facts.side}`, "frame-linux"]) assert.ok(classes.includes(c), `${name}: root class ${c}`);
+    assert.deepEqual(
+      await page.evaluate(() => [...document.querySelectorAll("#bar .bar-window button")].map((n) => n.dataset.button)),
+      facts.buttons,
+      `${name}: the buttons the shell named, in its order`,
+    );
+    const { padding: gap, ...rest } = l;
+    const { padding: mac, ...same } = seen.macos;
+    assert.deepEqual(rest, same, `${name}: the regions lie where they lie under macOS`);
+    assert.deepEqual(rest, (({ padding, ...r }) => r)(seen.linux), `${name}: and where they lie on Linux without the facts`);
+    assert.equal(gap, left ? 2 * PAD : seen[null].padding, `${name}: the bar's own padding, and on the left the pills' margin after the group`);
+    const g = p.group;
+    assert.ok(g !== null, `${name}: the group is drawn`);
+    assert.equal(g.top, p.bar.top, `${name}: the group's top is the bar's top`);
+    assert.equal(g.height, p.tabs.top - p.bar.top, `${name}: it lies in the title row`);
+    assert.equal(
+      await page.evaluate(() => document.querySelector("#bar .bar-window").hasAttribute("data-tauri-drag-region")),
+      false,
+      `${name}: the group is not a drag region`,
+    );
+    assert.equal(await page.locator("#bar .bar-window [data-tauri-drag-region]").count(), 0, `${name}: nor is a button`);
+    assert.equal(p.bar.right, p.edge, `${name}: the bar reaches the window edge`);
+    assert.deepEqual(p.tabs, linuxPlain.tabs, `${name}: the tab row is not touched`);
+    if (left) {
+      near(g.left, round ? PAD : 0, `${name}: the left edge of the group (flat: flush, round: the bar's padding)`);
+      assert.ok(g.right <= p.workspaces.left + 0.01, `${name}: the group precedes the workspaces`);
+      near(p.workspaces.left - g.right, PAD, `${name}: the workspaces start a padding after the group`);
+      assert.equal(p.workspaces.width, linuxPlain.workspaces.width, `${name}: the workspaces keep their width`);
+      assert.deepEqual(
+        [p.info.left, p.info.right, p.info.width, p.info.top, p.fill.right],
+        [linuxPlain.info.left, linuxPlain.info.right, linuxPlain.info.width, linuxPlain.info.top, linuxPlain.fill.right],
+        `${name}: the host name and the clock stay where they were`,
+      );
+    } else {
+      near(p.edge - g.right, round ? PAD : 0, `${name}: the right edge of the group (flat: flush, round: the bar's padding)`);
+      assert.deepEqual(p.workspaces, linuxPlain.workspaces, `${name}: the workspaces keep their box`);
+      assert.deepEqual(
+        [p.info.width, p.info.height, p.info.top],
+        [linuxPlain.info.width, linuxPlain.info.height, linuxPlain.info.top],
+        `${name}: the host name and the clock keep their size and row`,
+      );
+      near(g.left - p.info.right, PAD, `${name}: and end a padding before the group`);
+      assert.equal(p.fill.left, linuxPlain.fill.left, `${name}: the free space starts where it started`);
+    }
+  }
+
+  // Facts and the page's own answer for the platform are two things: the group follows the facts, and an empty platform name
+  // with no facts keeps the bar it had.
+  await open(page, url, { ...INFO, os: "" }, shellFacts("gnome stock"));
+  await showView(page, BAR_VIEW);
+  assert.equal(await page.locator("#bar .bar-window button").count(), 1, "the facts draw the group whatever app_info said");
+  await open(page, url, { ...INFO, os: "" });
+  await showView(page, BAR_VIEW);
+  assert.equal(await page.locator("#bar .bar-window").count(), 0, "an empty platform name without facts has no group");
+  assert.deepEqual((await parts()).workspaces, linuxPlain.workspaces, "and the bar it had");
 }
 
 async function statusCase(page, url) {
