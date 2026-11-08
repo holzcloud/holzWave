@@ -973,6 +973,9 @@ pub struct AppCore {
     /// Whether a Flatpak starts a pane on the host or in the sandbox: the person's stored choice and the permission of this
     /// Flatpak. Inert outside a Flatpak.
     host_shell: crate::host_shell::HostShellHost,
+    /// The frame and button choices of the window on Windows and Linux: the stored choice and the one the running windows
+    /// were built with. Inert elsewhere.
+    window_frame: crate::window_frame::WindowFrameHost,
     /// The exec primitive of each saved connection a command ran on, kept for the life of the connection list.
     remote_execs: RemoteExecs<SshExec>,
     /// The questions of keyboard-interactive logins that wait for the person (see [`crate::login_prompt`]). Also the
@@ -1217,6 +1220,7 @@ impl AppCore {
         let ai_host = AiHost::new(&dir, sink.clone(), ai);
         let local_network = crate::local_network::LocalNetworkHost::new(&dir, Some(host.local_network()));
         let host_shell = crate::host_shell::HostShellHost::new(&dir);
+        let window_frame = crate::window_frame::WindowFrameHost::new(&dir);
         let integrations = {
             let parts = integration.unwrap_or_else(|| {
                 let configured = lock(&config).settings.shell.clone();
@@ -1272,6 +1276,7 @@ impl AppCore {
                 host,
                 local_network,
                 host_shell,
+                window_frame,
                 remote_execs: RemoteExecs::new(),
                 prompts,
                 integrations,
@@ -1497,6 +1502,12 @@ impl AppCore {
     /// of the page.
     pub fn host_shell(&self) -> &crate::host_shell::HostShellHost {
         &self.host_shell
+    }
+
+    /// The frame and button choices of the window (Windows and Linux): the stored choice, the one the running windows were
+    /// built with, and the setter. The shell reads [`crate::window_frame::WindowFrameHost::started`] when it builds a window.
+    pub fn window_frame(&self) -> &crate::window_frame::WindowFrameHost {
+        &self.window_frame
     }
 
     /// Whether a new pane starts on the host through `flatpak-spawn --host`: only in a Flatpak with the permission whose
@@ -6378,6 +6389,28 @@ mod tests {
         let expected = host_shell_launch("/usr/bin/fish");
         assert_eq!((spec.program, spec.args), (expected.program, expected.args));
         assert!(spec.notice.is_none() && spec.host_spawn, "a program the sandbox cannot see is no defect on the host");
+    }
+
+    #[test]
+    fn the_core_owns_the_window_frame_host_over_its_data_directory() {
+        use holzwave_core::window_frame::{ButtonChoice, FrameChoice};
+        let dir = Scratch::new("wf-core");
+        std::fs::write(dir.0.join("window_frame.json"), "{\"version\": 1, \"window_frame\": \"system\", \"window_buttons\": \"round\"}\n")
+            .unwrap();
+        let core = AppCore::new(dir.0.clone(), Arc::new(Recorder::default()), ShellSpec::default());
+        dir.attach(&core);
+        let host = core.window_frame();
+        // The file is the started choice where the group applies, and is not looked at elsewhere.
+        if matches!(Os::current(), Os::Windows | Os::Linux) {
+            assert!(host.applies());
+            assert_eq!(host.started(), (FrameChoice::System, ButtonChoice::Round));
+            assert_eq!(host.view().frame, "system");
+            assert!(!host.view().pending);
+        } else {
+            assert!(!host.applies());
+            assert_eq!(host.started(), (FrameChoice::Auto, ButtonChoice::Auto));
+            assert!(!host.view().applies);
+        }
     }
 
     #[test]
