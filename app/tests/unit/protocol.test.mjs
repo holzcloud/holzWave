@@ -172,6 +172,23 @@ test("the app info and the pointer commands are pinned", () => {
   }
   assert.deepEqual([...new Set(golden.answers.host_shell.map((v) => v.state))].sort(), ["off", "on", "unavailable"]);
   assert.ok(golden.answers.host_shell.some((v) => !v.applies), "the view outside a Flatpak is in the samples");
+  // The window frame choices of Windows and Linux: the page asks the view and sends the two words, frame first. The view
+  // holds `applies`, the two words and `pending` (the choice differs from the one the open window was built with).
+  assert.deepEqual(golden.commands.window_frame_status, []);
+  assert.deepEqual(golden.commands.window_frame_set, ["frame", "buttons"]);
+  const frames = golden.answers.window_frame;
+  for (const view of frames) {
+    assert.deepEqual(keys(view), ["applies", "buttons", "frame", "pending"]);
+    assert.equal(typeof view.applies, "boolean");
+    assert.equal(typeof view.pending, "boolean");
+    assert.equal(typeof view.frame, "string");
+    assert.equal(typeof view.buttons, "string");
+  }
+  const applying = frames.filter((v) => v.applies);
+  assert.deepEqual([...new Set(applying.map((v) => v.frame))].sort(), ["auto", "own", "system"]);
+  assert.deepEqual([...new Set(applying.map((v) => v.buttons))].sort(), ["auto", "flat", "round"]);
+  assert.deepEqual([...new Set(frames.map((v) => v.pending))].sort(), [false, true]);
+  assert.equal(frames.filter((v) => !v.applies).length, 1, "exactly one sample is the view where the group does not apply");
   assert.deepEqual(golden.commands.mouse, ["pane", "action", "button", "x", "y", "mods"]);
   assert.deepEqual(golden.commands.wheel, ["pane", "rows", "x", "y", "mods"]);
   for (const name of ["note_window", "placement"]) {
@@ -1016,7 +1033,7 @@ test("the two image commands are pinned: a pixel read by pane, image, generation
   // Motion is a property of the person's window, not of one pane.
   assert.deepEqual(golden.commands.set_image_animation, ["enabled"]);
   assert.ok(!golden.commands.set_image_animation.includes("pane"));
-  // The golden has every command once: 124, the six that drive the vault of a phone make 130, and the two that hand a file
-  // over on a phone make 132.
-  assert.equal(Object.keys(golden.commands).length, 132);
+  // The golden has every command once: 124, the six that drive the vault of a phone make 130, the two that hand a file
+  // over on a phone make 132, and the two that carry the window frame choices make 134.
+  assert.equal(Object.keys(golden.commands).length, 134);
 });
