@@ -85,7 +85,7 @@ default.
 
 | Component | Rule |
 |---|---|
-| Window bar | traffic lights (macOS; the native title bar sits above the bar elsewhere, section 7), workspace chips, tabs, version label right-aligned in mono |
+| Window bar | traffic lights (macOS), or the three window buttons the system uses on Windows and Linux (6.33; with the setting `System` the system's own title bar sits above the bar instead, section 7), workspace chips, tabs, version label right-aligned in mono |
 | Workspace chip / tab | text only and, while a pane they hold needs you, one mark per kind (6.23); selected = rose wash and rose text, with an underline for non-colour cue |
 | Pane header | state dot, title, context (path, host) in mono, right-aligned |
 | Focus | 1 px rose ring plus a header cue; only shown when more than one pane exists |
@@ -157,7 +157,7 @@ AI chat, AI chat states, AI sidebar, attention marks, drag) and a platform switc
 
 **Rules**
 
-1. **One look everywhere.** The window chrome is drawn by holzWave, with no native title bar or tab control, so
+1. **One look everywhere.** The window chrome is drawn by holzWave, with no native tab control and, by default, no native title bar (on Windows and Linux the page's bar is the window bar, 6.33), so
    macOS, Windows, Linux, Android and the browser show the same thing. Only the OS window buttons and the system keyboard
    differ.
 2. **Mono everywhere in the chrome.** Labels, tabs and the status line are JetBrains Mono; Manrope only appears in
@@ -204,7 +204,7 @@ the pill and the tab and change neither shape: the pill stays round with its dia
 
 | Area | Content |
 |---|---|
-| Title bar (32 px) | window buttons (left on macOS, right on Windows and Linux), workspace pills, `＋`; right group: sync state `☁ synced`, `✦ AI`, `▥ Sidebar` toggle, `⌘K` |
+| Title bar (32 px) | window buttons (left on macOS; on Windows and Linux on the side the system uses, 6.33; none on Android and in the browser), workspace pills, `＋`; right group: sync state `☁ synced`, `✦ AI`, `▥ Sidebar` toggle, `⌘K` |
 | Tab row (28 px) | numbered tabs, a `⌁` mark on tabs with a remote connection, the attention marks of 6.23 (`? ▲ ! ✓`) after the name of a tab that holds a pane out of view that needs you, `＋`; a hint line right-aligned |
 | Area | the split tree of the shown tab, 1 px hairlines between panes, no gaps; the focused pane has the rose line on its header |
 | Sidebar (216 px, collapsible) | **Hosts** (state dot, protocol, reconnect counter), **Context** (Kubernetes context and namespace, Azure subscription, GAM profile), **History** (fuzzy search), **Widgets**. The column has a second form, the AI chat (280 px, 6.18), that takes its place |
@@ -255,6 +255,8 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | Local network states | ![](design/local-network-states.png) | the group `Local network` of the Settings dialog in four states (6.24): `allowed`, `denied` (underlined, `!`), `not asked yet` and `not known` (`?`), each with its advice and the buttons it offers; `Open System Settings` is always there |
 | Host shell | ![](design/host-shell.png) | the Settings dialog on the Linux window inside a Flatpak (6.32): the group `Host shell` after Accessibility and before the buttons, one row `Run panes on the host` with the dim meta `Flatpak`, the state word `off` at the right and one sentence of advice; absent everywhere outside a Flatpak |
 | Host shell states | ![](design/host-shell-states.png) | the group `Host shell` in its three states (6.32): `off`, `on` (warn, underlined, `!`, the box ticked) and `not available` (`?`, the box dashed and disabled), each with its advice; and the line a new local pane shows while the switch is off or not available |
+| Window frame | ![](design/window-frame.png) | the window buttons of Windows and Linux (6.33): the bar in each style and on each side (Windows flat on the right, GNOME round, stock GNOME with one close button, a layout with the buttons on the left, every other desktop flat) and the states of a button, each with a second cue: rest, hover, close under the pointer on Windows, keyboard focus, maximised, close under the pointer on Linux |
+| Window frame settings | ![](design/window-frame-settings.png) | the group `Window frame` of the Settings dialog on Windows and on Linux (6.33): the row `Frame`, on Linux also the row `Buttons`, the advice under each, and the status line `Applies after the next start.` |
 | Integration block | ![](design/integration-block.png) | a Kubernetes pods block beside its shell (6.25): header `pods`, context `Kubernetes · prod · payments · 10 s` marked as production, the bar with the context and namespace chips and `↻ Refresh`, a table with the status in words, a selected row with its `Logs` button, and the line `Updated 4 s ago` |
 | Integration states | ![](design/integration-states.png) | the block in four states (6.25): `Reading …`, the tool not found with the places searched, a path field, `Set path` and `Check again`, an error line with the last rows kept dimmed, and a table cut with its note |
 | Context section | ![](design/integration-context.png) | the sidebar's Context section (6.11): one row for each of Kubernetes, Talos, Azure and GAM with the mark, the selection as text, `production` (warn, underlined, `!`) on the Kubernetes row and its `Shell` button, the listbox open under it with the current value marked, the line `New blocks start with prod-eu.`, the status line segments `⎈ prod-eu/payments` `! PRODUCTION` and `az holz-prod`, and a shell pane whose header has the chip `⎈ prod-eu` `! production`; beside it the section in two states, a tool not found with `Set path` and Azure `signed out` |
@@ -382,8 +384,8 @@ A chat pane on a phone is the screen, with a sheet from the bottom edge for the 
 
 ### 6.7 Platforms
 
-The same window is drawn everywhere; only the OS window buttons move (traffic lights on the left on macOS, flat glyphs
-on the right on Windows, round buttons on the right on GNOME), and in a browser there are none (6.30). Shortcut labels follow the platform table in section 7.
+The same window is drawn everywhere; only the window buttons move (traffic lights on the left on macOS; on Windows and Linux the page draws them, flat glyphs
+on the right on Windows and on every Linux desktop that is not GNOME, round buttons on GNOME on the side its button layout names, which may be the left, 6.33), and in a browser there are none (6.30). Shortcut labels follow the platform table in section 7.
 
 | macOS | Windows | Linux | Browser |
 |---|---|---|---|
@@ -448,7 +450,7 @@ window runs in a web page (6.30); they say what the page is specified to do.
 
 | Deviation | Reason | Changed by |
 |---|---|---|
-| **Native window frame** on Windows and Linux: the system's title bar with its buttons, and the page's bar directly below it. macOS keeps the overlay bar with the traffic lights | `titleBarStyle` and `hiddenTitle` are macOS-only options in Tauri, and a page-drawn bar needs drag, resize edges and window buttons that have a history of problems under Wayland; owner decision of 2026-10-12. Plan 02.2-06 pins it in a test | a page-drawn bar: Phase 10 |
+| **Own window frame** on Windows and Linux: the system's title bar is gone and the page's bar is the window bar, with the three window buttons drawn in the style of the system (6.33). macOS keeps the overlay bar with the traffic lights. The choice is made per device by the setting `Frame` (`Auto`, `Own`, `System`) | the owner reversed the decision of 2026-10-12 (keep the system's title bar) so that the window has one look and the bar is the only strip above the panes; the system's title bar stays available as the setting `System`, because dragging, resizing and the buttons of a page-drawn bar were never seen on a real Windows or Linux window and have a history of problems under Wayland | the setting `Frame`: `System` brings the system's title bar back |
 | **`cmd.exe` does not report its directory**, so a split, a new tab and a restored pane start in the home directory | `cmd.exe` emits no OSC 7 and its `PROMPT` cannot percent-encode a path; the engine reads only OSC 7 (plans 02.2-04, 02.2-05) | none planned; PowerShell is the default shell when present |
 | **PowerShell is wrapped by an injected prompt** (`-NoLogo -NoExit -EncodedCommand`) that announces the directory, so a split and a restore work on the default shell. There is no setting to switch it off in this phase. `$?` is not preserved for the original prompt, and the wrapper runs after the profile (assumed until W7) | the only way to get a directory out of PowerShell; a constant script, no user text in it (plan 02.2-04) | an off switch only if W7 shows a conflict with a prompt framework |
 | **Kitty keyboard flags requested by a Windows program may not reach the engine** through ConPTY | ConPTY filters sequences in its non-passthrough mode and the pinned engine has no win32-input-mode; the Kitty path stays for macOS, Linux and SSH sessions (assumption A11, plan 02.2-04) | a sideloaded ConPTY with passthrough, if the run shows it matters |
@@ -2747,3 +2749,82 @@ With the switch `on` the pane says nothing. A pane of a saved SSH connection sho
 ![Host shell states](design/host-shell-states.png)
 
 **Not drawn.** A control for `flatpak override`, for Flatseal or for a link outside the app (holzWave draws only what it builds: the advice names the permission, and the Flatpak page of the documentation says how to grant it), a notice at the first start, a badge, and a setting for panes that are already open.
+
+
+### 6.33 Window frame
+
+On Windows and Linux the page's bar is the window bar. The system's title bar is gone, the free space of the title row drags the window, and the three window buttons sit in that row in the style of the system the window runs on. macOS keeps the overlay bar with the traffic lights, unchanged (6.1, section 7). Android and the browser have no window buttons (6.6, 6.30). This reverses the earlier rule that Windows and Linux keep the system's title bar above the page; that rule is still available as the setting `System`.
+
+**The rule.**
+
+1. With the setting `Frame` on `Auto` or `Own`, a window on Windows and Linux has no system title bar. The title row (32 px) holds the workspace pills, the free space, the host name and the clock, and the window buttons. With `System` the system keeps its title bar above the page's bar, as before, and the page draws no window buttons.
+2. The free space of the bar drags the window, and a double click on it maximises the window or restores it. The edges of the window resize it; the page draws no resize handles. The window buttons, the pills and the tabs are not drag regions.
+3. In full screen the group of buttons is not drawn, because the system draws no bar there; the page keeps its own bar.
+4. The style, the side and the set of buttons are read from the system and can be overridden by the setting `Buttons` on Linux. Both settings are facts of this computer and are never synced.
+
+**The three styles.** The style follows the system.
+
+| Style | Where | Hit box | Drawn |
+|---|---|---|---|
+| Flat | Windows, and every Linux desktop that is not GNOME | 46 px wide and 32 px high (the whole title row), side by side without a gap, flush with the window edge: the bar's side padding does not apply to them | the glyph alone, 10 px, drawn by the stylesheet with 1 px strokes in the current colour, so it is the same on every platform and does not depend on a font |
+| Round | GNOME | 28 by 28 px, 6 px between them, the group inset from the window edge by the bar's padding and centred in the 32 px row | a circle of 24 px inside the hit box (a 1 px `--hw-line` ring) and an 8 px glyph in the same drawing |
+
+When the desktop cannot be read, the style is flat, on the right, with all three buttons. A hit box is never smaller than 28 by 28 px at any UI scale: sizes are in `rem` and the floor is written as `max(28px, …)`.
+
+**Window buttons.** The same four drawings in both styles; the name is the accessible name and the `title`.
+
+| Button | Glyph | Name |
+|---|---|---|
+| Minimise | a horizontal line | `Minimize` |
+| Maximise | a square outline | `Maximize` |
+| Restore (while maximised) | two square outlines, the back one offset by 2 px and drawn by its top and right edge | `Restore` |
+| Close | two crossing diagonals | `Close` |
+
+**Side and set.** The side and the buttons come from the system.
+
+- Windows: the three on the right, in the order Minimize, Maximize, Close.
+- GNOME: the desktop's own button layout decides the side, the order and which buttons exist. Stock GNOME (layout `appmenu:close`) shows one round close button on the right; Ubuntu (`appmenu:minimize,maximize,close`) shows three; a layout that starts with the buttons (`close,minimize,maximize:`) puts them on the left in that order. A layout that names no window button is read as the close button alone, because a window that cannot be closed by pointer is worse than one button the person did not ask for. If a layout puts buttons on both sides, the side that holds `close` is drawn and the other side's buttons are not.
+- Every other Linux desktop: flat, on the right, all three.
+- The group on the right sits after the host name and the clock, separated by the bar's padding. The group on the left sits before the first workspace pill, separated by the bar's padding. The page does not move a button for the resize strips.
+
+**States.** Every state has a second cue besides colour.
+
+| State | Fill and glyph | Second cue |
+|---|---|---|
+| Rest | no fill; glyph `--hw-dim` | the drawn glyph |
+| Hover | the wash `--hw-rose-wash` fills the drawn shape (the whole hit box when flat, the 24 px circle when round); glyph `--hw-ink` | fill and tone, as the other buttons of the bar |
+| Windows close under the pointer | fill `--hw-danger`, glyph `--hw-ground` (inverted) | the filled box and the inverted glyph |
+| Linux close under the pointer | the normal wash, not red | as hover |
+| Keyboard focus | the 2 px ring `outline: 2px solid var(--hw-ink)`, offset -2 px, on the hit box | the ring |
+| Maximised | the Maximize button shows the restore glyph; its name and title are `Restore` | a shape and a word, not a colour |
+
+`--hw-danger` as a fill with `--hw-ground` as the glyph keeps at least 4.5 to 1 in the three built-in themes: 7.4 to 1 in the dark default, 6.5 to 1 in Schiefer and 6.0 to 1 in Papier, whose `--hw-danger` is a dark red. The red close button is Windows only; on Linux the close button is as quiet as the other two.
+
+**The group `Window frame` of the Settings dialog.** On Windows and Linux only (a Flatpak is Linux), after Accessibility and the group `Host shell` where that is drawn, and before the buttons. It is absent, not disabled, on macOS, on Android and in the browser. A `fieldset` with `role="group"` labelled by its legend, with two rows in the manner of the dialog's choice rows (the accessibility rows `System / On / Off` are the pattern).
+
+| Part | Words |
+|---|---|
+| Legend | `Window frame` |
+| Row | `Frame`, with the dim meta `Windows and Linux` and the choices `Auto`, `Own`, `System` |
+| Advice under `Frame` | `Auto draws holzWave's own bar as the window bar. System keeps the system's title bar above holzWave's bar.` |
+| Advice under `Frame`, Linux only, as a second sentence | `Under Wayland the own frame has not been tried; if the window cannot be moved or resized, choose System in this dialog (open it from the palette).` |
+| Row, drawn on Linux only | `Buttons`, with the dim meta `Linux` and the choices `Auto`, `Flat`, `Round` |
+| Advice under `Buttons` | `Auto follows the desktop: round on GNOME, flat on every other desktop.` |
+| Status line (`role="status"`, empty until it is needed) | `Applies after the next start.` |
+
+The status line shows its sentence whenever the stored choice differs from the one the open windows were built with. The words of the host's answer are `auto`, `own`, `system` for the first row and `auto`, `flat`, `round` for the second; a word that is in no table reads as `auto`. These words and the sentences above are the contract between the page and the host. Both choices are a fact of this computer and are never synced: `settings.json` travels to every computer, and a GNOME computer's `round` must not reach a KDE one; the values are kept in a file of this computer, in the manner of `local_network.json` (6.24).
+
+**Limits a reader must know.**
+
+- The outer edge of the window is the system's resize area: on Linux the outer 5 px and on Windows the top border belong to the resize handler, so the top and right edge of the close button lose that much of their hit box to it. The page does not work around it.
+- The Windows 11 snap layout flyout over the Maximize button is not built, because it needs a native surface that a web view does not give. Dragging the window to an edge and the Win key with the arrow keys still snap it.
+- **The own frame was never seen on a real Windows or Linux window by anyone.** Dragging, resizing, the buttons, the drawn states and the behaviour under Wayland are all unverified, and the author works on a Mac. The pictures below are drawings of the design, not screenshots.
+- Under Wayland `Auto` is the own frame as well. Whether such a window can be moved and resized is not known and cannot be detected while the app runs; the setting `System` is the way out, and the advice under `Frame` says so on Linux.
+
+**Accessibility.** The glyphs are drawn with `currentColor`, so `contrast-high` reaches them through `--hw-dim`, which it swaps for the stronger token like the rest of the bar. Under forced colours the strokes are `ButtonText`, hover and focus use `Highlight`, and the ring stays 2 px. The 160 ms transition of the hover fill is removed under `motion-reduce`, as for the other bar buttons. Every button is a real `button` with its name, reachable by the keyboard, with the 2 px ring. Every size is in `rem`, with the 28 px floor above.
+
+![Window frame](design/window-frame.png)
+
+![Window frame settings](design/window-frame-settings.png)
+
+**Not drawn.** The Windows 11 snap layout flyout, a menu on a right click of the bar, resize handles, a drawing for a phone and buttons in the browser (a page cannot draw or move the window it is shown in, 6.30), and a setting for the side of the buttons (the system decides it).

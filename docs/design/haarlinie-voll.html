@@ -44,8 +44,43 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .wc.win,.wc.lin{display:none}
 [data-os=win] .wc.mac,[data-os=lin] .wc.mac{display:none}
 [data-os=win] .wc.win{display:flex}[data-os=lin] .wc.lin{display:flex}
-.wc.win span{width:40px;text-align:center;color:var(--ink3);line-height:32px}
-.wc.lin span{width:20px;height:20px;border-radius:50%;background:var(--wash);color:var(--ink2);text-align:center;font-size:11px;line-height:20px;margin-right:6px}
+/* The window buttons of Windows and Linux (docs/design.md 6.33). Flat: 46 by 32 px, flush with the window edge, a 10 px glyph of 1 px strokes drawn here, so it does not depend on a font.
+   Round (GNOME): a 28 px hit box with a 24 px circle (a 1 px hairline ring) inside and an 8 px glyph, 6 px between them, the group inset by the bar padding. Rest is dim; hover is the wash
+   and the ink glyph; the close button of the flat style turns danger with the ground as its glyph; the focus ring is 2 px; the maximised window shows the restore glyph. */
+.fw{display:flex;align-items:center;flex:none;--g:10px}
+.fw.round{--g:8px;gap:6px;padding:0 8px}
+.fw-b{position:relative;display:flex;align-items:center;justify-content:center;box-sizing:border-box;flex:none;color:var(--ink3)}
+.fw.flat .fw-b{width:46px;height:32px}
+.fw.round .fw-b{width:28px;height:28px}
+.fw.round .fw-b::before{content:"";position:absolute;left:2px;top:2px;width:24px;height:24px;box-sizing:border-box;border:1px solid var(--edge);border-radius:50%}
+.fw-b.hov{background:var(--wash);color:var(--ink)}
+.fw.round .fw-b.hov{background:none}.fw.round .fw-b.hov::before{background:var(--wash)}
+.fw.flat .fw-b.cl{background:var(--danger);color:var(--ground)}
+.fw-b.fo{outline:2px solid var(--ink);outline-offset:-2px}
+.fw-g{position:relative;display:block;width:var(--g);height:var(--g)}
+.fw-g.min::before{content:"";position:absolute;left:0;right:0;top:50%;height:1px;background:currentColor}
+.fw-g.max{box-sizing:border-box;border:1px solid currentColor}
+.fw-g.rest::before{content:"";position:absolute;left:0;bottom:0;width:calc(var(--g) - 2px);height:calc(var(--g) - 2px);box-sizing:border-box;border:1px solid currentColor}
+.fw-g.rest::after{content:"";position:absolute;right:0;top:0;width:calc(var(--g) - 2px);height:calc(var(--g) - 2px);box-sizing:border-box;border:solid currentColor;border-width:1px 1px 0 0}
+.fw-g.x::before,.fw-g.x::after{content:"";position:absolute;left:50%;top:50%;width:calc(var(--g) * 1.4142);height:1px;margin:0 0 0 calc(var(--g) * -.7071);background:currentColor}
+.fw-g.x::before{transform:rotate(45deg)}.fw-g.x::after{transform:rotate(-45deg)}
+/* The views `frame` and `frame-settings` (docs/design.md 6.33): a ground with captioned cells and no window around them, like the screens of the browser build. */
+.fw.flat.rgt{margin-left:4px}.fw.round.rgt{padding:0 8px 0 4px}.fw.round.lft{padding:0 4px 0 8px}
+.fr-page{flex:1;min-height:0;display:flex;flex-direction:column;gap:7px;padding:14px 20px;background:var(--ground);overflow:hidden}
+.fr-page .cap{margin:0}
+.fr-bars{display:flex;flex-direction:column;gap:7px}
+.fr-bar.titlebar{border:1px solid var(--edge);padding-left:8px}
+.fr-bar.titlebar .fw.lft:first-child{margin-left:-8px}
+.fr-states{display:grid;grid-template-columns:repeat(3,1fr);gap:8px 20px}
+.fr-strip{display:flex;align-items:center;justify-content:flex-end;height:34px;background:var(--ground2);border:1px solid var(--edge)}
+.fr-cue{margin:2px 0 0;color:var(--ink3);font:400 10.5px/1.35 var(--mono)}
+.fs-page{flex:1;min-height:0;display:flex;justify-content:center;gap:20px;padding:16px 20px;background:var(--ground)}
+.fs-cell{display:flex;flex-direction:column;gap:4px;width:520px}.fs-cell .cap{margin:0}
+.fs-dlg{flex:1;min-height:0;display:flex;flex-direction:column;padding:14px 20px 14px;border:1px solid var(--edge);border-radius:24px;background:var(--ground2);box-shadow:0 18px 48px rgba(0,0,0,.6)}
+.fs-row{display:flex;align-items:center;gap:10px;min-height:28px;font:400 12px/1.4 var(--mono)}
+.fs-name{color:var(--ink)}.fs-meta{color:var(--ink3)}.fs-row .seg{margin-left:auto}
+.fs-adv{margin:2px 0 4px;color:var(--ink3);font:400 10.5px/1.35 var(--mono)}
+.fs-status{min-height:15px;margin:2px 0 0;color:var(--ink2);font:400 10.5px/1.35 var(--mono)}
 [data-os=mac] .rwc{display:none}[data-os=win] .lwc,[data-os=lin] .lwc{display:none}
 .titlebar{height:32px;background:var(--ground2);border-bottom:1px solid var(--edge);flex:none;gap:4px}
 .ws{height:22px;padding:0 11px;border-radius:999px;border:1px solid var(--edge);color:var(--ink3);font-weight:700;display:flex;align-items:center;gap:6px;white-space:nowrap}
@@ -791,7 +826,11 @@ td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
 <script>
 const $=s=>document.querySelector(s);
 const wcL='<div class="wc mac lwc"><i></i><i></i><i></i></div>';
-const wcR='<div class="wc win rwc"><span>&#8211;</span><span>&#9633;</span><span>&#10005;</span></div><div class="wc lin rwc"><span>&#8211;</span><span>&#9633;</span><span>&#10005;</span></div>';
+/* The window buttons (docs/design.md 6.33): `fwBtn(kind,state)` is one button, `fwGroup(style,kinds,states)` a group. The platform views draw Windows flat and Linux round with all three. */
+const fwNames={min:'Minimize',max:'Maximize',rest:'Restore',x:'Close'};
+const fwBtn=(kind,state='')=>`<span class="fw-b${state?' '+state:''}" role="img" aria-label="${fwNames[kind]}" title="${fwNames[kind]}"><i class="fw-g ${kind}"></i></span>`;
+const fwGroup=(style,kinds=['min','max','x'],states={},extra='')=>`<div class="fw ${style}${extra}">${kinds.map(k=>fwBtn(k,states[k]||'')).join('')}</div>`;
+const wcRight=()=>{const os=$('#root').dataset.os;return os==='win'?`<div class="wc win rwc">${fwGroup('flat')}</div>`:os==='lin'?`<div class="wc lin rwc">${fwGroup('round')}</div>`:''};
 const P=(dot,ico,t,ctx,body,o={})=>`<div class="pane ${o.f?'f':''}" style="${o.s||''}"><div class="ph"><i class="dot ${dot}"></i><span class="dim">${ico}</span><b class="lbl">${t}</b>${o.chip||''}<span class="ctx">${ctx}</span><span class="act">⊞ ⤢ ✕</span></div>${body}</div>`;
 
 const shell=(mode)=>{
@@ -898,12 +937,13 @@ function base(v){
   if(wbViews[v])return wbViews[v]();
   if(tbViews[v])return tbViews[v]();
   if(lkViews[v])return lkViews[v]();
+  if(frViews[v])return frViews[v]();
   const searchBar=v==='search'?`<div class="ov float row" style="left:150px;top:125px;padding:4px 8px;gap:8px;border-radius:8px"><span class="ro">⌕</span><span>layout<span class="cur"></span></span><span class="dim">3/12</span><span class="kbd">Aa</span><span class="kbd">.*</span><span class="kbd">ab</span><span class="dim">▲ ▼ ✕</span></div>`:'';
   const copyBar=v==='copy'?`<div class="ov row" style="left:0;right:0;bottom:0;height:22px;background:var(--rose-deep);color:#fff;padding:0 10px;gap:14px;font-weight:700;letter-spacing:.06em"><span>COPY MODE</span><span style="font-weight:400">v select · y yank · / search · f hints · q quit</span></div>`:'';
   return `<div class="titlebar row">${wcL}
     <div class="ws on">◆ main <span class="n">5</span></div><div class="ws">◇ infra <span class="n">3</span>${v==='attn'?mks(['fail','done']):''}</div><div class="ws">◇ docs <span class="n">1</span>${v==='attn'?mks(['done']):''}</div><div class="ws plus">＋</div>
     <span class="fill"></span>
-    <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='kiexplain'||v==='kidescribe'||v==='ki'||v==='kichats'||v==='kisidecards'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?'on':''}">✦ AI${v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kicommand'||v==='kisidecards'?' <span class="ax-n">· 1</span>':''}</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'||v==='kiactions'?'on':''}">${v.startsWith('web-')?'Ctrl+Shift+P':'⌘K'}</div>${wcR}</div>
+    <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='kiexplain'||v==='kidescribe'||v==='ki'||v==='kichats'||v==='kisidecards'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?'on':''}">✦ AI${v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kicommand'||v==='kisidecards'?' <span class="ax-n">· 1</span>':''}</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'||v==='kiactions'?'on':''}">${v.startsWith('web-')?'Ctrl+Shift+P':'⌘K'}</div>${wcRight()}</div>
   <div class="tabrow row">${v==='attn'?tabs(0,{1:['ask','bell','fail','done'],2:['bell'],3:['fail'],4:['done']}):tabs(v==='blocks'?1:v==='kimon'||v==='kimonstates'?4:v==='kint'||v==='kintstates'||v==='kintconfirm'||v==='kintconfirmstates'?5:0)}<span class="fill"></span><span class="dim" style="padding-right:12px">${v.startsWith('web-')?'Alt+Shift+1–9':'⌘1–9'} tab · click a pill to switch workspace</span></div>
   <div class="body">${v==='web-window'?wbArea():v==='preview'?previewArea():v==='kimon'?monitorArea():v==='kimonstates'?moStates():v==='kint'?igArea():v==='kintstates'?igStates():v==='kintconfirm'?icArea():v==='kintconfirmstates'?icStates():v==='kintctx'?cxArea():v==='kiwsh'?awArea():v==='kiwshstates'?awStates():v==='kidevicestates'?adStates():v==='lanstates'?lnStates():v==='host-shell-states'?hsStates():v==='kiexplain'||v==='kidescribe'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?chatArea(v):`<div class="area">
     ${P('','❯','shell','pane 1 · ~/holzWave',shell(v==='search'?'search':v==='copy'?'copy':''),{f:1,s:'grid-row:1/2',chip:phChip('⎈ talos-prod')})}
@@ -1184,6 +1224,40 @@ const hsDialog=()=>`<div class="scrim"></div><div class="ov float modal" role="d
    <div class="ap" style="padding:6px 0 0">${apG('Host shell',hsRow('off'))}</div>
    <span class="fill"></span>
    <div class="row" style="gap:8px;justify-content:flex-end"><span class="btn">Reload from file</span><span class="btn">Key bindings</span><span class="btn">AI providers</span><span class="btn p">Close</span></div></div></div>`;
+
+/* The window frame (docs/design.md 6.33). `frame` draws the bar in each style and side, and the states of a button; `frame-settings` draws the group `Window frame` of the Settings dialog
+   on Windows and on Linux. The words of the group are the design record's: the choices are Auto, Own, System and Auto, Flat, Round, and the host's words are auto, own, system and auto, flat, round. */
+const frBar=(group,side)=>`<div class="titlebar row fr-bar" style="${side==='left'?'padding-right:8px':''}">${side==='left'?group:''}<div class="ws on">◆ main <span class="n">5</span></div><div class="ws">◇ infra <span class="n">3</span></div><div class="ws plus">＋</div><span class="fill"></span><span class="dim">talos-1 · 14:31</span>${side==='right'?group:''}</div>`;
+const frCell=(cap,body,cue='')=>`<div class="fr-cell"><div class="cap">${cap}</div>${body}${cue?`<p class="fr-cue">${cue}</p>`:''}</div>`;
+const frStrip=g=>`<div class="fr-strip">${g}</div>`;
+const frViews={
+ frame:()=>`<div class="fr-page"><div class="cap">Title bar: the window buttons in each style and on each side</div><div class="fr-bars">
+ ${frCell('Windows: flat, right, minimise maximise close, flush with the window edge',frBar(fwGroup('flat',['min','max','x'],{},' rgt'),'right'))}
+ ${frCell('GNOME with the Ubuntu layout (appmenu:minimize,maximize,close): round, right, all three',frBar(fwGroup('round',['min','max','x'],{},' rgt'),'right'))}
+ ${frCell('GNOME stock layout (appmenu:close): one round close button',frBar(fwGroup('round',['x'],{},' rgt'),'right'))}
+ ${frCell('GNOME with a layout on the left (close,minimize,maximize:): round, left, in the order of the layout',frBar(fwGroup('round',['x','min','max'],{},' lft'),'left'))}
+ ${frCell('Any other Linux desktop, and a desktop that cannot be read: flat, right, all three',frBar(fwGroup('flat',['min','max','x'],{},' rgt'),'right'))}
+ </div><div class="cap" style="margin-top:6px">States of a button, each with a second cue besides colour</div><div class="fr-states">
+ ${frCell('Rest',frStrip(fwGroup('flat')),'The glyph is dim.')}
+ ${frCell('Hover',frStrip(fwGroup('flat',['min','max','x'],{max:'hov'})),'The wash fills the box and the glyph is ink.')}
+ ${frCell('Windows: close under the pointer',frStrip(fwGroup('flat',['min','max','x'],{x:'cl'})),'The box turns danger and the glyph is the ground: filled, inverted.')}
+ ${frCell('Keyboard focus',frStrip(fwGroup('flat',['min','max','x'],{min:'fo'})),'A 2 px ring inside the box.')}
+ ${frCell('Maximised',frStrip(fwGroup('flat',['min','rest','x'])),'The square becomes two squares; the name is Restore, not Maximize.')}
+ ${frCell('Linux: close under the pointer',frStrip(fwGroup('round',['min','max','x'],{x:'hov'},' rgt')),'The normal wash on the circle, not red. The hit box is 28 px.')}
+ </div></div>`,
+ 'frame-settings':()=>`<div class="fs-page">${[
+  ['Windows: the group after Accessibility, nothing to apply',fsDialog(false)],
+  ['Linux: Frame changed to System, applies after the next start',fsDialog(true)]
+ ].map(([cap,dlg])=>`<div class="fs-cell"><div class="cap">${cap}</div>${dlg}</div>`).join('')}</div>`
+};
+const fsChoice=(name,meta,choices,on)=>`<div class="fs-row" role="radiogroup" aria-label="${name}"><span class="fs-name">${name}</span><span class="fs-meta">${meta}</span><span class="seg" style="border-radius:6px">${choices.map((c,i)=>`<button role="radio" aria-checked="${i===on}" aria-pressed="${i===on}">${c}</button>`).join('')}</span></div>`;
+const fsAdvFrame="Auto draws holzWave's own bar as the window bar. System keeps the system's title bar above holzWave's bar.";
+const fsAdvWayland='Under Wayland the own frame has not been tried; if the window cannot be moved or resized, choose System in this dialog (open it from the palette).';
+const fsAdvButtons='Auto follows the desktop: round on GNOME, flat on every other desktop.';
+const fsDialog=linux=>`<div class="fs-dlg float" role="dialog" aria-label="Settings"><div class="grp lbl" style="padding:0">Accessibility</div>
+ <div class="field"><span class="dim">Motion</span><span class="seg" style="border-radius:6px"><button aria-pressed="true">System</button><button aria-pressed="false">On</button><button aria-pressed="false">Off</button></span></div>
+ <div class="ap" style="padding:6px 0 0">${apG('Window frame',`${fsChoice('Frame','Windows and Linux',['Auto','Own','System'],linux?2:0)}<p class="fs-adv">${fsAdvFrame}${linux?' '+fsAdvWayland:''}</p>${linux?`${fsChoice('Buttons','Linux',['Auto','Flat','Round'],0)}<p class="fs-adv">${fsAdvButtons}</p>`:''}<p class="fs-status" role="status">${linux?'Applies after the next start.':'&nbsp;'}</p>`)}</div>
+ <span class="fill"></span><div class="row" style="gap:8px;justify-content:flex-end"><span class="btn">Reload from file</span><span class="btn">Key bindings</span><span class="btn">AI providers</span><span class="btn p">Close</span></div></div>`;
 
 /* The screens of the browser build (docs/design.md 6.28 to 6.30). The page before sign-in is a ground with one box, with no window around it. */
 const wbHead='<div class="wb-brand"><b class="wb-mark">holzWave</b><span class="wb-host dim" title="The server">holz.example.net</span></div>';
@@ -1527,6 +1601,8 @@ const views=[
  ['lanstates','Local network states','The group Local network of the Settings dialog in four states: allowed, denied (underlined and marked !), not asked yet, and not known (marked ?). The state is words first; the buttons are Open System Settings always, Allow when macOS has not been asked, Check again when the state is denied or not known. macOS only.'],
  ['host-shell','Host shell','The group Host shell of the Settings dialog on the Linux window, inside a Flatpak, in its default state: off. It sits after Accessibility and before the buttons, one switch with the name Run panes on the host, the dim meta Flatpak, the state word at the right and one sentence of advice. Outside a Flatpak the group is absent, not disabled.'],
  ['host-shell-states','Host shell states','The group Host shell in its three states and the line a new local pane shows while the switch is off: off (the word), on (warn, underlined and marked !, the box ticked) and not available (marked ?, the box dashed and disabled), each with its advice; and a local pane for the off state and one for the not available state, whose first line says it runs inside the Flatpak sandbox and names the setting or the missing permission. Every state has a word besides its colour.'],
+ ['frame','Window frame','The window buttons of Windows and Linux, which draw their own window bar (docs/design.md 6.33): the bar in each style and on each side (Windows flat on the right, GNOME round with the Ubuntu layout, stock GNOME with one close button, a layout with the buttons on the left, every other Linux desktop flat), and the states of a button: rest, hover, close under the pointer on Windows (the danger fill with the ground as the glyph), keyboard focus (a 2 px ring), the maximised window (the restore glyph) and close under the pointer on Linux (the normal wash). Every state has a shape or a ring besides its colour. A drawing of the design: no window has been seen with it.'],
+ ['frame-settings','Window frame settings','The group Window frame of the Settings dialog, on Windows and on Linux only, after Accessibility and before the buttons: the row Frame with the choices Auto, Own and System, and on Linux the row Buttons with Auto, Flat and Round, each with its advice, and the status line that says Applies after the next start. when the stored choice differs from the one the open windows were built with. Absent, not disabled, on macOS, Android and in the browser.'],
  ['settings','Settings','Themes (including custom), font, UI scale, accessibility (system or explicit), key binding editor, sync, AI, privacy.'],
  ['keys','Shortcuts','The key binding editor. Grouped by pane, tab, workspace and tools. Always shows the keys of the running platform (see the platform switch). Capture, conflicts and fixed shortcuts are visible.'],
  ['preview','Previews','File browser (local and SFTP) with image, PDF and video as panes of their own. Markdown and the editor are in Daily. Space in the browser opens the preview beside it.'],
