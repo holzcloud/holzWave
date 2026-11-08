@@ -1,32 +1,81 @@
-//! The facts of the two configuration files that decide what a build looks like and where it installs: the window
-//! frame (research S10 and the owner decision of 2026-10-12: Windows and Linux keep the native frame in Phase 2.2, one
-//! documented deviation from "the same look"; a page-drawn bar is Phase 10) and the bundle (identifier, icons, no
-//! updater). Tauri documents `titleBarStyle` and `hiddenTitle` as macOS-only options, so the configuration keeps them
-//! and gets no `decorations: false`; a later change of any of this fails here and is a decision, not an accident.
+//! The facts of the configuration files that decide what a build looks like and where it installs: what every window is
+//! like and the bundle (identifier, icons, no updater). The window frame is decided by code, not by the configuration:
+//! `windowframe.rs` says whether a window has the system title bar and `lib.rs` builds every window, the first one
+//! included, through one `build_window`. What this file pins is what the configuration must keep, because it is the one
+//! description that `build_window` copies for every window: the macOS overlay, a resizable window with a minimum size, no
+//! transparency and the default shadow. A later change of any of this fails here and is a decision, not an accident.
 
 use std::path::Path;
 
 use serde_json::Value;
 
 const TAURI_CONF: &str = include_str!("../tauri.conf.json");
+const LIB_RS: &str = include_str!("../src/lib.rs");
 
 fn conf() -> Value {
     serde_json::from_str(TAURI_CONF).expect("tauri.conf.json is JSON")
 }
 
 #[test]
-fn windows_and_linux_keep_the_native_frame() {
+fn the_configuration_describes_one_window_and_leaves_the_frame_to_the_code() {
     let conf = conf();
     let windows = conf["app"]["windows"].as_array().expect("app.windows is a list");
-    assert_eq!(windows.len(), 1, "one window is configured");
+    assert_eq!(windows.len(), 1, "one window is configured: build_window copies it for every window");
     let window = &windows[0];
-    // `decorations: false` would take the native frame away on Windows and Linux, where the page has no bar of its own
-    // that could replace it (Phase 10). Absent or `true` both keep it; only an explicit `false` is a decision.
-    assert_ne!(window.get("decorations"), Some(&Value::Bool(false)), "decorations: false removes the native frame");
-    assert!(window.get("transparent").is_none(), "a transparent window has no frame of the system's");
+    // The frame is code: macOS keeps the overlay of the configuration, and the own frame of Windows is `decorations(false)` in
+    // `build_window`. An explicit `false` here would take the title bar from every platform, whatever the code decides.
+    assert_ne!(window.get("decorations"), Some(&Value::Bool(false)), "decorations: false belongs to build_window");
     // Both are macOS-only: there they put the traffic lights over the page's bar; elsewhere they do nothing.
     assert_eq!(window["titleBarStyle"], "Overlay", "the overlay title bar is the macOS look");
     assert_eq!(window["hiddenTitle"], true, "the title text stays hidden on macOS");
+    // A transparent undecorated window loses the system border, the shadow and the rounded corners of Windows 11.
+    assert!(window.get("transparent").is_none(), "a transparent window has no border, shadow or rounded corners");
+    // The edges that resize an undecorated window act only on a resizable window, and never below the minimum size.
+    assert_eq!(window["resizable"], true, "the resize edges of the runtime need a resizable window");
+    assert!(window["minWidth"].is_number() && window["minHeight"].is_number(), "a window has a minimum size");
+    // The default is `true`, and an undecorated window gets its border and its shadow from it.
+    assert!(matches!(window.get("shadow"), None | Some(Value::Bool(true))), "the shadow is the default or on");
+}
+
+/// The shipped part of `lib.rs` (before its test module) without its comment lines.
+fn lib_code() -> String {
+    let shipped = LIB_RS.split("\n#[cfg(test)]\nmod tests").next().expect("a first part");
+    shipped.lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n")
+}
+
+/// The text of the function that starts with `signature`, up to its closing brace at column zero.
+fn body_of(code: &str, signature: &str) -> String {
+    let rest = &code[code.find(signature).unwrap_or_else(|| panic!("{signature} is gone"))..];
+    rest[..rest.find("\n}\n").expect("a closing brace")].to_owned()
+}
+
+#[test]
+fn lib_rs_decides_the_frame_in_one_place_and_creates_no_window_from_the_configuration_on_a_desktop() {
+    let code = lib_code();
+    // One `.decorations(` call, in `build_window`: a second one is a second place that decides the frame.
+    assert_eq!(code.matches(".decorations(").count(), 1, "one place decides the frame");
+    let build = body_of(&code, "fn build_window(");
+    assert!(build.contains(".decorations(false)"), "the one call is in build_window");
+    assert!(build.contains("initialization_script("), "the page gets the facts before it runs");
+    // The first window shows at once as a configuration window did; the others are shown by their pages.
+    assert!(build.contains("visible: bool"), "build_window takes whether the window shows at once");
+    assert!(build.contains(".visible("), "and sets it");
+    assert!(code.contains("build_window(app.handle(), \"main\", true)"), "the first window is built visible, in setup");
+    // `create = false` stops the configuration from making a window, and only on a desktop: a phone keeps its window.
+    let lines: Vec<&str> = code.lines().collect();
+    let sets: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].contains("create = false")).collect();
+    assert!(!sets.is_empty(), "the configuration creates no window on a desktop");
+    for at in sets {
+        let gate = lines[..at].iter().rev().find(|line| line.trim_start().starts_with("#[cfg"));
+        assert_eq!(
+            gate.map(|line| line.trim()),
+            Some("#[cfg(not(target_os = \"android\"))]"),
+            "`create = false` is set only outside Android"
+        );
+    }
+    // The configuration is read in one place only: every window comes from build_window.
+    assert_eq!(code.matches("WebviewWindowBuilder::from_config").count(), 1, "one place builds a window");
+    assert!(build.contains("WebviewWindowBuilder::from_config"), "and it is build_window");
 }
 
 #[test]

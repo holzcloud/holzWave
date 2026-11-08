@@ -400,6 +400,23 @@ mod tests {
         assert_eq!(f.client((950.0, 150.0)), (50.0, 22.0));
     }
 
+    /// A window without the system title bar has its page at its outer origin (on Linux; on Windows an undecorated window with
+    /// a shadow may have invisible insets, which no test here can know). Client coordinates and the window found under the
+    /// pointer must be right for it as for a window with a title bar.
+    #[test]
+    fn a_frameless_window_has_its_page_at_its_outer_origin() {
+        let bare = Frame { inner_x: 900.0, inner_y: 100.0, ..frame("window-5", 900.0, 100.0, 500.0, 400.0) };
+        assert_eq!((bare.inner_x, bare.inner_y), (bare.x, bare.y));
+        assert_eq!(bare.client((950.0, 150.0)), (50.0, 50.0), "50 right and 50 below the outer corner");
+        assert_eq!(bare.client((900.0, 100.0)), (0.0, 0.0), "the corner is the origin");
+
+        let frames = [frame("main", 0.0, 0.0, 800.0, 600.0), bare];
+        let hit = window_under((1000.0, 120.0), &frames, &[], "main").expect("the frameless window is under the pointer");
+        assert_eq!(hit.label, "window-5");
+        assert_eq!(hit.client((1000.0, 120.0)), (100.0, 20.0));
+        assert_eq!(window_under((1000.0, 99.0), &frames, &[], "main"), None, "above its top edge is no window");
+    }
+
     #[test]
     fn the_focus_order_moves_a_window_to_the_front_and_forgets_it() {
         let mut mru = Mru::default();
