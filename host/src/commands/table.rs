@@ -584,6 +584,18 @@ macro_rules! host_commands {
                 run: history_sync::host_shell_set, web: unavailable
             }
             {
+                name: window_frame_status, shell: generated, group: history_sync, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: holzwave_host::window_frame::WindowFrameView,
+                run: history_sync::window_frame_status, web: unavailable
+            }
+            {
+                name: window_frame_set, shell: generated, group: history_sync, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [frame: String, buttons: String],
+                answers: holzwave_host::window_frame::WindowFrameView, fails: String,
+                run: history_sync::window_frame_set, web: unavailable
+            }
+            {
                 name: ai_turn_snapshot, shell: generated, group: ai, scope: none, mode: async, cap: CAP_DEFAULT,
                 args: [conversation: String],
                 answers: ChatState, fails: AiFault,

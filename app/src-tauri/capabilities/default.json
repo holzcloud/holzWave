@@ -92,6 +92,8 @@
     "allow-local-network-open-settings",
     "allow-host-shell-status",
     "allow-host-shell-set",
+    "allow-window-frame-status",
+    "allow-window-frame-set",
     "allow-monitor-sample",
     "allow-wsh-install",
     "allow-history-search",

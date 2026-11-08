@@ -102,6 +102,8 @@ fn main() {
     "local_network_open_settings",
     "host_shell_status",
     "host_shell_set",
+    "window_frame_status",
+    "window_frame_set",
     "monitor_sample",
     "wsh_install",
     "history_search",

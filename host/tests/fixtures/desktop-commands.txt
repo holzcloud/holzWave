@@ -78,6 +78,8 @@ local_network_answer|none|async|allow|holzwave_host::local_network::LocalNetwork
 local_network_open_settings|none|async||()|String
 host_shell_status|none|async||holzwave_host::host_shell::HostShellView|-
 host_shell_set|none|async|enabled|holzwave_host::host_shell::HostShellView|String
+window_frame_status|none|async||holzwave_host::window_frame::WindowFrameView|-
+window_frame_set|none|async|frame,buttons|holzwave_host::window_frame::WindowFrameView|String
 monitor_sample|none|async|pane|holzwave_core::monitor::Reading|String
 wsh_install|none|async|pane|String|String
 history_search|window|async|query,limit|Vec<holzwave_core::history::Hit>|-

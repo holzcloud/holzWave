@@ -5,6 +5,7 @@
 use holzwave_core::history::Hit;
 
 use crate::host_shell::HostShellView;
+use crate::window_frame::WindowFrameView;
 use crate::local_network::LocalNetworkView;
 use crate::state::AppCore;
 use crate::sync::SyncView;
@@ -75,4 +76,18 @@ pub fn host_shell_status(core: &AppCore) -> HostShellView {
 /// and the answer is the new view. Only panes started afterwards follow it. The browser build does not have it.
 pub fn host_shell_set(core: &AppCore, enabled: bool) -> Result<HostShellView, String> {
     core.host_shell().set(enabled)
+}
+
+/// The group `Window frame` of the Settings as the page needs it: `{applies, frame, buttons, pending}`. `applies` is false
+/// outside Windows and Linux (the page then draws nothing); the words are the stored choice and `pending` says that the
+/// choice differs from the one this window was built with. The browser build does not have it.
+pub fn window_frame_status(core: &AppCore) -> WindowFrameView {
+    core.window_frame().view()
+}
+
+/// The person chose the window frame and the style of the window buttons. Takes two words and nothing else; each word is
+/// checked against its table in the host before anything is written, and a word outside it is refused without being
+/// echoed. Windows that are open keep their frame; the next start reads the choice. The browser build does not have it.
+pub fn window_frame_set(core: &AppCore, frame: String, buttons: String) -> Result<WindowFrameView, String> {
+    core.window_frame().set(&frame, &buttons)
 }
