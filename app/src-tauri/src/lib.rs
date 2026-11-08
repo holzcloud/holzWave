@@ -440,7 +440,14 @@ pub fn run() {
             #[cfg(not(target_os = "android"))]
             {
                 // The frame is decided before any window exists, because it cannot be changed on a window that is built.
-                if let Some(facts) = windowframe::decide(OS) {
+                let input = windowframe::Inputs {
+                    os: OS,
+                    frame: holzwave_core::window_frame::FrameChoice::Auto,
+                    buttons: holzwave_core::window_frame::ButtonChoice::Auto,
+                    desktop: None,
+                    layout: None,
+                };
+                if let Some(facts) = windowframe::decide(&input) {
                     app.manage(facts);
                 }
                 // The first window is built here like every other (the configuration creates none), and visible at once as

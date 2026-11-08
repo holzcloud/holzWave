@@ -1,0 +1,1546 @@
+[
+  {
+    "name": "windows auto",
+    "os": "windows",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": null,
+    "layout": null,
+    "facts": {
+      "os": "windows",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"windows\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "windows own",
+    "os": "windows",
+    "frame": "own",
+    "buttons": "auto",
+    "desktop": null,
+    "layout": null,
+    "facts": {
+      "os": "windows",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"windows\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "windows own with round buttons",
+    "os": "windows",
+    "frame": "own",
+    "buttons": "round",
+    "desktop": null,
+    "layout": null,
+    "facts": {
+      "os": "windows",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"windows\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "windows auto with the layout of gnome",
+    "os": "windows",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "windows",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"windows\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "windows system",
+    "os": "windows",
+    "frame": "system",
+    "buttons": "auto",
+    "desktop": null,
+    "layout": null,
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "windows system with flat",
+    "os": "windows",
+    "frame": "system",
+    "buttons": "flat",
+    "desktop": null,
+    "layout": null,
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "gnome stock",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"close\"]};"
+  },
+  {
+    "name": "gnome ubuntu",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "ubuntu:GNOME",
+    "layout": "'appmenu:minimize,maximize,close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome ubuntu own",
+    "os": "linux",
+    "frame": "own",
+    "buttons": "auto",
+    "desktop": "ubuntu:GNOME",
+    "layout": "'appmenu:minimize,maximize,close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome pop",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "pop:GNOME",
+    "layout": "'appmenu:minimize,maximize,close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome budgie",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "Budgie:GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"close\"]};"
+  },
+  {
+    "name": "gnome in lower case",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "gnome",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"close\"]};"
+  },
+  {
+    "name": "gnome left layout",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'close,minimize,maximize:appmenu'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "left",
+      "buttons": [
+        "close",
+        "minimize",
+        "maximize"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"left\",\"buttons\":[\"close\",\"minimize\",\"maximize\"]};"
+  },
+  {
+    "name": "gnome left layout without a line ending",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'close:'",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "left",
+      "buttons": [
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"left\",\"buttons\":[\"close\"]};"
+  },
+  {
+    "name": "gnome windows order with carriage return",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:maximize,close'\r\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome buttons on both sides, close on the left",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'close:minimize,maximize'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "left",
+      "buttons": [
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"left\",\"buttons\":[\"close\"]};"
+  },
+  {
+    "name": "gnome buttons on both sides, close on the right",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'minimize:maximize,close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome layout names no window button, appmenu only",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"close\"]};"
+  },
+  {
+    "name": "gnome layout names no window button, colon only",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "':'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"close\"]};"
+  },
+  {
+    "name": "gnome layout names no window button, empty",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "''\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"close\"]};"
+  },
+  {
+    "name": "gnome layout names only unknown words",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'menu,icon,spacer:foo'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"close\"]};"
+  },
+  {
+    "name": "gnome layout with minimise and no close, right",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "':minimize,maximize'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\"]};"
+  },
+  {
+    "name": "gnome layout with minimise and no close, left",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'minimize,maximize:'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "left",
+      "buttons": [
+        "minimize",
+        "maximize"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"left\",\"buttons\":[\"minimize\",\"maximize\"]};"
+  },
+  {
+    "name": "gnome layout with unknown words between buttons",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'icon,menu:spacer,minimize,close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"close\"]};"
+  },
+  {
+    "name": "gnome unreadable layout, no text",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": null,
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome unreadable layout, an empty read",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome unreadable layout, only a line ending",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome unreadable layout, no colon",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome unreadable layout, two colons",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'close:minimize:maximize'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome unreadable layout, a button twice on one side",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'minimize,minimize:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome unreadable layout, a button on both sides",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'close:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome unreadable layout, an upper-case letter",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:Close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome unreadable layout, a character outside the set",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close;'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome unreadable layout, a space",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu: close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome unreadable layout, one opening quote only",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome unreadable layout, one closing quote only",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome unreadable layout, double quotes",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "\"appmenu:close\"\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome unreadable layout, no quotes",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "appmenu:close\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome unreadable layout, a quote inside the pair",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:cl'ose'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome unreadable layout, two lines",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n'extra'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome unreadable layout, text after the closing quote",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close' extra\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome unreadable layout, more than 128 bytes",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,menu,close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome unreadable layout, the text of an error",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "No such schema “org.gnome.desktop.wm.preferences”\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome unreadable layout, a type tag",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "uint32 1\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome layout of exactly 128 bytes is read",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"close\"]};"
+  },
+  {
+    "name": "gnome layout of 129 bytes is unreadable",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome flat buttons choice",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "flat",
+    "desktop": "GNOME",
+    "layout": "'appmenu:minimize,maximize,close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome flat buttons choice with the stock layout",
+    "os": "linux",
+    "frame": "own",
+    "buttons": "flat",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"close\"]};"
+  },
+  {
+    "name": "gnome round buttons choice",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "round",
+    "desktop": "GNOME",
+    "layout": "'appmenu:minimize,maximize,close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome classic alone is not gnome",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME-Classic",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome classic with gnome",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME-Classic:GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"close\"]};"
+  },
+  {
+    "name": "a name that only starts with gnome",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOMEX",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "a name that ends with gnome",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "X-GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "gnome with system frame",
+    "os": "linux",
+    "frame": "system",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "gnome with system frame and round",
+    "os": "linux",
+    "frame": "system",
+    "buttons": "round",
+    "desktop": "ubuntu:GNOME",
+    "layout": "'appmenu:minimize,maximize,close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "flat desktop KDE",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "KDE",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "flat desktop XFCE",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "XFCE",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "flat desktop X-Cinnamon",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "X-Cinnamon",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "flat desktop MATE",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "MATE",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "flat desktop LXQt",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "LXQt",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "flat desktop Budgie",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "Budgie",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "flat desktop Pantheon",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "Pantheon",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "flat desktop COSMIC",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "COSMIC",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "flat desktop sway",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "sway",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "flat desktop Hyprland",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "Hyprland",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "flat desktop unknown desktop",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "unknown desktop",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "flat desktop empty name",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "",
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "no desktop",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": null,
+    "layout": null,
+    "facts": {
+      "os": "linux",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "no desktop with a layout",
+    "os": "linux",
+    "frame": "own",
+    "buttons": "auto",
+    "desktop": null,
+    "layout": "'appmenu:close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "kde with round buttons",
+    "os": "linux",
+    "frame": "auto",
+    "buttons": "round",
+    "desktop": "KDE",
+    "layout": "'appmenu:minimize,maximize,close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "round",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"round\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "kde with flat buttons",
+    "os": "linux",
+    "frame": "own",
+    "buttons": "flat",
+    "desktop": "KDE",
+    "layout": "'appmenu:minimize,maximize,close'\n",
+    "facts": {
+      "os": "linux",
+      "style": "flat",
+      "side": "right",
+      "buttons": [
+        "minimize",
+        "maximize",
+        "close"
+      ]
+    },
+    "script": "window.__HW_FRAME__ = {\"os\":\"linux\",\"style\":\"flat\",\"side\":\"right\",\"buttons\":[\"minimize\",\"maximize\",\"close\"]};"
+  },
+  {
+    "name": "kde with system frame",
+    "os": "linux",
+    "frame": "system",
+    "buttons": "auto",
+    "desktop": "KDE",
+    "layout": null,
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no desktop with system frame",
+    "os": "linux",
+    "frame": "system",
+    "buttons": "auto",
+    "desktop": null,
+    "layout": null,
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'macos' frame auto",
+    "os": "macos",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'macos' frame own",
+    "os": "macos",
+    "frame": "own",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'macos' frame system",
+    "os": "macos",
+    "frame": "system",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'android' frame auto",
+    "os": "android",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'android' frame own",
+    "os": "android",
+    "frame": "own",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'android' frame system",
+    "os": "android",
+    "frame": "system",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'ios' frame auto",
+    "os": "ios",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'ios' frame own",
+    "os": "ios",
+    "frame": "own",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'ios' frame system",
+    "os": "ios",
+    "frame": "system",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'freebsd' frame auto",
+    "os": "freebsd",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'freebsd' frame own",
+    "os": "freebsd",
+    "frame": "own",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'freebsd' frame system",
+    "os": "freebsd",
+    "frame": "system",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'Windows' frame auto",
+    "os": "Windows",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'Windows' frame own",
+    "os": "Windows",
+    "frame": "own",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'Windows' frame system",
+    "os": "Windows",
+    "frame": "system",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'windows ' frame auto",
+    "os": "windows ",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'windows ' frame own",
+    "os": "windows ",
+    "frame": "own",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'windows ' frame system",
+    "os": "windows ",
+    "frame": "system",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'Linux' frame auto",
+    "os": "Linux",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'Linux' frame own",
+    "os": "Linux",
+    "frame": "own",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os 'Linux' frame system",
+    "os": "Linux",
+    "frame": "system",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os '' frame auto",
+    "os": "",
+    "frame": "auto",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os '' frame own",
+    "os": "",
+    "frame": "own",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  },
+  {
+    "name": "no facts for os '' frame system",
+    "os": "",
+    "frame": "system",
+    "buttons": "auto",
+    "desktop": "GNOME",
+    "layout": "'appmenu:close'\n",
+    "facts": null,
+    "script": null
+  }
+]
