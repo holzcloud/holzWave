@@ -8,11 +8,16 @@
 .bar-window {
   grid-row: 1; grid-column: 4; display: flex; align-items: stretch; margin-right: calc(-1 * var(--bar-pad));
 }
+/* In full screen the group is not drawn (the attribute is set from the window's state): `display: flex` above would win
+   over the browser's own rule for `hidden`. With no buttons the host name and the clock end at the bar's padding. */
+.bar-window[hidden] { display: none; }
+.frame-own.frame-right #bar:has(.bar-window[hidden]) .bar-info { margin-right: 0; }
 
 /* Flat: 46 by 32 px, the glyph alone, drawn with 1 px strokes in the current colour so it is the same on every platform and
    does not depend on a font. The floor of 28 px holds at any UI scale. */
 #bar .bar-window .wf-btn {
-  position: relative; width: max(28px, calc(46rem / 12)); height: max(28px, calc(32rem / 12)); min-width: 0; max-width: none;
+  position: relative; display: flex; align-items: center; justify-content: center;
+  width: max(28px, calc(46rem / 12)); height: max(28px, calc(32rem / 12)); min-width: 0; max-width: none;
   padding: 0; border: 0; border-radius: 0; background: none; color: var(--hw-dim); line-height: 1;
 }
 #bar .bar-window .wf-btn:hover { background: var(--hw-rose-wash); color: var(--hw-ink); }
@@ -20,20 +25,46 @@
 .os-windows #bar .bar-window .wf-btn[data-button="close"]:hover { background: var(--hw-danger); color: var(--hw-ground); }
 #bar .bar-window .wf-btn:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
 
-/* The close glyph: two crossing diagonals of 10 px by 10 px. */
-.wf-btn[data-button="close"]::before, .wf-btn[data-button="close"]::after {
-  content: ""; position: absolute; left: 50%; top: 50%; width: calc(14rem / 12); height: 1px; margin: -.5px 0 0 calc(-7rem / 12);
+/* The glyph: a box of 10 px by 10 px that the two pseudo elements draw in, so a press on it is a press on the button. The
+   maximise button of a maximised window shows the restore drawing: that is a shape, not a colour, and its name changes too. */
+.wf-glyph { position: relative; display: block; flex: none; width: calc(10rem / 12); height: calc(10rem / 12); pointer-events: none; }
+.wf-glyph::before, .wf-glyph::after { content: ""; position: absolute; box-sizing: border-box; display: none; }
+
+/* Minimise: one horizontal line. */
+.wf-glyph[data-glyph="minimize"]::before { display: block; left: 0; right: 0; top: 50%; height: 1px; background: currentColor; }
+
+/* Maximise: a square outline. */
+.wf-glyph[data-glyph="maximize"]::before { display: block; inset: 0; border: 1px solid currentColor; }
+
+/* Restore: two square outlines. The front one sits at the bottom left, the back one 2 px up and to the right, drawn by its top
+   and right edge only. */
+.wf-glyph[data-glyph="restore"]::before {
+  display: block; left: 0; bottom: 0; width: calc(8rem / 12); height: calc(8rem / 12); border: 1px solid currentColor;
+}
+.wf-glyph[data-glyph="restore"]::after {
+  display: block; right: 0; top: 0; width: calc(8rem / 12); height: calc(8rem / 12);
+  border-top: 1px solid currentColor; border-right: 1px solid currentColor;
+}
+
+/* Close: two crossing diagonals, each as long as the diagonal of the 10 px box. */
+.wf-glyph[data-glyph="close"]::before, .wf-glyph[data-glyph="close"]::after {
+  display: block; left: 50%; top: 50%; width: calc(14rem / 12); height: 1px; margin: -.5px 0 0 calc(-7rem / 12);
   background: currentColor;
 }
-.wf-btn[data-button="close"]::before { transform: rotate(45deg); }
-.wf-btn[data-button="close"]::after { transform: rotate(-45deg); }
+.wf-glyph[data-glyph="close"]::before { transform: rotate(45deg); }
+.wf-glyph[data-glyph="close"]::after { transform: rotate(-45deg); }
 
 :root:not(.motion-reduce) #bar .bar-window .wf-btn {
   transition: background-color 160ms cubic-bezier(.2, .7, .3, 1), color 160ms cubic-bezier(.2, .7, .3, 1);
 }
 
+/* Higher contrast needs no rule of its own: the rest tone is `--hw-dim`, which `contrast-high` swaps for the stronger token
+   like the rest of the bar (chrome.css). Forced colours: the strokes are the system's text colour, the button under the pointer
+   and the focused one are `Highlight` with a visible 1 px border (the system paints the fill), and the ring stays 2 px. */
 @media (forced-colors: active) {
-  :root #bar .bar-window .wf-btn { color: ButtonText; forced-color-adjust: none; background: none; }
-  :root #bar .bar-window .wf-btn:hover, :root #bar .bar-window .wf-btn:focus-visible { color: HighlightText; background: Highlight; }
-  :root #bar .bar-window .wf-btn:focus-visible { outline: 2px solid ButtonText; }
+  :root #bar .bar-window .wf-btn { color: ButtonText; background: none; }
+  :root #bar .bar-window .wf-btn:hover,
+  :root.os-windows #bar .bar-window .wf-btn[data-button="close"]:hover,
+  :root #bar .bar-window .wf-btn:focus-visible { color: Highlight; background: none; border: 1px solid Highlight; }
+  :root #bar .bar-window .wf-btn:focus-visible { outline: 2px solid Highlight; }
 }
