@@ -22,18 +22,18 @@ export interface ButtonRow {
   readonly word: ButtonWord;
   readonly name: string;
   readonly glyph: GlyphWord;
-  readonly command: "minimize" | "toggle_maximize" | "close";
+  readonly press: "minimize" | "toggle_maximize" | "close";
 }
 
 /** The three buttons in the order Windows draws them (design 6.33, window buttons). */
 export const BUTTONS: readonly ButtonRow[] = [
-  { word: "minimize", name: "Minimize", glyph: "minimize", command: "minimize" },
-  { word: "maximize", name: "Maximize", glyph: "maximize", command: "toggle_maximize" },
-  { word: "close", name: "Close", glyph: "close", command: "close" },
+  { word: "minimize", name: "Minimize", glyph: "minimize", press: "minimize" },
+  { word: "maximize", name: "Maximize", glyph: "maximize", press: "toggle_maximize" },
+  { word: "close", name: "Close", glyph: "close", press: "close" },
 ];
 
 /** The row of the restore state: the maximise button of a maximised window (design 6.33, window buttons and states). */
-const RESTORE: ButtonRow = { word: "maximize", name: "Restore", glyph: "restore", command: "toggle_maximize" };
+const RESTORE: ButtonRow = { word: "maximize", name: "Restore", glyph: "restore", press: "toggle_maximize" };
 
 /** The maximise row for a window that is maximised or not: the other two rows never change with the state. */
 export function maximizeRow(maximized: boolean): ButtonRow {

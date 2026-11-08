@@ -68,7 +68,7 @@ export async function initWindowFrame(bar: HTMLElement): Promise<void> {
     show(button, row);
     buttons.set(row.word, button);
     button.addEventListener("click", () => {
-      const command = `plugin:window|${row.command}`;
+      const command = `plugin:window|${row.press}`;
       if (!PRESS.has(command)) return;
       // The runtime acts on the window it is called from; a refusal leaves the window as it is.
       const sent = call(command).catch(() => {});

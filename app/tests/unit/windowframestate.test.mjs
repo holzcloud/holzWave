@@ -78,9 +78,9 @@ test("the button table has exactly the three words of the shell, each row comple
   assert.deepEqual(BUTTONS.map((row) => row.word), ["minimize", "maximize", "close"]);
   assert.deepEqual(BUTTONS.map((row) => row.name), ["Minimize", "Maximize", "Close"]);
   assert.deepEqual(BUTTONS.map((row) => row.glyph), ["minimize", "maximize", "close"]);
-  assert.deepEqual(BUTTONS.map((row) => row.command), ["minimize", "toggle_maximize", "close"]);
+  assert.deepEqual(BUTTONS.map((row) => row.press), ["minimize", "toggle_maximize", "close"]);
   for (const row of BUTTONS) {
-    assert.deepEqual(Object.keys(row).sort(), ["command", "glyph", "name", "word"]);
+    assert.deepEqual(Object.keys(row).sort(), ["glyph", "name", "press", "word"]);
     for (const value of Object.values(row)) assert.ok(typeof value === "string" && value.length > 0);
   }
   assert.deepEqual(readFrame(WINDOWS()).buttons, BUTTONS.map((row) => row.word), "the reader and the table agree on the order");
@@ -91,7 +91,7 @@ test("the maximise row follows the window and the other two rows never do", () =
   assert.equal(restore.name, "Restore");
   assert.equal(restore.glyph, "restore");
   assert.equal(restore.word, "maximize");
-  assert.equal(restore.command, "toggle_maximize", "a press is the same command in both states");
+  assert.equal(restore.press, "toggle_maximize", "a press is the same command in both states");
   const plain = maximizeRow(false);
   assert.equal(plain.name, "Maximize");
   assert.equal(plain.glyph, "maximize");
