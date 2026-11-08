@@ -79,6 +79,27 @@ fn lib_rs_decides_the_frame_in_one_place_and_creates_no_window_from_the_configur
 }
 
 #[test]
+fn the_setup_decides_the_frame_from_the_choice_the_core_read_at_start() {
+    let code = lib_code();
+    // The stored file, the decision and the dialog's `pending` flag agree only if all three come from the one read at
+    // start: the pair `started()` returns, never a literal choice and never a second read of the file.
+    let started = code.find("window_frame().started()").expect("setup asks the core for the choice it started with");
+    let call = code.find("windowframe::facts_for_this_system(").expect("setup decides through the one function that reads the system");
+    assert!(started < call, "the started choice is read before the decision");
+    let line = code[call..].lines().next().expect("a line");
+    assert!(line.contains("facts_for_this_system(frame, buttons)"), "the pair of started() goes to the decision: {line}");
+    let binding = code[..started].lines().last().expect("a line");
+    assert!(binding.contains("let (frame, buttons) ="), "the pair is bound from started(): {binding}");
+    for literal in ["FrameChoice::", "ButtonChoice::"] {
+        assert!(!code.contains(literal), "{literal} is a literal choice in lib.rs: the stored one decides");
+    }
+    // `decide` and its inputs belong to windowframe.rs: lib.rs calls only the function that reads the system.
+    assert!(!code.contains("windowframe::decide"), "lib.rs does not call decide itself");
+    assert!(!code.contains("windowframe::Inputs"), "lib.rs builds no inputs of the decision itself");
+    assert_eq!(code.matches("facts_for_this_system(").count(), 1, "the system is read in one place");
+}
+
+#[test]
 fn the_identifier_and_the_icons_are_fixed() {
     let conf = conf();
     // The identifier is the application id on every platform (bundle id, Wayland app id, config directory name).

@@ -11,7 +11,11 @@
 //! page's tests read as well. The session type (X11 or Wayland) is deliberately no input: the own frame is drawn under both
 //! (an owner decision), and whether a Wayland window can be moved and resized cannot be detected while the app runs.
 
+use std::time::Duration;
+
 use holzwave_core::window_frame::{ButtonChoice, FrameChoice};
+
+use crate::textscale::{Helper, command_of, output_within};
 
 /// The name of the page global that holds the facts (`app/src/windowframe.ts` reads the same name).
 pub const GLOBAL: &str = "__HW_FRAME__";
@@ -21,6 +25,10 @@ const DESKTOP_LIMIT: usize = 4096;
 
 /// The longest layout text that is read, between the quotes `gsettings` prints. The stock values are under 40 bytes.
 const LAYOUT_LIMIT: usize = 128;
+
+/// The longest the layout helper may run before it is given up. The setup waits on it before the first window exists, so
+/// it is shorter than the text size helper's 750 ms; a real answer takes a few milliseconds.
+const LAYOUT_DEADLINE: Duration = Duration::from_millis(300);
 
 /// The operating systems that get an own frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -253,6 +261,42 @@ pub fn decide(input: &Inputs) -> Option<FrameFacts> {
         FrameChoice::Auto => own_frame(input),
         FrameChoice::Own => own_frame(input),
     }
+}
+
+/// `gsettings get` of the GNOME window manager's `button-layout`, by the absolute path the text size helper uses. It is
+/// started with a cleared environment and closed standard input, and its output is read to at most 4096 bytes
+/// (`textscale::command_of` and `output_within`).
+fn layout_helper() -> Helper {
+    Helper {
+        program: "/usr/bin/gsettings".to_owned(),
+        args: ["get", "org.gnome.desktop.wm.preferences", "button-layout"].map(str::to_owned).into(),
+    }
+}
+
+/// The frame for `os` (as `std::env::consts::OS` spells it) and the stored choices, reading the system through `env`
+/// (the lookup of a process variable) and `run` (which starts a helper and gives its output, or `None` for a helper that
+/// did not answer). The layout helper runs only on Linux, with the own frame, under a GNOME desktop: never on another
+/// system, with the frame `system`, or under another desktop. A layout that is not valid UTF-8 is unreadable, not a
+/// lossy one, and an unreadable or missing answer gives the documented default (see [`parse_layout`]).
+pub fn facts_via(
+    os: &str,
+    frame: FrameChoice,
+    buttons: ButtonChoice,
+    env: &dyn Fn(&str) -> Option<String>,
+    run: &dyn Fn(&Helper) -> Option<Vec<u8>>,
+) -> Option<FrameFacts> {
+    let desktop = env("XDG_CURRENT_DESKTOP");
+    let reads_layout = os == "linux" && frame != FrameChoice::System && is_gnome(desktop.as_deref());
+    let layout = if reads_layout { run(&layout_helper()).and_then(|bytes| String::from_utf8(bytes).ok()) } else { None };
+    decide(&Inputs { os, frame, buttons, desktop: desktop.as_deref(), layout: layout.as_deref() })
+}
+
+/// The frame of this system for the choices the windows are built with. Blocks for up to the layout deadline on a GNOME
+/// desktop with the own frame, and not at all elsewhere: call it before the first window exists.
+pub fn facts_for_this_system(frame: FrameChoice, buttons: ButtonChoice) -> Option<FrameFacts> {
+    facts_via(std::env::consts::OS, frame, buttons, &|name| std::env::var(name).ok(), &|helper| {
+        output_within(command_of(helper), LAYOUT_DEADLINE)
+    })
 }
 
 #[cfg(test)]
@@ -621,5 +665,132 @@ mod tests {
         ] {
             assert!(!word.is_empty() && word.chars().all(|c| c.is_ascii_lowercase()), "word {word}");
         }
+    }
+
+    // ---- the reader of the system -----------------------------------------------------------------------
+
+    /// A runner that fails the test when it is called.
+    fn never(_: &Helper) -> Option<Vec<u8>> {
+        panic!("the layout helper was started");
+    }
+
+    fn env_of(desktop: Option<&'static str>) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            assert_eq!(name, "XDG_CURRENT_DESKTOP", "the desktop name is the only variable read");
+            desktop.map(str::to_owned)
+        }
+    }
+
+    fn answers(text: &'static [u8]) -> impl Fn(&Helper) -> Option<Vec<u8>> {
+        move |helper| {
+            assert_eq!(helper, &layout_helper());
+            Some(text.to_vec())
+        }
+    }
+
+    fn shape(facts: Option<FrameFacts>) -> Option<(Style, Side, Vec<Button>)> {
+        facts.map(|f| (f.style, f.side, f.buttons))
+    }
+
+    #[test]
+    fn the_layout_helper_is_gsettings_by_absolute_path_with_its_exact_arguments_and_a_short_deadline() {
+        let helper = layout_helper();
+        assert_eq!(helper.program, "/usr/bin/gsettings");
+        assert!(std::path::Path::new(&helper.program).is_absolute());
+        assert_eq!(helper.args, ["get", "org.gnome.desktop.wm.preferences", "button-layout"]);
+        assert!(LAYOUT_DEADLINE <= Duration::from_millis(300));
+        assert!(LAYOUT_DEADLINE > Duration::ZERO);
+    }
+
+    #[test]
+    fn the_layout_helper_is_not_started_for_any_system_choice_or_desktop_that_does_not_need_it() {
+        let own = [FrameChoice::Auto, FrameChoice::Own];
+        for os in ["macos", "windows", "android", "ios", "freebsd", ""] {
+            for frame in [FrameChoice::Auto, FrameChoice::Own, FrameChoice::System] {
+                facts_via(os, frame, ButtonChoice::Auto, &env_of(Some("GNOME")), &never);
+            }
+        }
+        for buttons in [ButtonChoice::Auto, ButtonChoice::Flat, ButtonChoice::Round] {
+            for desktop in [Some("GNOME"), Some("ubuntu:GNOME")] {
+                assert_eq!(facts_via("linux", FrameChoice::System, buttons, &env_of(desktop), &never), None);
+            }
+            for desktop in [Some("KDE"), Some("XFCE"), Some("GNOME-Classic"), Some("GNOMEX"), Some(""), None] {
+                for frame in own {
+                    assert!(facts_via("linux", frame, buttons, &env_of(desktop), &never).is_some(), "{desktop:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_layout_helper_is_started_on_gnome_with_the_own_frame_and_its_answer_decides() {
+        let run = |text, desktop, frame| shape(facts_via("linux", frame, ButtonChoice::Auto, &env_of(desktop), &answers(text)));
+        assert_eq!(run(b"'appmenu:close'\n", Some("GNOME"), FrameChoice::Auto), Some((Style::Round, Side::Right, vec![Button::Close])));
+        assert_eq!(
+            run(b"'appmenu:minimize,maximize,close'\n", Some("ubuntu:GNOME"), FrameChoice::Own),
+            Some((Style::Round, Side::Right, MCX.to_vec()))
+        );
+        assert_eq!(
+            run(b"'close,minimize,maximize:appmenu'\n", Some("GNOME"), FrameChoice::Auto),
+            Some((Style::Round, Side::Left, vec![Button::Close, Button::Minimize, Button::Maximize]))
+        );
+    }
+
+    #[test]
+    fn a_helper_that_did_not_answer_gives_the_round_right_three_button_default_on_gnome() {
+        let default = Some((Style::Round, Side::Right, MCX.to_vec()));
+        let gnome = env_of(Some("GNOME"));
+        let call = |run: &dyn Fn(&Helper) -> Option<Vec<u8>>| {
+            shape(facts_via("linux", FrameChoice::Auto, ButtonChoice::Auto, &gnome, run))
+        };
+        assert_eq!(call(&|_| None), default, "no program or a timeout");
+        assert_eq!(call(&|_| Some(Vec::new())), default, "an empty answer");
+        assert_eq!(call(&|_| Some(vec![0xff, 0xfe, b'\n'])), default, "bytes that are not UTF-8");
+        assert_eq!(call(&|_| Some(b"'appmenu:close\xff'\n".to_vec())), default, "a stray byte inside the pair");
+        assert_eq!(
+            call(&|_| Some("No such schema \u{201c}org.gnome.desktop.wm.preferences\u{201d}\n".as_bytes().to_vec())),
+            default,
+            "the text of an error"
+        );
+    }
+
+    #[test]
+    fn a_text_cut_off_at_the_output_limit_is_unreadable_and_never_a_partial_layout() {
+        let gnome = env_of(Some("GNOME"));
+        // What `output_within` returns for a helper that never stops: the first 4096 bytes, with no closing quote.
+        let mut endless = b"'appmenu:close,".to_vec();
+        endless.resize(4096, b'x');
+        let facts = facts_via("linux", FrameChoice::Auto, ButtonChoice::Auto, &gnome, &|_| Some(endless.clone()));
+        assert_eq!(shape(facts), Some((Style::Round, Side::Right, MCX.to_vec())));
+        // A text cut in the middle of a layout has lost its closing quote.
+        let facts = facts_via("linux", FrameChoice::Auto, ButtonChoice::Auto, &gnome, &answers(b"'close,minimize,maxi"));
+        assert_eq!(shape(facts), Some((Style::Round, Side::Right, MCX.to_vec())));
+    }
+
+    #[test]
+    fn the_style_choice_still_decides_when_the_layout_is_read() {
+        let flat = facts_via("linux", FrameChoice::Auto, ButtonChoice::Flat, &env_of(Some("GNOME")), &answers(b"'appmenu:close'\n"));
+        assert_eq!(shape(flat), Some((Style::Flat, Side::Right, vec![Button::Close])));
+    }
+
+    #[test]
+    fn the_real_read_gives_no_facts_for_the_system_frame_and_never_starts_anything_for_it() {
+        // Whatever this machine is, the frame `system` is no own frame and decides without a helper.
+        assert_eq!(facts_for_this_system(FrameChoice::System, ButtonChoice::Auto), None);
+    }
+
+    // Unix test children only: the Windows test target has no `sleep` (and still compiles this module).
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_helper_costs_the_layout_within_the_deadline_and_never_the_start() {
+        use std::time::Instant;
+        let hung = |_: &Helper| {
+            let helper = Helper { program: "/bin/sleep".to_owned(), args: vec!["30".to_owned()] };
+            output_within(command_of(&helper), LAYOUT_DEADLINE)
+        };
+        let start = Instant::now();
+        let facts = facts_via("linux", FrameChoice::Auto, ButtonChoice::Auto, &env_of(Some("GNOME")), &hung);
+        assert_eq!(shape(facts), Some((Style::Round, Side::Right, MCX.to_vec())));
+        assert!(start.elapsed() < Duration::from_secs(5), "waited {:?} for a helper that hangs", start.elapsed());
     }
 }

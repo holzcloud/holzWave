@@ -167,9 +167,9 @@ impl Sink for TauriSink {
 /// source of what every window is like; the configuration itself creates none on a desktop (see `run`). `visible` says
 /// whether it shows at once: the first window does, as a configuration window always did; a later window is hidden and its
 /// page shows it with `window_ready` once it has drawn, so that it never flashes empty. When the system decided an own frame
-/// ([`windowframe::decide`], held in the app's state) the window has no system title bar and its page gets the facts before
-/// it runs. A label that exists is an error. Never call it with a lock of the core held (a window event of the new window
-/// takes them), nor from a synchronous command (Windows deadlocks there, wry 583).
+/// ([`windowframe::facts_for_this_system`], held in the app's state) the window has no system title bar and its page gets
+/// the facts before it runs. A label that exists is an error. Never call it with a lock of the core held (a window event of
+/// the new window takes them), nor from a synchronous command (Windows deadlocks there, wry 583).
 fn build_window(app: &AppHandle, label: &str, visible: bool) -> Result<WebviewWindow, String> {
     let mut conf = app.config().app.windows.first().cloned().ok_or("the configuration has no window")?;
     conf.label = label.to_owned();
@@ -440,14 +440,11 @@ pub fn run() {
             #[cfg(not(target_os = "android"))]
             {
                 // The frame is decided before any window exists, because it cannot be changed on a window that is built.
-                let input = windowframe::Inputs {
-                    os: OS,
-                    frame: holzwave_core::window_frame::FrameChoice::Auto,
-                    buttons: holzwave_core::window_frame::ButtonChoice::Auto,
-                    desktop: None,
-                    layout: None,
-                };
-                if let Some(facts) = windowframe::decide(&input) {
+                // The choice the first window is built with is the one the core read at start, so the stored file, this
+                // decision and the dialog's `pending` flag agree; every window shares the one decision. On a GNOME desktop
+                // with the own frame this waits for the layout helper for at most its short deadline.
+                let (frame, buttons) = core.window_frame().started();
+                if let Some(facts) = windowframe::facts_for_this_system(frame, buttons) {
                     app.manage(facts);
                 }
                 // The first window is built here like every other (the configuration creates none), and visible at once as

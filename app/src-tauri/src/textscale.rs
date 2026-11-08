@@ -33,9 +33,9 @@ const OUTPUT_LIMIT: u64 = 4096;
 
 /// A program to start and its arguments, one entry per argument.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Helper {
-    program: String,
-    args: Vec<String>,
+pub(crate) struct Helper {
+    pub(crate) program: String,
+    pub(crate) args: Vec<String>,
 }
 
 /// `reg.exe query` of the accessibility key's `TextScaleFactor`, under `<SystemRoot>\System32`. `env` looks up a
@@ -94,7 +94,7 @@ fn parse_gsettings(output: &str) -> u32 {
 }
 
 /// A command for `helper`: absolute program, no inherited environment, nothing on standard input or error.
-fn command_of(helper: &Helper) -> Command {
+pub(crate) fn command_of(helper: &Helper) -> Command {
     let mut command = Command::new(&helper.program);
     command.args(&helper.args).env_clear().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     #[cfg(windows)]
@@ -112,7 +112,7 @@ fn command_of(helper: &Helper) -> Command {
 /// A child that is over time is killed and reaped on a short-lived thread, so the caller never waits for it: a
 /// process in an uninterruptible call does not die on a signal, and waiting for it would be the hang this function
 /// exists to avoid (the same shape as `output_within` of the core's `pty.rs`, which is private to that file).
-fn output_within(mut command: Command, deadline: Duration) -> Option<Vec<u8>> {
+pub(crate) fn output_within(mut command: Command, deadline: Duration) -> Option<Vec<u8>> {
     let mut child = command.spawn().ok()?;
     let stdout = child.stdout.take()?;
     let (tx, rx) = mpsc::channel();
