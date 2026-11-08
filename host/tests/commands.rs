@@ -1518,7 +1518,7 @@ impl holzwave_host::local_network::Source for CountingSource {
     }
 }
 
-const UNAVAILABLE_BROWSER: [(&str, &str); 7] = [
+const UNAVAILABLE_BROWSER: [(&str, &str); 9] = [
     ("open_url", r#"{"url":"ftp://example.test/x","pane":null}"#),
     ("reveal_path", r#"{"path":"/no/such/holzwave/path","base":null}"#),
     ("local_network_status", "{}"),
@@ -1526,6 +1526,8 @@ const UNAVAILABLE_BROWSER: [(&str, &str); 7] = [
     ("local_network_open_settings", "{}"),
     ("host_shell_status", "{}"),
     ("host_shell_set", r#"{"enabled":true}"#),
+    ("window_frame_status", "{}"),
+    ("window_frame_set", r#"{"frame":"own","buttons":"flat"}"#),
 ];
 
 #[test]
@@ -1557,10 +1559,11 @@ fn the_commands_that_need_the_desktop_answer_one_sentence_and_run_nothing() {
     assert_eq!((world.events(), world.opened()), (events, windows));
     assert!(!world.dir.join("local-network.json").exists(), "no choice was stored");
     assert!(!world.dir.join("host_shell.json").exists(), "no host shell choice was stored");
+    assert!(!world.dir.join("window_frame.json").exists(), "no window frame choice was stored");
 }
 
 #[test]
-fn the_unavailable_rows_of_this_group_are_exactly_these_seven() {
+fn the_unavailable_rows_of_this_group_are_exactly_these_nine() {
     let rows: BTreeSet<&str> =
         COMMANDS.iter().filter(|row| row.web == Web::Unavailable && !FIRST_GROUPS.contains(&row.group) && row.group != "vault" && row.group != "handover").map(|row| row.name).collect();
     // The group `vault` has its six unavailable rows pinned in `vault_commands.rs`, and `handover` its two in `handover.rs`.
@@ -1599,6 +1602,64 @@ fn outside_a_flatpak_the_host_shell_answers_that_it_does_not_apply_and_refuses_t
     assert!(!world.dir.join("host_shell.json").exists(), "nothing was written");
     assert!(!world.dir.join("host_shell.json.bad").exists());
     assert!(!history_sync::host_shell_status(&world.core).applies, "and nothing changed");
+}
+
+#[test]
+fn the_window_frame_rows_are_desktop_only_and_take_two_words() {
+    let status = lookup("window_frame_status").expect("a row");
+    let set = lookup("window_frame_set").expect("a row");
+    for row in [status, set] {
+        assert_eq!((row.group, row.scope, row.mode, row.web), ("history_sync", Scope::None, Mode::Async, Web::Unavailable), "{}", row.name);
+    }
+    assert!(status.args.is_empty() && status.error.is_none(), "the status takes nothing and cannot fail");
+    assert_eq!(
+        set.args.iter().map(|arg| (arg.name, arg.ty)).collect::<Vec<_>>(),
+        [("frame", "String"), ("buttons", "String")],
+        "two words and nothing else"
+    );
+    assert_eq!(set.error, Some("String"));
+    assert_eq!(status.answer.split_whitespace().collect::<String>(), "holzwave_host::window_frame::WindowFrameView");
+    assert_eq!(set.answer.split_whitespace().collect::<String>(), "holzwave_host::window_frame::WindowFrameView");
+}
+
+#[test]
+fn the_window_frame_view_applies_on_windows_and_linux_only_and_a_set_checks_its_words_first() {
+    use holzwave_core::platform::Os;
+    let applies = matches!(Os::current(), Os::Windows | Os::Linux);
+    let world = World::new("window-frame-commands");
+    let view = history_sync::window_frame_status(&world.core);
+    assert_eq!(view.applies, applies, "the group applies on Windows and Linux only");
+    assert_eq!((view.frame.as_str(), view.buttons.as_str()), ("auto", "auto"));
+    assert!(!view.pending);
+
+    // A word outside the table is refused on every system, writes nothing and is not echoed.
+    let hostile = "evil-word-\u{1b}[31m-/etc/passwd";
+    for (frame, buttons) in [(hostile, "flat"), ("own", hostile), (hostile, hostile), ("", ""), ("OWN", "flat")] {
+        let refused =
+            history_sync::window_frame_set(&world.core, frame.to_owned(), buttons.to_owned()).expect_err("a word outside the table is refused");
+        assert!(!refused.contains("evil-word") && !refused.contains("passwd"), "the word was echoed: {refused}");
+        let dir = world.dir.to_string_lossy().into_owned();
+        assert!(!refused.contains(&dir), "the data directory was named: {refused}");
+    }
+    assert!(!world.dir.join("window_frame.json").exists(), "nothing was written");
+    assert!(!world.dir.join("window_frame.json.bad").exists());
+
+    // Two valid words are stored where the group applies and refused, without a write, elsewhere.
+    let set = history_sync::window_frame_set(&world.core, "own".to_owned(), "flat".to_owned());
+    if applies {
+        let set = set.expect("stored on Windows and Linux");
+        assert_eq!((set.applies, set.frame.as_str(), set.buttons.as_str()), (true, "own", "flat"));
+        assert!(world.dir.join("window_frame.json").exists(), "the choice was written");
+    } else {
+        set.expect_err("refused where the group does not apply");
+        assert!(!world.dir.join("window_frame.json").exists(), "nothing was written");
+    }
+    let after = history_sync::window_frame_status(&world.core);
+    if applies {
+        assert_eq!((after.frame.as_str(), after.buttons.as_str()), ("own", "flat"));
+    } else {
+        assert_eq!((after.frame.as_str(), after.buttons.as_str()), ("auto", "auto"));
+    }
 }
 
 // ---- connections, login prompts and the installation of wsh --------------------------------------------------------------
@@ -1925,9 +1986,10 @@ fn rows_expected() -> usize {
     golden_commands().len()
 }
 
-/// The 23 commands the browser build does not have: eight of the first table plan, seven of the second, the six that
-/// drive the vault of a phone and the two that hand a file over on a phone.
-const THE_UNAVAILABLE: [&str; 23] = [
+/// The 25 commands the browser build does not have: eight of the first table plan, nine of the second (the two that
+/// carry the window frame choices among them), the six that drive the vault of a phone and the two that hand a file over on
+/// a phone.
+const THE_UNAVAILABLE: [&str; 25] = [
     "attach_pane",
     "attach_tab",
     "clipboard_text",
@@ -1951,6 +2013,8 @@ const THE_UNAVAILABLE: [&str; 23] = [
     "vault_reset",
     "vault_status",
     "vault_unlock",
+    "window_frame_set",
+    "window_frame_status",
 ];
 
 /// The four commands that carry a document or a long typed message and so take a larger argument text.
@@ -2230,7 +2294,7 @@ fn surface_file_lists_every_golden_command() {
     let lines = surface_lines();
     let surface_names: BTreeSet<&str> = lines.iter().map(|(name, _)| *name).collect();
 
-    assert_eq!(lines.len(), 132, "one line for each command that was declared");
+    assert_eq!(lines.len(), 134, "one line for each command that was declared");
     assert_eq!(surface_names.len(), lines.len(), "no command twice");
     assert_eq!(surface_names, golden_names);
     for (_, line) in &lines {

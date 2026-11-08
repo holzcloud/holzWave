@@ -37,6 +37,7 @@ mod protocol {
 
     use holzwave_host::ai_device::{DeviceState, DeviceView};
     use holzwave_host::host_shell::HostShellView;
+    use holzwave_host::window_frame::WindowFrameView;
     use holzwave_host::local_network::LocalNetworkView;
     use holzwave_core::local_network::State as LnState;
     use holzwave_host::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, RemovalView, TicketView};
@@ -709,6 +710,12 @@ mod protocol {
                     to_value(&HostShellView { applies: true, state: "off" }),
                     to_value(&HostShellView { applies: true, state: "on" }),
                     to_value(&HostShellView { applies: true, state: "unavailable" }),
+                ],
+                "window_frame": [
+                    to_value(&WindowFrameView { applies: false, frame: "auto".into(), buttons: "auto".into(), pending: false }),
+                    to_value(&WindowFrameView { applies: true, frame: "auto".into(), buttons: "auto".into(), pending: false }),
+                    to_value(&WindowFrameView { applies: true, frame: "system".into(), buttons: "round".into(), pending: true }),
+                    to_value(&WindowFrameView { applies: true, frame: "own".into(), buttons: "flat".into(), pending: false }),
                 ],
                 "integration": integration_samples(),
                 "ai": {

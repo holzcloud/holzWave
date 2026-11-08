@@ -1002,6 +1002,32 @@
         "current": null,
         "total": 0
       }
+    ],
+    "window_frame": [
+      {
+        "applies": false,
+        "buttons": "auto",
+        "frame": "auto",
+        "pending": false
+      },
+      {
+        "applies": true,
+        "buttons": "auto",
+        "frame": "auto",
+        "pending": false
+      },
+      {
+        "applies": true,
+        "buttons": "round",
+        "frame": "system",
+        "pending": true
+      },
+      {
+        "applies": true,
+        "buttons": "flat",
+        "frame": "own",
+        "pending": false
+      }
     ]
   },
   "app_info": {
@@ -1461,6 +1487,11 @@
       "text"
     ],
     "widgets_list": [],
+    "window_frame_set": [
+      "frame",
+      "buttons"
+    ],
+    "window_frame_status": [],
     "window_ready": [],
     "wsh_install": [
       "pane"
