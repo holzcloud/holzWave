@@ -144,6 +144,16 @@ The own window frame of Windows and Linux (the page's bar is the window bar, wit
 |---|---|
 | ![The window as a browser shows it: no window buttons, status line marks, the upload target and the Download row menu](docs/design/web-window.png) | ![The holzWave window inside a browser tab](docs/design/platforms/web.png) |
 
+Drawings of the design for the server as a sync target and for terminal sessions that live on the server. None of it is built yet, and nothing here was run on a real phone or against a real server.
+
+| The server row and its sessions | The writer label and the states of a remote pane | The sessions on a phone |
+|---|---|---|
+| ![Drawing of the design: the Connections view with the server above the saved connections, its two sessions with Attach and End, and behind it a remote pane whose header says WRITING](docs/design/server-sessions.png) | ![Drawing of the design: the writer label WRITING, WATCHING and FREE as a square and a word with Take over, the six states of a remote pane and the server row in its states](docs/design/server-pane-states.png) | ![Drawing of the design: the sessions sheet of the Connections view and a remote pane that watches, with the label WATCHING and Take over](docs/design/server-sessions-phone.png) |
+
+| Signing in to a server | Devices and the two switches | The target of the sync |
+|---|---|---|
+| ![Drawing of the design: the two steps of the sign-in in the app, the page Authorize device of the browser and the states of the sign-in](docs/design/device-authorize.png) | ![Drawing of the design: the list of devices of a person and of an administrator, and the group Device access with the switches Sync target and Remote sessions](docs/design/device-lists.png) | ![Drawing of the design: the sync popover with the choice WebDAV or holzWave server, set up and connected](docs/design/sync-transport.png) |
+
 | Links at rest and under the pointer | The question before a link opens | Pictures in a pane |
 |---|---|---|
 | ![Terminal text with two dotted links at rest, one solid under the pointer with its address in the status line and a notice beside it that says why a click could not open it, one in rose under the open gesture, one underlined by the program, and an address with a scheme that is not allowed left as plain text](docs/design/links.png) | ![The dialog Open this link? that shows the text of a link and the address it goes to, with Cancel focused and Open](docs/design/link-ask.png) | ![A pane with pictures below the cell backgrounds, between the backgrounds and the text and above the text, pictures drawn by placeholder characters, a cursor and a selection over a picture, and pictures clipped at the pane edges](docs/design/images.png) |
