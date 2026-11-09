@@ -1887,27 +1887,25 @@ impl Tx<'_> {
             .execute(params![window_secs, now, cap(max_rows)])?)
     }
 
-    /// Removes invitations and bootstrap tokens that expired unused, at most `max_rows` of them in all.
+    /// Removes what expired, at most `max_rows` rows in all: invitations and bootstrap tokens that expired unused, device
+    /// grants past their time and devices whose token expired.
     pub fn tokens_purge(&self, now: i64, max_rows: usize) -> Result<usize> {
-        let first = self
-            .conn
-            .prepare_cached(
-                "DELETE FROM invites WHERE id IN (\
-                 SELECT id FROM invites WHERE redeemed_at IS NULL AND expires_at <= ?1 LIMIT ?2)",
-            )?
-            .execute(params![now, cap(max_rows)])?;
-        let left = max_rows.saturating_sub(first);
-        if left == 0 {
-            return Ok(first);
+        let mut removed = 0;
+        for sql in [
+            "DELETE FROM invites WHERE id IN (\
+             SELECT id FROM invites WHERE redeemed_at IS NULL AND expires_at <= ?1 LIMIT ?2)",
+            "DELETE FROM bootstrap WHERE rowid IN (\
+             SELECT rowid FROM bootstrap WHERE redeemed_at IS NULL AND expires_at <= ?1 LIMIT ?2)",
+            "DELETE FROM device_grants WHERE id IN (SELECT id FROM device_grants WHERE expires_at <= ?1 LIMIT ?2)",
+            "DELETE FROM devices WHERE id IN (SELECT id FROM devices WHERE expires_at <= ?1 LIMIT ?2)",
+        ] {
+            let left = max_rows.saturating_sub(removed);
+            if left == 0 {
+                break;
+            }
+            removed += self.conn.prepare_cached(sql)?.execute(params![now, cap(left)])?;
         }
-        let second = self
-            .conn
-            .prepare_cached(
-                "DELETE FROM bootstrap WHERE rowid IN (\
-                 SELECT rowid FROM bootstrap WHERE redeemed_at IS NULL AND expires_at <= ?1 LIMIT ?2)",
-            )?
-            .execute(params![now, cap(left)])?;
-        Ok(first + second)
+        Ok(removed)
     }
 }
 
@@ -2034,4 +2032,272 @@ impl Tx<'_> {
             .execute(params![id, account.0])?;
         Ok(changed > 0)
     }
+}
+
+impl Tx<'_> {
+    /// Writes the activity of a device: `last_seen` becomes `now` and `expires_at` becomes `now + idle`, but only when the
+    /// last write is at least [`crate::device::TOUCH_INTERVAL`] seconds old and the token has not expired. A call inside the
+    /// interval, for a token that expired or for an unknown device changes nothing and answers `false`.
+    pub fn device_touch(&self, id: i64, now: i64, idle: i64) -> Result<bool> {
+        let changed = self
+            .conn
+            .prepare_cached(
+                "UPDATE devices SET last_seen = ?2, expires_at = ?2 + ?3 \
+                 WHERE id = ?1 AND ?2 - last_seen >= ?4 AND expires_at > ?2",
+            )?
+            .execute(params![id, now, idle, crate::device::TOUCH_INTERVAL])?;
+        Ok(changed == 1)
+    }
+
+    /// The devices of an account whose token has not expired, newest first, at most
+    /// [`crate::device::MAX_DEVICES_PER_ACCOUNT`].
+    pub fn devices_of(&self, account: AccountId, now: i64) -> Result<Vec<Device>> {
+        let sql = format!(
+            "SELECT {DEVICE_COLUMNS} FROM devices d WHERE d.account_id = ?1 AND d.expires_at > ?2 \
+             ORDER BY d.created_at DESC, d.id DESC LIMIT ?3"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        Ok(stmt
+            .query_map(params![account.0, now, cap(crate::device::MAX_DEVICES_PER_ACCOUNT)], device_from_row)?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The devices of every account whose token has not expired, newest first, at most
+    /// [`crate::device::MAX_LISTED_DEVICES`]. For the administrator.
+    pub fn devices_all(&self, now: i64) -> Result<Vec<Device>> {
+        let sql = format!(
+            "SELECT {DEVICE_COLUMNS} FROM devices d WHERE d.expires_at > ?1 ORDER BY d.created_at DESC, d.id DESC LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        Ok(stmt
+            .query_map(params![now, cap(crate::device::MAX_LISTED_DEVICES)], device_from_row)?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Ends any device by its id, for the administrator; answers the account it belonged to, or `None` when there was none.
+    pub fn device_revoke_any(&self, id: i64) -> Result<Option<AccountId>> {
+        let mut stmt = self.conn.prepare_cached("DELETE FROM devices WHERE id = ?1 RETURNING account_id")?;
+        Ok(optional(stmt.query_row(params![id], |r| Ok(AccountId(r.get(0)?))))?)
+    }
+
+    // ---- device grants ----
+
+    /// Stores a grant by the hashes of its two codes. A user code that is already in use is [`StoreError::Conflict`] (the
+    /// caller draws another). The caps on open grants are the caller's to check with [`Tx::grant_counts`] in the same
+    /// transaction.
+    pub fn grant_create(&self, new: &NewGrant<'_>) -> Result<Grant> {
+        let name = clean_text(new.name, crate::device::MAX_DEVICE_NAME);
+        if name.is_empty() {
+            return Err(StoreError::Invalid("a device needs a name"));
+        }
+        let platform = clean_text(new.platform, crate::device::MAX_PLATFORM);
+        let addr = new.addr.to_string();
+        self.conn
+            .prepare_cached(
+                "INSERT INTO device_grants (device_code_hash, user_code_hash, name, platform, addr, created_at, expires_at, \
+                 poll_interval) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?
+            .execute(params![
+                &new.device_code_hash[..],
+                &new.user_code_hash[..],
+                name,
+                platform,
+                addr,
+                new.now,
+                new.expires_at,
+                crate::device::POLL_INTERVAL
+            ])?;
+        Ok(Grant {
+            id: self.conn.last_insert_rowid(),
+            name,
+            platform,
+            addr,
+            created_at: new.now,
+            expires_at: new.expires_at,
+            last_poll: None,
+            poll_interval: crate::device::POLL_INTERVAL,
+            approved_by: None,
+            denied: false,
+        })
+    }
+
+    /// The grant with this user code hash, expired or not (the verdict says which).
+    pub fn grant_by_user_code(&self, user_code_hash: &TokenHash) -> Result<Option<Grant>> {
+        let mut stmt =
+            self.conn.prepare_cached(&format!("SELECT {GRANT_COLUMNS} FROM device_grants WHERE user_code_hash = ?1"))?;
+        Ok(optional(stmt.query_row(params![&user_code_hash[..]], grant_from_row))?)
+    }
+
+    /// The grant with this device code hash, expired or not (the verdict says which).
+    pub fn grant_by_device_code(&self, device_code_hash: &TokenHash) -> Result<Option<Grant>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached(&format!("SELECT {GRANT_COLUMNS} FROM device_grants WHERE device_code_hash = ?1"))?;
+        Ok(optional(stmt.query_row(params![&device_code_hash[..]], grant_from_row))?)
+    }
+
+    /// Records that `account` approved the grant `id`. Only a grant that has not expired, was not decided and whose approver
+    /// is an active account is changed; answers whether it was.
+    pub fn grant_approve(&self, id: i64, account: AccountId, now: i64) -> Result<bool> {
+        let changed = self
+            .conn
+            .prepare_cached(
+                "UPDATE device_grants SET approved_account_id = ?2 \
+                 WHERE id = ?1 AND approved_account_id IS NULL AND denied = 0 AND expires_at > ?3 \
+                 AND EXISTS (SELECT 1 FROM accounts WHERE id = ?2 AND state = 'active')",
+            )?
+            .execute(params![id, account.0, now])?;
+        Ok(changed == 1)
+    }
+
+    /// Records that the grant `id` was refused. Only a grant that has not expired and was not decided is changed; answers
+    /// whether it was.
+    pub fn grant_deny(&self, id: i64, now: i64) -> Result<bool> {
+        let changed = self
+            .conn
+            .prepare_cached(
+                "UPDATE device_grants SET denied = 1 \
+                 WHERE id = ?1 AND approved_account_id IS NULL AND denied = 0 AND expires_at > ?2",
+            )?
+            .execute(params![id, now])?;
+        Ok(changed == 1)
+    }
+
+    /// Consumes an approved grant by its device code hash, in one statement, so it is taken exactly once: the grant comes
+    /// back with `approved_by` set and is gone. A grant that is not approved, was refused, has expired or whose approver is no
+    /// longer active is not touched and gives `None`.
+    pub fn grant_take(&self, device_code_hash: &TokenHash, now: i64) -> Result<Option<Grant>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "DELETE FROM device_grants WHERE device_code_hash = ?1 AND denied = 0 AND expires_at > ?2 \
+             AND approved_account_id IN (SELECT id FROM accounts WHERE state = 'active') RETURNING {GRANT_COLUMNS}"
+        ))?;
+        Ok(optional(stmt.query_row(params![&device_code_hash[..], now], grant_from_row))?)
+    }
+
+    /// How many grants are open at `now` (not expired, not taken) on the whole server and from `addr`.
+    pub fn grant_counts(&self, addr: std::net::IpAddr, now: i64) -> Result<GrantCounts> {
+        let (all, from_addr): (i64, i64) = self.conn.query_row(
+            "SELECT count(*), coalesce(sum(addr = ?2), 0) FROM device_grants WHERE expires_at > ?1",
+            params![now, addr.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(GrantCounts {
+            all: usize::try_from(all).unwrap_or(usize::MAX),
+            from_addr: usize::try_from(from_addr).unwrap_or(usize::MAX),
+        })
+    }
+
+    /// Records a poll of the grant `id` at `now`. With `slow` the grant's interval goes up by
+    /// [`crate::device::POLL_INTERVAL`] seconds, to at most [`crate::device::MAX_POLL_INTERVAL`]. Answers whether the grant
+    /// exists.
+    pub fn grant_poll_mark(&self, id: i64, now: i64, slow: bool) -> Result<bool> {
+        let changed = self
+            .conn
+            .prepare_cached(
+                "UPDATE device_grants SET last_poll = ?2, \
+                 poll_interval = CASE WHEN ?3 THEN min(poll_interval + ?4, ?5) ELSE poll_interval END WHERE id = ?1",
+            )?
+            .execute(params![id, now, slow, crate::device::POLL_INTERVAL, crate::device::MAX_POLL_INTERVAL])?;
+        Ok(changed == 1)
+    }
+
+    // ---- the two switches ----
+
+    /// Whether a switch (`sync` or `remote`) is on. A switch that was never set is off; any other key is an error.
+    pub fn setting_get(&self, key: &str) -> Result<bool> {
+        check_setting_key(key)?;
+        let mut stmt = self.conn.prepare_cached("SELECT value FROM server_settings WHERE key = ?1")?;
+        Ok(optional(stmt.query_row(params![key], |r| r.get::<_, String>(0)))?.is_some_and(|value| value == "on"))
+    }
+
+    /// Turns a switch (`sync` or `remote`) on or off. Any other key is an error.
+    pub fn setting_set(&self, key: &str, on: bool) -> Result<()> {
+        check_setting_key(key)?;
+        self.conn
+            .prepare_cached(
+                "INSERT INTO server_settings (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            )?
+            .execute(params![key, if on { "on" } else { "off" }])?;
+        Ok(())
+    }
+}
+
+/// The keys of the feature switches. The list is closed: the table refuses any other key as well.
+pub const SETTING_KEYS: [&str; 2] = ["sync", "remote"];
+
+fn check_setting_key(key: &str) -> Result<()> {
+    if SETTING_KEYS.contains(&key) { Ok(()) } else { Err(StoreError::Invalid("that setting does not exist")) }
+}
+
+/// What a device grant is made from.
+#[derive(Clone)]
+pub struct NewGrant<'a> {
+    /// The SHA-256 of the device code ([`crate::device::GrantCode::hash`]).
+    pub device_code_hash: TokenHash,
+    /// The SHA-256 of the eight letters of the user code ([`crate::device::UserCode::hash`]).
+    pub user_code_hash: TokenHash,
+    /// What the asking device calls itself; cleaned as a device name is. A name with nothing left is refused.
+    pub name: &'a str,
+    /// The platform word; cleaned as a device's is.
+    pub platform: &'a str,
+    /// Unix seconds of the request.
+    pub now: i64,
+    /// Unix seconds after which the grant is dead (`now` plus [`crate::device::GRANT_TTL`]).
+    pub expires_at: i64,
+    /// The client address.
+    pub addr: std::net::IpAddr,
+}
+
+/// One device grant. It carries neither code, only what the person is asked to approve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Grant {
+    /// The id of the row.
+    pub id: i64,
+    /// The name the device gave itself.
+    pub name: String,
+    /// The platform word the device gave.
+    pub platform: String,
+    /// The client address as text.
+    pub addr: String,
+    /// Unix seconds.
+    pub created_at: i64,
+    /// Unix seconds after which the grant is dead.
+    pub expires_at: i64,
+    /// Unix seconds of the last poll, or `None` when the device has not polled yet.
+    pub last_poll: Option<i64>,
+    /// The seconds the device has to wait between polls; it goes up when the device polls too fast.
+    pub poll_interval: i64,
+    /// The account that approved, once one did.
+    pub approved_by: Option<AccountId>,
+    /// Whether a person refused.
+    pub denied: bool,
+}
+
+/// How many grants are open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrantCounts {
+    /// On the whole server.
+    pub all: usize,
+    /// From one client address.
+    pub from_addr: usize,
+}
+
+const GRANT_COLUMNS: &str =
+    "id, name, platform, addr, created_at, expires_at, last_poll, poll_interval, approved_account_id, denied";
+
+fn grant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Grant> {
+    let approved: Option<i64> = row.get(8)?;
+    Ok(Grant {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        platform: row.get(2)?,
+        addr: row.get(3)?,
+        created_at: row.get(4)?,
+        expires_at: row.get(5)?,
+        last_poll: row.get(6)?,
+        poll_interval: row.get(7)?,
+        approved_by: approved.map(AccountId),
+        denied: row.get::<_, i64>(9)? != 0,
+    })
 }
