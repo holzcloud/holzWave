@@ -190,7 +190,7 @@ holzWave has three nested levels, and each one has its own shape and place so th
 |---|---|---|---|
 | **Workspace** | round pill with a diamond (`◆` active, `◇` others), tab count as a small number; the active one is a solid `--hw-rose-deep` fill with `--hw-on-accent` text | title bar, left to right | its own tabs and layout |
 | **Tab** | square, numbered (`1 shell`), underline and rose wash when shown, a close mark on hover | its own row under the title bar | one split tree of panes |
-| **Pane** | tile with a 24 px header: state dot, type icon, title, context chip, context right-aligned, `⊞ ⤢ ✕` | the area under the tab row | one block: shell, SSH, preview, editor, monitor |
+| **Pane** | tile with a 24 px header: state dot, type icon, title, context chip, context right-aligned, `⊞ ⤢ ✕` | the area under the tab row | one block: shell, SSH, server session, preview, editor, monitor |
 
 Anything that is not one of these three is **chrome around them**: the right title-bar group (sync, AI, sidebar, palette),
 the sidebar and the status line.
@@ -246,12 +246,13 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | New block | ![](design/new-block.png) | block picker with roadmap phases: shell, SSH, WSL, Docker, previews, editor, Kubernetes, Talos, Azure, GAM7, monitor, history; Kubernetes, Talos, Azure and GAM7 are not opened from it yet: they open from the command palette and from the sidebar's Context section (6.25 says why) |
 | Search | ![](design/search.png) | scrollback search bar in the pane, hits marked, the current hit solid |
 | Copy mode | ![](design/copy-mode.png) | keyboard selection, hint letters on hashes and paths, a solid status line with the keys |
-| Connections | ![](design/connections.png) | list and form: host, user, login (`Key file`, `Password`, `Agent` or `Code or password prompt`), secret from the OS keychain, jump host, reconnect policy, startup command, use wsh on this host |
+| Connections | ![](design/connections.png) | list and form: host, user, login (`Key file`, `Password`, `Agent` or `Code or password prompt`), secret from the OS keychain, jump host, reconnect policy, startup command, use wsh on this host; above them, when a server is known, its row and its sessions (6.34) |
 | Login prompt | ![](design/login-prompt.png) | the question of a server that asks for a one-time code or a password prompt (6.22): the title and host of your own saved connection, the fixed sentence that the text comes from the server, its words in a bordered block with one field per question, `Cancel` and `Send` |
 | Settings | ![](design/settings.png) | themes (built-in and custom), font, UI scale, accessibility as `System / On / Off` |
 | Shortcuts | ![](design/shortcuts.png) | the key binding editor, see 6.4 |
 | Previews | ![](design/previews.png) | file browser (local and SFTP) with image, PDF and video panes, see 6.5 |
 | Sync | ![](design/sync.png) | Nextcloud endpoint, last sync, end-to-end encryption, conflicts with their backup |
+| Sync target | ![](design/sync-transport.png) | the set-up popover with the choice `WebDAV` or `holzWave server` (6.9): set up with WebDAV, set up with the server and not signed in (`Sign in…`), the server with its sync target off (`Sync is off on this server.`, `Connect` disabled), and connected to the server |
 | AI chat | ![](design/ai-chat-pane.png) ![](design/ai-chat-states.png) | the chat as a pane beside the shell (6.12): the bar with the provider chip and the place word, Markdown replies, a reply that streams with `Stop`; then the picker, a stopped reply, a failed turn and a long draft |
 | AI chat: sharing context | ![](design/ai-consent-ask.png) ![](design/ai-consent-offer.png) | the consent card and the items that go out (6.14): the question before a pane is shared, the destination and its place, the findings of the redactor, the total and the best-effort sentence |
 | AI chat: tool calls | ![](design/ai-approval.png) ![](design/ai-approval-states.png) | the approval card, the taint banner and the rows of tool results (6.15): every field of a request with its size, where the result goes, the untrusted text in the turn, `Allow once` and `Deny`; then a remote target, a request that can only be denied and the rows of a denied, a stopped and a finished call |
@@ -290,6 +291,10 @@ Each view is a state of the same window. Overlays use the 24 px radius and the s
 | Web: account | ![](design/web-account.png) | the account dialog (6.29) with its six groups and the layer `Confirm it is you` above it |
 | Web: people | ![](design/web-people.png) | the people dialog (6.29): the table of accounts with state marks, the menu of one row and the invitation link shown once |
 | Web: window | ![](design/web-window.png) | the window as the browser shows it (6.30): no window buttons, the marks of the status line, the upload target, the `Download` row menu and the Notifications setting |
+| Server sessions | ![](design/server-sessions.png) | the Connections view with the server row above the saved connections (6.34): signed in, `Sign out` and `New session`, the help line, two sessions with their size, start, attached count, `held` or `free`, `Attach` and `End`; behind it a local pane and a remote pane whose header says `WRITING`; with the Browser platform the row is `This server` |
+| Server pane states | ![](design/server-pane-states.png) | the writer label in a pane header (6.34): `WRITING` with a filled square, `WATCHING` with a hollow one and `FREE` with a dashed one, `Take over` after the last two; the six states of the pane; the server row in its states |
+| Device sign-in | ![](design/device-authorize.png) | the step in the app and the page `Authorize device` (6.35), with the states of the second screen and the three results of the page |
+| Device lists | ![](design/device-lists.png) | the Devices group of the Account dialog, the list of devices of an administrator with the column `Owner`, and the group `Device access` with its two switches, one of them turned off by the configuration (6.35) |
 | Links | ![](design/links.png) | links in the output of a shell pane (6.31): two at rest with a dotted underline, one under the pointer with a solid underline and its target in the `LINK` segment of the status line, with the notice beside it that says why a click could not open it, one with the open gesture held in rose, one in text the program underlined itself, and an address with a scheme that is not allowed, which stays plain text |
 | Link dialog | ![](design/link-ask.png) | the question `Open this link?` (6.31) for a link whose text names one site and whose target is another: the text and the target in mono, `Cancel` focused, `Open` solid rose |
 | Images | ![](design/images.png) | pictures in a shell pane (6.31): one in each of the three layers, a picture clipped at the edge of the pane body, a picture made of placeholder cells, and the cursor and a selection drawn over a picture |
@@ -426,7 +431,7 @@ context slot. The state is a shape and words, never colour alone:
 While a connection is down the pane screen says why on a line of its own, in the warn colour, and what is typed is kept
 (up to 64 KiB) and sent after the connection is back. A failure that retrying cannot cure (a refused login, a changed host
 key) leaves the pane open with the reason; Enter tries again. Every connection has an entry in the palette
-(`Connect: Name (ssh)`) and in the connection manager (`Connections…`), which is the Connections view of 6.3.
+(`Connect: Name (ssh)`) and in the connection manager (`Connections…`), which is the Connections view of 6.3. The connection manager also lists the server (6.34), above the saved connections: a server is a source of sessions and not a saved connection, so it has no palette entry, and the pane of one of its sessions says its state in the same context slot, with the words of that section.
 
 The Login choice of an SSH connection has four radio options, in this order: `Key file`, `Password`, `Agent` and `Code or
 password prompt`. `Agent` means that the person's ssh-agent signs the login: the form shows no passphrase field and no
@@ -504,6 +509,7 @@ window runs in a web page (6.30); they say what the page is specified to do.
 | **Browser: no tear-off.** One window `main` is mirrored by every browser tab of the person; `Move pane to new window` and `Move tab to new window` are absent | the person's windows live on the server and every tab shows the same set | none planned |
 | **Browser: no text-scale signal from the system.** The UI scale is the `ui_scale` setting alone, as on macOS | a web page has no OS text size to read; the browser's zoom is a separate setting | none planned |
 | **Browser: no local-network group and no notice.** Nothing of 6.24 is drawn | the privacy setting belongs to the app, and the browser build runs on a server, not on the person's computer | none planned |
+| **Browser: the server is `This server`, with no sign-in.** The Connections view lists the server the page was loaded from as `This server` with the state `signed in` and without `Sign in…` and `Sign out`; the choice of the sync target (6.9) is not drawn (6.34) | the browser's own sign-in is the credential, and a server does not sync to a server | none planned |
 | **Browser: no `Host shell` group.** Nothing of 6.32 is drawn | the panes run on the server, and a Flatpak is a way to install a desktop app | none planned |
 | **Browser: `Reveal in folder` and open-in-folder answer `Not available in the browser.`** and are absent from menus and the palette | the files are on the server, not in the person's file manager | the `Download` action replaces them |
 | **Browser: no `file` links.** A link the program marked with a `file` address, and a printed file path, are plain text: no underline, no click, hint mode skips them | a folder cannot be shown from a page, and the file is on the server, not on the person's computer; the other schemes behave as on the desktop (6.31) | the `Download` action |
@@ -515,10 +521,22 @@ The title bar's right group holds one button for the sync, a word with a cloud: 
 `☁ sync error` (red, underlined) and `☁ sync off` (dim). The word is the cue, the colour the second one. A click opens a
 popover under it (a floating layer, 24 rem wide), and so do the palette entries `Sync…` and `Sync now`.
 
-- **Set up** (no account yet): a short sentence on what is kept and that it is encrypted here, four rows (folder address,
-  user, app password, passphrase), a note that the passphrase cannot be recovered, and `Connect`. The secret fields are
-  never filled in again. A refusal is said in the status line of the popover, in words.
-- **Connected:** title `Nextcloud` with a chip (`connected`, `syncing`, `error`), the address and user, then the rows
+- **Set up** (no account yet): a short sentence on what is kept and that it is encrypted here, a choice of the target
+  (below), four rows (folder address, user, app password, passphrase), a note that the passphrase cannot be recovered, and
+  `Connect`. The secret fields are never filled in again. A refusal is said in the status line of the popover, in words.
+- **The choice of the target.** Above the rows, a radio group named `Transport` with two options, `WebDAV` and `holzWave server`, exactly one
+  active (the chosen one has the filled mark, the other the hollow one, as in the login choice of 6.8). The passphrase row stays and is
+  shared by both. With `holzWave server` the rows for the folder address, the user and the app password are replaced by `Server address`
+  (the address from the sign-in of 6.35, or a dim `–` while there is none) and a state line: `not signed in` with the link `Sign in…`, or
+  `signed in`. While the person is not signed in, `Connect` is disabled (a dashed border and the dim colour; the state line is its
+  description, as in 6.6). When the server has the sync target off, the state line says `Sync is off on this server.` (warn, underlined,
+  `!`) and `Connect` is disabled in the same way. A dim sentence under the choice says what a change of target does: `Changing the target
+  keeps your passphrase. Files are not copied from one target to the other; the next run reads the new one.` The choice is not drawn in the
+  browser window: a server does not sync to a server. The pictures are in the Sync target view.
+
+![Sync target](design/sync-transport.png)
+
+- **Connected:** title `Nextcloud` (`holzWave server` when that is the target) with a chip (`connected`, `syncing`, `error`), the address and user, then the rows
   `Last sync` (`14:31 · 3 files`), `Encryption` (`end-to-end · passphrase`) and `Conflicts` (`none`, or the count and that
   the other version is kept), the list of what is synced, a line when changes from another computer wait for the next
   start, and the buttons `Close`, `Turn off` (asks with a second click) and `Sync now`. When another computer removed
@@ -2424,6 +2442,8 @@ for an account that has a password, the others always.
 | Recovery code | `saved` or `none` | `Make a new code`; while the saved passwords are locked `Unlock` instead |
 | Sessions | none | `Sign out` on every row but this one, and `Sign out everywhere` |
 
+A seventh group, `Devices`, follows `Sessions` while a device switch is on (6.35).
+
 A state word is its own cue: `set` and `saved` are in the ok colour, `not set` and `none` are dim; the colour is never alone.
 A change opens its form in the place of the group's row, with `Save` and `Cancel`: the password asks `Current password` and `New password`
 (`current-password`, `new-password`, the refusal sentence of 6.28 rule 7 under `New password`, the sentence of rule 1 under `Current
@@ -2497,6 +2517,8 @@ sentence `Shown once. Copy it now and send it to the person. It works for 7 days
 a bordered block in mono cut with an ellipsis, `Copy link` and the solid `Done`. The link is never listed again, is not put into
 the status line or the title, and is removed from the page when `Done` is pressed or the layer closes.
 
+While a device switch is on, the dialog also has the groups `Devices` and `Device access` below the table (6.35).
+
 No dialog of this section shows any person's secrets, terminal output, commands, scrollback or layout, and there is no audit viewer. An
 administrator reads and changes the account rows and nothing else.
 
@@ -2513,7 +2535,7 @@ to remove. Every size is in `rem`, every target at least 28 px high. The table h
 ![People](design/web-people.png)
 
 **Not drawn.** A password that an administrator sets for someone, impersonating a person, a view of anyone's data, groups, bulk actions,
-a search of the people, an audit viewer, API tokens, management of SSH keys, a list of shared panes, and a name that an administrator
+a search of the people, an audit viewer, API tokens (the Devices list of 6.35 shows signed-in devices and never a token), management of SSH keys, a list of shared panes, and a name that an administrator
 chooses for a new account in the invitation form (an invitation is for a person who chooses their own).
 
 ### 6.30 The web window
@@ -2621,6 +2643,8 @@ the moment the tab is visible again and are never touched while it is visible. T
 again each time the tab is hidden. The title never holds anything a pane wrote: no pane title, directory, command or output. The two icon files
 (`favicon.svg` and `favicon-attention.svg`, the second the first plus the dot) are served from the same origin, and the page adds the icon link
 itself in the browser build only.
+
+**Server sessions.** The Connections view lists the server the page was loaded from as a row named `This server` (6.34). It has no state dot beyond `signed in`, no `Sign in…` and no `Sign out`, because the browser's own sign-in is the credential; its `New session`, its session rows, the writer label and `Take over` are those of 6.34. The session is drawn by the person's own worker for the browser, so its scroll position and selection are shared by every tab of the person, as for every pane of the window. The Account and People groups of 6.35 and the page `Authorize device` are drawn only here, and the choice of the sync target (6.9) is not.
 
 **Controls the browser does not have.** Tear-off entries (`Move pane to new window`, `Move tab to new window`), the text size from the system,
 the group `Local network` and `Reveal in folder` are absent from menus, the palette and the Settings, not disabled. When a stored shortcut
@@ -2858,3 +2882,166 @@ The status line shows its sentence whenever the stored choice differs from the o
 ![Window frame settings](design/window-frame-settings.png)
 
 **Not drawn.** The Windows 11 snap layout flyout, a menu on a right click of the bar, resize handles, a drawing for a phone and buttons in the browser (a page cannot draw or move the window it is shown in, 6.30), and a setting for the side of the buttons (the system decides it).
+
+
+### 6.34 Server connection and sessions
+
+A holzWave server ([server.md](server.md)) can keep terminal sessions running with no window open, and the app can show one of them in a pane. The server is a source of sessions in the Connections view (6.3), a session is a pane of the window (6.1), and nothing else is new: no dialog of its own, no title-bar button and no palette entry for sessions. All of it exists only when the operator has turned `Remote sessions` on (6.35) and the person has signed in to the server (6.35). With that switch off the server row says so and nothing else is drawn. The window of the browser build lists the server it was loaded from in the same place (6.30).
+
+**The rule.**
+
+1. The server is one row of the Connections view, above the saved connections, in the manner of a saved connection. Its running sessions are listed under it. `Attach` shows one in a pane; `New session` makes one and shows it.
+2. A remote pane keeps the pane header of 6.1 and adds the writer label between the title and the context slot. The three levels stay apart: the label is a small square chip, never a round pill.
+3. A session has **one writer at a time**. Every other pane that shows the session watches: what it types is dropped. The write right is free when its holder has been silent for 30 seconds; it never moves by itself, so everyone sees `FREE` until someone presses `Take over`. A pane that detaches gives the right up at once.
+4. The × of a remote pane **detaches**; it never ends the session. Its title and accessible name are `Detach session`, it asks for nothing, because the session keeps running, and the session stays in the list. Ending a session is the button `End` of the list.
+5. The session is drawn by the person's own client from the bytes the server sends. Scroll position, selection and search belong to the pane, so they are never shared between two panes that show the same session.
+
+**The connection source.** The row and its sessions sit in a group under the `.label` legend `Server`, above the list of saved connections. The row has the name of the server (its host), the address in mono, a state dot with a word, and the buttons. The dot is a shape and the word is the cue; the state is read again when the view opens.
+
+| State | Dot | Word | Buttons |
+|---|---|---|---|
+| signed in | filled | `signed in` | `Sign out`, and `New session` while remote sessions are on |
+| not signed in | hollow | `not signed in` | `Sign in…` |
+| signing in | dotted ring | `signing in…` | none (the step of 6.35 is open) |
+| unreachable | hollow with a dash | `unreachable` | `Sign out` |
+
+`Sign in…` opens the step of 6.35. `Sign out` forgets the sign-in of this device and asks with a second click, like `Turn off` in 6.9 (the words of the second press are `Click again to sign out`); the address stays, so the next `Sign in…` goes straight to the code. Under a signed-in row the sessions are listed, one row each: the title (the program's title, else `Session N`, where N is the place in the list, oldest first), the working directory in mono with `~`, the size (`120×40`), the start (`14:02` today, `Mon 14:02` within a week, the date otherwise), how many are attached (`N attached`, `0 attached` when nobody is), the word `held` when somebody writes and `free` when nobody does, and the buttons `Attach` and `End`. `held` has a filled square before it and `free` a dashed one, the shapes of the writer label. `End` asks with a second click (`Click again to end`). `Attach` on a session that this window already shows moves the keyboard to that pane. A line under the row says in the dim colour what a session is:
+
+| Line | When |
+|---|---|
+| `A session keeps running on the server with no window open. It ends when the server restarts or after a day with nobody connected.` | the page knows the idle limit of the server, and says it in words (`a day`, `6 hours`) |
+| `A session keeps running on the server with no window open. It ends when the server restarts or after the idle limit of the server with nobody connected.` | the page does not know it |
+
+When the server has remote sessions off, the row is the signed-in row without `New session`, no list is drawn and the dim line `Remote sessions are off on this server.` takes the place of the sessions. When the server has the sync target off nothing changes here. On Android, while the saved secrets are locked, the buttons of the row are replaced by the dim line `Locked: unlock to connect` (the pattern of 6.6): the token of the device lives in the vault.
+
+**The remote pane.** The header keeps the dot, the type icon (`⌁`), the title and the context slot, and the hit targets of 6.1. Between the title and the context slot sits the writer label, a `.label` chip with a shape and a word, and after it, on `WATCHING` and `FREE` only, the hairline button `Take over`.
+
+| Label | Shape | Meaning | Tone |
+|---|---|---|---|
+| `WRITING` | filled square | this pane holds the write right | ink |
+| `WATCHING` | hollow square | another pane writes | secondary ink |
+| `FREE` | dashed square, dashed border | nobody writes | dim |
+
+The label never names the other writer or the device that writes: names stay in the Devices list (6.35). Rose is not used for the label: it is neither focus nor action. The word is the cue and the shape the second one; both survive `forced-colors` and `contrast-high`, and the chip is a `role="status"` region, so a change from `WATCHING` to `WRITING` is announced. `Take over` is a real button: 24 px tall in the strip with a hit box of 28 px on the desktop (the extra 2 px above and below are not drawn), 44 px on a phone and a tablet, with the 2 px focus ring; it has no chord and no palette entry in this phase. Pressing it moves the write right to this pane and sends this pane's size once (the grid rule below); every other pane sees its label change.
+
+The context slot says the server (its host), then the size of the session (`120×40`) when it differs from the tile. While a state below lasts, it says the state's word instead.
+
+**The states of a pane.** Each state is a dot shape and a word in the context slot, and one dim line on the screen. The writer label stays only where the page knows it.
+
+| State | Dot | Header context | Line on the screen | Writer label |
+|---|---|---|---|---|
+| attaching | dotted ring | `Attaching…` | `Attaching…` | not shown |
+| loading older lines | as before | `Loading older lines…` | `Loading older lines…` | shown |
+| resyncing | dotted ring | `Resyncing…` | `Resyncing…` | shown |
+| session ended | hollow with a dash | `Session ended · exit N` (warn, underlined, `!`) | `Session ended · exit N` | not shown |
+| reconnecting | dotted ring | `Reconnecting…` | `Reconnecting…` | not shown |
+| server unreachable | hollow with a dash | `Server unreachable` (warn, underlined, `!`) | `Server unreachable. Press Enter to try again.` | not shown |
+
+On attach the server sends the current screen and a bounded tail of the scrollback. `Loading older lines…` is shown when the person has scrolled to the top of what the page holds and the server has older lines: it is automatic and draws no new control, because it is a new attach with a longer tail, and the screen keeps its place. The phone has the same rule and no second limit. `Resyncing…` is the server asking for a fresh start because the pane was too slow. A session that ended stays in the pane with its last screen and the notice and closes on `Enter` or on ×, like a held terminal in 6.26. While the connection is down what is typed is not sent and not kept (unlike an SSH pane, 6.8: a session may have another writer when the connection is back); after the tries are used the pane waits for `Enter` for one more try.
+
+**The grid rule.** A terminal program lays out for one size, so a session has one size: the size of the **writer's tile**. A watcher draws the same grid from the top-left corner, clipped by its tile when the tile is smaller and over empty ground when it is larger; it never resizes the session by resizing its own tile. The context slot says the size while it differs from the tile. When someone takes over, the new writer's size is sent once and becomes the size of the session.
+
+**Phone and tablet.** The Connections view is a full-screen sheet on a phone, and the rows are at least 44 px high: the server row, every session row and every button. A session row on a phone says the title and `free` or `held` and wraps the rest (directory, size, start, attached count) on the lines under it. The writer label takes the empty place of the top strip (6.6) and `Take over` follows it at 44 px; the name of the pane is cut first, nothing else moves. On the tablet the header is 44 px (6.6) and holds both.
+
+![Server sessions](design/server-sessions.png)
+
+![Server pane states](design/server-pane-states.png)
+
+![Server sessions on a phone](design/server-sessions-phone.png)
+
+**The words.** One table; a unit test compares the page with it.
+
+| Word | Where |
+|---|---|
+| `WRITING`, `WATCHING`, `FREE` | the writer label (the page writes them in capitals itself) |
+| `Take over` | the button after `WATCHING` and `FREE` |
+| `Detach session` | the title and the accessible name of the × of a remote pane |
+| `signed in`, `not signed in`, `signing in…`, `unreachable` | the state word of the server row |
+| `Server` | the legend of the group |
+| `Sign in…`, `Sign out`, `Click again to sign out`, `New session` | the buttons of the server row |
+| `Attach`, `End`, `Click again to end` | the buttons of a session row |
+| `free`, `held`, `N attached`, `Session N` | a session row |
+| `Remote sessions are off on this server.` | the row, while the server has them off |
+| `Locked: unlock to connect` | the row on Android while the secrets are locked |
+| `This server` | the row in the browser build (6.30) |
+| `Attaching…`, `Loading older lines…`, `Resyncing…`, `Session ended · exit N`, `Reconnecting…`, `Server unreachable`, `Server unreachable. Press Enter to try again.` | the states of a pane |
+
+**Limits a reader must know.**
+
+- A session ends when the server restarts, and when the worker of the person ends after the idle limit of the server (a day by default) with nobody connected. It survives every client leaving. The 64 panes and 8 sockets of a person are shared with the browser window.
+- Typed bytes are not kept while the connection is down.
+- **Nothing here was run on a real phone, on a real desktop against a real server over a real network, behind a real reverse proxy, with two real people, or across a real server restart.** The pictures are drawings of the design, not screenshots.
+
+**Accessibility.** The label and the states are words and shapes, so colour is never the only cue. Hairlines use `--hw-line` and dim text `--hw-ink-2` under `contrast-high`. Under `forced-colors` the squares are drawn in system colours (the filled one as `CanvasText`, the others as borders, the dashed one with its dashes) and the dot shapes keep their borders. Nothing moves, so `motion-reduce` has nothing to remove. Every size is in `rem`; `Take over`, `Attach`, `End` and the buttons of the row are at least 28 px high on the desktop and 44 px on a phone.
+
+**Not drawn.** A palette entry for sessions, sharing a session with another person, a second server, a menu on the header or the label, a session on both sync targets, renaming a session, a button in the header that ends it, and a key for `Take over`.
+
+### 6.35 Devices and signing in to a server
+
+An app (desktop or phone) signs in to the server with the person's own login in a browser and keeps a token of its own, a **device**, in the OS keychain. The server never learns the passphrase of the sync and never sees a file in plain text. Two switches of the operator, `Sync target` and `Remote sessions`, are off by default, and while both are off nothing on this page is reachable.
+
+**The step in the app.** A small dialog over the window, in the box of the Settings dialog, opened by `Sign in…` of the server row (6.34) and of the sync popover (6.9). Two screens. The first asks for the address; once an address is known it is not shown again (`Sign out` forgets the token and keeps the address, so `Sign in…` goes straight to the second screen). The second shows the request.
+
+| Screen | Words |
+|---|---|
+| 1: heading | `Sign in to the server` |
+| 1: field | `Server address`, with the help line `The address of your holzWave server, starting with https://.` |
+| 1: refusal of an address that is not an `https` origin | `Use an address that starts with https://.` |
+| 1: read-only row | `Device`, and the name of the computer (shown, never asked) |
+| 1: buttons | `Continue`, `Cancel` |
+| 2: the code | the user code in mono in large type (`BCDF-GHJK`) |
+| 2: lines | `Opening your browser…` while the page opens, then `Enter this code only if you started this here.` |
+| 2: buttons | `Open again`, `Cancel`; after a failure `Start again`, `Cancel`; after success `Close` |
+
+The states of the second screen are a dot shape and words; the failures also carry the mark `!` and an underline.
+
+| State | Dot | Words |
+|---|---|---|
+| waiting | dotted ring | `Waiting for approval…` |
+| approved | filled | `Signed in` |
+| denied | `!` and an underline | `The request was denied.` |
+| expired | `!` and an underline | `The code expired. Start again.` |
+| unreachable | `!` and an underline | `The server cannot be reached.` |
+| off | `!` and an underline | `Device sign-in is off on this server.` |
+
+**The page `Authorize device`.** A dialog of the web page in the box of the sign-in page (6.28), 24 rem wide. It opens from the fragment `#device=<code>` of the address the app opens (the server's own root), after a sign-in no older than five minutes: the sign-in page keeps the fragment, and the layer `Confirm it is you` of 6.29 shows once when the sign-in is older. It also opens from the palette entry `Authorize device…`, which first asks for a typed code (browser only): the field `Code`, the buttons `Look up` and `Cancel`. The dialog has the title `Authorize device`, the rows `Device`, `Platform`, `Address` (the network address the request came from, in mono) and `Requested` (`just now`, `3 min ago`), the code in mono to compare with the app, the sentence `Approve only if you started this on your own device.` and the buttons `Deny` and `Approve`. The result is said in the status line of the dialog:
+
+| Result | Words |
+|---|---|
+| approved | `Device approved.` |
+| denied | `Request denied.` |
+| unknown or expired code | `That code is not valid or has expired.` |
+
+![Device sign-in](design/device-authorize.png)
+
+**The Devices group.** In the Account dialog (6.29), after Sessions, drawn only while a device switch is on: one row for each device of the person with its name, `macOS · just now` (platform and last seen: `just now`, `3 min ago`, `3 h ago`, `2 days ago` or `never`) and the button `Revoke`, which asks with a second click (`Click again to revoke`). With none: `No devices.` In the People dialog an administrator has the same list for everybody, below the table of people, with the extra column `Owner`; `Revoke` asks twice there too and needs a recent sign-in. A revoked device is refused on its next request and its sockets close.
+
+**The group `Device access`.** In the People dialog, below the Devices group: two switches, `Sync target` and `Remote sessions`, each the switch of the Android Security row (6.6) at the desktop's size (28 px high): the word `ON` or `OFF` is inside the knob, `ON` has the knob at the right, filled, a rose outline and the rose wash, `OFF` has the knob at the left, hollow, and a dim hairline. Both are `OFF` by default. A switch that the operator's configuration has turned off for good is drawn `OFF` with a dashed outline, is not operable (`aria-disabled`) and has the dim line `Turned off in the server configuration.`. One dim line sits under the group: `Off by default. Turning one off ends the matching connections; devices stay signed in.` Changing a switch asks for a fresh sign-in like every change in that dialog.
+
+![Device lists](design/device-lists.png)
+
+**The words.**
+
+| Word | Where |
+|---|---|
+| `Sign in to the server`, `Server address`, `Device`, `Continue`, `Cancel` | the first screen of the step |
+| `Use an address that starts with https://.` | the refusal of an address |
+| `Opening your browser…`, `Enter this code only if you started this here.`, `Open again`, `Start again`, `Close` | the second screen |
+| `Waiting for approval…`, `Signed in`, `The request was denied.`, `The code expired. Start again.`, `The server cannot be reached.`, `Device sign-in is off on this server.` | the states of the second screen |
+| `Authorize device`, `Authorize device…`, `Platform`, `Address`, `Requested`, `Code`, `Look up` | the page and its palette entry |
+| `Approve only if you started this on your own device.`, `Approve`, `Deny` | the page |
+| `Device approved.`, `Request denied.`, `That code is not valid or has expired.` | the results of the page |
+| `Devices`, `Owner`, `Revoke`, `Click again to revoke`, `No devices.` | the lists |
+| `Device access`, `Sync target`, `Remote sessions`, `ON`, `OFF` | the switches |
+| `Turned off in the server configuration.`, `Off by default. Turning one off ends the matching connections; devices stay signed in.` | the lines of the group |
+
+**Limits a reader must know.**
+
+- A device token is for the app, never shown, never in a file, a log or an address, and revocable. It is **not bound to the device**: whoever holds it can use it until it is revoked or has been unused for 90 days.
+- Approving a device in a browser can be phished: a person can be led to approve a code that an attacker started. The page says what it says, shows the device, the platform and the address, and tells the person to approve only what they started.
+- A group of this section is drawn only in the browser build (6.30); the desktop app and the phone have the step and the row of 6.34, and `Sign out`.
+- **Nothing here was tried with a real passkey or single sign-on from a real phone**, and nothing was run on a real phone or against a real server. The pictures are drawings of the design.
+
+**Accessibility.** The step and the page are dialogs (`aria-modal`), the focus stays inside and returns to where it was, the code is real text (not an image) and the two switches are `role="switch"` with `aria-checked`. States are words and shapes or the mark `!` with an underline, so colour is never alone. Hairlines use `--hw-line` and dim text `--hw-ink-2` under `contrast-high`; under `forced-colors` the boxes, the switches and the dashed outline keep their borders; nothing moves. Every size is in `rem`, every target at least 28 px high (44 px on a phone).
+
+**Not drawn.** A list of tokens or their values, a button that shows or copies a token, a second server, a password or passkey field in the app (the login is the browser's), a setting for the lifetime of a device, and a control that moves files from one sync target to the other.

@@ -741,6 +741,130 @@ td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
 .im-tx{color:var(--ink);white-space:pre;z-index:4}
 .im-sel{background:var(--sel);z-index:6}
 .im-cur{background:var(--rose);width:7.2px;height:16px;z-index:6}
+/* Server sessions (docs/design.md 6.34) and devices (6.35). The state dot of the server row and of a remote pane is a shape: filled, hollow, dotted, hollow with a dash. The writer label is a square and a word:
+   filled square for WRITING, hollow for WATCHING, dashed for FREE. It is never rose: rose marks focus and action only. */
+.sv-dot{position:relative;display:inline-block;flex:none;width:7px;height:7px;box-sizing:border-box;border-radius:50%;border:1px solid var(--ink3)}
+.sv-dot[data-s=in]{background:var(--ink);border-color:var(--ink)}
+.sv-dot[data-s=wait]{border-style:dotted;border-color:var(--ink2)}
+.sv-dot[data-s=down]::after{content:"";position:absolute;left:-3px;right:-3px;top:calc(50% - .5px);height:1px;background:var(--ink3)}
+.dot.dr{background:none;border:1px dotted var(--ink2);box-sizing:border-box}
+.dot.fl{position:relative;background:none;border:1px solid var(--ink3);box-sizing:border-box}
+.dot.fl::after{content:"";position:absolute;left:-3px;right:-3px;top:calc(50% - .5px);height:1px;background:var(--ink3)}
+.sv-chip{display:inline-flex;align-items:center;gap:5px;flex:none;height:16px;padding:0 6px;border:1px solid var(--edge);border-radius:3px;color:var(--ink);font:500 10px var(--mono);letter-spacing:.1em;white-space:nowrap}
+.sv-chip[data-writer=watching]{color:var(--ink2)}
+.sv-chip[data-writer=free]{color:var(--ink3);border-style:dashed}
+.sv-sq{display:inline-block;flex:none;width:7px;height:7px;box-sizing:border-box;border:1px solid currentColor}
+.sv-sq.w{background:currentColor}.sv-sq.f{border-style:dashed}
+.sv-take{display:inline-flex;align-items:center;flex:none;height:20px;padding:0 8px;border:1px solid var(--edge);border-radius:3px;color:var(--ink);font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase;white-space:nowrap}
+.sv-x{display:inline-block}
+.sv-btn{display:inline-flex;align-items:center;justify-content:center;min-height:28px;padding:0 10px;border:1px solid var(--edge);border-radius:6px;color:var(--ink);font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase;white-space:nowrap}
+.sv-btn.arm{border-color:var(--danger);color:var(--danger)}
+.sv-btn.dis{border-style:dashed;color:var(--ink3)}
+.sv-btn.p{background:var(--rose-deep);border-color:var(--rose-deep);color:#fff;font-weight:700}
+.sv-dlg{display:flex;flex-direction:column;overflow:hidden}
+.sv-srv{display:flex;align-items:center;gap:10px;min-height:32px}
+.sv-name{color:var(--ink);font-weight:700;white-space:nowrap}
+.sv-addr{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink3)}
+.sv-stw{color:var(--ink2);white-space:nowrap}
+.sv-acts{display:flex;gap:6px;margin-left:auto;flex:none}
+.sv-help{margin:2px 0 6px;color:var(--ink3);font:400 10.5px/1.35 var(--mono)}
+.sv-sess{display:grid;grid-template-columns:140px 150px 58px 68px 86px 64px 1fr;align-items:center;gap:0 8px;min-height:36px;padding:0 4px;border-top:1px solid var(--edge)}
+.sv-st{color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sv-dir{color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sv-sz,.sv-at,.sv-att{color:var(--ink3);white-space:nowrap}
+.sv-wr{display:inline-flex;align-items:center;gap:5px;color:var(--ink2);white-space:nowrap}
+.sv-mgr{display:flex;flex:1;min-height:0;border-top:1px solid var(--edge);margin-top:8px}
+.sv-frame{border:1px solid var(--edge);border-radius:6px;background:var(--pane);overflow:hidden}
+.sv-frame .pane{background:transparent}
+.sv-frame .term{flex:none;padding:4px 10px 5px;font-size:10.5px;line-height:1.4}
+.sv-line{color:var(--ink3);white-space:normal}
+.sv-page{flex:1;min-height:0;display:flex;flex-direction:column;gap:8px;padding:14px 20px;background:var(--ground);overflow:hidden}
+.sv-page .cap{margin:0 0 3px}
+.sv-3{display:flex;flex-direction:column;gap:6px}
+.sv-rw{display:grid;grid-template-columns:300px 1fr;gap:0 12px;align-items:center}.sv-rw .cap{margin:0}
+.sv-6{display:grid;grid-template-columns:repeat(2,1fr);gap:6px 16px}
+.sv-s3{display:grid;grid-template-columns:repeat(3,1fr);gap:6px 16px}
+.ph:has(.sv-chip) .lbl{white-space:nowrap}
+.ph:has(.sv-chip) .ctx{min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ph:has(.sv-chip){overflow:hidden}
+.sv-rowf .sv-srv{flex-wrap:wrap;gap:2px 8px;min-height:28px}
+.sv-rowf .sv-addr{display:none}
+.sv-rowf .sv-acts{margin-left:0;flex:1 0 100%;padding-bottom:3px}
+.sv-rows{display:flex;flex-direction:column;gap:6px}
+.sv-rowf{padding:4px 12px;border:1px solid var(--edge);border-radius:6px;background:var(--ground2)}
+.sv-rowf .sv-srv{min-height:30px}
+.sv-rowf .sv-sess{min-height:30px}
+.sv-rowf .sv-line{padding:0 0 4px}
+.dv-page{flex:1;min-height:0;display:flex;flex-direction:column;gap:10px;padding:14px 20px;background:var(--ground);overflow:hidden}
+.dv-page .cap{margin:0 0 3px}
+.dv-top{display:flex;align-items:flex-start;justify-content:center;gap:20px}
+.dv-cell{display:flex;flex-direction:column;gap:3px}
+.dv-top .dv-cell{width:20rem}
+.dv-box{position:static;width:20rem;padding:.9rem 1.1rem .8rem;border-radius:8px;display:flex;flex-direction:column;line-height:1.4}
+.dv-box .wb-title{margin:0 0 .3rem}
+.dv-box .wb-f{margin:0 0 .45rem}
+.dv-box .wb-lead{margin:0 0 .5rem}
+.dv-box .wb-acts{margin:.3rem 0 0}
+.dv-box .btn{display:flex;align-items:center;justify-content:center;min-height:1.75rem;white-space:nowrap}
+.dv-code{margin:0 0 .5rem;padding:.5rem .6rem;border:1px solid var(--edge);border-radius:6px;background:var(--ground);text-align:center;color:var(--ink);font:700 22px/1.25 var(--mono);letter-spacing:.14em}
+.dv-kv{display:grid;grid-template-columns:5.5rem 1fr;gap:.15rem .6rem;margin:0 0 .5rem}
+.dv-kv .k{color:var(--ink3)}.dv-kv .v{color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dv-kv .v.mo{font-family:var(--mono)}
+.dv-note{margin:0 0 .4rem;color:var(--ink2)}
+.dv-states{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
+.dv-res{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.dv-st{display:flex;flex-direction:column;gap:3px;padding:6px 10px 7px;border:1px solid var(--edge);border-radius:6px;background:var(--ground2);min-height:56px}
+.dv-st .w{display:flex;align-items:flex-start;gap:7px;line-height:1.35}
+.dv-st .w .sv-dot{margin-top:5px}
+.dv-st .w.bad{color:var(--warn);text-decoration:underline}.dv-st .w.bad::before{content:"! ";font-weight:700;text-decoration:none}
+.dv-st .w.bad .sv-dot{display:none}
+.dv-cols{display:grid;grid-template-columns:350px 420px 280px;justify-content:center;gap:16px;align-items:start}
+.dv-dlg{padding:.8rem 1rem .7rem;border-radius:8px;position:static;display:flex;flex-direction:column;line-height:1.4}
+.wb-box.dv-dlg{width:100%}
+.dv-dlg .wb-r{min-height:1.75rem;flex-wrap:wrap}.dv-dlg .wb-r .nm,.dv-dlg .wb-r .mt{white-space:nowrap}
+.dv-dlg .wb-r .st:empty{display:none}.dv-dlg .wb-r .btn{margin-left:auto}
+.wb-r .btn.arm{border-color:var(--danger);color:var(--danger)}
+.dv-tbl{width:100%;border-collapse:collapse;font-size:.85em;table-layout:fixed}.dv-tbl th:nth-child(1),.dv-tbl td:nth-child(1){width:25%}.dv-tbl th:nth-child(2),.dv-tbl td:nth-child(2){width:11%}.dv-tbl th:nth-child(3),.dv-tbl td:nth-child(3){width:15%}.dv-tbl th:nth-child(4),.dv-tbl td:nth-child(4){width:27%}.dv-tbl th:nth-child(5),.dv-tbl td:nth-child(5){width:22%}.dv-tbl th{white-space:nowrap}.dv-tbl td{overflow:hidden;text-overflow:ellipsis}
+.dv-tbl th{padding:.3rem .4rem;font-size:9px}
+.dv-tbl td{padding:.3rem .4rem;color:var(--ink2);white-space:nowrap}
+.dv-tbl td:first-child{color:var(--ink);font-weight:500}
+.dv-tbl .btn{display:inline-flex;align-items:center;min-height:1.5rem;padding:0 .5rem;font-size:.85em;font-weight:500;letter-spacing:.1em;text-transform:uppercase}
+.dv-sw{display:flex;align-items:center;gap:.6rem;min-height:1.75rem}
+.dv-sw .nm{color:var(--ink)}
+.dv-sw .sv-sw{margin-left:auto}
+.dv-sw[data-locked] .nm{color:var(--ink3)}
+.sv-sw{display:inline-flex;align-items:center;gap:.35rem;height:1.75rem;min-width:3.4rem;padding:0 .35rem 0 .6rem;border:1px solid var(--rose);border-radius:.875rem;background:var(--wash);color:var(--rose);font:700 10px var(--mono);letter-spacing:.08em}
+.sv-sw i{width:.875rem;height:.875rem;border-radius:50%;background:var(--rose)}
+.sv-sw.off{flex-direction:row-reverse;justify-content:flex-end;padding:0 .6rem 0 .35rem;border-color:var(--edge);background:none;color:var(--ink3)}
+.sv-sw.off i{box-sizing:border-box;background:none;border:1px solid currentColor}
+.sv-sw.lock{border-style:dashed}
+.dv-line{margin:.05rem 0 .3rem;color:var(--ink3);font-size:.88em;line-height:1.35}
+.sy-choice{display:flex;gap:16px;margin:2px 0 4px}
+.sy-choice span{display:inline-flex;align-items:center;gap:6px;min-height:28px;color:var(--ink2)}
+.sy-choice span.on{color:var(--ink)}
+.sy-note{margin:0 0 6px;color:var(--ink3);font-size:10.5px;line-height:1.35}
+.sy-state{display:flex;align-items:center;gap:8px;min-height:28px}
+.sy-state .sv-dot{margin-right:0}
+.sy-link{color:var(--ink);text-decoration:underline}
+.sy-why{color:var(--ink3);font-size:10.5px}
+.ph1 .sv-top{gap:4px;padding:0 6px}
+.ph1 .sv-pn{flex:1 1 0;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:var(--ink2);font-size:8px}
+.ph1 .sv-chip{height:14px;padding:0 4px;gap:3px;font-size:6.5px;border-radius:2px}
+.ph1 .sv-sq{width:5px;height:5px}
+.ph1 .sv-take{height:22px;min-width:22px;padding:0 5px;font-size:6.5px;justify-content:center}
+.ph1 .sv-sheet{padding:6px 8px;font-size:8px;line-height:1.35}
+.ph1 .sv-sheet .sv-srv{min-height:22px;gap:5px;flex-wrap:wrap}
+.ph1 .sv-sheet .sv-name{font-size:8.5px}
+.ph1 .sv-sheet .sv-addr{flex:1 0 100%;font-size:7.5px}
+.ph1 .sv-sheet .sv-help{font-size:7.5px;margin:2px 0 4px}
+.ph1 .sv-sheet .sv-btn{min-height:22px;min-width:22px;padding:0 7px;font-size:7px;border-radius:5px}
+.ph1 .sv-sheet .sv-acts{margin-left:0;flex:1 0 100%;gap:4px}
+.ph1 .sv-psess{display:flex;align-items:center;gap:4px;min-height:22px;padding:2px 0;border-top:1px solid var(--edge)}
+.ph1 .sv-ptx{flex:1 1 0;min-width:0;display:flex;flex-direction:column}
+.ph1 .sv-pt{color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ph1 .sv-pm{color:var(--ink3);font-size:7px;line-height:1.3}
+.ph1 .sv-psess .sv-wr{font-size:7px;gap:3px;align-self:flex-start;margin-top:1px}
+.ph1 .sv-pb{display:inline-flex;align-items:center;justify-content:center;min-height:22px;min-width:22px;padding:0 5px;border:1px solid var(--edge);border-radius:5px;color:var(--ink);font:500 6.5px var(--mono);letter-spacing:.06em;text-transform:uppercase;white-space:nowrap}
 </style>
 
 <div class="wrap" id="root" data-os="mac">
@@ -819,6 +943,10 @@ td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
   <p class="lead">Two sheet rows and two palette entries hand over one file at a time between the phone and the shell's own folder. The lines after a copy and the refusal of a file over 256 MiB are shown, and the notification that Android requires while shells or connections run. The notification is drawn by Android; the product fixes only its words and its action. Shown at the scale of the mock (about half).</p>
   <div class="phones" id="phones-handover"></div>
 
+  <h2>Server sessions on a phone</h2>
+  <p class="lead">The Connections view is the screen: the server row, its sessions and every button are at least 44 px high (22 px at the scale of the mock). A session row says its title and whether it is free or held and wraps the rest. In the pane the writer label and Take over sit in the top strip; the name of the pane is cut first. Left, the sessions sheet; right, a pane that watches. A drawing of the design: nothing of it was run on a phone.</p>
+  <div class="phones" id="phones-server"></div>
+
   <h2>Features and where they live</h2>
   <div class="tblwrap"><table id="cov"></table></div>
 </div>
@@ -831,7 +959,7 @@ const fwNames={min:'Minimize',max:'Maximize',rest:'Restore',x:'Close'};
 const fwBtn=(kind,state='')=>`<span class="fw-b${state?' '+state:''}" role="img" aria-label="${fwNames[kind]}" title="${fwNames[kind]}"><i class="fw-g ${kind}"></i></span>`;
 const fwGroup=(style,kinds=['min','max','x'],states={},extra='')=>`<div class="fw ${style}${extra}">${kinds.map(k=>fwBtn(k,states[k]||'')).join('')}</div>`;
 const wcRight=()=>{const os=$('#root').dataset.os;return os==='win'?`<div class="wc win rwc">${fwGroup('flat')}</div>`:os==='lin'?`<div class="wc lin rwc">${fwGroup('round')}</div>`:''};
-const P=(dot,ico,t,ctx,body,o={})=>`<div class="pane ${o.f?'f':''}" style="${o.s||''}"><div class="ph"><i class="dot ${dot}"></i><span class="dim">${ico}</span><b class="lbl">${t}</b>${o.chip||''}<span class="ctx">${ctx}</span><span class="act">⊞ ⤢ ✕</span></div>${body}</div>`;
+const P=(dot,ico,t,ctx,body,o={})=>`<div class="pane ${o.f?'f':''}" style="${o.s||''}"><div class="ph"><i class="dot ${dot}"></i><span class="dim">${ico}</span><b class="lbl">${t}</b>${o.chip||''}<span class="ctx">${ctx}</span><span class="act">${o.act||'⊞ ⤢ ✕'}</span></div>${body}</div>`;
 
 const shell=(mode)=>{
   let t=`<span class="ro">❯</span> cargo test -p holzwave-core
@@ -938,14 +1066,15 @@ function base(v){
   if(tbViews[v])return tbViews[v]();
   if(lkViews[v])return lkViews[v]();
   if(frViews[v])return frViews[v]();
+  if(svViews[v])return svViews[v]();
   const searchBar=v==='search'?`<div class="ov float row" style="left:150px;top:125px;padding:4px 8px;gap:8px;border-radius:8px"><span class="ro">⌕</span><span>layout<span class="cur"></span></span><span class="dim">3/12</span><span class="kbd">Aa</span><span class="kbd">.*</span><span class="kbd">ab</span><span class="dim">▲ ▼ ✕</span></div>`:'';
   const copyBar=v==='copy'?`<div class="ov row" style="left:0;right:0;bottom:0;height:22px;background:var(--rose-deep);color:#fff;padding:0 10px;gap:14px;font-weight:700;letter-spacing:.06em"><span>COPY MODE</span><span style="font-weight:400">v select · y yank · / search · f hints · q quit</span></div>`:'';
   return `<div class="titlebar row">${wcL}
     <div class="ws on">◆ main <span class="n">5</span></div><div class="ws">◇ infra <span class="n">3</span>${v==='attn'?mks(['fail','done']):''}</div><div class="ws">◇ docs <span class="n">1</span>${v==='attn'?mks(['done']):''}</div><div class="ws plus">＋</div>
     <span class="fill"></span>
-    <div class="tbtn ${v==='sync'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='kiexplain'||v==='kidescribe'||v==='ki'||v==='kichats'||v==='kisidecards'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?'on':''}">✦ AI${v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kicommand'||v==='kisidecards'?' <span class="ax-n">· 1</span>':''}</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'||v==='kiactions'?'on':''}">${v.startsWith('web-')?'Ctrl+Shift+P':'⌘K'}</div>${wcRight()}</div>
+    <div class="tbtn ${v==='sync'||v==='sync-transport'?'on':''}"><span class="ok">☁</span> synced</div><div class="tbtn ${v==='kiexplain'||v==='kidescribe'||v==='ki'||v==='kichats'||v==='kisidecards'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?'on':''}">✦ AI${v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kicommand'||v==='kisidecards'?' <span class="ax-n">· 1</span>':''}</div><div class="tbtn on">▥ Sidebar</div><div class="tbtn ${v==='palette'||v==='kiactions'?'on':''}">${v.startsWith('web-')?'Ctrl+Shift+P':'⌘K'}</div>${wcRight()}</div>
   <div class="tabrow row">${v==='attn'?tabs(0,{1:['ask','bell','fail','done'],2:['bell'],3:['fail'],4:['done']}):tabs(v==='blocks'?1:v==='kimon'||v==='kimonstates'?4:v==='kint'||v==='kintstates'||v==='kintconfirm'||v==='kintconfirmstates'?5:0)}<span class="fill"></span><span class="dim" style="padding-right:12px">${v.startsWith('web-')?'Alt+Shift+1–9':'⌘1–9'} tab · click a pill to switch workspace</span></div>
-  <div class="body">${v==='web-window'?wbArea():v==='preview'?previewArea():v==='kimon'?monitorArea():v==='kimonstates'?moStates():v==='kint'?igArea():v==='kintstates'?igStates():v==='kintconfirm'?icArea():v==='kintconfirmstates'?icStates():v==='kintctx'?cxArea():v==='kiwsh'?awArea():v==='kiwshstates'?awStates():v==='kidevicestates'?adStates():v==='lanstates'?lnStates():v==='host-shell-states'?hsStates():v==='kiexplain'||v==='kidescribe'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?chatArea(v):`<div class="area">
+  <div class="body">${v==='server-sessions'?svArea():v==='web-window'?wbArea():v==='preview'?previewArea():v==='kimon'?monitorArea():v==='kimonstates'?moStates():v==='kint'?igArea():v==='kintstates'?igStates():v==='kintconfirm'?icArea():v==='kintconfirmstates'?icStates():v==='kintctx'?cxArea():v==='kiwsh'?awArea():v==='kiwshstates'?awStates():v==='kidevicestates'?adStates():v==='lanstates'?lnStates():v==='host-shell-states'?hsStates():v==='kiexplain'||v==='kidescribe'||v==='kipane'||v==='kistates'||v==='kiset'||v==='kiask'||v==='kioffer'||v==='kiapprove'||v==='kiapprovestates'||v==='kiwrite'||v==='kiwritestates'||v==='kicommand'||v==='kicommandstates'||v==='kidevice'?chatArea(v):`<div class="area">
     ${P('','❯','shell','pane 1 · ~/holzWave',shell(v==='search'?'search':v==='copy'?'copy':''),{f:1,s:'grid-row:1/2',chip:phChip('⎈ talos-prod')})}
     ${P('wa','⌁','holzkube','ssh · talos-2',ssh(1))}
     ${P('in','✎','layout.rs','sftp · talos-1',editor)}
@@ -1588,6 +1717,137 @@ const lkViews={
 };
 ovl['link-ask']=lkAsk();
 ovl['host-shell']=hsDialog();
+/* Server sessions (docs/design.md 6.34) and signing in to a server (6.35). Every word below is a word of the two word tables of those sections; a view that is not a window of its own is a ground with captioned cells, like the screens of the browser build.
+   The writer label is a square and a word (filled WRITING, hollow WATCHING, dashed FREE); the state dot is a shape (filled, hollow, dotted, hollow with a dash). Nothing of this phase was run on a real server or a real phone: these are drawings of the design. */
+const SV_HOST='holz.example.net';
+const svSq=k=>`<i class="sv-sq ${k}" aria-hidden="true"></i>`;
+const SV_W={writing:['WRITING','w'],watching:['WATCHING','h'],free:['FREE','f']};
+const svChip=s=>`<span class="sv-chip" data-writer="${s}" role="status">${svSq(SV_W[s][1])}${SV_W[s][0]}</span>`;
+const svTake='<span class="sv-take" data-target role="button">Take over</span>';
+const svX='<span class="sv-x" role="button" title="Detach session" aria-label="Detach session">✕</span>';
+const svBtn=(t,o='')=>`<span class="sv-btn ${o}" data-target role="button"${o.includes('dis')?' aria-disabled="true"':''}>${t}</span>`;
+const svDot=s=>`<i class="sv-dot" data-s="${s}"></i>`;
+const svTerm=`<div class="term pre"><span class="ro">❯</span> cargo build --release
+<span class="dim">   Compiling holzwave-core v0.0.1-beta2</span>
+<span class="dim">   Compiling holzwave-server v0.0.1-beta2</span>
+<span class="ok">    Finished</span> release in 2m 14s
+<span class="ro">❯</span> <span class="cur"></span></div>`;
+/* A pane of a server session. `w` is the writer word, `ctx` the context slot, `dot` the class of the dot; the cross is the detach button. */
+const svPane=(w,o={})=>P(o.dot||'','⌁',o.title||'Session 1',o.ctx||`${SV_HOST} · 120×40`,o.body||svTerm,{f:o.f,chip:(w?svChip(w):'')+(w&&w!=='writing'?svTake:''),act:'⊞ ⤢ '+svX});
+const svArea=()=>`<div class="area" style="grid-template-columns:1fr 1fr;grid-template-rows:1fr">${P('','❯','shell','pane 1 · ~/holzWave',shell(''))}${svPane('writing',{f:1})}</div>`;
+/* The server row. `st` is in, out, wait or down; `web` draws the row of the browser build (`This server`, no sign-in, no sign-out). */
+const SV_STATE={in:'signed in',out:'not signed in',wait:'signing in…',down:'unreachable'};
+const svSrv=(st,o={})=>{
+  const web=!!o.web;
+  const btns=o.locked?'<span class="dim">Locked: unlock to connect</span>':web?svBtn('New session'):st==='in'?svBtn('Sign out')+(o.off?'':svBtn('New session')):st==='out'?svBtn('Sign in…'):st==='down'?svBtn('Sign out'):'';
+  return `<div class="sv-srv" role="row">${svDot(web?'in':st)}<span class="sv-name">${web?'This server':SV_HOST}</span><span class="sv-addr">${web?SV_HOST:'https://'+SV_HOST}</span><span class="sv-stw">${web?'signed in':SV_STATE[st]}</span><span class="sv-acts">${btns}</span></div>`;
+};
+const svSess=(title,dir,size,at,att,held,o={})=>`<div class="sv-sess" role="row"><span class="sv-st">${title}</span><span class="sv-dir">${dir}</span><span class="sv-sz">${size}</span><span class="sv-at">${at}</span><span class="sv-att">${att}</span><span class="sv-wr">${svSq(held?'w':'f')}${held?'held':'free'}</span><span class="sv-acts">${svBtn('Attach')}${svBtn(o.arm?'Click again to end':'End',o.arm?'arm':'')}</span></div>`;
+const SV_HELP='A session keeps running on the server with no window open. It ends when the server restarts or after a day with nobody connected.';
+const SV_OFF='Remote sessions are off on this server.';
+const svList=()=>`${svSess('cargo build','~/holzWave','120×40','14:02','1 attached',1)}${svSess('Session 2','~/holzWave/core','80×24','Mon 09:40','0 attached',0)}`;
+/* The Connections view with the server above the saved connections (6.3, 6.34). The platform switch decides the row: `Browser` shows `This server`. */
+const svConn=()=>{
+  const web=$('#root').dataset.os==='web';
+  return `<div class="scrim"></div><div class="ov float modal sv-dlg" role="dialog" aria-label="Connections" style="left:120px;top:84px;width:880px;height:568px">
+ <div class="ap" style="padding:14px 20px 0">${apG('Server',`${svSrv('in',{web})}<p class="sv-help">${SV_HELP}</p>${svList()}`)}</div>
+ <div class="sv-mgr" style="margin:6px 0 0">
+  <div style="width:240px;border-right:1px solid var(--edge);padding:12px 0"><div class="grp lbl">Connections</div><div class="it"><span><span class="ok">●</span> talos-1</span><span class="dim">ssh</span></div><div class="it on"><span><span class="wa">⟳</span> talos-2</span><span class="dim">ssh</span></div><div class="it"><span><span class="ok">●</span> build-linux</span><span class="dim">wsl</span></div><div class="it dim"><span>＋ New connection</span></div></div>
+  <div class="fill" style="padding:14px 22px"><b style="font-size:14px">talos-2</b> <span class="chip w">Reconnecting 2/5</span>
+   <div style="height:8px"></div><div class="field"><span class="dim">Host</span><span class="v">10.0.4.12</span></div><div class="field"><span class="dim">User</span><span class="v">holz</span></div><div class="field"><span class="dim">Login</span><span class="v">● Key file &nbsp; ○ Password &nbsp; ○ Agent</span></div>
+   <div class="row" style="gap:8px;margin-top:4px"><span class="btn p">Connect</span><span class="btn">Test</span><span class="btn" style="margin-left:auto">Close</span></div></div></div></div>`;
+};
+Object.defineProperty(ovl,'server-sessions',{enumerable:true,get:svConn});
+/* The panes of the states view: three headers with the three writer words, and the six states of 6.34. */
+const svCell=(cap,body)=>`<div class="dv-cell"><div class="cap">${cap}</div>${body}</div>`;
+const svRw=(cap,body)=>`<div class="sv-rw"><div class="cap">${cap}</div>${body}</div>`;
+const svFrame=(w,o={})=>`<div class="sv-frame">${svPane(w,o)}</div>`;
+const svLines=(line)=>`<div class="term sv-line">${line}</div>`;
+const svWarn=t=>`<span class="wa" style="text-decoration:underline">! ${t}</span>`;
+const svStates=[
+ ['Attaching','dr',['Attaching…'],'Attaching…',null],
+ ['Older lines, the person scrolled to the top','', ['Loading older lines…'],'Loading older lines…','writing'],
+ ['The server asked for a fresh start','dr',['Resyncing…'],'Resyncing…','writing'],
+ ['The session ended','fl',[svWarn('Session ended · exit 1')],'Session ended · exit 1',null],
+ ['The connection was lost','dr',['Reconnecting…'],'Reconnecting…',null],
+ ['No try is left','fl',[svWarn('Server unreachable')],'Server unreachable. Press Enter to try again.',null]
+];
+const svViews={
+ 'server-pane-states':()=>`<div class="sv-page"><div class="cap">The writer label in a pane header: a square and a word, and Take over when the pane does not write</div><div class="sv-3">
+ ${svRw('Writing: this pane has the write right',svFrame('writing',{f:1,body:svLines('Typing goes to the session.')}))}
+ ${svRw('Watching: another pane writes',svFrame('watching',{body:svLines('Typing is dropped. Take over moves the write right here.')}))}
+ ${svRw('Free: nobody writes; it stays free until someone takes over',svFrame('free',{body:svLines('The writer was silent for 30 s. The write right moves only by Take over.')}))}
+ </div><div class="cap" style="margin-top:4px">The states of a remote pane: the header says the word, the screen says one dim line</div><div class="sv-6">
+ ${svStates.map(([cap,dot,ctx,line,w])=>svCell(cap,svFrame(w,{dot,ctx:ctx[0],body:svLines(line)}))).join('')}
+ </div><div class="cap" style="margin-top:4px">The server row of the Connections view in its states</div><div class="sv-s3">
+ ${svCell('Signed in, remote sessions on',`<div class="sv-rowf">${svSrv('in')}</div>`)}
+ ${svCell('Not signed in',`<div class="sv-rowf">${svSrv('out')}</div>`)}
+ ${svCell('Signing in…',`<div class="sv-rowf">${svSrv('wait')}</div>`)}
+ ${svCell('Unreachable',`<div class="sv-rowf">${svSrv('down')}</div>`)}
+ ${svCell('Signed in, remote sessions off on the server',`<div class="sv-rowf">${svSrv('in',{off:1})}<p class="sv-help" style="margin:0 0 4px">${SV_OFF}</p></div>`)}
+ ${svCell('Android, saved secrets locked',`<div class="sv-rowf">${svSrv('out',{locked:1})}</div>`)}
+ </div></div>`,
+ 'device-authorize':()=>dvAuthorize(),
+ 'device-lists':()=>dvLists()
+};
+/* Signing in to a server (6.35): the dialog of the app in two steps and the page of the browser, with the states of each. */
+const dvBox=(label,inner)=>`<div class="float wb-box dv-box" role="dialog" aria-label="${label}">${inner}</div>`;
+const dvKv=rows=>`<div class="dv-kv">${rows.map(([k,v,m])=>`<span class="k">${k}</span><span class="v${m?' mo':''}">${v}</span>`).join('')}</div>`;
+const dvStep1=dvBox('Sign in to the server',`<div class="wb-title">Sign in to the server</div>
+ ${wbIn('Server address','<span class="tx">http://holz.example.net</span>',{bad:1,fo:1,hint:'The address of your holzWave server, starting with https://.',err:'Use an address that starts with https://.'})}
+ ${dvKv([['Device','Holz MacBook']])}
+ <div class="wb-acts"><span class="btn">Cancel</span><span class="btn p">Continue</span></div>`);
+const dvStep2=dvBox('Sign in to the server',`<div class="wb-title">Sign in to the server</div>
+ <div class="dv-code" aria-label="Code">BCDF-GHJK</div>
+ <p class="dv-note">Opening your browser…</p><p class="dv-note">Enter this code only if you started this here.</p>
+ <div class="sy-state" role="status">${svDot('wait')}<span>Waiting for approval…</span></div>
+ <div class="wb-acts"><span class="btn">Open again</span><span class="btn">Cancel</span></div>`);
+const dvPage=dvBox('Authorize device',`<div class="wb-title">Authorize device</div>
+ ${dvKv([['Device','Holz MacBook'],['Platform','macOS'],['Address','203.0.113.7',1],['Requested','just now']])}
+ <div class="dv-code" aria-label="Code">BCDF-GHJK</div>
+ <p class="dv-note">Approve only if you started this on your own device.</p>
+ <div class="wb-acts"><span class="btn">Deny</span><span class="btn p">Approve</span></div>`);
+const dvSt=(dot,text,bad)=>`<div class="dv-st"><div class="w${bad?' bad':''}">${bad?'':svDot(dot)}<span>${text}</span></div></div>`;
+const dvAuthorize=()=>`<div class="dv-page"><div class="dv-top">
+ ${svCell('The app, step 1: the address, and an address that is refused',dvStep1)}
+ ${svCell('The app, step 2: the code, while the browser page is open',dvStep2)}
+ ${svCell('The browser: the page that approves a device',dvPage)}
+ </div><div class="cap" style="margin-top:2px">The states of step 2 in the app</div><div class="dv-states">
+ ${svCell('Waiting',dvSt('wait','Waiting for approval…'))}${svCell('Approved',dvSt('in','Signed in'))}${svCell('Denied',dvSt('','The request was denied.',1))}
+ ${svCell('Expired',dvSt('','The code expired. Start again.',1))}${svCell('Unreachable',dvSt('','The server cannot be reached.',1))}${svCell('Off on the server',dvSt('','Device sign-in is off on this server.',1))}
+ </div><div class="cap" style="margin-top:2px">What the page of the browser says after Approve, Deny, and a code that is not known</div><div class="dv-res">
+ ${svCell('Approve',dvSt('in','Device approved.'))}${svCell('Deny',dvSt('out','Request denied.'))}${svCell('A code that is not valid',dvSt('','That code is not valid or has expired.',1))}
+ </div></div>`;
+/* The Devices group of the Account dialog, the Devices group of the People dialog (with the owner) and the Device access group (6.35). */
+const dvRow=(name,meta,armed)=>`<div class="wb-r"><span class="nm">${name}</span><span class="mt">${meta}</span><span class="st"></span><span class="btn${armed?' arm':''}">${armed?'Click again to revoke':'Revoke'}</span></div>`;
+const dvAccount=`<div class="float wb-box dv-dlg" role="dialog" aria-label="Account"><div class="wb-title" style="margin:0 0 .2rem">Account</div><div class="ap-s" role="status" style="min-height:1.1rem;margin:0"></div>
+ <div class="ap" style="padding:0">${apG('Sessions',`<div class="wb-r"><span class="nm cur-s">Firefox on macOS</span><span class="st">this session</span></div>`)}
+ ${apG('Devices',`${dvRow('Holz MacBook','macOS · just now')}${dvRow('Pixel 8','Android · 3 h ago',1)}`)}</div>
+ <div class="wb-acts"><span class="btn">Close</span></div></div>`;
+const dvEmpty=`<div class="float wb-box dv-dlg" role="dialog" aria-label="Account"><div class="ap" style="padding:0">${apG('Devices',`<div class="wb-r"><span class="nm" style="color:var(--ink3)">No devices.</span></div>`)}</div></div>`;
+const dvAdmin=`<div class="float wb-box dv-dlg" role="dialog" aria-label="People"><div class="wb-title" style="margin:0 0 .2rem">People</div>
+ <div class="ap" style="padding:0">${apG('Devices',`<table class="dv-tbl"><thead><tr><th>Name</th><th>Owner</th><th>Platform</th><th>Last seen</th><th></th></tr></thead><tbody>
+ <tr><td>Holz MacBook</td><td>holz</td><td>macOS</td><td>just now</td><td><span class="btn">Revoke</span></td></tr>
+ <tr><td>Pixel 8</td><td>holz</td><td>Android</td><td>3 h ago</td><td><span class="btn">Revoke</span></td></tr>
+ <tr><td>Studio PC</td><td>anna</td><td>Windows</td><td>2 days ago</td><td><span class="btn">Revoke</span></td></tr></tbody></table>`)}</div></div>`;
+const dvSw=(name,on,lock)=>`<div class="dv-sw"${lock?' data-locked':''}><span class="nm">${name}</span><span class="sv-sw${on?'':' off'}${lock?' lock':''}" role="switch" aria-checked="${on?'true':'false'}"${lock?' aria-disabled="true"':''}>${on?'ON':'OFF'}<i></i></span></div>`;
+const dvAccess=`<div class="float wb-box dv-dlg" role="dialog" aria-label="People"><div class="wb-title" style="margin:0 0 .2rem">People</div>
+ <div class="ap" style="padding:0">${apG('Device access',`${dvSw('Sync target',1,0)}${dvSw('Remote sessions',0,1)}<p class="dv-line">Turned off in the server configuration.</p><p class="dv-line" style="margin-top:.3rem">Off by default. Turning one off ends the matching connections; devices stay signed in.</p>`)}</div></div>`;
+const dvLists=()=>`<div class="dv-page"><div class="dv-cols">
+ <div class="dv-cell"><div class="cap">Account: the Devices group, one revoke asked a second time</div>${dvAccount}<div class="cap" style="margin-top:8px">Account: no device yet</div>${dvEmpty}</div>
+ <div class="dv-cell"><div class="cap">People: the list of an administrator, with the owner</div>${dvAdmin}</div>
+ <div class="dv-cell"><div class="cap">People: Device access, Sync target on and Remote sessions off by the configuration</div>${dvAccess}</div>
+ </div></div>`;
+/* The sync popover with the choice of the target (6.9): set up with WebDAV, set up with the server, and connected to the server; and the server with the sync target switched off. */
+const syChoice=on=>`<div class="sy-choice" role="radiogroup" aria-label="Transport"><span role="radio" aria-checked="${on==='dav'}" class="${on==='dav'?'on':''}">${on==='dav'?'●':'○'} WebDAV</span><span role="radio" aria-checked="${on==='srv'}" class="${on==='srv'?'on':''}">${on==='srv'?'●':'○'} holzWave server</span></div><p class="sy-note">Changing the target keeps your passphrase. Files are not copied from one target to the other; the next run reads the new one.</p>`;
+const syPop=(style,title,chip,inner)=>`<div class="ov float" style="${style};width:340px;padding:14px;border-radius:16px"><div class="row" style="gap:8px"><b>${title}</b>${chip}</div>${inner}</div>`;
+const syLead='<div class="dim" style="margin:4px 0 6px">Same settings, themes, connections and layouts on every computer. Encrypted here before it leaves.</div>';
+const syPass='<div class="field"><span class="dim">Passphrase</span><span class="v">•••••••••</span></div><div class="dim" style="margin:6px 0 4px">The passphrase cannot be recovered if lost.</div>';
+ovl['sync-transport']=
+ syPop('right:720px;top:36px','Nextcloud','<span class="chip">not set up</span>',`${syLead}${syChoice('dav')}<div class="field"><span class="dim">Folder address</span><span class="v">…/dav/holz/holzwave</span></div><div class="field"><span class="dim">User</span><span class="v">holz</span></div><div class="field"><span class="dim">App password</span><span class="v">•••••••••</span></div>${syPass}<div class="row" style="gap:8px;margin-top:6px"><span class="btn p">Connect</span></div>`)+
+ syPop('right:370px;top:36px','holzWave server','<span class="chip">not set up</span>',`${syLead}${syChoice('srv')}<div class="field"><span class="dim">Server address</span><span class="v dim">–</span></div><div class="sy-state" role="status">${svDot('out')}<span>not signed in</span><span class="sy-link">Sign in…</span></div>${syPass}<div class="row" style="gap:8px;margin-top:6px"><span class="btn dis" aria-disabled="true" style="border-style:dashed">Connect</span></div>`)+
+ syPop('right:370px;top:392px','holzWave server','<span class="chip">not set up</span>',`${syChoice('srv')}<div class="field"><span class="dim">Server address</span><span class="v">${SV_HOST}</span></div><div class="sy-state" role="status">${svDot('in')}<span>signed in</span></div><div class="sy-state" role="status"><span class="wa" style="text-decoration:underline">! Sync is off on this server.</span></div><div class="row" style="gap:8px;margin-top:4px"><span class="btn dis" aria-disabled="true" style="border-style:dashed">Connect</span></div>`)+
+ syPop('right:20px;top:36px','holzWave server','<span class="chip" style="color:var(--ok)">connected</span>',`<div class="dim" style="margin:4px 0 10px">${SV_HOST} · signed in</div><div class="field"><span class="dim">Last sync</span><span>14:31 · 3 files</span></div><div class="field"><span class="dim">Encryption</span><span class="ok">end-to-end · passphrase</span></div><div class="field"><span class="dim">Conflicts</span><span>none</span></div><div class="grp lbl" style="padding:8px 0 2px">Synced</div><div class="dim">Settings · themes · connections · layouts</div><div class="dim">Secrets only encrypted</div><div class="row" style="gap:8px;margin-top:12px"><span class="btn">Close</span><span class="btn">Turn off</span><span class="btn p">Sync now</span></div>`);
 const views=[
  ['alltag','Daily','Every level at a glance: workspaces as pills, tabs below, panes inside. Panes: local shell, SSH with Kubernetes context (reconnecting here), SFTP editor, Markdown preview, system monitor. Hosts, context, history and widgets on the right.'],
  ['palette','Palette ⌘K','Every action by name: layout, connect, switch, themes. The way to reach anything without its own button. With the Browser platform the tear-off entry is gone and Toggle full screen is listed, without a chord.'],
@@ -1612,6 +1872,7 @@ const views=[
  ['kintstates','Integration states','What the block says while it reads, when the tool is not found (the places looked in, a field for the path, Set path and Check again), when a read failed (the last rows stay, dimmed, with the core\u2019s sentence marked !) and when a list was cut. Every state has words besides its colour.'],
  ['kintctx','Context section','The tools the person uses on the command line, in the sidebar between Hosts and History: one row each for Kubernetes, Talos, Azure and GAM with the mark, the name and the selection as text. The focused pane 1 is a plain shell, so the open list under Kubernetes sets the pick and the line says New blocks start with prod-eu; production is the word, an underline and the mark ! as well as its colour, and Shell opens a terminal with the row\u2019s context. The status line has the segments \u2013 prod-eu/payments with PRODUCTION and az holz-prod \u2013 and pane 5, a shell opened from the row, has the chip and the word production. Beside the panes the section in more states: a tool that is not found with its path field and a refused path, a tool that cannot be used, Azure signed out, a stale value and the note under a shell that has the focus.'],
  ['sync','Sync','Nextcloud/WebDAV, end-to-end encrypted, conflicts keep a backup, a list of what is synced.'],
+ ['sync-transport','Sync target','The set-up popover of the sync with the choice of the target above its rows (docs/design.md 6.9): WebDAV or holzWave server, exactly one, the passphrase shared. Left to right: set up with WebDAV, set up with the server (not signed in, with Sign in…), connected to the server; and under the second one the server with its sync target switched off: the state line says so and Connect is disabled with a dashed border. The choice is not drawn in the browser window.'],
  ['ki','AI sidebar','The AI chat takes the place of the sidebar in the same column, 280 px wide: the head with ◂ Sidebar leads back, the title button names the chat and ＋ New chat starts another. Below them is the chat of the pane form: the bar, the transcript, the consent card and the composer. Terminal content is sent only after you share that pane.'],
  ['kichats','AI chat: conversations','The title button opens the list of stored chats under the head: a row for the chat on screen (the rose wash, a 2 px bar and the mark ●), one for every other chat with its model and age, and a chat that is open in a pane says in pane 3 and has no ×. The first press on × turns it into Delete? (underlined, in the danger colour); the second deletes the chat for good. The core’s notes about its folder are dim lines above the rows, and one sentence about the list (here Chat deleted.) is said under the head.'],
  ['kisidecards','AI chat: approval in the column','A decision is brought to the person: the card of 6.15 in the strip of the column, with the fields of the request stacked (the name with its size, the value under it), its own scroll in the payload box, the place chip, the hash and Allow once and Deny. ✦ AI · 1 in the title bar shows the column in this form on the chat that waits; the card never takes the keyboard.'],
@@ -1644,7 +1905,11 @@ const views=[
  ['web-account','Web: account','The account dialog, opened from the palette entry Account\u2026: one group for each thing a person can change (password, authenticator, passkeys, unlock passphrase, recovery code) with its state as a word, and the sessions with this one marked by the word this session and a dot, Sign out and Sign out everywhere. A change asks again in the layer Confirm it is you above the dialog, which shows the account name in mono and offers the password or a passkey.'],
  ['web-people','Web: people','The people dialog, for administrators only: the table of accounts with role, state (active with a dot, disabled with a ring, locked out with ! and an underline) and last sign-in, the menu of one row (Make admin, Disable, Unlock sign-in while locked out, Reset secrets, Delete) and the layer that shows a new invitation link once with Copy link. The dialog shows no secret, terminal, command or layout of anyone.'],
  ['web-window','Web: window','The window as a browser shows it: the bar starts at the left edge, with no window buttons and no drag region. In the status line the marks reconnecting (a dotted ring), session ends in 4 min (a quarter circle) and secrets locked (a lock and the text button Unlock), and the notice Not available in the browser. A file dragged over a pane that takes it (a shell, a chat or a file browser; a preview, the monitor and a tool view take nothing and show no edge) shows a dashed edge and Drop to upload, with the upload folder once the page has seen it (the first drop of a page load shows the label alone); the edge is drawn here on the shell pane, and it is the same on a chat and on a file browser. A dropped file becomes its quoted path typed in a shell, the same path in the message of a chat, and the selected row of a file browser that lists the upload folder (a browser that lists another folder stays as it is and the status line says Uploaded to the folder). The row menu of a file in the file browser has the one entry Download; Settings has the row Notifications, here off, on and blocked by the browser.'],
-  ['links','Links','Links the program marked, in a shell pane (docs/design.md 6.31): two at rest with a dotted underline, one under the pointer with a solid underline and its target in the LINK segment of the status line (cut in the middle) with the notice beside it that says why a click could not open it (the host\u2019s own sentence, here an opener that cannot be started), one with the open gesture held in solid rose, one in text the program underlined itself, and an address with a scheme that is not allowed, which stays plain text. The pointer cursor is the system\u2019s and is not drawn.'],
+  ['server-sessions','Server sessions','The Connections view with the holzWave server above the saved connections (docs/design.md 6.34): its name, its address in mono, the state dot with its word, Sign out and New session; under it the running sessions with the program title, the directory, the size, the start, how many are attached, free or held, Attach and End; the help line under the row. Behind the dialog a local pane and a remote pane whose header says WRITING. With the Browser platform the row is This server, with no sign-in and no sign-out.'],
+ ['server-pane-states','Server pane states','The header of a remote pane (6.34): WRITING with a filled square, WATCHING with a hollow one and FREE with a dashed one, and Take over after the label when the pane does not write. Then the six states of the pane, each a dot shape and a word in the context slot and one dim line on the screen, and the server row in its states: signed in, not signed in, signing in, unreachable, remote sessions off on the server, and the Android row while the secrets are locked.'],
+ ['device-authorize','Device sign-in','Signing in to a server from the app (docs/design.md 6.35): step 1 asks for the address of the server (an address that is not https is refused), step 2 shows the code while the browser page opens; and the page Authorize device of the browser with the device, the platform, the address, the time and the code to compare, Deny and Approve. Under them the states of step 2 and the three results of the page. Each state is a dot shape or the mark ! besides its words.'],
+ ['device-lists','Device lists','The Devices group of the Account dialog (a revoke that asks a second time, and the empty list), the list of devices of an administrator in the People dialog with the column Owner, and the Device access group with the two switches Sync target and Remote sessions (docs/design.md 6.35): the word ON or OFF is inside the knob, and a switch that the server configuration turned off for good is OFF, dashed, not operable, with its line.'],
+ ['links','Links','Links the program marked, in a shell pane (docs/design.md 6.31): two at rest with a dotted underline, one under the pointer with a solid underline and its target in the LINK segment of the status line (cut in the middle) with the notice beside it that says why a click could not open it (the host\u2019s own sentence, here an opener that cannot be started), one with the open gesture held in solid rose, one in text the program underlined itself, and an address with a scheme that is not allowed, which stays plain text. The pointer cursor is the system\u2019s and is not drawn.'],
   ['link-ask','Link dialog','The question Open this link? for a link whose text names one site and whose target is another: the text and the full target in mono, Cancel focused with the 2 px ring, Open the solid rose button. It has the shape of the close confirmation and is a floating layer.'],
   ['images','Images','Pictures in a shell pane: one in each of the three layers (below the cell backgrounds, between the backgrounds and the text, above the text), pictures clipped at the top and bottom edge of the pane body, a picture made of placeholder cells, and the cursor and a selection drawn over a picture. An animated picture does not move under reduced motion: its first frame if it was never started, else the frame it shows.'],
   ['drag','Drag','Reorder panes by drag and drop, drop them as a tab, drag them out into a new window. On Wayland use the palette.'],
@@ -1840,6 +2105,19 @@ $('#phones-handover').innerHTML=
 +phc('Lines after a copy',lkTop('open'),`<div style="padding:8px">${hoNote('Into the shell folder','Copied report.pdf (1.2 MB) to ~/handover/report.pdf')}${hoNote('The name was taken','Copied report.pdf (1.2 MB) to ~/handover/report-2.pdf')}${hoNote('Out of the shell folder','Copied report.pdf (1.2 MB) out')}${hoNote('Too large','report.pdf is 612 MB; the limit is 256 MB','warn')}${hoNote('Any other failure','Could not copy the file','warn')}</div>`,'',{raw:1})
 +phc('Drawn by Android',`<span class="dim">12:41</span><span class="dim" style="margin-left:auto">87 %</span>`,`<div style="padding:8px 6px"><div class="lk-sys"><div class="h"><i></i><span>holzWave · now</span></div><b>holzWave is running</b><div>3 shells, 1 connection</div><span class="a" data-target>Stop all</span></div><div class="cap" style="margin:8px 4px 0;font-size:8px">Channel: Running sessions. No sound, no badge. Shaded and rounded because the system draws it.</div></div>`,'',{raw:1});
 
+/* Server sessions on a phone (docs/design.md 6.34): the Connections view as the screen, and a pane that watches. A phone is drawn at half scale, so 22 px here stand for 44 px. */
+const svPSess=(title,meta,held)=>`<div class="sv-psess"><div class="sv-ptx"><span class="sv-pt">${title}</span><span class="sv-pm">${meta}</span></div><span class="sv-wr">${svSq(held?'w':'f')}${held?'held':'free'}</span><span class="sv-pb" data-target role="button">Attach</span><span class="sv-pb" data-target role="button">End</span></div>`;
+const svPSheet=`<div class="sv-sheet"><div class="grp lbl" style="padding:0 0 2px;font-size:7.5px">Server</div><div class="sv-srv" role="row">${svDot('in')}<span class="sv-name">${SV_HOST}</span><span class="sv-addr">https://${SV_HOST}</span><span class="sv-stw">signed in</span><span class="sv-acts">${svBtn('Sign out')}${svBtn('New session')}</span></div><p class="sv-help">${SV_HELP}</p>${svPSess('cargo build','~/holzWave · 120×40 · 14:02 · 1 attached',1)}${svPSess('Session 2','~/holzWave/core · 80×24 · Mon 09:40 · 0 attached',0)}</div>`;
+const svPTop=w=>`<span class="wd">◆</span><span class="sv-pn">cargo build</span>${svChip(w)}${w==='writing'?'':svTake}<span class="ro">✦ ⌘</span>`;
+$('#phones-server').innerHTML=
+ phc('Connections: the sessions sheet','<span class="lbl">Connections</span>',svPSheet,'',{raw:1})
++phc('A remote pane that watches',svPTop('watching'),`<span class="ro">❯</span> cargo build --release
+<span class="dim">   Compiling holzwave-core</span>
+<span class="dim">   Compiling holzwave-server</span>
+<span class="ok">    Finished</span> release
+<span class="ro">❯</span> <span class="cur"></span>`,BN);
+$('#phones-server').querySelectorAll('.ph1 .t')[1].classList.add('sv-top');
+
 /* Feature list */
 const B='<span class="ph-tag built">built</span>',pl=n=>`<span class="ph-tag">Phase ${n}</span>`;
 const rows=[
@@ -1851,6 +2129,7 @@ const rows=[
 ['Nextcloud sync, end-to-end','Title bar ☁, sync popover, settings',pl('3b')],
 ['File previews (Markdown, image, video, PDF)','Previews view and Daily',pl(4)],['Editor with SFTP','Editor block',pl(4)],
 ['wsh CLI','Open blocks and set titles from the shell',pl(5)],['Widgets sidebar','Right, collapsible',pl(6)],['History with fuzzy search','Sidebar, ⌃R',pl(6)],['System monitor','System block',pl(6)],['System monitor over SSH','Palette › System monitor: host (ssh)',B],['AI chat in a pane','Title bar ✦ AI, palette, a pane beside the focused one',B],['Explain error, command from description','Palette and chat, ⇧⌘Y, ⇧⌘G',B],['wsh ai','Terminal, request card in the window',B],['AI providers and keys','Chat bar › Providers…, palette, Settings',B],['Apple on-device model','Chat picker, Providers › On device (macOS 26 or later)',B],['Sharing a pane with the chat','Chat › Auto',B],['Approving a tool call','Chat › approval card',B],['Changing a file','Chat › approval card › diff',B],['Running a command','Chat › approval card',B],['AI chat in the sidebar','Palette, title bar ✦ AI, replaces the sidebar',B],
+['Server sync and remote sessions','Connections view, pane header, sync popover, Account and People',pl(12)],
 ['Kubernetes, Talos, Azure, GAM7','Context in sidebar and status line, blocks',pl('6b')],['Android','One pane per screen, sheet, key row',pl(7)]
 ];
 $('#cov').innerHTML='<tr><th>Feature</th><th>Where</th><th>Status</th></tr>'+rows.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td></tr>`).join('');
