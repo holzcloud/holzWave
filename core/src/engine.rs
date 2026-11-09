@@ -905,8 +905,10 @@ pub trait TerminalEngine {
     /// What is carried: the cells with their colours and styles, the links of cells, the cursor and its shape, the
     /// terminal modes that differ from their defaults (bracketed paste, application cursor keys, mouse reporting and
     /// the like), the scrolling region, the tab stops, the working directory, the keyboard state and which screen is
-    /// active. What is not: pictures, the title, the selection, the search and the viewport position (those belong to
-    /// the engine that shows the terminal, not to the terminal).
+    /// active; a line the program wrote as one long line is written as one, so the receiver wraps it again at its own
+    /// width. What is not: pictures, the title, the selection, the search, the viewport position and the palette (those
+    /// belong to the engine that shows the terminal, not to the terminal), and, while the alternate screen is active,
+    /// the main screen behind it.
     ///
     /// The bytes are cut off by refusing: a snapshot that would be larger than `max_bytes` is an error, never a
     /// prefix, because a prefix of a screen is a corrupted screen. The call belongs to the engine's own thread and

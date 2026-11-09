@@ -1111,21 +1111,48 @@ impl std::io::Write for BoundedSink {
 }
 
 impl GhosttyEngine {
-    /// The VT bytes of the screen, see [`TerminalEngine::snapshot_vt`].
+    /// The VT bytes of the last `tail_rows` scrolled-off rows and the screen, see [`TerminalEngine::snapshot_vt`].
+    ///
+    /// The library's formatter takes a selection and writes exactly its cells with their styles and links, so the range is
+    /// one selection from the first wanted scrollback row to the last cell of the screen; nothing is walked or rebuilt by
+    /// hand, and if a library bump changes what such a selection carries the equality tests of the byte bridge fail first.
+    /// Two things are set on top of what the formatter does by itself:
+    ///
+    /// - Soft-wrapped lines are written unwrapped. Otherwise every wrapped row would end in a line feed, the client would
+    ///   see hard line ends where the program wrote one long line, and text read back from it (a copy, a search) would break
+    ///   where the pane's own does not. A client of the same width wraps the line again at the same cell and marks it wrapped.
+    /// - The cursor shape (DECSCUSR) is appended: the formatter carries the position, the blinking and the visibility but
+    ///   not the shape. A block, which is what a fresh terminal has, is left unsaid.
+    ///
+    /// The palette is not carried: the colours of a theme belong to the engine that draws them, and a cell that names a
+    /// palette entry keeps naming it. The range is clamped to the rows that exist, and the active screen is the one that is
+    /// written: while a full-screen program runs on the alternate screen, that is the screen that is carried (it has no
+    /// scrollback) and the main screen behind it is not.
     fn snapshot_vt_range(&mut self, tail_rows: usize, max_bytes: usize) -> Result<Vec<u8>> {
-        // The scrollback comes in with the next change; for now the range is the screen.
-        let _ = tail_rows;
         let (cols, rows) = (self.terminal.cols().map_err(eng)?, self.terminal.rows().map_err(eng)?);
         if cols == 0 || rows == 0 {
             return Err(Error::Engine("the terminal has no cells".into()));
         }
-        let corner = |x: u16, y: u32| {
-            self.terminal.grid_ref(Point::Active(PointCoordinate { x, y })).map_err(eng)
+        // The shape of the cursor is known to the render state only. Updating it marks nothing as shown: the frame
+        // that the next `update` builds is the one it would have been (`screen` does the same).
+        let (shape, blinking) = {
+            let snapshot = self.render.update(&self.terminal).map_err(eng)?;
+            let cursor = snapshot.cursor().map_err(eng)?;
+            (cursor.visual_style, cursor.blinking)
         };
-        let range = Selection::new(corner(0, 0)?, corner(cols - 1, u32::from(rows) - 1)?, false);
+        // Clamped to the rows that exist; the active screen starts at `scrollback` in screen coordinates.
+        let scrollback = self.terminal.scrollback_rows().map_err(eng)?;
+        let first = u32::try_from(scrollback - tail_rows.min(scrollback)).map_err(|_| Error::Engine("too many rows".into()))?;
+        let start = self.screen_ref((0, first))?;
+        let end = self
+            .terminal
+            .grid_ref(Point::Active(PointCoordinate { x: cols - 1, y: u32::from(rows) - 1 }))
+            .map_err(eng)?;
+        let range = Selection::new(start, end, false);
         let options = FormatterOptions::new()
             .with_format(Format::Vt)
             .with_selection(&range)
+            .with_unwrap(true)
             .with_modes(true)
             .with_scrolling_region(true)
             .with_tabstops(true)
@@ -1141,7 +1168,21 @@ impl GhosttyEngine {
             return Err(Error::Engine(format!("the snapshot is larger than {max_bytes} bytes")));
         }
         written.map_err(eng)?;
-        Ok(sink.bytes)
+        let mut bytes = sink.bytes;
+        let base = match shape {
+            CursorVisualStyle::Underline => Some(3),
+            CursorVisualStyle::Bar => Some(5),
+            _ => None,
+        };
+        if let Some(base) = base {
+            // Odd is blinking, even steady.
+            let command = format!("\x1b[{} q", base + u8::from(!blinking));
+            if bytes.len() + command.len() > max_bytes {
+                return Err(Error::Engine(format!("the snapshot is larger than {max_bytes} bytes")));
+            }
+            bytes.extend_from_slice(command.as_bytes());
+        }
+        Ok(bytes)
     }
 }
 
