@@ -81,7 +81,7 @@ Does not exist yet:
   the buttons, the drawn states and the behaviour under Wayland are unverified. Under Wayland the setting `Frame` on `Auto` is
   the own frame, which was not tried there; `Frame` set to `System` in Settings, or `window_frame.json` edited by hand, gives
   the system's title bar back ([config.md](config.md)). The frame choice and the Linux button style are per-device settings
-  and never sync. Open: the keyboard cannot reach the buttons of the bar. The list is in [design.md](design.md) section 7.
+  and never sync. The keyboard reaches the bar with `F6` (tested with Playwright's keyboard only, [design.md](design.md) section 6.1). The list of what is open is in [design.md](design.md) section 7.
 
 - Local shell, scrollback, copy and paste, Unicode, resize, themes.
 - Block tiling with tabs and workspaces.

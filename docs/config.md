@@ -298,8 +298,10 @@ one key. The key is a single printable character (`D`, `]`, `1`, `,`) or a name:
 `Cmd+Ctrl+Alt+Shift+Key` in that modifier order with letters in upper case: `Cmd+Shift+D`.
 
 **Bindability.** The terminal owns the plain keys, so a chord must hold `Cmd`, or at least two modifiers one of which is
-`Ctrl` or `Alt`. `D`, `Shift+D`, `Ctrl+D`, `Alt+D` and `Escape` are refused; `Cmd+D`, `Ctrl+Alt+D` and
-`Ctrl+Shift+PageDown` are fine.
+`Ctrl` or `Alt`, or be a function key (`F1` to `F24`) alone or with `Shift`. `D`, `Shift+D`, `Ctrl+D`, `Alt+D` and `Escape` are
+refused; `Cmd+D`, `Ctrl+Alt+D`, `Ctrl+Shift+PageDown` and `F6` are fine. A function key types no character, but a program on the
+alternate screen (htop, mc) reads function keys itself: while one is running, the page sends a function-key chord to it and does not
+run the action, so a binding on a function key never takes a key from such a program (the palette is the way then).
 
 **A chord is text with a platform meaning.** `Cmd` is the Command key on macOS and the Super (Windows) key elsewhere,
 which the operating system usually keeps for itself, so no default on Windows or Linux uses it. A `settings.json`
@@ -384,6 +386,9 @@ GNOME's input method takes for emoji.
 | `tab.close`, `workspace.close` | none | none | none |
 | `ai.new_chat` | none | none | none |
 | `integration.context`, `integration.profiles` | none | none | none |
+| `region.focus_next` | `F6` | `F6` | `F6` |
+| `region.focus_prev` | `Shift+F6` | `Shift+F6` | `Shift+F6` |
+| `bar.focus` | none | none | none |
 
 **The browser build.** A browser keeps some chords for itself and never hands them to a page: `Ctrl+W`, `Ctrl+T`, `Ctrl+N`,
 `Ctrl+Tab`, `Ctrl+PageUp` and `Ctrl+PageDown`, and the same with `Shift` for `W`, `T` and `N` (close window, reopen tab,
@@ -399,6 +404,11 @@ private window). The browser build therefore has its own column, which is the Li
 Every chord of the browser column can be changed in the settings like any other, and a chord that a browser keeps is not
 refused if you choose it yourself (the page may not receive it). The `keybindings` of a person who uses the browser belong to
 the server's settings for that person and do not travel to a desktop, as they do not travel between the desktop platforms.
+
+`region.focus_next` (`F6`) and `region.focus_prev` (`Shift+F6`) move the keyboard between the terminal and the window bar: from the
+terminal to the first (or last) control of the bar, from the bar back to the terminal. `bar.focus` (the palette entry `Focus the bar`)
+goes to the bar from anywhere and has no default chord. On a Mac laptop `F6` is `fn+F6` unless the system's function keys are
+standard, and in a browser `F6` is also the browser's key for its address bar. See [design.md](design.md) section 6.1.
 
 `integration.context` shows the sidebar and brings its Context section into view; `integration.profiles` opens the dialog of the
 integration profiles. Neither has a default chord, so no chord of another action is taken; give one in the key binding editor if
