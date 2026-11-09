@@ -145,9 +145,9 @@ impl<T: serde::Serialize> IsSerialize<T> {
 #[test]
 fn a_device_token_has_its_shape_parses_back_and_prints_a_marker() {
     // The probe sees what it should: a type with the traits is seen, a type without is not.
-    assert!(IsClone::<String>::YES && IsSerialize::<String>::YES, "the probe works");
-    assert!(!IsClone::<DeviceToken>::YES, "a token cannot be cloned");
-    assert!(!IsSerialize::<DeviceToken>::YES, "a token cannot be serialised");
+    const { assert!(IsClone::<String>::YES && IsSerialize::<String>::YES, "the probe works") };
+    const { assert!(!IsClone::<DeviceToken>::YES, "a token cannot be cloned") };
+    const { assert!(!IsSerialize::<DeviceToken>::YES, "a token cannot be serialised") };
 
     let token = DeviceToken::generate().expect("a token");
     let text = token.expose().to_owned();
@@ -460,7 +460,7 @@ fn a_grant_code_has_the_shape_of_a_token_with_its_own_prefix() {
     let token = DeviceToken::generate().expect("a token");
     assert!(GrantCode::parse(token.expose()).is_err(), "a device token is no grant code");
     assert!(DeviceToken::parse(code.expose()).is_err(), "a grant code is no device token");
-    assert!(!IsClone::<GrantCode>::YES && !IsSerialize::<GrantCode>::YES);
+    const { assert!(!IsClone::<GrantCode>::YES && !IsSerialize::<GrantCode>::YES) };
 }
 
 // ---- grants ----
@@ -610,7 +610,7 @@ fn pending_grants_are_counted_exactly_and_expired_ones_are_not_counted_and_are_p
     let a: IpAddr = "192.0.2.10".parse().expect("address");
     let b: IpAddr = "2001:db8::10".parse().expect("address");
     let c: IpAddr = "192.0.2.99".parse().expect("address");
-    assert!(MAX_PENDING_PER_ADDR == 5 && MAX_PENDING == 200);
+    const { assert!(MAX_PENDING_PER_ADDR == 5 && MAX_PENDING == 200) };
     assert_eq!(store.read(|tx| tx.grant_counts(a, NOW)).expect("counts").all, 0);
     for _ in 0..3 {
         grant(&store, "a", "192.0.2.10", NOW);
