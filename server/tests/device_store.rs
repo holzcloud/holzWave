@@ -13,8 +13,8 @@ use holzwave_server::device::{
     poll_verdict,
 };
 use holzwave_server::store::{
-    Account, AccountId, AccountState, Device, Grant, NewAccount, NewDevice, NewGrant, NewSession, Role, SignInMethod, Store,
-    StoreError, TokenHash,
+    Account, AccountId, AccountState, BlobBounds, Cond, Device, Grant, NewAccount, NewDevice, NewGrant, NewSession, PutOutcome,
+    Role, SignInMethod, Store, StoreError, TokenHash, hash_token,
 };
 use scratch::Scratch;
 
@@ -811,4 +811,389 @@ fn a_device_is_touched_at_most_once_a_minute_and_the_lists_are_scoped_ordered_an
     assert_eq!(store.write(|tx| tx.device_revoke_any(b1.id)).expect("revoke"), Some(bob.id));
     assert_eq!(store.write(|tx| tx.device_revoke_any(b1.id)).expect("revoke"), None);
     assert_eq!(store.read(|tx| tx.devices_of(bob.id, now)).expect("list").len(), 1);
+}
+
+// ---- sync blobs ----
+
+const ROOMY: BlobBounds = BlobBounds { quota_bytes: 1 << 20, max_files: 100, backups_keep: 0 };
+
+fn etag_of(body: &[u8]) -> String {
+    hash_token(body).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn put(store: &Store, account: &Account, path: &str, body: &[u8], cond: Cond, bounds: BlobBounds, now: i64) -> PutOutcome {
+    store.write(|tx| tx.blob_put(account.id, path, body, &cond, &bounds, now)).expect("a put")
+}
+
+fn stored(body: &[u8]) -> PutOutcome {
+    PutOutcome::Stored(etag_of(body))
+}
+
+#[test]
+fn a_conditional_write_is_absent_match_or_any_and_the_etag_is_the_hash_of_the_body() {
+    let (_scratch, store) = open("blob-cond");
+    make(&store, "root", Role::Admin);
+    let alice = make(&store, "alice", Role::Member);
+    let at = |cond: Cond, body: &[u8], now: i64| put(&store, &alice, "files/one", body, cond, ROOMY, now);
+
+    // Absent: succeeds for a new path, fails for an existing one.
+    assert_eq!(at(Cond::Absent, b"first", NOW), stored(b"first"));
+    assert_eq!(at(Cond::Absent, b"other", NOW), PutOutcome::PreconditionFailed);
+    let blob = store.read(|tx| tx.blob_get(alice.id, "files/one")).expect("get").expect("there");
+    assert_eq!((blob.body.as_slice(), blob.size, blob.updated_at), (&b"first"[..], 5, NOW));
+    assert_eq!(blob.etag, etag_of(b"first"), "the lowercase hex SHA-256 of the body");
+    assert_eq!(blob.etag.len(), 64);
+    assert!(blob.etag.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+    assert_eq!(etag_of(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "the helper is the real SHA-256");
+
+    // Match: succeeds only for the current etag.
+    assert_eq!(at(Cond::Match(etag_of(b"stale")), b"second", NOW + 1), PutOutcome::PreconditionFailed);
+    assert_eq!(at(Cond::Match(etag_of(b"first").to_uppercase()), b"second", NOW + 1), PutOutcome::PreconditionFailed, "the etag is lowercase");
+    assert_eq!(at(Cond::Match(String::new()), b"second", NOW + 1), PutOutcome::PreconditionFailed);
+    assert_eq!(at(Cond::Match(etag_of(b"first")), b"second", NOW + 2), stored(b"second"));
+    assert_eq!(at(Cond::Match(etag_of(b"first")), b"third", NOW + 3), PutOutcome::PreconditionFailed, "the old etag is stale now");
+    let blob = store.read(|tx| tx.blob_get(alice.id, "files/one")).expect("get").expect("there");
+    assert_eq!((blob.body.as_slice(), blob.updated_at), (&b"second"[..], NOW + 2), "a refused write changed nothing");
+    // Match on a path that is not there.
+    let none = put(&store, &alice, "files/none", b"x", Cond::Match(etag_of(b"x")), ROOMY, NOW);
+    assert_eq!(none, PutOutcome::PreconditionFailed);
+    assert_eq!(store.read(|tx| tx.blob_get(alice.id, "files/none")).expect("get"), None);
+
+    // Any: always writes, new or not, and an empty body is a body.
+    assert_eq!(at(Cond::Any, b"third", NOW + 4), stored(b"third"));
+    assert_eq!(put(&store, &alice, "files/two", b"", Cond::Any, ROOMY, NOW), stored(b""));
+    assert_eq!(store.read(|tx| tx.blob_get(alice.id, "files/two")).expect("get").expect("there").size, 0);
+    assert_eq!(store.read(|tx| tx.blob_get(alice.id, "files/absent")).expect("get"), None);
+
+    // The shape of the path is bounded, nothing else about it is the store's business.
+    for path in ["", &"p".repeat(513)] {
+        let r = store.write(|tx| tx.blob_put(alice.id, path, b"x", &Cond::Any, &ROOMY, NOW));
+        assert!(matches!(r, Err(StoreError::Invalid(_))), "{:?}", path.len());
+        assert!(matches!(store.read(|tx| tx.blob_get(alice.id, path)), Err(StoreError::Invalid(_))));
+    }
+    // The text of a blob does not show in its Debug output.
+    let shown = format!("{:?}", store.read(|tx| tx.blob_get(alice.id, "files/one")).expect("get").expect("there"));
+    assert!(!shown.contains("third") && !shown.contains("116"), "{shown}");
+}
+
+#[test]
+fn of_two_writers_that_hold_the_same_etag_exactly_one_wins() {
+    let scratch = Scratch::new("blob-race");
+    let first = Arc::new(Store::open(scratch.path()).expect("first"));
+    // A second store on the same directory has its own connection: the immediate transaction is what keeps them apart.
+    let second = Arc::new(Store::open(scratch.path()).expect("second"));
+    make(&first, "root", Role::Admin);
+    let alice = make(&first, "alice", Role::Member);
+    let e0 = match put(&first, &alice, "meta.json", b"{}", Cond::Absent, ROOMY, NOW) {
+        PutOutcome::Stored(etag) => etag,
+        other => panic!("the first write: {other:?}"),
+    };
+
+    for round in 0..20 {
+        let current = match first.read(|tx| tx.blob_get(alice.id, "files/hot")).expect("get") {
+            Some(blob) => blob.etag,
+            None => {
+                assert_eq!(put(&first, &alice, "files/hot", b"seed", Cond::Absent, ROOMY, NOW), stored(b"seed"));
+                etag_of(b"seed")
+            }
+        };
+        let barrier = std::sync::Barrier::new(2);
+        let results: Vec<PutOutcome> = std::thread::scope(|scope| {
+            let handles: Vec<_> = [&first, &second]
+                .into_iter()
+                .enumerate()
+                .map(|(i, store)| {
+                    let (barrier, alice, current) = (&barrier, &alice, current.clone());
+                    scope.spawn(move || {
+                        let body = format!("writer {i} round {round}").into_bytes();
+                        barrier.wait();
+                        put(store, alice, "files/hot", &body, Cond::Match(current), ROOMY, NOW + round)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().expect("a writer panicked")).collect()
+        });
+        let winners = results.iter().filter(|r| matches!(r, PutOutcome::Stored(_))).count();
+        let losers = results.iter().filter(|r| **r == PutOutcome::PreconditionFailed).count();
+        assert_eq!((winners, losers), (1, 1), "round {round}: {results:?}");
+        let winner = results.iter().position(|r| matches!(r, PutOutcome::Stored(_))).expect("a winner");
+        let kept = first.read(|tx| tx.blob_get(alice.id, "files/hot")).expect("get").expect("there");
+        assert_eq!(kept.body, format!("writer {winner} round {round}").into_bytes(), "the winner's body is what is stored");
+        assert_eq!(results[winner], PutOutcome::Stored(kept.etag));
+    }
+
+    // Sixteen writers on one connection's mutex: one winner as well.
+    let current = first.read(|tx| tx.blob_get(alice.id, "files/hot")).expect("get").expect("there").etag;
+    let barrier = std::sync::Barrier::new(16);
+    let wins: usize = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                let (store, barrier, alice, current) = (&first, &barrier, &alice, current.clone());
+                scope.spawn(move || {
+                    barrier.wait();
+                    put(store, alice, "files/hot", format!("w{i}").as_bytes(), Cond::Match(current), ROOMY, NOW + 99)
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| usize::from(matches!(h.join().expect("a writer panicked"), PutOutcome::Stored(_)))).sum()
+    });
+    assert_eq!(wins, 1);
+    // And 16 writers that all say Absent for a new path: one winner.
+    let barrier = std::sync::Barrier::new(16);
+    let wins: usize = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                let (store, barrier, alice) = (if i % 2 == 0 { &first } else { &second }, &barrier, &alice);
+                scope.spawn(move || {
+                    barrier.wait();
+                    put(store, alice, "files/new", format!("w{i}").as_bytes(), Cond::Absent, ROOMY, NOW)
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| usize::from(matches!(h.join().expect("a writer panicked"), PutOutcome::Stored(_)))).sum()
+    });
+    assert_eq!(wins, 1);
+    assert_eq!(first.read(|tx| tx.blob_get(alice.id, "meta.json")).expect("get").expect("there").etag, e0, "meta.json was not touched");
+}
+
+#[test]
+fn the_quota_and_the_file_count_are_exact_and_a_refused_write_changes_nothing() {
+    let (_scratch, store) = open("blob-bounds");
+    make(&store, "root", Role::Admin);
+    let alice = make(&store, "alice", Role::Member);
+    let bob = make(&store, "bob", Role::Member);
+    let bounds = BlobBounds { quota_bytes: 10, max_files: 3, backups_keep: 0 };
+    let usage = |account: &Account| store.read(|tx| tx.blob_usage(account.id)).expect("usage");
+    let put = |path: &str, body: &[u8], cond: Cond| put(&store, &alice, path, body, cond, bounds, NOW);
+
+    assert_eq!(put("files/a", b"123456", Cond::Absent), stored(b"123456"));
+    assert_eq!((usage(&alice).files, usage(&alice).bytes), (1, 6));
+    // 6 + 5 is 11, one over the quota: refused, nothing written, the usage is as it was.
+    assert_eq!(put("files/b", b"12345", Cond::Absent), PutOutcome::OverQuota);
+    assert_eq!(store.read(|tx| tx.blob_get(alice.id, "files/b")).expect("get"), None);
+    assert_eq!((usage(&alice).files, usage(&alice).bytes), (1, 6));
+    assert_eq!(put("files/b", b"1234", Cond::Absent), stored(b"1234"), "6 + 4 is exactly the quota");
+    assert_eq!((usage(&alice).files, usage(&alice).bytes), (2, 10));
+    // Replacing counts the difference only: a smaller one frees room, one as large as the room left fits exactly.
+    assert_eq!(put("files/a", b"abc", Cond::Any), stored(b"abc"));
+    assert_eq!((usage(&alice).files, usage(&alice).bytes), (2, 7));
+    assert_eq!(put("files/a", b"abcdef", Cond::Any), stored(b"abcdef"), "6 + 4 is exactly the quota");
+    assert_eq!(put("files/a", b"abcdefg", Cond::Any), PutOutcome::OverQuota, "7 + 4 is 11");
+    assert_eq!(
+        store.read(|tx| tx.blob_get(alice.id, "files/a")).expect("get").expect("there").body,
+        b"abcdef",
+        "the refused replacement left the old body"
+    );
+    // A body larger than the whole quota is refused up front.
+    assert_eq!(put("files/huge", &[0u8; 100], Cond::Absent), PutOutcome::OverQuota);
+    assert_eq!(store.read(|tx| tx.blob_get(alice.id, "files/huge")).expect("get"), None);
+    // The condition is judged first: a stale write over quota says precondition failed.
+    assert_eq!(put("files/a", &[0u8; 100], Cond::Match("0".repeat(64))), PutOutcome::PreconditionFailed);
+
+    // The count: three blobs at most; a fourth is refused, a replacement is not.
+    let (_s2, store2) = open("blob-files");
+    make(&store2, "root", Role::Admin);
+    let carol = make(&store2, "carol", Role::Member);
+    let put2 = |path: &str, cond: Cond| put_with(&store2, &carol, path, b"x", cond, bounds);
+    for name in ["files/1", "files/2", "files/3"] {
+        assert_eq!(put2(name, Cond::Absent), stored(b"x"));
+    }
+    assert_eq!(put2("files/4", Cond::Absent), PutOutcome::TooManyFiles);
+    assert_eq!(store2.read(|tx| tx.blob_get(carol.id, "files/4")).expect("get"), None);
+    assert_eq!(store2.read(|tx| tx.blob_usage(carol.id)).expect("usage").files, 3);
+    assert_eq!(put2("files/2", Cond::Any), stored(b"x"), "a replacement adds no file");
+    // Both limits at once: the bytes are named first.
+    let both = put_with(&store2, &carol, "files/5", &[0u8; 8], Cond::Absent, bounds);
+    assert_eq!(both, PutOutcome::OverQuota);
+
+    // Another person's bytes and files do not count against this person.
+    assert_eq!(put_with(&store, &bob, "files/a", b"1234567890", Cond::Absent, bounds), stored(b"1234567890"));
+    assert_eq!(usage(&bob).bytes, 10);
+    assert_eq!((usage(&alice).files, usage(&alice).bytes), (2, 10), "alice's own count did not move");
+}
+
+fn put_with(store: &Store, account: &Account, path: &str, body: &[u8], cond: Cond, bounds: BlobBounds) -> PutOutcome {
+    put(store, account, path, body, cond, bounds, NOW)
+}
+
+#[test]
+fn a_limit_that_was_lowered_does_not_trap_a_person_who_makes_their_data_smaller() {
+    let (_scratch, store) = open("blob-lowered");
+    make(&store, "root", Role::Admin);
+    let alice = make(&store, "alice", Role::Member);
+    for name in ["files/1", "files/2", "files/3", "files/4"] {
+        assert_eq!(put_with(&store, &alice, name, b"123456", Cond::Absent, ROOMY), stored(b"123456"));
+    }
+    // Over the number of files (4 against 2): adding one is refused, a replacement is not.
+    let few = BlobBounds { quota_bytes: 1000, max_files: 2, backups_keep: 0 };
+    assert_eq!(put_with(&store, &alice, "files/5", b"1", Cond::Absent, few), PutOutcome::TooManyFiles);
+    assert_eq!(put_with(&store, &alice, "files/1", b"12345", Cond::Any, few), stored(b"12345"));
+    // Over the bytes (23 against 20): growing is refused, a replacement that is not larger is not.
+    let small = BlobBounds { quota_bytes: 20, max_files: 100, backups_keep: 0 };
+    assert_eq!(put_with(&store, &alice, "files/1", b"1234567", Cond::Any, small), PutOutcome::OverQuota);
+    assert_eq!(put_with(&store, &alice, "files/5", b"1", Cond::Absent, small), PutOutcome::OverQuota);
+    assert_eq!(put_with(&store, &alice, "files/2", b"123456", Cond::Any, small), stored(b"123456"));
+    assert_eq!(put_with(&store, &alice, "files/2", b"12345", Cond::Any, small), stored(b"12345"));
+}
+
+#[test]
+fn a_listing_holds_the_names_etags_and_sizes_of_one_account_and_one_folder() {
+    let (_scratch, store) = open("blob-list");
+    make(&store, "root", Role::Admin);
+    let alice = make(&store, "alice", Role::Member);
+    let bob = make(&store, "bob", Role::Member);
+    for (path, body) in [
+        ("meta.json", &b"{\"v\":1}"[..]),
+        ("files/y", b"why"),
+        ("files/x", b"ex"),
+        ("backups/2026", b"backup"),
+        ("backups/2025", b"old backup"),
+    ] {
+        assert_eq!(put_with(&store, &alice, path, body, Cond::Absent, ROOMY), stored(body));
+    }
+    // The same paths for another person, with other bodies.
+    for path in ["meta.json", "files/x", "files/bob-only", "backups/2026"] {
+        put_with(&store, &bob, path, b"bob's", Cond::Absent, ROOMY);
+    }
+    let list = |account: &Account, prefix: &str| -> Vec<(String, String, u64)> {
+        store
+            .read(|tx| tx.blob_list(account.id, prefix))
+            .expect("list")
+            .into_iter()
+            .map(|e| (e.name, e.etag, e.size))
+            .collect()
+    };
+    assert_eq!(list(&alice, ""), [("meta.json".to_owned(), etag_of(b"{\"v\":1}"), 7)], "the root holds meta.json only");
+    assert_eq!(
+        list(&alice, "files/"),
+        [("x".to_owned(), etag_of(b"ex"), 2), ("y".to_owned(), etag_of(b"why"), 3)],
+        "in the order of the names"
+    );
+    assert_eq!(
+        list(&alice, "backups/"),
+        [("2025".to_owned(), etag_of(b"old backup"), 10), ("2026".to_owned(), etag_of(b"backup"), 6)]
+    );
+    assert_eq!(list(&bob, "files/").iter().map(|e| e.0.as_str()).collect::<Vec<_>>(), ["bob-only", "x"]);
+    assert_eq!(list(&bob, "files/")[1].1, etag_of(b"bob's"), "another person's body at the same path");
+    assert_eq!(list(&bob, "backups/").len(), 1);
+    assert_eq!(store.read(|tx| tx.blob_get(bob.id, "backups/2025")).expect("get"), None, "bob has no 2025 backup");
+    // A person with nothing sees nothing; so does a prefix that matches nothing, and a pattern is no pattern.
+    let carol = make(&store, "carol", Role::Member);
+    for prefix in ["", "files/", "backups/"] {
+        assert!(list(&carol, prefix).is_empty(), "{prefix:?}");
+    }
+    for prefix in ["fi_es/", "%", "files//", "nothing/", "FILES/", "f%/", "fil%"] {
+        assert!(list(&alice, prefix).is_empty(), "{prefix:?} is compared as text, not as a pattern");
+    }
+    // The updated time is that of the write.
+    put_with(&store, &alice, "files/x", b"ex2", Cond::Any, ROOMY);
+    let entry = store.read(|tx| tx.blob_list(alice.id, "files/")).expect("list").remove(0);
+    assert_eq!((entry.name.as_str(), entry.updated_at), ("x", NOW));
+}
+
+#[test]
+fn after_a_write_into_backups_only_the_newest_keep_remain() {
+    let (_scratch, store) = open("blob-backups");
+    make(&store, "root", Role::Admin);
+    let alice = make(&store, "alice", Role::Member);
+    let bob = make(&store, "bob", Role::Member);
+    let keep3 = BlobBounds { quota_bytes: 1 << 20, max_files: 100, backups_keep: 3 };
+    let names = |account: &Account| -> Vec<String> {
+        let mut found: Vec<String> =
+            store.read(|tx| tx.blob_list(account.id, "backups/")).expect("list").into_iter().map(|e| e.name).collect();
+        found.sort();
+        found
+    };
+    put_with(&store, &alice, "files/keep-me", b"x", Cond::Absent, keep3);
+    put_with(&store, &alice, "meta.json", b"{}", Cond::Absent, keep3);
+    put_with(&store, &bob, "backups/b0", b"bob", Cond::Absent, keep3);
+    for (i, now) in (0..6usize).zip(1000..) {
+        let outcome = put(&store, &alice, &format!("backups/t{i}"), b"b", Cond::Absent, keep3, now);
+        assert_eq!(outcome, stored(b"b"));
+        let expected: Vec<String> = (i.saturating_sub(2)..=i).map(|n| format!("t{n}")).collect();
+        assert_eq!(names(&alice), expected, "after write {i}");
+    }
+    assert_eq!(names(&bob), ["b0"], "another person's backups are not pruned");
+    let files: Vec<String> = store.read(|tx| tx.blob_list(alice.id, "files/")).expect("list").into_iter().map(|e| e.name).collect();
+    assert_eq!(files, ["keep-me"], "only backups are pruned");
+    assert_eq!(store.read(|tx| tx.blob_list(alice.id, "")).expect("list").len(), 1, "meta.json stays");
+
+    // A write that is not into backups prunes nothing, and zero keeps all.
+    put(&store, &alice, "files/other", b"x", Cond::Absent, keep3, 5000);
+    assert_eq!(names(&alice).len(), 3);
+    let keep_all = BlobBounds { backups_keep: 0, ..keep3 };
+    for i in 6..12 {
+        put(&store, &alice, &format!("backups/t{i}"), b"b", Cond::Absent, keep_all, 2000 + i);
+    }
+    assert_eq!(names(&alice).len(), 9);
+
+    // The same time stamp: the oldest by path goes first.
+    let (_s2, store2) = open("blob-backups-ties");
+    make(&store2, "root", Role::Admin);
+    let dave = make(&store2, "dave", Role::Member);
+    let keep2 = BlobBounds { backups_keep: 2, ..keep3 };
+    for name in ["backups/a", "backups/b", "backups/c", "backups/d"] {
+        put_with(&store2, &dave, name, b"b", Cond::Absent, keep2);
+    }
+    let left: Vec<String> = store2.read(|tx| tx.blob_list(dave.id, "backups/")).expect("list").into_iter().map(|e| e.name).collect();
+    assert_eq!(left, ["c", "d"]);
+    // A write stamped older than the rest is never pruned by its own write (it is the newest the person made).
+    put(&store2, &dave, "backups/zz", b"b", Cond::Absent, keep2, NOW - 10_000);
+    let left: Vec<String> = store2.read(|tx| tx.blob_list(dave.id, "backups/")).expect("list").into_iter().map(|e| e.name).collect();
+    assert_eq!(left, ["c", "d", "zz"], "the blob that was just written stays");
+}
+
+#[test]
+fn pruning_counts_in_the_file_limit_and_is_undone_with_a_refused_write() {
+    let (_scratch, store) = open("blob-prune-bounds");
+    make(&store, "root", Role::Admin);
+    let alice = make(&store, "alice", Role::Member);
+    let tight = BlobBounds { quota_bytes: 100, max_files: 3, backups_keep: 2 };
+    put_with(&store, &alice, "files/f", b"1", Cond::Absent, tight);
+    put(&store, &alice, "backups/1", b"1", Cond::Absent, tight, 1);
+    put(&store, &alice, "backups/2", b"1", Cond::Absent, tight, 2);
+    // Three files now, at the limit; a third backup adds one and prunes one, so it fits.
+    assert_eq!(put(&store, &alice, "backups/3", b"1", Cond::Absent, tight, 3), stored(b"1"));
+    let names: Vec<String> = store.read(|tx| tx.blob_list(alice.id, "backups/")).expect("list").into_iter().map(|e| e.name).collect();
+    assert_eq!(names, ["2", "3"]);
+    assert_eq!(store.read(|tx| tx.blob_usage(alice.id)).expect("usage").files, 3);
+
+    // A backup that is too large for the quota is refused and the old backup it would have pushed out stays.
+    let small = BlobBounds { quota_bytes: 5, max_files: 10, backups_keep: 1 };
+    let (_s2, store2) = open("blob-prune-undo");
+    make(&store2, "root", Role::Admin);
+    let bob = make(&store2, "bob", Role::Member);
+    put(&store2, &bob, "backups/old", b"1234", Cond::Absent, small, 1);
+    assert_eq!(put(&store2, &bob, "backups/new", b"123456", Cond::Absent, small, 2), PutOutcome::OverQuota);
+    let names: Vec<String> = store2.read(|tx| tx.blob_list(bob.id, "backups/")).expect("list").into_iter().map(|e| e.name).collect();
+    assert_eq!(names, ["old"], "the prune was undone with the write");
+    // One that fits replaces it.
+    assert_eq!(put(&store2, &bob, "backups/new", b"12345", Cond::Absent, small, 3), stored(b"12345"));
+    let names: Vec<String> = store2.read(|tx| tx.blob_list(bob.id, "backups/")).expect("list").into_iter().map(|e| e.name).collect();
+    assert_eq!(names, ["new"]);
+}
+
+#[test]
+fn deleting_an_account_removes_its_blobs_and_no_other_persons() {
+    let (scratch, store) = open("blob-delete");
+    make(&store, "root", Role::Admin);
+    let alice = make(&store, "alice", Role::Member);
+    let bob = make(&store, "bob", Role::Member);
+    for path in ["meta.json", "files/a", "backups/b"] {
+        put_with(&store, &alice, path, b"payload-of-alice", Cond::Absent, ROOMY);
+        put_with(&store, &bob, path, b"payload-of-bob", Cond::Absent, ROOMY);
+    }
+    assert_eq!(count(&scratch, "sync_blobs"), 6);
+    store.write(|tx| tx.account_delete(alice.id)).expect("delete");
+    assert_eq!(count(&scratch, "sync_blobs"), 3);
+    assert_eq!(store.read(|tx| tx.blob_usage(alice.id)).expect("usage").files, 0);
+    assert_eq!(store.read(|tx| tx.blob_usage(bob.id)).expect("usage").files, 3);
+    assert_eq!(store.read(|tx| tx.blob_get(bob.id, "files/a")).expect("get").expect("there").body, b"payload-of-bob");
+    // The bytes are overwritten, not just unlinked: the file holds no copy of the deleted person's body.
+    drop(store);
+    for file in ["server.sqlite3", "server.sqlite3-wal"] {
+        let bytes = std::fs::read(scratch.join("server").join(file)).unwrap_or_default();
+        let hits = bytes.windows(16).filter(|w| *w == b"payload-of-alice").count();
+        assert_eq!(hits, 0, "{file} still holds the deleted person's blob");
+    }
 }

@@ -2301,3 +2301,215 @@ fn grant_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Grant> {
         denied: row.get::<_, i64>(9)? != 0,
     })
 }
+
+// ---- sync blobs ----
+
+/// The condition of a blob write: the write rule of the sync protocol, shared with the client so both ends mean the same.
+pub use holzwave_core::sync::webdav::Cond;
+
+/// The most entries one listing returns.
+const MAX_LISTED_BLOBS: i64 = 10_000;
+
+/// The longest blob path the table keeps, in bytes. The grammar of a path is the caller's; this only bounds the column.
+const MAX_BLOB_PATH: usize = 512;
+
+/// What one write is held to. The numbers are the operator's (per person); the store only does the arithmetic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlobBounds {
+    /// The most bytes all of a person's blobs hold together.
+    pub quota_bytes: u64,
+    /// The most blobs a person has.
+    pub max_files: usize,
+    /// How many of the newest blobs under `backups/` stay after a write there; zero keeps all.
+    pub backups_keep: usize,
+}
+
+/// What a person's blobs add up to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlobUsage {
+    /// How many blobs.
+    pub files: usize,
+    /// How many bytes together.
+    pub bytes: u64,
+}
+
+/// A stored blob. Its `Debug` text does not print the body.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Blob {
+    /// The lowercase hex SHA-256 of the body, computed here.
+    pub etag: String,
+    /// The length of the body in bytes.
+    pub size: u64,
+    /// Unix seconds of the last write.
+    pub updated_at: i64,
+    /// The bytes, as the client sent them (ciphertext).
+    pub body: Vec<u8>,
+}
+
+impl fmt::Debug for Blob {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Blob").field("size", &self.size).field("updated_at", &self.updated_at).finish_non_exhaustive()
+    }
+}
+
+/// One entry of a listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlobInfo {
+    /// The path below the prefix that was listed.
+    pub name: String,
+    /// The lowercase hex SHA-256 of the body.
+    pub etag: String,
+    /// The length of the body in bytes.
+    pub size: u64,
+    /// Unix seconds of the last write.
+    pub updated_at: i64,
+}
+
+/// What a conditional write came to. Only `Stored` wrote anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PutOutcome {
+    /// The blob is stored; this is its etag (the lowercase hex SHA-256 of the body).
+    Stored(String),
+    /// The condition did not hold: somebody else wrote first, or the blob is not there.
+    PreconditionFailed,
+    /// The write would take the person over their bytes.
+    OverQuota,
+    /// The write would take the person over their number of blobs.
+    TooManyFiles,
+}
+
+/// The lowercase hex of a digest.
+fn hex_lower(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        out.push(char::from(DIGITS[usize::from(byte & 15)]));
+    }
+    out
+}
+
+fn check_blob_path(path: &str) -> Result<()> {
+    if path.is_empty() || path.len() > MAX_BLOB_PATH {
+        Err(StoreError::Invalid("a blob path has a wrong length"))
+    } else {
+        Ok(())
+    }
+}
+
+fn to_u64(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or(0)
+}
+
+impl Tx<'_> {
+    /// The blob of `account` at `path`, or `None`. Another account's blob at the same path is never seen.
+    pub fn blob_get(&self, account: AccountId, path: &str) -> Result<Option<Blob>> {
+        check_blob_path(path)?;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT etag, size, updated_at, body FROM sync_blobs WHERE account_id = ?1 AND path = ?2",
+        )?;
+        Ok(optional(stmt.query_row(params![account.0, path], |r| {
+            Ok(Blob { etag: r.get(0)?, size: to_u64(r.get(1)?), updated_at: r.get(2)?, body: r.get(3)? })
+        }))?)
+    }
+
+    /// The direct children of `prefix` for `account`, by name: `prefix` is `""` for the root (blobs with no slash in their
+    /// path) or ends in a slash (`files/`), and the answer holds the part of each path after it. The prefix is compared as
+    /// text, never as a pattern. At most 10 000 entries.
+    pub fn blob_list(&self, account: AccountId, prefix: &str) -> Result<Vec<BlobInfo>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT substr(path, length(?2) + 1), etag, size, updated_at FROM sync_blobs \
+             WHERE account_id = ?1 AND substr(path, 1, length(?2)) = ?2 AND length(path) > length(?2) \
+             AND instr(substr(path, length(?2) + 1), '/') = 0 ORDER BY path LIMIT ?3",
+        )?;
+        Ok(stmt
+            .query_map(params![account.0, prefix, MAX_LISTED_BLOBS], |r| {
+                Ok(BlobInfo { name: r.get(0)?, etag: r.get(1)?, size: to_u64(r.get(2)?), updated_at: r.get(3)? })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// What `account`'s blobs add up to.
+    pub fn blob_usage(&self, account: AccountId) -> Result<BlobUsage> {
+        let (files, bytes): (i64, i64) = self.conn.query_row(
+            "SELECT count(*), coalesce(sum(size), 0) FROM sync_blobs WHERE account_id = ?1",
+            params![account.0],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok(BlobUsage { files: usize::try_from(files).unwrap_or(usize::MAX), bytes: to_u64(bytes) })
+    }
+
+    /// Writes `body` at `path` for `account` if `cond` holds, as one atomic step.
+    ///
+    /// The step reads the current blob, checks the condition (`Absent`: no blob; `Match(etag)`: the blob has that etag;
+    /// `Any`: always), writes, prunes `backups/` to the newest `bounds.backups_keep` when the path is under it (never the
+    /// blob just written), and then looks at what the person holds: a write that leaves them over their bytes or over their
+    /// number of blobs, and holds more than before, is undone whole, pruning included, and answers `OverQuota` or
+    /// `TooManyFiles`. So replacing a blob counts only the difference, and a person who is over a limit that was lowered can
+    /// still make their data smaller. The etag is computed here from the body; a client's claim is never trusted. A body
+    /// larger than the whole quota is refused before anything is written.
+    ///
+    /// The path grammar, the size limit of a single blob and the structure of a body are the caller's rules.
+    pub fn blob_put(
+        &self,
+        account: AccountId,
+        path: &str,
+        body: &[u8],
+        cond: &Cond,
+        bounds: &BlobBounds,
+        now: i64,
+    ) -> Result<PutOutcome> {
+        check_blob_path(path)?;
+        let current: Option<String> = optional(
+            self.conn
+                .prepare_cached("SELECT etag FROM sync_blobs WHERE account_id = ?1 AND path = ?2")?
+                .query_row(params![account.0, path], |r| r.get(0)),
+        )?;
+        let holds = match (cond, &current) {
+            (Cond::Any, _) | (Cond::Absent, None) => true,
+            (Cond::Match(wanted), Some(found)) => wanted == found,
+            _ => false,
+        };
+        if !holds {
+            return Ok(PutOutcome::PreconditionFailed);
+        }
+        if u64::try_from(body.len()).unwrap_or(u64::MAX) > bounds.quota_bytes {
+            return Ok(PutOutcome::OverQuota);
+        }
+        let before = self.blob_usage(account)?;
+        let etag = hex_lower(&hash_token(body));
+        let size = i64::try_from(body.len()).map_err(|_| StoreError::Invalid("a blob is too large"))?;
+
+        self.conn.execute_batch("SAVEPOINT blob_put")?;
+        self.conn
+            .prepare_cached(
+                "INSERT INTO sync_blobs (account_id, path, etag, size, updated_at, body) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                 ON CONFLICT (account_id, path) DO UPDATE SET \
+                   etag = excluded.etag, size = excluded.size, updated_at = excluded.updated_at, body = excluded.body",
+            )?
+            .execute(params![account.0, path, etag, size, now, body])?;
+        if bounds.backups_keep > 0 && path.starts_with("backups/") {
+            self.conn
+                .prepare_cached(
+                    "DELETE FROM sync_blobs WHERE account_id = ?1 AND substr(path, 1, 8) = 'backups/' AND path <> ?2 \
+                     AND rowid NOT IN (SELECT rowid FROM sync_blobs WHERE account_id = ?1 AND substr(path, 1, 8) = 'backups/' \
+                                       ORDER BY updated_at DESC, path DESC LIMIT ?3)",
+                )?
+                .execute(params![account.0, path, cap(bounds.backups_keep)])?;
+        }
+        let after = self.blob_usage(account)?;
+        let refused = if after.bytes > bounds.quota_bytes && after.bytes > before.bytes {
+            Some(PutOutcome::OverQuota)
+        } else if after.files > bounds.max_files && after.files > before.files {
+            Some(PutOutcome::TooManyFiles)
+        } else {
+            None
+        };
+        if let Some(outcome) = refused {
+            self.conn.execute_batch("ROLLBACK TO blob_put; RELEASE blob_put")?;
+            return Ok(outcome);
+        }
+        self.conn.execute_batch("RELEASE blob_put")?;
+        Ok(PutOutcome::Stored(etag))
+    }
+}
