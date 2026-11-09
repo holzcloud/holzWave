@@ -8,6 +8,7 @@ pub mod auth;
 pub mod cli;
 pub mod clock;
 pub mod config;
+pub mod device;
 pub mod http;
 pub mod keyfile;
 pub mod limits;

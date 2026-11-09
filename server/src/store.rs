@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 pub const APPLICATION_ID: i64 = 0x6877_5356;
 
 /// The schema version this code writes and the newest one it reads.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// How long a statement waits for another writer before it fails with a busy error.
 pub const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -83,6 +83,8 @@ pub enum StoreError {
     Invalid(&'static str),
     /// The account already has the most passkeys.
     PasskeyLimit,
+    /// The account already has the most devices.
+    DeviceLimit,
     /// The database or its files failed; the text is a fixed sentence.
     Storage(&'static str),
 }
@@ -108,6 +110,9 @@ impl fmt::Display for StoreError {
             ),
             StoreError::Invalid(reason) => f.write_str(reason),
             StoreError::PasskeyLimit => write!(f, "an account can have at most {MAX_PASSKEYS} passkeys"),
+            StoreError::DeviceLimit => {
+                write!(f, "an account can have at most {} devices", crate::device::MAX_DEVICES_PER_ACCOUNT)
+            }
             StoreError::Storage(reason) => write!(f, "the database failed: {reason}"),
         }
     }
@@ -395,7 +400,7 @@ CREATE INDEX unlock_methods_by_account ON unlock_methods (account_id);
 ";
 
 /// The migrations, indexed by the version they start from: entry `n` takes a database at version `n` to `n + 1`.
-const MIGRATIONS: [fn(&Connection) -> rusqlite::Result<()>; SCHEMA_VERSION as usize] = [migrate_to_1, migrate_to_2];
+const MIGRATIONS: [fn(&Connection) -> rusqlite::Result<()>; SCHEMA_VERSION as usize] = [migrate_to_1, migrate_to_2, migrate_to_3];
 
 fn migrate_to_1(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(SCHEMA_V1)?;
@@ -406,6 +411,55 @@ fn migrate_to_1(conn: &Connection) -> rusqlite::Result<()> {
 /// takes no value from the sessions that exist, because a session row says when it was made, not that it was the newest.
 fn migrate_to_2(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("ALTER TABLE accounts ADD COLUMN last_signin INTEGER;")
+}
+
+/// The statements that make schema version 3: the devices that sign in with a token, the pending device grants, the two
+/// feature switches and the encrypted files a person syncs to the server. One batch, so no later change needs a second step.
+const SCHEMA_V3: &str = "
+CREATE TABLE devices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL REFERENCES accounts (id),
+    token_hash BLOB NOT NULL UNIQUE CHECK (length(token_hash) = 32),
+    name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 64),
+    platform TEXT NOT NULL CHECK (length(platform) <= 32),
+    created_at INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    addr TEXT NOT NULL
+) STRICT;
+CREATE INDEX devices_by_account ON devices (account_id);
+CREATE TABLE device_grants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_code_hash BLOB NOT NULL UNIQUE CHECK (length(device_code_hash) = 32),
+    user_code_hash BLOB NOT NULL UNIQUE CHECK (length(user_code_hash) = 32),
+    name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 64),
+    platform TEXT NOT NULL CHECK (length(platform) <= 32),
+    addr TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    last_poll INTEGER,
+    poll_interval INTEGER NOT NULL CHECK (poll_interval > 0),
+    approved_account_id INTEGER REFERENCES accounts (id),
+    denied INTEGER NOT NULL DEFAULT 0 CHECK (denied IN (0, 1))
+) STRICT;
+CREATE TABLE server_settings (
+    key TEXT PRIMARY KEY CHECK (key IN ('sync', 'remote')),
+    value TEXT NOT NULL CHECK (value IN ('on', 'off'))
+) STRICT;
+CREATE TABLE sync_blobs (
+    account_id INTEGER NOT NULL REFERENCES accounts (id),
+    path TEXT NOT NULL CHECK (length(path) BETWEEN 1 AND 512),
+    etag TEXT NOT NULL CHECK (length(etag) = 64),
+    size INTEGER NOT NULL CHECK (size = length(body)),
+    updated_at INTEGER NOT NULL,
+    body BLOB NOT NULL,
+    PRIMARY KEY (account_id, path)
+) STRICT;
+";
+
+/// Version 3 adds the tables of device sign-in, the feature switches and the sync blobs. Nothing that exists is changed.
+fn migrate_to_3(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(SCHEMA_V3)
 }
 
 /// Looks at the identity of an open database with queries that write nothing. A database that is empty and carries no
@@ -1273,9 +1327,10 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Deletes an account: its password, TOTP secret, passkeys, identities, unlock methods, sessions and invitations go; the
-    /// row stays with state `deleted`, so its user id, username and handle are never given to anyone else. Deleting the only
-    /// active administrator is [`StoreError::LastAdmin`]. Unredeemed invitations the account made go too.
+    /// Deletes an account: its password, TOTP secret, passkeys, identities, unlock methods, sessions, devices, approved
+    /// device grants, sync blobs and invitations go; the row stays with state `deleted`, so its user id, username and
+    /// handle are never given to anyone else. Deleting the only active administrator is [`StoreError::LastAdmin`].
+    /// Unredeemed invitations the account made go too.
     pub fn account_delete(&self, id: AccountId) -> Result<()> {
         let account = self.live_account(id)?;
         if account.role == Role::Admin && account.state == AccountState::Active {
@@ -1288,6 +1343,9 @@ impl Tx<'_> {
             "DELETE FROM oidc_identities WHERE account_id = ?1",
             "DELETE FROM unlock_methods WHERE account_id = ?1",
             "DELETE FROM sessions WHERE account_id = ?1",
+            "DELETE FROM devices WHERE account_id = ?1",
+            "DELETE FROM device_grants WHERE approved_account_id = ?1",
+            "DELETE FROM sync_blobs WHERE account_id = ?1",
             "DELETE FROM invites WHERE account_id = ?1 OR (created_by = ?1 AND redeemed_at IS NULL)",
             "UPDATE accounts SET state = 'deleted' WHERE id = ?1",
         ] {
@@ -1850,5 +1908,130 @@ impl Tx<'_> {
             )?
             .execute(params![now, cap(left)])?;
         Ok(first + second)
+    }
+}
+
+// ---- devices ----
+
+/// A device name or platform as it is kept: control characters dropped, cut to `max` characters.
+fn clean_text(text: &str, max: usize) -> String {
+    text.chars().filter(|c| !c.is_control()).take(max).collect()
+}
+
+/// What a device is made from.
+#[derive(Clone)]
+pub struct NewDevice<'a> {
+    /// The SHA-256 of the token ([`crate::device::DeviceToken::hash`]).
+    pub token_hash: TokenHash,
+    /// The account the device signs in as.
+    pub account_id: AccountId,
+    /// What the person calls it; control characters are dropped and it is cut to 64 characters. A name with nothing left is
+    /// refused.
+    pub name: &'a str,
+    /// The platform word (`macos`, `android`, ...); control characters are dropped and it is cut to 32 characters.
+    pub platform: &'a str,
+    /// Unix seconds of the creation.
+    pub now: i64,
+    /// Unix seconds after which the token no longer works unless the device is seen again.
+    pub expires_at: i64,
+    /// The client address.
+    pub addr: std::net::IpAddr,
+}
+
+/// One device. It never carries the hash of its token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Device {
+    /// The id of the row. Ids are never reused.
+    pub id: i64,
+    /// The account.
+    pub account_id: AccountId,
+    /// The name.
+    pub name: String,
+    /// The platform word.
+    pub platform: String,
+    /// Unix seconds.
+    pub created_at: i64,
+    /// Unix seconds of the last time the device was seen (written at most once a minute).
+    pub last_seen: i64,
+    /// Unix seconds after which the token no longer works.
+    pub expires_at: i64,
+    /// The client address when the device was made, as text.
+    pub addr: String,
+}
+
+const DEVICE_COLUMNS: &str = "d.id, d.account_id, d.name, d.platform, d.created_at, d.last_seen, d.expires_at, d.addr";
+
+fn device_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Device> {
+    Ok(Device {
+        id: row.get(0)?,
+        account_id: AccountId(row.get(1)?),
+        name: row.get(2)?,
+        platform: row.get(3)?,
+        created_at: row.get(4)?,
+        last_seen: row.get(5)?,
+        expires_at: row.get(6)?,
+        addr: row.get(7)?,
+    })
+}
+
+impl Tx<'_> {
+    /// Stores a device by the hash of its token. The account must be active and have fewer than
+    /// [`crate::device::MAX_DEVICES_PER_ACCOUNT`] devices that have not expired, else [`StoreError::DeviceLimit`].
+    pub fn device_create(&self, new: &NewDevice<'_>) -> Result<Device> {
+        match self.account_get(new.account_id)? {
+            Some(account) if account.state == AccountState::Active => {}
+            _ => return Err(StoreError::NotFound),
+        }
+        let name = clean_text(new.name, crate::device::MAX_DEVICE_NAME);
+        if name.is_empty() {
+            return Err(StoreError::Invalid("a device needs a name"));
+        }
+        let platform = clean_text(new.platform, crate::device::MAX_PLATFORM);
+        let open: i64 = self.conn.query_row(
+            "SELECT count(*) FROM devices WHERE account_id = ?1 AND expires_at > ?2",
+            params![new.account_id.0, new.now],
+            |r| r.get(0),
+        )?;
+        if usize::try_from(open).unwrap_or(usize::MAX) >= crate::device::MAX_DEVICES_PER_ACCOUNT {
+            return Err(StoreError::DeviceLimit);
+        }
+        let addr = new.addr.to_string();
+        self.conn
+            .prepare_cached(
+                "INSERT INTO devices (account_id, token_hash, name, platform, created_at, last_seen, expires_at, addr) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7)",
+            )?
+            .execute(params![new.account_id.0, &new.token_hash[..], name, platform, new.now, new.expires_at, addr])?;
+        Ok(Device {
+            id: self.conn.last_insert_rowid(),
+            account_id: new.account_id,
+            name,
+            platform,
+            created_at: new.now,
+            last_seen: new.now,
+            expires_at: new.expires_at,
+            addr,
+        })
+    }
+
+    /// The device whose token has this hash, only while the token has not expired and the account is active. It looks at
+    /// nothing but the hash, through the unique index, so no secret is compared in application code.
+    pub fn device_lookup(&self, token_hash: &TokenHash, now: i64) -> Result<Option<Device>> {
+        let sql = format!(
+            "SELECT {DEVICE_COLUMNS} FROM devices d JOIN accounts a ON a.id = d.account_id \
+             WHERE d.token_hash = ?1 AND d.expires_at > ?2 AND a.state = 'active'"
+        );
+        let mut stmt = self.conn.prepare_cached(&sql)?;
+        Ok(optional(stmt.query_row(params![&token_hash[..], now], device_from_row))?)
+    }
+
+    /// Ends the device `id` of the account `account`, in one statement that matches both; answers whether one went. Another
+    /// account's device never matches.
+    pub fn device_revoke(&self, account: AccountId, id: i64) -> Result<bool> {
+        let changed = self
+            .conn
+            .prepare_cached("DELETE FROM devices WHERE id = ?1 AND account_id = ?2")?
+            .execute(params![id, account.0])?;
+        Ok(changed > 0)
     }
 }
