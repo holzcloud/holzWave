@@ -46,7 +46,7 @@
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -291,13 +291,16 @@ pub const MAX_TAP_QUEUE_BYTES: usize = 16 * 1024 * 1024;
 /// thread copy every chunk without a bound.
 pub const MAX_TAPS: usize = 32;
 
+/// The most bytes one [`PaneHandle::write_raw`] call may hand to the program.
+pub const MAX_RAW_BYTES: usize = 64 * 1024;
+
 /// The identity of a tap, for [`PaneHandle::detach_tap`]. Unique in the process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TapId(u64);
 
 impl TapId {
     fn next() -> Self {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        static NEXT: AtomicU64 = AtomicU64::new(1);
         TapId(NEXT.fetch_add(1, Ordering::Relaxed))
     }
 }
@@ -530,6 +533,8 @@ enum Control {
     /// Take the snapshot and register the tap, with no output fed between the two.
     AttachTap { tail_rows: usize, max_bytes: usize, queue_bytes: usize, id: TapId, reply: Sender<Result<Tap>> },
     DetachTap(TapId),
+    /// Bytes for the program, verbatim; honoured by a headless pane only.
+    WriteRaw(Vec<u8>),
     Close,
 }
 
@@ -540,6 +545,10 @@ struct Shared {
     thread: Mutex<Option<JoinHandle<()>>>,
     /// The state of the pane's connection; empty for a local shell.
     conn: Arc<Mutex<Option<SharedState>>>,
+    /// [`PaneSpec::headless`]: the only kind of pane that takes [`PaneHandle::write_raw`].
+    headless: bool,
+    /// How many times a timer woke the engine thread, see [`PaneHandle::timer_wakes`].
+    timer_wakes: Arc<AtomicU64>,
 }
 
 impl Drop for Shared {
@@ -600,14 +609,17 @@ impl PaneHandle {
         let conn: Arc<Mutex<Option<SharedState>>> = Arc::new(Mutex::new(None));
         let engine_conn = conn.clone();
         let engine_queue = queue.clone();
+        let headless = spec.headless;
+        let timer_wakes = Arc::new(AtomicU64::new(0));
+        let engine_timer_wakes = timer_wakes.clone();
         let join = thread::Builder::new()
             .name(format!("hw-pane-{pane}-engine"))
-            .spawn(move || engine_main::<E, F, S>(pane, spec, make_engine, sink, engine_queue, started_tx, wrap, engine_conn))
+            .spawn(move || engine_main::<E, F, S>(pane, spec, make_engine, sink, engine_queue, started_tx, wrap, engine_conn, engine_timer_wakes))
             .map_err(Error::Io)?;
 
         match started_rx.recv_timeout(START_TIMEOUT) {
             Ok(Ok(pid)) => Ok(PaneHandle {
-                shared: Arc::new(Shared { queue, pid, thread: Mutex::new(Some(join)), conn }),
+                shared: Arc::new(Shared { queue, pid, thread: Mutex::new(Some(join)), conn, headless, timer_wakes }),
             }),
             Ok(Err(e)) => {
                 // The thread reported its failure and is on its way out.
@@ -854,6 +866,33 @@ impl PaneHandle {
         self.request(|reply| Control::AttachTap { tail_rows, max_bytes, queue_bytes, id, reply })
     }
 
+    /// Write `bytes` to the program as they are, the way a person's typing arrives, with no key encoder in between. Only a
+    /// pane that was started headless ([`PaneSpec::headless`]) takes them: any other pane refuses with an error and writes
+    /// nothing, and so does a call of more than [`MAX_RAW_BYTES`]. Returns at once; the engine thread queues the bytes
+    /// for the PTY writer thread like a person's own input, which is never dropped.
+    ///
+    /// This is the one place where bytes enter a pane from outside, so who may call it is part of its contract: the
+    /// session host of a server, after it has checked that the sender holds the write right of the session. The page
+    /// can never reach it: it has no row in the command table and the host does not export it. The bytes are not
+    /// looked at; they are as trusted as the holder of the write right.
+    pub fn write_raw(&self, bytes: &[u8]) -> Result<()> {
+        if !self.shared.headless {
+            return Err(Error::Pty("raw input is for headless panes only".into()));
+        }
+        if bytes.len() > MAX_RAW_BYTES {
+            return Err(Error::Pty(format!("raw input is limited to {MAX_RAW_BYTES} bytes per call")));
+        }
+        self.send(Control::WriteRaw(bytes.to_vec()))
+    }
+
+    /// How many times a timer woke the engine thread with nothing queued for it: the next frame, an animated picture, the
+    /// lookup of the working directory, the exit poll. A message or a chunk of output is not counted. It exists for tests
+    /// and diagnostics, as [`PaneHandle::queue_high_water`] does: it is how the idle behaviour of a pane is observed from
+    /// outside (a pane that draws for no page, [`PaneSpec::headless`], sets no timer for frames).
+    pub fn timer_wakes(&self) -> u64 {
+        self.shared.timer_wakes.load(Ordering::Relaxed)
+    }
+
     /// End a tap now: nothing more is handed to it, what was queued is dropped and its reader gets [`TapEnd::Closed`].
     /// The other taps are not affected. An id that is gone is ignored.
     pub fn detach_tap(&self, id: TapId) {
@@ -1022,6 +1061,8 @@ struct Actor<E: TerminalEngine, S: FnMut(PaneEvent)> {
     headless: bool,
     /// The taps ([`PaneHandle::attach_tap`]), in the order they were attached.
     taps: Vec<TapSink>,
+    /// Timer wake-ups of the main loop, for [`PaneHandle::timer_wakes`].
+    timer_wakes: Arc<AtomicU64>,
 }
 
 impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
@@ -1056,7 +1097,10 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
                     self.hold_if_wanted(None);
                     return;
                 }
-                Popped::Timeout => {}
+                // Woken by a timer with nothing queued: the next frame, a picture, the directory lookup or the exit poll.
+                Popped::Timeout => {
+                    self.timer_wakes.fetch_add(1, Ordering::Relaxed);
+                }
             }
             // The clock has passed the due time of an animation: a frame is due, built by the rule below.
             if self.image_due.is_some_and(|due| self.now_ms() >= due) {
@@ -1156,7 +1200,7 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
     /// A control message of a held pane: what would reach the program is dropped, the rest is as in a live pane.
     fn handle_held(&mut self, control: Control) {
         match control {
-            Control::Key(_) | Control::Edit(_) | Control::Text(_) | Control::Mouse(_) | Control::CwdFound(_) => {}
+            Control::Key(_) | Control::Edit(_) | Control::Text(_) | Control::Mouse(_) | Control::CwdFound(_) | Control::WriteRaw(_) => {}
             Control::Paste { reply, .. } => {
                 let _ = reply.send(Err(Error::Pty("the program has ended".into())));
             }
@@ -1334,6 +1378,12 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
                 // A caller that stopped waiting (its call timed out) must not leave a tap behind.
                 if reply.send(answer).is_err() {
                     self.taps.retain(|tap| tap.id != id);
+                }
+            }
+            // The handle refused a pane that is not headless; the engine thread does not trust that alone.
+            Control::WriteRaw(bytes) => {
+                if self.headless {
+                    self.writer.input(bytes);
                 }
             }
             Control::DetachTap(id) => {
@@ -1606,6 +1656,7 @@ fn spawn_command(spec: &PaneSpec, env: &dyn Fn(&str) -> Option<String>) -> (Stri
     (wrapped.program, wrapped.args, None)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn engine_main<E, F, S>(
     pane: PaneId,
     spec: PaneSpec,
@@ -1615,6 +1666,7 @@ fn engine_main<E, F, S>(
     started: Sender<Result<Option<u32>>>,
     wrap: Option<ReaderWrap>,
     conn: Arc<Mutex<Option<SharedState>>>,
+    timer_wakes: Arc<AtomicU64>,
 ) where
     E: TerminalEngine,
     F: FnOnce(&PaneSpec) -> Result<E>,
@@ -1695,6 +1747,7 @@ fn engine_main<E, F, S>(
         end_gate: Gate::new(),
         headless: spec.headless,
         taps: Vec::new(),
+        timer_wakes,
     };
     let _ = started.send(Ok(pid));
     actor.run();
@@ -2548,5 +2601,78 @@ mod image_clock_tests {
         assert_eq!(seen.ticks().len(), at_hold, "a held pane asked the clock");
         assert!(seen.updates.load(Ordering::Relaxed) > at_hold, "the held pane still builds its frames");
         end(&pane);
+    }
+}
+
+#[cfg(test)]
+mod tap_queue_tests {
+    use super::*;
+
+    fn pair(bound: usize) -> (TapSink, TapReceiver) {
+        let shared = Arc::new(TapShared {
+            state: Mutex::new(TapState::default()),
+            ready: Condvar::new(),
+            receiver_gone: AtomicBool::new(false),
+        });
+        (TapSink { id: TapId::next(), shared: shared.clone(), bound }, TapReceiver { shared })
+    }
+
+    fn queued(rx: &TapReceiver) -> usize {
+        rx.shared.lock().bytes
+    }
+
+    #[test]
+    fn a_chunk_that_would_pass_the_bound_ends_the_tap_with_overflow_and_drops_what_was_queued() {
+        let (tap, rx) = pair(100);
+        assert!(tap.push(&[1; 60]));
+        assert!(tap.push(&[2; 40]), "exactly the bound fits");
+        assert_eq!(queued(&rx), 100);
+        assert!(!tap.push(&[3]), "one byte over ends the tap");
+        assert_eq!(queued(&rx), 0, "the queue is dropped with the tap, so the memory is freed at once");
+        assert_eq!(rx.recv(Duration::ZERO), Some(TapMsg::End(TapEnd::Overflow)));
+        assert_eq!(rx.recv(Duration::ZERO), Some(TapMsg::End(TapEnd::Overflow)), "the end repeats");
+        assert!(!tap.push(&[4]), "a finished tap takes nothing");
+    }
+
+    #[test]
+    fn what_the_reader_takes_makes_room_and_the_held_bytes_never_pass_the_bound() {
+        let (tap, rx) = pair(64);
+        for round in 0..1000u32 {
+            assert!(tap.push(&[7; 40]), "round {round}");
+            assert!(queued(&rx) <= 64);
+            assert_eq!(rx.recv(Duration::ZERO), Some(TapMsg::Bytes(vec![7; 40])));
+        }
+        assert_eq!(rx.recv(Duration::ZERO), None, "nothing is waiting");
+    }
+
+    #[test]
+    fn a_closed_tap_yields_its_queued_bytes_first_and_a_detached_one_yields_none() {
+        let (tap, rx) = pair(100);
+        assert!(tap.push(b"abc"));
+        tap.close(false);
+        assert_eq!(rx.recv(Duration::ZERO), Some(TapMsg::Bytes(b"abc".to_vec())));
+        assert_eq!(rx.recv(Duration::ZERO), Some(TapMsg::End(TapEnd::Closed)));
+
+        let (tap, rx) = pair(100);
+        assert!(tap.push(b"abc"));
+        tap.close(true);
+        assert_eq!(rx.recv(Duration::ZERO), Some(TapMsg::End(TapEnd::Closed)), "detached: at once");
+    }
+
+    #[test]
+    fn a_dropped_receiver_ends_the_tap_on_the_next_chunk() {
+        let (tap, rx) = pair(100);
+        assert!(tap.push(b"a"));
+        drop(rx);
+        assert!(!tap.push(b"b"));
+    }
+
+    #[test]
+    fn a_waiting_reader_is_woken_by_a_chunk() {
+        let (tap, rx) = pair(100);
+        let reader = thread::spawn(move || rx.recv(Duration::from_secs(10)));
+        thread::sleep(Duration::from_millis(50));
+        assert!(tap.push(b"wake"));
+        assert_eq!(reader.join().unwrap(), Some(TapMsg::Bytes(b"wake".to_vec())));
     }
 }

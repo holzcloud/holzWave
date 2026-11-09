@@ -42,6 +42,10 @@ impl Probe {
         let events = self.events.clone();
         move |event| events.lock().unwrap().push(event)
     }
+
+    fn events(&self) -> Vec<PaneEvent> {
+        self.events.lock().unwrap().clone()
+    }
 }
 
 fn headless(script: &str) -> PaneSpec {
@@ -518,5 +522,213 @@ mod engines {
             assert_eq!(text(&mut client), text(&mut pane), "a wrapped line is one line in the client, as in the pane");
             assert!(text(&mut client).contains(&long));
         }
+    }
+}
+
+// ---- a tap that cannot keep up, input for headless panes, and no frames ----
+
+mod taps {
+    use super::*;
+    use holzwave_core::pane::MAX_RAW_BYTES;
+
+    #[test]
+    fn a_tap_that_never_reads_is_dropped_and_told_so_and_the_pane_keeps_its_pace() {
+        // 4 MiB of output against a queue of 64 KiB that nobody reads.
+        let probe = Probe::default();
+        let pane = start(headless("yes abcdefghijklmnopqrstuvwxyz | head -c 4194304; echo finished; sleep 60"), &probe);
+        let tap = pane.attach_tap(0, SNAPSHOT, 64 * 1024).expect("attach");
+        wait_for_pane(&pane, "finished");
+        // The pane's own engine has every line: the slow tap held nothing back.
+        assert!(pane_text(&pane, TextRegion::LastRows(30)).contains("abcdefghijklmnopqrstuvwxyz"));
+        // The reader finds the explicit end, and nothing queued is left behind it.
+        assert_eq!(tap.rx.recv(Duration::from_secs(5)), Some(TapMsg::End(TapEnd::Overflow)));
+        assert_eq!(tap.rx.recv(Duration::ZERO), Some(TapMsg::End(TapEnd::Overflow)));
+        // The pane accepts a fresh attach, which is what a caller does after an overflow.
+        let mut again = Client::attach(&pane, 100);
+        assert!(again.shows("finished"));
+        close(pane);
+    }
+
+    #[test]
+    fn a_tap_that_reads_slowly_but_within_its_queue_loses_nothing() {
+        let probe = Probe::default();
+        let pane = start(headless(&paced_numbers(1200)), &probe);
+        let mut client = Client::attach(&pane, 0);
+        // Reads only after the program is long done: the whole output fits the queue of 4 MiB.
+        wait_for_pane(&pane, "done");
+        assert!(client.pump_until("done"));
+        let seen = numbers(&client.text(TextRegion::LastRows(2000)));
+        assert_eq!(*seen.last().unwrap(), 1199);
+        close(pane);
+    }
+
+    #[test]
+    fn a_detached_tap_stops_at_once_and_the_others_are_not_affected() {
+        let probe = Probe::default();
+        let pane = start(headless(&paced_numbers(1500)), &probe);
+        let leaving = Client::attach(&pane, 0);
+        let mut staying = Client::attach(&pane, 0);
+        // Take something from the one that leaves, then detach it.
+        assert!(matches!(leaving.tap.rx.recv(Duration::from_secs(5)), Some(TapMsg::Bytes(_))));
+        pane.detach_tap(leaving.tap.id);
+        let mut ended = false;
+        let deadline = std::time::Instant::now() + WAIT;
+        while !ended && std::time::Instant::now() < deadline {
+            ended = matches!(leaving.tap.rx.recv(Duration::from_millis(50)), Some(TapMsg::End(TapEnd::Closed)));
+        }
+        assert!(ended, "the detached tap never ended");
+        // Nothing follows the end, however long the program goes on writing.
+        wait_for_pane(&pane, "done");
+        assert_eq!(leaving.tap.rx.recv(Duration::ZERO), Some(TapMsg::End(TapEnd::Closed)));
+
+        assert!(staying.pump_until("done"));
+        let seen = numbers(&staying.text(TextRegion::LastRows(2000)));
+        for pair in seen.windows(2) {
+            assert_eq!(pair[1], pair[0] + 1);
+        }
+        assert_eq!(*seen.last().unwrap(), 1499);
+        // Detaching a tap that is gone is fine.
+        pane.detach_tap(leaving.tap.id);
+        close(pane);
+    }
+
+    #[test]
+    fn a_dropped_receiver_frees_its_place() {
+        let probe = Probe::default();
+        let pane = start(headless(&paced_numbers(300)), &probe);
+        for _ in 0..(holzwave_core::pane::MAX_TAPS * 3) {
+            // More attaches than the pane keeps, none of them kept: every dropped reader's place is given back.
+            let tap = pane.attach_tap(0, SNAPSHOT, QUEUE).expect("a place is free");
+            drop(tap);
+        }
+        close(pane);
+    }
+
+    #[test]
+    fn a_pane_refuses_a_tap_past_its_bound_of_taps() {
+        let probe = Probe::default();
+        let pane = start(headless("sleep 60"), &probe);
+        let mut kept = Vec::new();
+        for _ in 0..holzwave_core::pane::MAX_TAPS {
+            kept.push(pane.attach_tap(0, SNAPSHOT, QUEUE).expect("attach"));
+        }
+        assert!(pane.attach_tap(0, SNAPSHOT, QUEUE).is_err(), "one more than the pane keeps");
+        pane.detach_tap(kept.pop().unwrap().id);
+        assert!(pane.attach_tap(0, SNAPSHOT, QUEUE).is_ok(), "a place was given back");
+        close(pane);
+    }
+
+    #[test]
+    fn joins_two_taps_attached_at_different_moments_each_join_at_their_own_snapshot() {
+        let probe = Probe::default();
+        let pane = start(headless(&paced_numbers(1500)), &probe);
+        let mut early = Client::attach(&pane, 0);
+        thread::sleep(Duration::from_millis(120));
+        let mut late = Client::attach(&pane, 0);
+        for (name, client) in [("early", &mut early), ("late", &mut late)] {
+            assert!(client.pump_until("done"), "{name}");
+        }
+        let (a, b) = (numbers(&early.text(TextRegion::LastRows(2000))), numbers(&late.text(TextRegion::LastRows(2000))));
+        for (name, seen) in [("early", &a), ("late", &b)] {
+            for pair in seen.windows(2) {
+                assert_eq!(pair[1], pair[0] + 1, "{name}: {} then {}", pair[0], pair[1]);
+            }
+            assert_eq!(*seen.last().unwrap(), 1499, "{name}");
+        }
+        assert!(a[0] <= b[0], "the later join starts no earlier: {} and {}", a[0], b[0]);
+        close(pane);
+    }
+
+    #[test]
+    fn raw_input_reaches_the_program_of_a_headless_pane_and_comes_back_through_the_tap() {
+        let probe = Probe::default();
+        let mut spec = PaneSpec::new("/bin/cat", 80, 24);
+        spec.headless = true;
+        let pane = start(spec, &probe);
+        let mut client = Client::attach(&pane, 0);
+        pane.write_raw(b"raw bytes\n").expect("a headless pane takes raw input");
+        // The terminal echoes what it is given and `cat` writes it back after: two lines carry the bytes.
+        let two_lines = common::wait_until(WAIT, || {
+            while let Some(TapMsg::Bytes(bytes)) = client.tap.rx.recv(Duration::ZERO) {
+                client.engine.feed(&bytes);
+            }
+            client.text(TextRegion::LastRows(10)).matches("raw bytes").count() >= 2
+        });
+        assert!(two_lines, "the program did not get the bytes: {:?}", client.text(TextRegion::LastRows(10)));
+        close(pane);
+    }
+
+    #[test]
+    fn raw_input_of_a_pane_that_is_not_headless_is_refused_and_nothing_is_written() {
+        let probe = Probe::default();
+        let pane = start(PaneSpec::new("/bin/cat", 80, 24), &probe);
+        assert!(pane.write_raw(b"nope\n").is_err());
+        thread::sleep(Duration::from_millis(300));
+        assert!(!pane_text(&pane, TextRegion::LastRows(10)).contains("nope"), "the program received bytes it was not to");
+        close(pane);
+    }
+
+    #[test]
+    fn raw_input_is_bounded_per_call() {
+        let probe = Probe::default();
+        let mut spec = PaneSpec::new("/bin/cat", 80, 24);
+        spec.headless = true;
+        let pane = start(spec, &probe);
+        assert_eq!(MAX_RAW_BYTES, 64 * 1024);
+        assert!(pane.write_raw(&vec![b'x'; MAX_RAW_BYTES + 1]).is_err(), "a byte over");
+        assert!(pane.write_raw(&[b'y'; 0]).is_ok(), "nothing is fine");
+        assert!(pane.write_raw(&b"z\n".repeat(MAX_RAW_BYTES / 2)).is_ok(), "exactly the bound");
+        close(pane);
+    }
+
+    #[test]
+    fn a_headless_pane_emits_no_frame_and_the_other_events_still_come() {
+        let script = "printf '\\033]2;a title\\007'; echo one; sleep 0.4; echo two; sleep 0.4";
+        let mut spec = headless(script);
+        spec.cwd = Some(std::env::temp_dir());
+        let probe = Probe::default();
+        let pane = start(spec, &probe);
+        assert!(pane.join(Duration::from_secs(20)), "the program's end ends the pane");
+        let events = probe.events();
+        assert!(!events.iter().any(|e| matches!(e, PaneEvent::Frame(_))), "a headless pane drew a frame: {events:?}");
+        assert!(events.contains(&PaneEvent::Title("a title".into())), "{events:?}");
+        assert!(events.iter().any(|e| matches!(e, PaneEvent::Cwd(_))), "{events:?}");
+        let exits: Vec<_> = events.iter().filter(|e| matches!(e, PaneEvent::Exited { .. })).collect();
+        assert_eq!(exits, [&PaneEvent::Exited { code: Some(0) }], "the program's own exit reaches the sink once");
+        assert!(matches!(events.last(), Some(PaneEvent::Exited { .. })), "and it is the last event");
+
+        // The same program in an ordinary pane does draw: the absence above is the flag's doing.
+        let probe = Probe::default();
+        let plain = start(PaneSpec::new("/bin/sh", 80, 24).args(["-c", script]), &probe);
+        assert!(plain.join(Duration::from_secs(20)));
+        assert!(probe.events().iter().any(|e| matches!(e, PaneEvent::Frame(_))), "a pane that is not headless draws frames");
+    }
+
+    #[test]
+    fn a_headless_pane_sets_no_timer_for_frames_idle_or_busy() {
+        // Idle: nothing at all after the first moments (the first look at the directory is the last timer).
+        let probe = Probe::default();
+        let pane = start(headless("sleep 60"), &probe);
+        thread::sleep(Duration::from_millis(600));
+        let settled = pane.timer_wakes();
+        thread::sleep(Duration::from_millis(1500));
+        assert_eq!(pane.timer_wakes(), settled, "an idle headless pane woke up");
+        close(pane);
+
+        // Busy: the same paced output once headless and once not. The frames are the timers that the flag takes away.
+        let run = |headless_flag: bool| {
+            let program = "i=0; while [ $i -lt 400 ]; do echo \"n $i\"; i=$((i+1)); if [ $((i % 20)) -eq 0 ]; then sleep 0.02; fi; done; sleep 1";
+            let mut spec = PaneSpec::new("/bin/sh", 80, 24).args(["-c", program]);
+            spec.headless = headless_flag;
+            let probe = Probe::default();
+            let pane = start(spec, &probe);
+            assert!(pane.join(Duration::from_secs(20)));
+            pane.timer_wakes()
+        };
+        let (quiet, drawing) = (run(true), run(false));
+        println!("timer wake-ups of the same paced output: headless {quiet}, with frames {drawing}");
+        // The first look at the directory is the one timer both runs have; the frames are the rest.
+        assert!(quiet <= 4, "headless woke {quiet} times for a timer");
+        assert!(drawing >= quiet + 10, "headless {quiet}, with frames {drawing}");
     }
 }
