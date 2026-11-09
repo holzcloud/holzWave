@@ -75,7 +75,7 @@ function installCore([initial, down]) {
       if (!parsed.bindable) {
         warnings.push(
           `The key combination ${parsed.chord} for ${action} is not allowed because it would take plain typing away ` +
-            "from the terminal; use Cmd, or two modifiers including Ctrl or Alt; the default stays.",
+            "from the terminal; use Cmd, a function key, or two modifiers including Ctrl or Alt; the default stays.",
         );
         continue;
       }
@@ -186,7 +186,7 @@ async function listCase(page, url) {
   assert.equal(await dialog(page).getAttribute("aria-modal"), "true");
 
   const rows = dialog(page).locator(".kb-row");
-  assert.equal(await rows.count(), 57, "one row per action of the core");
+  assert.equal(await rows.count(), 60, "one row per action of the core");
   assert.equal(await rowOf(page, "pane.split_right").locator(".kb-title").textContent(), "Split pane right");
   assert.equal(await chordOf(page, "pane.split_right"), "Cmd+D");
   assert.equal(await chordOf(page, "workspace.select_3"), "Cmd+Alt+3");

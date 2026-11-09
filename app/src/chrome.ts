@@ -12,6 +12,7 @@ import { el, fitNodes, loadStyles, setAttr, setText } from "./dom.js";
 import { focusInput } from "./keyboard.js";
 import { clockText, tabLabel } from "./labels.js";
 import { paneLabel, renamePane, setPaneCloseHandler, setPaneRenameHandler } from "./panehead.js";
+import { registerRegionActions } from "./regions.js";
 import { startRename } from "./rename.js";
 import { state } from "./state.js";
 import type { View } from "./types.js";
@@ -383,6 +384,7 @@ export async function initChrome(): Promise<void> {
   });
   registerRenameActions();
   registerCloseActions();
+  registerRegionActions(focusInput);
   setPaneRenameHandler(renamePaneTo);
   setPaneCloseHandler(closePaneAfterAsking);
   tick();

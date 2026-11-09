@@ -146,6 +146,8 @@ test("every id isRepeatable accepts is a default action of the chord table", () 
 // ---- the chord table -----------------------------------------------------------------------------
 
 const EXPECTED = {
+  "F6": "region.focus_next",
+  "Shift+F6": "region.focus_prev",
   "Cmd+D": "pane.split_right",
   "Cmd+Shift+D": "pane.split_down",
   "Cmd+T": "tab.new",

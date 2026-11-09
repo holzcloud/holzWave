@@ -826,8 +826,8 @@ async function stateCase(page, url) {
   assert.notEqual(red.background, wash, "and not the ordinary wash");
 
   // Keyboard focus: the 2 px ring on the hit box. The ring is `:focus-visible`, which an engine grants to a script's focus() after
-  // a key press. (The Tab key cannot walk the bar here: while a bar button has the focus, the page's key handler sends Tab to
-  // the terminal, as it does for every button of the bar, so each button is focused by name.)
+  // a key press. (Each button is focused by name here so that the ring is read per button; the walk through the bar with Tab, and
+  // F6 to its last button, are in regions.test.mjs.)
   await page.mouse.move(500, 300);
   await page.keyboard.press("Shift");
   for (const word of WORDS) {

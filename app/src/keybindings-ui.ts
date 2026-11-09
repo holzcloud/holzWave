@@ -24,7 +24,7 @@ const KEY = "keybindings";
 /** The hint under the title; the core's refusals are shown beside the rows they concern. */
 export const KEYBINDINGS_HINT =
   "Choose Change, then press the new key combination; Escape cancels. A combination needs Cmd, or two modifiers " +
-  "including Ctrl or Alt; the core refuses the others and says why.";
+  "including Ctrl or Alt, or is a function key; the core refuses the others and says why.";
 
 /** The words that mark a warning as one about key bindings (the core's resolver and its load notes). */
 const BINDING_NOTE = /binding|key combination/i;

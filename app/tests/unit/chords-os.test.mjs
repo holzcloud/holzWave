@@ -51,6 +51,33 @@ test("on Linux the fallback is the same without Ctrl+V, and anything that is not
   }
 });
 
+test("F6 and Shift+F6 move the keyboard between the regions on every platform, with or without the core's rows", () => {
+  for (const name of ["", "macos", "windows", "linux", "web"]) {
+    setOs(name);
+    assert.equal(actionIdFor("F6"), "region.focus_next", `${name || "unknown"}: F6`);
+    assert.equal(actionIdFor("Shift+F6"), "region.focus_prev", `${name || "unknown"}: Shift+F6`);
+    assert.equal(chordFor("region.focus_next"), "F6", name);
+    assert.equal(chordFor("region.focus_prev"), "Shift+F6", name);
+    assert.equal(actionIdFor("Ctrl+F6"), undefined, `${name}: another modifier is another chord`);
+  }
+});
+
+test("the core's table decides F6 once it is set: a moved region action leaves the key unowned", () => {
+  setOs("linux");
+  setBindingTable([
+    { action: "region.focus_next", chord: "Ctrl+Alt+F6" },
+    { action: "region.focus_prev", chord: "Shift+F6" },
+    { action: "bar.focus", chord: "F6" },
+  ]);
+  assert.equal(actionIdFor("Ctrl+Alt+F6"), "region.focus_next");
+  assert.equal(actionIdFor("F6"), "bar.focus", "a chord another action took is that action's");
+  assert.equal(actionIdFor("Shift+F6"), "region.focus_prev");
+  setBindingTable([{ action: "region.focus_next", chord: null }, { action: "region.focus_prev", chord: null }]);
+  assert.equal(actionIdFor("F6"), undefined, "an unbound region action is not revived by the static table");
+  assert.equal(actionIdFor("Shift+F6"), undefined);
+  setBindingTable([]);
+});
+
 test("no chord with Cmd resolves on Windows or Linux while the core's rows are missing", () => {
   for (const name of ["windows", "linux"]) {
     setOs(name);

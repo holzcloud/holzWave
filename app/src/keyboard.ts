@@ -12,6 +12,7 @@ import { actionIdFor, setBindingTable, setOs } from "./chords.js";
 import { isConfirmingClose } from "./confirm.js";
 import { gridRect } from "./geometry.js";
 import { chordsOf, isComposingKey, isModifierKey, type KeyPayload, keyPayload } from "./keymap.js";
+import { CONTROL_SELECTOR, isControlKey, isFunctionKeyChord } from "./keyroute.js";
 import {
   anySticky,
   consume,
@@ -31,6 +32,7 @@ import {
 } from "./keyrowstate.js";
 import { offerKey, pushKeyHandler } from "./keystack.js";
 import { confirmPaste, isConfirmingPaste, pasteDecision } from "./paste-confirm.js";
+import { inBar, walkBar } from "./regions.js";
 import { state } from "./state.js";
 import { showNotice } from "./status.js";
 import type { View } from "./types.js";
@@ -58,6 +60,34 @@ function inOtherField(target: EventTarget | null): boolean {
     target.isContentEditable ||
     target.dataset.field !== undefined // the code editor: its content is in a shadow root, so its host is the target
   );
+}
+
+/**
+ * The control has the focus for the keyboard (`:focus-visible`: it was reached by a key, or by a script after one) and not only
+ * because a pointer pressed it, which some engines answer with a focus that nobody asked the keyboard to keep. A control that a
+ * click left focused stays out of the keys' way: Enter and Tab still go to the terminal, as they did before the bar had the keyboard.
+ * An engine that does not know the selector counts every focus as the keyboard's.
+ */
+function keyboardFocus(target: HTMLElement): boolean {
+  try {
+    return target.matches(":focus-visible");
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * A control of the page other than the terminal input has the keyboard focus (a button of the bar, a link, a tab, a scrollable box):
+ * the keys that move between controls and press them are its own, and nothing of them goes to the terminal.
+ */
+function onControl(target: EventTarget | null): target is HTMLElement {
+  if (!(target instanceof HTMLElement) || target === ime || target.id === "term") return false;
+  return target.matches(CONTROL_SELECTOR) && keyboardFocus(target);
+}
+
+/** A control of the bar has the keyboard focus. */
+function onBarControl(target: EventTarget | null): target is HTMLElement {
+  return inBar(target) && onControl(target);
 }
 
 function createInput(): HTMLTextAreaElement {
@@ -201,6 +231,12 @@ function onKeyDown(e: KeyboardEvent): void {
     if (e.target === ime) e.preventDefault();
     return;
   }
+  // Escape on a control of the bar gives the keyboard back to the terminal; the bar has no use for it and the terminal gets nothing.
+  if (e.key === "Escape" && onBarControl(e.target) && !inOtherField(e.target)) {
+    e.preventDefault();
+    focusInput();
+    return;
+  }
   for (const chord of chordsOf(e)) {
     const id = actionIdFor(chord);
     // A program on the alternate screen (vim, less, htop) reads these keys itself, and a text field of the page (the name
@@ -208,6 +244,9 @@ function onKeyDown(e: KeyboardEvent): void {
     if (id !== undefined && EDIT_STEPS.has(id) && (onAlternateScreen() || inOtherField(e.target))) continue;
     // Copy and paste in a text field of the page are the field's own, with the browser's default.
     if (id !== undefined && CLIPBOARD_ACTIONS.has(id) && inOtherField(e.target)) continue;
+    // A function key alone (or with Shift) is what a program such as htop or mc reads for itself: while one is on the alternate
+    // screen the terminal input leaves it to the program. The palette entry of the action is the way then.
+    if (id !== undefined && isFunctionKeyChord(chord) && e.target === ime && onAlternateScreen()) continue;
     // The registry decides what a held key may repeat. A repeat it swallowed is consumed here as well, so it never
     // reaches the encoder as terminal input. An action that keeps its default (paste) lets the first press through
     // to the browser; its repeats are consumed, so a held chord pastes once.
@@ -219,6 +258,14 @@ function onKeyDown(e: KeyboardEvent): void {
   if (e.metaKey) return; // a Cmd chord nobody owns is neither a command nor terminal input
   if (isModifierKey(e)) return; // the encoder reads the modifier bits of the next key
   if (inOtherField(e.target)) return; // a text field of the page types for itself
+  // The bar is walked by the page: Tab and Shift+Tab go to the next and the previous control and, past the last or the first, to the
+  // terminal. The engine's own Tab would reach buttons on some computers only (WebKit on macOS needs full keyboard access).
+  if (e.key === "Tab" && isControlKey(e) && onBarControl(e.target)) {
+    e.preventDefault();
+    if (!walkBar(e.target, e.shiftKey)) focusInput();
+    return;
+  }
+  if (isControlKey(e) && onControl(e.target)) return; // a focused control keeps Tab, Enter, Space and the arrows: no default prevented
   const pane = state.view?.focus;
   if (pane === undefined) return;
   e.preventDefault();

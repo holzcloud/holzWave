@@ -4,11 +4,21 @@
 // `pane.close` is Cmd+W (D-14): the native macOS menu has no Close Window item, so the page owns the shortcut. The
 // clipboard chords Cmd+C and Cmd+V are fixed here as well (no rebindable action): the page owns them, the native Edit
 // menu and the web view's own `paste` event stay a second route.
-// It is only the fallback until the core's rows arrive. On Windows, Linux and the web it holds just the fixed clipboard
-// chords (see FIXED_CLIPBOARD): the Super key (`Cmd`) is the OS's there and a browser keeps its own `Cmd` chords, so a
+// It is only the fallback until the core's rows arrive. On Windows, Linux and the web it holds just the region chords `F6` and
+// `Shift+F6` and the fixed clipboard chords (see FIXED_CLIPBOARD): the Super key (`Cmd`) is the OS's there and a browser keeps its own `Cmd` chords, so a
 // Win-key or browser chord must never run from this table.
 
+/**
+ * The chords that mean the same on every platform: the keyboard moves between the terminal and the bar on `F6` and `Shift+F6`.
+ * They belong to every static table, so a window with no rows from the core has them too.
+ */
+const REGION_CHORDS: ReadonlyMap<string, string> = new Map([
+  ["F6", "region.focus_next"],
+  ["Shift+F6", "region.focus_prev"],
+]);
+
 export const CHORDS: ReadonlyMap<string, string> = new Map([
+  ...REGION_CHORDS,
   ["Cmd+D", "pane.split_right"],
   ["Cmd+Shift+D", "pane.split_down"],
   ["Cmd+W", "pane.close"],
@@ -61,11 +71,12 @@ export const CHORDS: ReadonlyMap<string, string> = new Map([
 // ---- the platform --------------------------------------------------------------------------------
 
 /**
- * The fixed clipboard shortcuts of Windows, Linux and the web: outside the core's rebindable table, like `Cmd+C` on
- * macOS. Plain `Ctrl+C` is never a copy (it is SIGINT and always reaches the program). `Ctrl+V` pastes on Windows only:
+ * The static shortcuts of Windows, Linux and the web: the two region chords and the clipboard chords. The clipboard chords are
+ * outside the core's rebindable table, like `Cmd+C` on macOS. Plain `Ctrl+C` is never a copy (it is SIGINT and always reaches the program). `Ctrl+V` pastes on Windows only:
  * on Linux and in a browser a terminal keeps it for the program (Ctrl+V is the literal-next of the shell).
  */
 const FIXED_CLIPBOARD: ReadonlyMap<string, string> = new Map([
+  ...REGION_CHORDS,
   ["Ctrl+Shift+C", "edit.copy"],
   ["Ctrl+Insert", "edit.copy"],
   ["Ctrl+Shift+V", "edit.paste"],
