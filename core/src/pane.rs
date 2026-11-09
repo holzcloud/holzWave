@@ -23,6 +23,14 @@
 //!   example a 4 MiB paste into `cat`. Replies to a program's own queries are dropped when the writer is far behind
 //!   ([`REPLY_BACKLOG`]); what the user typed or pasted never is.
 //!
+//! # Taps
+//!
+//! A tap is a second reader of the bytes the engine is fed: [`PaneHandle::attach_tap`] takes a VT snapshot of the screen
+//! ([`TerminalEngine::snapshot_vt`]) and registers the tap in one step of the engine thread, so no byte of the program
+//! falls between the snapshot and the stream and none is in both. A client that feeds the snapshot and then every
+//! [`TapMsg::Bytes`] to an engine of its own ends up with the terminal of the pane. Each tap has a queue bounded in bytes
+//! that the engine thread never waits for: a tap that cannot keep up is removed and told so ([`TapEnd::Overflow`]).
+//!
 //! # Ending
 //!
 //! A pane ends in one of four ways and all of them take the same path: [`PaneHandle::close`] (or the last handle
@@ -35,11 +43,12 @@
 //! The sink runs on the engine thread. It may be called before [`PaneHandle::spawn`] has returned (a failed start
 //! reports `Failed` first), so it must not wait for the handle.
 
+use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -191,6 +200,12 @@ pub struct PaneSpec {
     /// Names the program does not inherit from the app's environment (see [`SpawnOptions::env_remove`]): applied before
     /// `env`, so a name that is in both is set. Empty (the default) removes nothing. Not used for an SSH pane.
     pub env_remove: Vec<String>,
+    /// The pane runs a program and keeps its engine but draws for no page: it encodes no frame and emits no
+    /// [`PaneEvent::Frame`], and an idle pane sets no timer for frames or pictures. It still emits `Title`, `Cwd`, `Bell`,
+    /// `CommandEnd`, `Held`, `Exited` and `Failed`. It is the pane of a session that lives on a server and is seen only
+    /// through taps ([`PaneHandle::attach_tap`]); the only pane that accepts raw input bytes ([`PaneHandle::write_raw`]).
+    /// `false` by default.
+    pub headless: bool,
 }
 
 impl PaneSpec {
@@ -220,6 +235,7 @@ impl PaneSpec {
             env: Vec::new(),
             linger: None,
             env_remove: Vec::new(),
+            headless: false,
         }
     }
 
@@ -263,6 +279,167 @@ pub enum PaneEvent {
     Held { code: Option<u32> },
     /// The pane could not start. Exactly once, and no other event follows.
     Failed(String),
+}
+
+/// The least bytes a tap's queue may be given: one read of the PTY, so that a chunk always fits an empty queue.
+pub const MIN_TAP_QUEUE_BYTES: usize = READ_CHUNK;
+
+/// The most bytes a tap's queue may be given; a larger request is cut to it.
+pub const MAX_TAP_QUEUE_BYTES: usize = 16 * 1024 * 1024;
+
+/// The most taps one pane keeps. Past it an attach is refused, so a caller that never detaches cannot make the engine
+/// thread copy every chunk without a bound.
+pub const MAX_TAPS: usize = 32;
+
+/// The identity of a tap, for [`PaneHandle::detach_tap`]. Unique in the process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TapId(u64);
+
+impl TapId {
+    fn next() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        TapId(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+/// Why a tap ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TapEnd {
+    /// The reader did not keep up: its queue would have passed its bound, so the tap was removed and what was queued is
+    /// gone. The bytes after the last one it got were lost, so what it built from them is wrong: the caller attaches
+    /// again and starts from a fresh snapshot.
+    Overflow,
+    /// The pane ended, or the tap was detached. Every byte that was queued before the end is delivered first.
+    Closed,
+}
+
+/// What a tap yields.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TapMsg {
+    /// Bytes the engine was fed, in order, as the reader of the PTY handed them over (at most 64 KiB each).
+    Bytes(Vec<u8>),
+    /// The end. Yielded once the queue is empty and again on every later call.
+    End(TapEnd),
+}
+
+#[derive(Default)]
+struct TapState {
+    chunks: VecDeque<Vec<u8>>,
+    bytes: usize,
+    end: Option<TapEnd>,
+}
+
+struct TapShared {
+    state: Mutex<TapState>,
+    ready: Condvar,
+    /// The receiver was dropped: nobody wants the bytes, the engine thread removes the tap.
+    receiver_gone: AtomicBool,
+}
+
+impl TapShared {
+    fn lock(&self) -> std::sync::MutexGuard<'_, TapState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The engine thread's end of a tap.
+struct TapSink {
+    id: TapId,
+    shared: Arc<TapShared>,
+    bound: usize,
+}
+
+impl TapSink {
+    /// Hand over a chunk without waiting. `false` means the tap is finished (overflow or no receiver) and is removed.
+    fn push(&self, chunk: &[u8]) -> bool {
+        if self.shared.receiver_gone.load(Ordering::Relaxed) {
+            return false;
+        }
+        let mut state = self.shared.lock();
+        if state.end.is_some() {
+            return false;
+        }
+        if state.bytes + chunk.len() > self.bound {
+            // The queue is dropped with the tap: its bytes are of no use to a reader that has to start over.
+            state.chunks.clear();
+            state.bytes = 0;
+            state.end = Some(TapEnd::Overflow);
+        } else {
+            state.bytes += chunk.len();
+            state.chunks.push_back(chunk.to_vec());
+        }
+        self.shared.ready.notify_one();
+        state.end.is_none()
+    }
+
+    /// The pane ended or the tap was detached: what is queued stays readable, then the end follows.
+    fn close(&self, discard: bool) {
+        let mut state = self.shared.lock();
+        if state.end.is_none() {
+            state.end = Some(TapEnd::Closed);
+        }
+        if discard {
+            state.chunks.clear();
+            state.bytes = 0;
+        }
+        self.shared.ready.notify_one();
+    }
+}
+
+/// The reader of a tap. Dropping it detaches the tap on the engine thread's next chunk; [`PaneHandle::detach_tap`] does it
+/// at once.
+pub struct TapReceiver {
+    shared: Arc<TapShared>,
+}
+
+impl TapReceiver {
+    /// The next message, waiting at most `timeout` (`Duration::ZERO` does not wait); `None` when nothing came in time.
+    pub fn recv(&self, timeout: Duration) -> Option<TapMsg> {
+        let deadline = Instant::now().checked_add(timeout);
+        let mut state = self.shared.lock();
+        loop {
+            if let Some(chunk) = state.chunks.pop_front() {
+                state.bytes -= chunk.len();
+                return Some(TapMsg::Bytes(chunk));
+            }
+            if let Some(end) = state.end {
+                return Some(TapMsg::End(end));
+            }
+            let left = match deadline {
+                Some(deadline) => deadline.saturating_duration_since(Instant::now()),
+                None => Duration::from_secs(3600),
+            };
+            if left.is_zero() {
+                return None;
+            }
+            state = self.shared.ready.wait_timeout(state, left).unwrap_or_else(PoisonError::into_inner).0;
+        }
+    }
+}
+
+impl Drop for TapReceiver {
+    fn drop(&mut self) {
+        self.shared.receiver_gone.store(true, Ordering::Relaxed);
+    }
+}
+
+impl std::fmt::Debug for TapReceiver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TapReceiver").finish_non_exhaustive()
+    }
+}
+
+/// What [`PaneHandle::attach_tap`] returns: the state of the terminal at one instant and the bytes that follow it.
+#[derive(Debug)]
+pub struct Tap {
+    /// The VT bytes of the scrollback tail and the screen ([`TerminalEngine::snapshot_vt`]). Feed them to an engine of
+    /// `size` first, and then every [`TapMsg::Bytes`].
+    pub snapshot: Vec<u8>,
+    /// The grid `(cols, rows)` of the pane at the instant of the snapshot: the client sets its own grid to it before it
+    /// feeds the snapshot.
+    pub size: (u16, u16),
+    pub id: TapId,
+    pub rx: TapReceiver,
 }
 
 /// A line-editing step of the shell's line editor. The page names one of these, never the bytes: the core owns the
@@ -350,6 +527,9 @@ enum Control {
     ImageChunk { id: u32, generation: u64, offset: usize, max: usize, reply: Sender<Result<Option<ImageChunk>>> },
     /// The answer of a working-directory lookup, from the short-lived thread that ran it.
     CwdFound(Option<PathBuf>),
+    /// Take the snapshot and register the tap, with no output fed between the two.
+    AttachTap { tail_rows: usize, max_bytes: usize, queue_bytes: usize, id: TapId, reply: Sender<Result<Tap>> },
+    DetachTap(TapId),
     Close,
 }
 
@@ -659,6 +839,27 @@ impl PaneHandle {
         self.request(|reply| Control::ImageChunk { id, generation, offset, max, reply })
     }
 
+    /// Attach a tap: the state of the terminal now and every byte the engine is fed from then on, taken in one step of the
+    /// engine thread, so that a client that feeds both to an engine of its own never misses or repeats a byte.
+    ///
+    /// `tail_rows` is how many rows of scrollback come with the screen (clamped to what exists, `0` for the screen only).
+    /// `max_bytes` bounds the snapshot: a larger one is refused, as an error, and no tap is registered. `queue_bytes`
+    /// bounds the bytes that wait for the reader, cut to [`MIN_TAP_QUEUE_BYTES`]..=[`MAX_TAP_QUEUE_BYTES`]: a reader
+    /// that falls further behind is removed ([`TapEnd::Overflow`]) and the engine thread never waits for it. At most
+    /// [`MAX_TAPS`] taps per pane. Waits for the engine thread's answer like [`PaneHandle::paste`] does, so it must not
+    /// be called on the Tauri main thread.
+    pub fn attach_tap(&self, tail_rows: usize, max_bytes: usize, queue_bytes: usize) -> Result<Tap> {
+        let queue_bytes = queue_bytes.clamp(MIN_TAP_QUEUE_BYTES, MAX_TAP_QUEUE_BYTES);
+        let id = TapId::next();
+        self.request(|reply| Control::AttachTap { tail_rows, max_bytes, queue_bytes, id, reply })
+    }
+
+    /// End a tap now: nothing more is handed to it, what was queued is dropped and its reader gets [`TapEnd::Closed`].
+    /// The other taps are not affected. An id that is gone is ignored.
+    pub fn detach_tap(&self, id: TapId) {
+        let _ = self.send(Control::DetachTap(id));
+    }
+
     /// End the pane: the shell is killed and reaped on the engine thread and one `Exited` event follows. Does not
     /// wait (killing takes about 200 ms); use [`PaneHandle::join`] to wait. Closing twice is fine.
     pub fn close(&self) {
@@ -817,13 +1018,17 @@ struct Actor<E: TerminalEngine, S: FnMut(PaneEvent)> {
     bell_gate: Gate,
     /// The same for the end of a command.
     end_gate: Gate,
+    /// [`PaneSpec::headless`]: no frame is wanted, so none is built and nothing wakes for one.
+    headless: bool,
+    /// The taps ([`PaneHandle::attach_tap`]), in the order they were attached.
+    taps: Vec<TapSink>,
 }
 
 impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
     /// The main loop. Returns when the pane is to end.
     fn run(&mut self) {
         loop {
-            let mut wait = match (self.dirty, self.last_emit) {
+            let mut wait = match (self.frame_wanted(), self.last_emit) {
                 (true, Some(last)) => self.interval.saturating_sub(last.elapsed()),
                 (true, None) => Duration::ZERO,
                 (false, _) => Duration::from_secs(3600),
@@ -833,7 +1038,7 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
             }
             // An animation wakes the pane only for the time the engine named, and only when no frame is waiting anyway:
             // a dirty pane already waits for its frame interval.
-            if let Some(due) = self.image_due.filter(|_| !self.dirty) {
+            if let Some(due) = self.image_due.filter(|_| !self.frame_wanted()) {
                 wait = wait.min(Duration::from_millis(due.saturating_sub(self.now_ms())));
             }
             if let Some(poll) = self.exit_poll {
@@ -874,6 +1079,11 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
                 }
             }
         }
+    }
+
+    /// Whether a frame is due: the screen changed and the pane draws for a page.
+    fn frame_wanted(&self) -> bool {
+        self.dirty && !self.headless
     }
 
     /// The exit status of the shell if it has exited. Does not block; a child that cannot be asked counts as running.
@@ -925,7 +1135,7 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
         self.emit_frame();
         (self.sink)(PaneEvent::Held { code });
         loop {
-            let wait = match (self.dirty, self.last_emit) {
+            let wait = match (self.frame_wanted(), self.last_emit) {
                 (true, Some(last)) => self.interval.saturating_sub(last.elapsed()),
                 (true, None) => Duration::ZERO,
                 (false, _) => Duration::from_secs(3600),
@@ -1119,6 +1329,18 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
                 // A read marks nothing dirty and writes nothing to the PTY; a caller that is gone costs nothing.
                 let _ = reply.send(Ok(self.engine.image_chunk(id, generation, offset, max)));
             }
+            Control::AttachTap { tail_rows, max_bytes, queue_bytes, id, reply } => {
+                let answer = self.attach_tap(tail_rows, max_bytes, queue_bytes, id);
+                // A caller that stopped waiting (its call timed out) must not leave a tap behind.
+                if reply.send(answer).is_err() {
+                    self.taps.retain(|tap| tap.id != id);
+                }
+            }
+            Control::DetachTap(id) => {
+                if let Some(at) = self.taps.iter().position(|tap| tap.id == id) {
+                    self.taps.remove(at).close(true);
+                }
+            }
             // `run` ends the loop on Close before it gets here.
             Control::Close => {}
         }
@@ -1127,11 +1349,38 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
     /// Program output into the engine; its answers to the program's queries go back through the writer.
     fn feed(&mut self, bytes: &[u8]) {
         self.engine.feed(bytes);
+        self.fan_out(bytes);
         let replies = self.engine.take_replies();
         self.writer.reply(replies);
         self.cwd.output(Instant::now());
         self.drain_events();
         self.dirty = true;
+    }
+
+    /// Hand the bytes the engine was just fed to every tap, in order. A tap that is finished by this (it fell behind, or
+    /// nobody reads it) is removed; the engine thread never waits for any of them.
+    fn fan_out(&mut self, bytes: &[u8]) {
+        if !self.taps.is_empty() {
+            self.taps.retain(|tap| tap.push(bytes));
+        }
+    }
+
+    /// Take a snapshot and register a tap for it, between two feeds of this thread.
+    fn attach_tap(&mut self, tail_rows: usize, max_bytes: usize, queue_bytes: usize, id: TapId) -> Result<Tap> {
+        // Taps whose reader has gone do not count against the bound.
+        self.taps.retain(|tap| !tap.shared.receiver_gone.load(Ordering::Relaxed));
+        if self.taps.len() >= MAX_TAPS {
+            return Err(Error::Pty("too many taps on this pane".into()));
+        }
+        let snapshot = self.engine.snapshot_vt(tail_rows, max_bytes)?;
+        let size = self.engine.size()?;
+        let shared = Arc::new(TapShared {
+            state: Mutex::new(TapState::default()),
+            ready: Condvar::new(),
+            receiver_gone: AtomicBool::new(false),
+        });
+        self.taps.push(TapSink { id, shared: shared.clone(), bound: queue_bytes });
+        Ok(Tap { snapshot, size, id, rx: TapReceiver { shared } })
     }
 
     fn key(&mut self, dom: &DomKey) {
@@ -1230,6 +1479,10 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
     /// use up the interval, or the echo of that key, arriving a fraction of a millisecond later, would wait for it.
     fn emit_frame(&mut self) {
         self.dirty = false;
+        // A pane that draws for no page builds no frame and asks no picture clock: nothing in it is waiting for one.
+        if self.headless {
+            return;
+        }
         // The engine's clock for animated pictures runs once per frame, never per chunk of output, and not at all in a
         // held pane. What it returns is when the next frame is due.
         self.image_due = if self.holding { None } else { self.engine.tick_images(self.now_ms()) };
@@ -1258,6 +1511,10 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
         // Kill and reap; the writer is dropped only after this. The reader thread keeps draining meanwhile.
         let code = self.pty.take().and_then(|pty| pty.close().ok());
         self.reaped.store(true, Ordering::Relaxed);
+        // Every tap gets the end after the bytes that were queued for it.
+        for tap in self.taps.drain(..) {
+            tap.close(false);
+        }
         (self.sink)(PaneEvent::Exited { code });
         // Callers waiting for an answer must not wait for their timeout: dropping what is left drops their
         // reply channels.
@@ -1436,6 +1693,8 @@ fn engine_main<E, F, S>(
         holding: false,
         bell_gate: Gate::new(),
         end_gate: Gate::new(),
+        headless: spec.headless,
+        taps: Vec::new(),
     };
     let _ = started.send(Ok(pid));
     actor.run();

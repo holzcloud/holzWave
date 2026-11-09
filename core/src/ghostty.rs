@@ -1,6 +1,7 @@
 use std::cell::{Cell as StdCell, RefCell};
 use std::rc::Rc;
 
+use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::key::{self, Action, Key, OptionAsAlt};
 use libghostty_vt::mouse::{self, EncoderSize};
 use libghostty_vt::paste::Options as PasteOptions;
@@ -1083,6 +1084,64 @@ impl GhosttyEngine {
             return Ok(None);
         }
         Ok(Some(cap_tail(text.to_owned(), max_bytes)))
+    }
+}
+
+/// A writer for the formatter that holds at most `max` bytes: the byte that would pass the bound is refused, so the
+/// formatter stops and memory never grows with the size of a terminal that holds a hostile amount of text.
+struct BoundedSink {
+    bytes: Vec<u8>,
+    max: usize,
+    over: bool,
+}
+
+impl std::io::Write for BoundedSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.bytes.len() + buf.len() > self.max {
+            self.over = true;
+            return Err(std::io::Error::other("snapshot over its bound"));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl GhosttyEngine {
+    /// The VT bytes of the screen, see [`TerminalEngine::snapshot_vt`].
+    fn snapshot_vt_range(&mut self, tail_rows: usize, max_bytes: usize) -> Result<Vec<u8>> {
+        // The scrollback comes in with the next change; for now the range is the screen.
+        let _ = tail_rows;
+        let (cols, rows) = (self.terminal.cols().map_err(eng)?, self.terminal.rows().map_err(eng)?);
+        if cols == 0 || rows == 0 {
+            return Err(Error::Engine("the terminal has no cells".into()));
+        }
+        let corner = |x: u16, y: u32| {
+            self.terminal.grid_ref(Point::Active(PointCoordinate { x, y })).map_err(eng)
+        };
+        let range = Selection::new(corner(0, 0)?, corner(cols - 1, u32::from(rows) - 1)?, false);
+        let options = FormatterOptions::new()
+            .with_format(Format::Vt)
+            .with_selection(&range)
+            .with_modes(true)
+            .with_scrolling_region(true)
+            .with_tabstops(true)
+            .with_pwd(true)
+            .with_keyboard(true)
+            .with_cursor(true)
+            .with_style(true);
+        let mut formatter = Formatter::new(&self.terminal, options).map_err(eng)?;
+        let mut sink = BoundedSink { bytes: Vec::new(), max: max_bytes, over: false };
+        // SAFETY: the sink only appends to its own buffer; it never reaches the formatter or the terminal.
+        let written = unsafe { formatter.format_write(&mut sink) };
+        if sink.over {
+            return Err(Error::Engine(format!("the snapshot is larger than {max_bytes} bytes")));
+        }
+        written.map_err(eng)?;
+        Ok(sink.bytes)
     }
 }
 
@@ -2178,6 +2237,10 @@ impl TerminalEngine for GhosttyEngine {
             return None;
         }
         degraded("animation tick", self.terminal.kitty_graphics_animation_tick(now_ms).map_err(eng), || None)
+    }
+
+    fn snapshot_vt(&mut self, tail_rows: usize, max_bytes: usize) -> Result<Vec<u8>> {
+        self.snapshot_vt_range(tail_rows, max_bytes)
     }
 
     fn set_image_animation(&mut self, enabled: bool) {

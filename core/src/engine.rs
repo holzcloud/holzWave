@@ -897,6 +897,23 @@ pub trait TerminalEngine {
     /// Pause (`false`) or resume (`true`) animations. While paused, [`TerminalEngine::tick_images`] moves no frame, so
     /// the frame that is shown stays; resuming goes on from that frame.
     fn set_image_animation(&mut self, _enabled: bool) {}
+
+    /// The VT bytes that rebuild this terminal in an empty one of the same size: the last `tail_rows` rows that have
+    /// scrolled off the top (clamped to the rows that exist, `0` for none) followed by the screen. Feeding the bytes to a
+    /// fresh engine and then every byte this engine is fed afterwards makes the two agree.
+    ///
+    /// What is carried: the cells with their colours and styles, the links of cells, the cursor and its shape, the
+    /// terminal modes that differ from their defaults (bracketed paste, application cursor keys, mouse reporting and
+    /// the like), the scrolling region, the tab stops, the working directory, the keyboard state and which screen is
+    /// active. What is not: pictures, the title, the selection, the search and the viewport position (those belong to
+    /// the engine that shows the terminal, not to the terminal).
+    ///
+    /// The bytes are cut off by refusing: a snapshot that would be larger than `max_bytes` is an error, never a
+    /// prefix, because a prefix of a screen is a corrupted screen. The call belongs to the engine's own thread and
+    /// changes nothing the engine shows.
+    fn snapshot_vt(&mut self, _tail_rows: usize, _max_bytes: usize) -> Result<Vec<u8>> {
+        Err(Error::Unsupported("snapshot_vt".into()))
+    }
 }
 
 #[cfg(test)]
