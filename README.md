@@ -23,6 +23,7 @@ Nextcloud, and an AI chat that sees your terminal only after you share that pane
 > The author has run it on macOS (Apple Silicon) and Windows. The Linux packages of `0.0.1-beta2` were built on a GitHub runner
 > and were not started on a Linux desktop by the author for this release (earlier alphas and betas were run on Linux). The window in the images below is the
 > design for the release; the table [What works today](#what-works-today) says what is built and what is tested.
+> The own window bar of Windows and Linux has never been seen on a real Windows or Linux window ([docs/status.md](docs/status.md)).
 >
 > **Where to get it.** Two ways are available today: the downloads on the releases page and the Homebrew tap, both below.
 > Every other channel (Flathub, the Microsoft Store, Obtainium, F-Droid) is not available: the state of each, with one
@@ -95,7 +96,7 @@ The Android pictures are the design, rendered from the design page, not screensh
 |---|---|---|
 | ![holzWave on macOS](docs/design/platforms/macos.png) | ![holzWave on Windows](docs/design/platforms/windows.png) | ![holzWave on Linux](docs/design/platforms/linux.png) |
 
-The own window frame of Windows and Linux (the page's bar is the window bar, with the window buttons of the system) is specified and drawn here, and it was never seen on a real Windows or Linux window: these two pictures are drawings of the design, not screenshots.
+The own window frame of Windows and Linux (the page's bar is the window bar, with the window buttons of the system; the Windows 11 snap layouts are not built) is built and tested against a mock window and by compile checks, and it was never seen on a real Windows or Linux window, so its drag, resize edges and buttons and its behaviour under Wayland are unverified (under Wayland, if the window cannot be moved or resized, set `Frame` to `System` in Settings): these two pictures are drawings of the design, not screenshots.
 
 | The window buttons: three styles, both sides and the states | The Settings group Window frame |
 |---|---|

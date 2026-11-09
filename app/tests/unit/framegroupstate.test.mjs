@@ -172,9 +172,18 @@ test("every word and sentence of the page is in the design record", () => {
   assert.ok(section.includes("after Accessibility and the group `Host shell` where that is drawn, and before the buttons"), "the place");
 });
 
-// The design record names no sentence for a command that failed without a reason. The page has one line for that in every group
-// of the dialog, and this group says the same words as the group `Host shell` so a person reads one sentence for one thing.
-test("the line of a command that failed with no reason is the dialog's one sentence", () => {
+// The design record names the sentence for a command that failed with no reason to show (docs/design.md 6.33, the failure line).
+// This group says the same words as the group `Host shell`, so a person reads one sentence for one thing.
+test("the line of a command that failed with no reason is the dialog's one sentence, and the design record says it", () => {
   assert.equal(GROUP.failed, HOST_SHELL_GROUP.failed);
   assert.equal(GROUP.failed, "The command failed.");
+  const section = spec.slice(spec.indexOf("### 6.33 Window frame"));
+  const row = section
+    .split("\n")
+    .filter((l) => l.startsWith("| "))
+    .map((l) => l.split("|").slice(1, -1).map((c) => c.trim()))
+    .find((c) => c[0].startsWith("Failure line"));
+  assert.ok(row, "the spec has the failure line");
+  assert.ok(row[0].includes('role="status"'), "the failure line is a status");
+  assert.equal(row[1].replace(/^`|`$/g, ""), GROUP.failed, "the failure sentence");
 });

@@ -74,6 +74,14 @@ Does not exist yet:
   the last plan of the phase and conditional: its manifest and the host-shell code path exist and are checked from the Mac
   ([flatpak.md](flatpak.md)), but it was never built or run, and it ships only if it builds on the owner's machine and row
   L10 passes. DESK-30 and DESK-31 are marked done only after the owner's rows pass.
+- **Own window frame:** on Windows and Linux the page's bar is the window bar, with three window buttons in the style of the system
+  (flat on Windows and most Linux desktops, round on GNOME, with the layout read from GNOME's `gsettings`); macOS keeps its overlay
+  bar, and the Windows 11 snap layouts are not built. **Status: written and tested against a mock window in WebKit and Chromium
+  and by compile checks for Windows and Linux; it has never been seen on a real Windows or Linux window.** Drag, the resize edges,
+  the buttons, the drawn states and the behaviour under Wayland are unverified. Under Wayland the setting `Frame` on `Auto` is
+  the own frame, which was not tried there; `Frame` set to `System` in Settings, or `window_frame.json` edited by hand, gives
+  the system's title bar back ([config.md](config.md)). The frame choice and the Linux button style are per-device settings
+  and never sync. Open: the keyboard cannot reach the buttons of the bar. The list is in [design.md](design.md) section 7.
 
 - Local shell, scrollback, copy and paste, Unicode, resize, themes.
 - Block tiling with tabs and workspaces.
