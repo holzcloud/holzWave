@@ -76,9 +76,9 @@ fn parse_exposes_modifiers_and_key_as_fields() {
 /// The action table of `os`, after checking that it is the full set: a loop over an empty table would pass vacuously.
 fn all_actions(os: &str) -> &'static [ActionInfo] {
     // 15 named defaults, nine tab and nine workspace selections, the history and sidebar actions, the three chat actions
-    // that have a chord, the thirteen that are unbound until the user binds them (two of them open the integrations), and the six
-    // line-editing actions.
-    assert_eq!(actions_for(os).len(), 15 + 9 + 9 + 2 + 3 + 13 + 6, "the {os} table holds 57 actions");
+    // that have a chord, the thirteen that are unbound until the user binds them (two of them open the integrations), the two
+    // region actions that have a chord and the one that has none, and the six line-editing actions.
+    assert_eq!(actions_for(os).len(), 15 + 9 + 9 + 2 + 3 + 13 + 3 + 6, "the {os} table holds 60 actions");
     actions_for(os)
 }
 
@@ -299,8 +299,8 @@ fn no_windows_or_linux_default_takes_the_super_key_or_plain_typing() {
             let Some(d) = a.default else { continue };
             let c = chord(d);
             assert!(!c.cmd, "{d} of {} on {os} uses the Super key", a.id);
-            // A single Ctrl or Alt on a printable key belongs to the shell (Ctrl+C is SIGINT).
-            if c.modifier_count() == 1 {
+            // A single Ctrl or Alt on a printable key belongs to the shell (Ctrl+C is SIGINT). A function key types nothing.
+            if c.modifier_count() == 1 && !is_function_key(&c.key) {
                 assert!(NAVIGATION.contains(&c.key.as_str()), "{d} of {} on {os} is a plain Ctrl or Alt key", a.id);
             }
             // Ctrl+Alt is AltGr on Windows: a printable key with both would take typing away.
@@ -309,6 +309,11 @@ fn no_windows_or_linux_default_takes_the_super_key_or_plain_typing() {
             }
         }
     }
+}
+
+/// `F1` to `F24`: the keys that type no character, so a default on one of them takes no typing away.
+fn is_function_key(key: &str) -> bool {
+    key.strip_prefix('F').and_then(|n| n.parse::<u8>().ok()).is_some_and(|n| (1..=24).contains(&n))
 }
 
 /// The keys on which a single Ctrl or Alt is allowed, as in the bindability policy.
@@ -419,8 +424,48 @@ fn a_single_alt_or_ctrl_on_a_navigation_key_is_bindable_but_not_on_a_letter() {
         assert!(chord(text).is_bindable(), "{text} should be bindable");
     }
     // Option+7 types a bracket on a Swiss layout: a letter, digit or symbol with one Alt or Ctrl stays typing.
-    for text in ["Alt+D", "Alt+7", "Ctrl+D", "Alt+[", "Alt+Space", "Alt+Enter", "Alt+Tab", "Shift+Left", "Alt+F5"] {
+    for text in ["Alt+D", "Alt+7", "Ctrl+D", "Alt+[", "Alt+Space", "Alt+Enter", "Alt+Tab", "Shift+Left", "Alt+F5", "Ctrl+F5"] {
         assert!(!chord(text).is_bindable(), "{text} must stay with the terminal");
+    }
+}
+
+#[test]
+fn a_function_key_alone_or_with_shift_is_bindable_and_with_one_ctrl_or_alt_it_is_not() {
+    // A function key types no character; the page leaves it to a program on the alternate screen (htop, mc), so the default of
+    // the region actions, F6 and Shift+F6, is inside the policy.
+    for text in ["F1", "F6", "Shift+F6", "F12", "Shift+F24", "Cmd+F6", "Ctrl+Shift+F6", "Alt+Shift+F6"] {
+        assert!(chord(text).is_bindable(), "{text} should be bindable");
+    }
+    for text in ["Ctrl+F6", "Alt+F6"] {
+        assert!(!chord(text).is_bindable(), "{text} must stay with the terminal");
+    }
+}
+
+#[test]
+fn the_region_actions_move_the_keyboard_between_the_window_regions_on_every_platform() {
+    for os in OSES {
+        let ids: Vec<&str> = all_actions(os).iter().map(|a| a.id).collect();
+        // Appended after the integration actions, so every action before keeps its place; the line-editing actions follow.
+        let at = ids.iter().position(|id| *id == "integration.profiles").expect("integration.profiles is in the table");
+        assert_eq!(&ids[at + 1..at + 4], ["region.focus_next", "region.focus_prev", "bar.focus"], "the order on {os}");
+        let title_of = |id: &str| all_actions(os).iter().find(|a| a.id == id).map(|a| a.title);
+        assert_eq!(title_of("region.focus_next"), Some("Focus next region"), "title on {os}");
+        assert_eq!(title_of("region.focus_prev"), Some("Focus previous region"), "title on {os}");
+        assert_eq!(title_of("bar.focus"), Some("Focus the bar"), "title on {os}");
+        // The same chord everywhere: a function key is the same key on every platform, and no platform's default uses it.
+        assert_eq!(default_of(os, "region.focus_next"), Some("F6"), "F6 on {os}");
+        assert_eq!(default_of(os, "region.focus_prev"), Some("Shift+F6"), "Shift+F6 on {os}");
+        assert_eq!(default_of(os, "bar.focus"), None, "bar.focus has no chord on {os}: the palette is its way");
+        for a in all_actions(os) {
+            if !a.id.starts_with("region.") {
+                assert_ne!(a.default, Some("F6"), "{} takes the chord of the region actions on {os}", a.id);
+            }
+        }
+        // A person can move them like any other action, and the displaced default is unbound.
+        let o = overrides(&[("region.focus_next", "Ctrl+Alt+F6"), ("bar.focus", "F6")]);
+        let (kb, warnings) = Keybindings::resolve_for(os, &o);
+        assert_eq!(kb.chord_of("region.focus_next"), Some(&chord("Ctrl+Alt+F6")), "{os}: {warnings:?}");
+        assert_eq!(kb.chord_of("bar.focus"), Some(&chord("F6")), "{os}: {warnings:?}");
     }
 }
 
@@ -469,7 +514,7 @@ fn an_edit_action_can_be_moved_and_unbound_like_any_other() {
 
 #[test]
 fn plain_keys_and_single_ctrl_or_alt_chords_stay_with_the_terminal() {
-    for text in ["D", "Shift+D", "Ctrl+D", "Alt+D", "Escape", "Enter", "Shift+Tab", "Ctrl+C", "F5", "Up", "Shift+Up"] {
+    for text in ["D", "Shift+D", "Ctrl+D", "Alt+D", "Escape", "Enter", "Shift+Tab", "Ctrl+C", "Up", "Shift+Up", "F", "Shift+F"] {
         assert!(!chord(text).is_bindable(), "{text} must stay with the terminal");
     }
 }
@@ -529,7 +574,7 @@ fn the_empty_string_unbinds_a_known_action_without_a_warning() {
 
 #[test]
 fn a_chord_that_would_steal_terminal_input_is_refused_with_a_warning() {
-    for refused in ["D", "Shift+D", "Ctrl+D", "Alt+D", "Escape", "shift+enter", "F5"] {
+    for refused in ["D", "Shift+D", "Ctrl+D", "Alt+D", "Escape", "shift+enter", "Alt+F5", "Ctrl+F5"] {
         let (kb, warnings) = Keybindings::resolve_for(MAC, &overrides(&[("tab.new", refused)]));
         assert_eq!(warnings.len(), 1, "{refused:?}: {warnings:?}");
         assert!(warnings[0].contains("tab.new"), "{refused:?}: {warnings:?}");
@@ -706,10 +751,11 @@ fn pinned_lines() -> Vec<String> {
 
 #[test]
 fn the_three_existing_tables_are_what_they_were() {
-    // The file was written from the tables as they were before the browser table existed.
+    // The file was written from the tables as they were before the browser table existed; the three actions that move the
+    // keyboard between the regions of the window were added after the integration actions.
     let pinned: Vec<&str> = include_str!("fixtures/keybindings-defaults.txt").lines().collect();
     let now = pinned_lines();
-    assert_eq!(pinned.len(), 3 * 57, "the pinned file holds three tables of 57 rows");
+    assert_eq!(pinned.len(), 3 * 60, "the pinned file holds three tables of 60 rows");
     for (index, (want, got)) in pinned.iter().zip(&now).enumerate() {
         assert_eq!(want, got, "line {} of the pinned defaults differs", index + 1);
     }
@@ -822,7 +868,7 @@ fn web_table_never_takes_the_super_key_or_plain_typing() {
         let Some(d) = a.default else { continue };
         let c = chord(d);
         assert!(!c.cmd, "default {d} of {} uses the Super key", a.id);
-        assert!(c.modifier_count() >= 1, "default {d} of {} is plain typing", a.id);
+        assert!(c.modifier_count() >= 1 || is_function_key(&c.key), "default {d} of {} is plain typing", a.id);
         let letter = c.key.len() == 1 && c.key.chars().all(|ch| ch.is_ascii_alphabetic());
         let plain = c.modifier_count() == 1 && (c.ctrl || c.alt);
         assert!(!(letter && plain), "default {d} of {} is a plain Ctrl or Alt letter, which belongs to the shell", a.id);

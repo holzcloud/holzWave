@@ -49,6 +49,9 @@ macos|workspace.close|
 macos|ai.new_chat|
 macos|integration.context|
 macos|integration.profiles|
+macos|region.focus_next|F6
+macos|region.focus_prev|Shift+F6
+macos|bar.focus|
 macos|edit.word_back|Alt+Left
 macos|edit.word_forward|Alt+Right
 macos|edit.line_start|Cmd+Left
@@ -106,6 +109,9 @@ windows|workspace.close|
 windows|ai.new_chat|
 windows|integration.context|
 windows|integration.profiles|
+windows|region.focus_next|F6
+windows|region.focus_prev|Shift+F6
+windows|bar.focus|
 windows|edit.word_back|
 windows|edit.word_forward|
 windows|edit.line_start|
@@ -163,6 +169,9 @@ linux|workspace.close|
 linux|ai.new_chat|
 linux|integration.context|
 linux|integration.profiles|
+linux|region.focus_next|F6
+linux|region.focus_prev|Shift+F6
+linux|bar.focus|
 linux|edit.word_back|Ctrl+Left
 linux|edit.word_forward|Ctrl+Right
 linux|edit.line_start|

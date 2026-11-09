@@ -1978,6 +1978,24 @@
           "title": "Integration profiles…"
         },
         {
+          "action": "region.focus_next",
+          "chord": "F6",
+          "is_default": true,
+          "title": "Focus next region"
+        },
+        {
+          "action": "region.focus_prev",
+          "chord": "Shift+F6",
+          "is_default": true,
+          "title": "Focus previous region"
+        },
+        {
+          "action": "bar.focus",
+          "chord": null,
+          "is_default": true,
+          "title": "Focus the bar"
+        },
+        {
           "action": "edit.word_back",
           "chord": "Alt+Left",
           "is_default": true,
@@ -2595,6 +2613,24 @@
         "chord": null,
         "is_default": true,
         "title": "Integration profiles…"
+      },
+      {
+        "action": "region.focus_next",
+        "chord": "F6",
+        "is_default": true,
+        "title": "Focus next region"
+      },
+      {
+        "action": "region.focus_prev",
+        "chord": "Shift+F6",
+        "is_default": true,
+        "title": "Focus previous region"
+      },
+      {
+        "action": "bar.focus",
+        "chord": null,
+        "is_default": true,
+        "title": "Focus the bar"
       },
       {
         "action": "edit.word_back",

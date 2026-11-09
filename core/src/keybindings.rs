@@ -110,12 +110,21 @@ impl Chord {
     ///
     /// The terminal owns the plain keys: a binding must never swallow input that a program expects. So a chord
     /// needs Cmd, or at least two modifiers one of which is Ctrl or Alt, or a single Ctrl or Alt on a navigation key
-    /// (`Alt+Left`, `Ctrl+Backspace`). `D`, `Shift+D`, `Ctrl+D`, `Alt+D` and
+    /// (`Alt+Left`, `Ctrl+Backspace`), or a function key alone or with Shift (`F6`, `Shift+F6`: they type no character,
+    /// and the page leaves them to a program on the alternate screen). `D`, `Shift+D`, `Ctrl+D`, `Alt+D` and
     /// `Escape` stay with the encoder; `Cmd+D`, `Ctrl+Alt+D` and `Ctrl+Shift+PageDown` are free to bind.
     pub fn is_bindable(&self) -> bool {
         self.cmd
             || (self.modifier_count() >= 2 && (self.ctrl || self.alt))
             || (self.modifier_count() == 1 && (self.ctrl || self.alt) && NAVIGATION_KEYS.contains(&self.key.as_str()))
+            || (!self.ctrl && !self.alt && self.is_function_key())
+    }
+
+    /// Whether the key is one of `F1` to `F24`.
+    fn is_function_key(&self) -> bool {
+        self.key.strip_prefix('F').is_some_and(|digits| {
+            !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) && digits.parse::<u8>().is_ok_and(|n| (1..=MAX_FUNCTION_KEY).contains(&n))
+        })
     }
 
     /// How many of the four modifiers are held.
@@ -200,7 +209,7 @@ const fn unbound(id: &'static str, title: &'static str) -> ActionInfo {
 }
 
 /// The base part of the macOS default table. Order is the order of the editor, and the other tables keep it.
-static BASE_MACOS: [ActionInfo; 51] = [
+static BASE_MACOS: [ActionInfo; 54] = [
     action("pane.split_right", "Split pane right", "Cmd+D"),
     action("pane.split_down", "Split pane down", "Cmd+Shift+D"),
     action("pane.close", "Close pane", "Cmd+W"),
@@ -252,10 +261,13 @@ static BASE_MACOS: [ActionInfo; 51] = [
     unbound("ai.new_chat", "New AI chat"),
     unbound("integration.context", "Show the Context section"),
     unbound("integration.profiles", "Integration profiles…"),
+    action("region.focus_next", "Focus next region", "F6"),
+    action("region.focus_prev", "Focus previous region", "Shift+F6"),
+    unbound("bar.focus", "Focus the bar"),
 ];
 
 /// The base part for Windows and Linux: the same actions in the same order, on `Ctrl+Shift` (see the module docs).
-static BASE_OTHER: [ActionInfo; 51] = [
+static BASE_OTHER: [ActionInfo; 54] = [
     action("pane.split_right", "Split pane right", "Ctrl+Shift+D"),
     action("pane.split_down", "Split pane down", "Ctrl+Shift+O"),
     action("pane.close", "Close pane", "Ctrl+Shift+W"),
@@ -307,6 +319,9 @@ static BASE_OTHER: [ActionInfo; 51] = [
     unbound("ai.new_chat", "New AI chat"),
     unbound("integration.context", "Show the Context section"),
     unbound("integration.profiles", "Integration profiles…"),
+    action("region.focus_next", "Focus next region", "F6"),
+    action("region.focus_prev", "Focus previous region", "Shift+F6"),
+    unbound("bar.focus", "Focus the bar"),
 ];
 
 /// The line-editing actions with the macOS standard as default: Option moves and deletes by word, Cmd by line.
@@ -479,7 +494,7 @@ impl Keybindings {
             if !chord.is_bindable() {
                 warnings.push(format!(
                     "The key combination {chord} for {id} is not allowed because it would take plain typing \
-                     away from the terminal; use Cmd, or two modifiers including Ctrl or Alt; {}.",
+                     away from the terminal; use Cmd, a function key, or two modifiers including Ctrl or Alt; {}.",
                     keeps(index)
                 ));
                 continue;
