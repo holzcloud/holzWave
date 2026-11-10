@@ -14,6 +14,7 @@ use std::fmt;
 use zeroize::Zeroizing;
 
 use crate::Error;
+use crate::remote::ws::{UrlError, WsUrl};
 
 /// What a device token starts with (the server's `DEVICE_PREFIX`).
 pub const TOKEN_PREFIX: &str = "hwd_";
@@ -117,5 +118,106 @@ impl From<Fault> for Error {
     /// for its own sentences, so a caller that shows `to_string()` shows the sentence).
     fn from(fault: Fault) -> Error {
         Error::Io(std::io::Error::other(fault.sentence()))
+    }
+}
+
+/// The address of a server: its origin, `scheme://host[:port]` and nothing after it. No user name, path, query or fragment.
+///
+/// [`Origin::parse`] accepts `https`, and `http` for a loopback host only (a server on this computer, or a test); the file of
+/// the link ([`Origin::parse_https`]) accepts `https` alone. The rules of the host and the port are the WebSocket address's,
+/// so the two cannot disagree about what a server's address is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Origin {
+    secure: bool,
+    /// The host, an IPv6 address without brackets.
+    host: String,
+    port: u16,
+}
+
+impl Origin {
+    /// An `https` origin, or an `http` one for a loopback host. A single trailing slash is allowed and dropped.
+    pub fn parse(text: &str) -> Result<Origin, UrlError> {
+        Origin::parse_with(text, true)
+    }
+
+    /// An `https` origin and nothing else.
+    pub fn parse_https(text: &str) -> Result<Origin, UrlError> {
+        Origin::parse_with(text, false)
+    }
+
+    fn parse_with(text: &str, loopback_http: bool) -> Result<Origin, UrlError> {
+        let (scheme, rest) = text.split_once("://").ok_or(UrlError::Scheme)?;
+        let ws_scheme = match scheme {
+            "https" => "wss",
+            "http" if loopback_http => "ws",
+            _ => return Err(UrlError::Scheme),
+        };
+        let url = WsUrl::parse(&format!("{ws_scheme}://{rest}"))?;
+        // An origin ends after the authority: the one path a WebSocket address always has is `/`, and it is all that is allowed.
+        if rest.find('/').is_some_and(|i| &rest[i..] != "/") {
+            return Err(UrlError::Path);
+        }
+        Ok(Origin { secure: url.secure(), host: url.host().to_owned(), port: url.port() })
+    }
+
+    /// `https` (true) or a loopback `http` (false).
+    pub fn secure(&self) -> bool {
+        self.secure
+    }
+
+    /// The host, an IPv6 address without brackets.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// The canonical text: `scheme://host[:port]`, the port only when it is not the default of the scheme, an IPv6 host in
+    /// brackets, no trailing slash.
+    pub fn to_text(&self) -> String {
+        let host = if self.host.contains(':') { format!("[{}]", self.host) } else { self.host.clone() };
+        let port = if self.port == if self.secure { 443 } else { 80 } { String::new() } else { format!(":{}", self.port) };
+        format!("{}://{host}{port}", if self.secure { "https" } else { "http" })
+    }
+
+    /// The WebSocket address of `path` on this server (`wss` for `https`, `ws` for the loopback `http`).
+    pub fn socket_url(&self, path: &str) -> Result<WsUrl, UrlError> {
+        let host = if self.host.contains(':') { format!("[{}]", self.host) } else { self.host.clone() };
+        WsUrl::parse(&format!("{}://{host}:{}{path}", if self.secure { "wss" } else { "ws" }, self.port))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_origin_is_an_authority_and_nothing_after_it() {
+        let o = Origin::parse("https://sync.example").unwrap();
+        assert_eq!((o.secure(), o.host(), o.port(), o.to_text().as_str()), (true, "sync.example", 443, "https://sync.example"));
+        assert_eq!(Origin::parse("https://sync.example/").unwrap(), o, "one trailing slash is dropped");
+        assert_eq!(Origin::parse("https://sync.example:8443").unwrap().to_text(), "https://sync.example:8443");
+        assert_eq!(Origin::parse("https://sync.example:443").unwrap().to_text(), "https://sync.example");
+        assert_eq!(Origin::parse("http://[::1]:8080").unwrap().to_text(), "http://[::1]:8080");
+        assert_eq!(Origin::parse("http://127.0.0.1").unwrap().to_text(), "http://127.0.0.1");
+        for bad in ["https://sync.example/sync", "https://sync.example//", "https://sync.example/?x=1", "https://u:p@sync.example", "ftp://x", "wss://x", ""] {
+            assert!(Origin::parse(bad).is_err(), "{bad}");
+        }
+        // The file of the link takes https alone.
+        assert!(Origin::parse_https("https://sync.example").is_ok());
+        assert_eq!(Origin::parse_https("http://127.0.0.1:8080"), Err(UrlError::Scheme));
+        assert_eq!(Origin::parse("http://sync.example"), Err(UrlError::Insecure));
+    }
+
+    #[test]
+    fn the_socket_address_of_an_origin_follows_its_scheme() {
+        let secure = Origin::parse("https://sync.example:8443").unwrap().socket_url("/ws/device").unwrap();
+        assert_eq!((secure.secure(), secure.host(), secure.port(), secure.path()), (true, "sync.example", 8443, "/ws/device"));
+        let plain = Origin::parse("http://127.0.0.1:9000").unwrap().socket_url("/ws/device").unwrap();
+        assert_eq!((plain.secure(), plain.port()), (false, 9000));
+        let v6 = Origin::parse("https://[2001:db8::1]").unwrap().socket_url("/ws/device").unwrap();
+        assert_eq!((v6.host(), v6.port()), ("2001:db8::1", 443));
     }
 }

@@ -132,7 +132,7 @@ const WORKSPACE_ALLOWLIST: &[(&str, &[Dependency])] = &[
                  stream with the platform verifier and none of the library's TLS features is on. The server keeps its own \
                  copy only as a dev dependency",
             ),
-            ("ureq", "WebDAV transport of the sync, a named exception in EXCEPTIONS (sync/webdav.rs)"),
+            ("ureq", "WebDAV transport of the sync and its transport to a holzWave server, a named exception in EXCEPTIONS (sync/webdav.rs, sync/server.rs)"),
             ("zeroize", "wipes the derived sync key and the decrypted content from memory (sync/crypto.rs)"),
         ],
     ),
@@ -456,7 +456,9 @@ const EXCEPTIONS: &[Exception] = &[
         "WebDAV and Nextcloud transport of the sync (core/src/sync/webdav.rs): it connects only to the endpoint the user \
          entered, when the account is saved or a run is started, and in the background only while sync is set up \
          (SyncRuntime::background does nothing while sync is off); https is required except for a loopback address, \
-         redirects are not followed and every answer is bounded",
+         redirects are not followed and every answer is bounded. The client now also talks to the holzWave server the \
+         person signed in to (core/src/sync/server.rs), only when sync is set up with that transport, with the same rules: \
+         https, no redirects, bounded answers",
     ),
 ];
 
@@ -483,6 +485,13 @@ const PERMITTED_HITS: &[(&str, &str, &str)] = &[
         "the one socket of the WebSocket client of the byte bridge: it connects to the holzWave server the person signed in \
          to, only when the person asks for a remote session after sign-in, over TLS with the platform verifier (a plain \
          connection only to a loopback address), with bounded connects, handshakes, reads, writes and messages",
+    ),
+    (
+        "core/src/sync/server.rs",
+        "ureq",
+        "the transport of the sync to the holzWave server the person signed in to, a named exception of the closure guard \
+         (see EXCEPTIONS): it connects only when sync is set up with that transport, over https (a plain connection only to a \
+         loopback address), without redirects and with bounded answers",
     ),
     (
         "core/src/ai/http.rs",

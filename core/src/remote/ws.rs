@@ -77,7 +77,7 @@ pub enum UrlError {
 impl UrlError {
     pub fn sentence(self) -> &'static str {
         match self {
-            UrlError::Scheme => "The server address must start with wss://.",
+            UrlError::Scheme => "The server address must be a secure web address.",
             UrlError::Insecure => "A server address without TLS is only accepted for this computer.",
             UrlError::Userinfo => "The server address must not hold a user name or a password.",
             UrlError::Query => "The server address must not hold a query.",
@@ -97,6 +97,13 @@ impl fmt::Display for UrlError {
 }
 
 impl std::error::Error for UrlError {}
+
+impl From<UrlError> for crate::Error {
+    /// The refusal as the crate's error, with exactly its fixed sentence as the text.
+    fn from(e: UrlError) -> Self {
+        crate::Error::Io(io::Error::other(e.sentence()))
+    }
+}
 
 /// The address of a WebSocket endpoint: `wss://host[:port][/path]`, or `ws://` for a loopback host.
 #[derive(Clone, Debug, PartialEq, Eq)]
