@@ -1,6 +1,7 @@
 // The sync on the page (design.md section 6.9): the title bar button says the state in words, the popover sets an
 // account up (and shows why not), shows the last run and the conflicts, and runs the sync now. The stub plays the core.
 import assert from "node:assert/strict";
+import { currentBackend } from "./lib.mjs";
 
 export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(5000);
@@ -48,6 +49,20 @@ async function setupCase(page, url) {
   await page.locator(".sync-btn").click();
   await page.waitForSelector(".dlg.sync");
   assert.equal(await page.locator(".sync .sy-chip").textContent(), "not set up");
+  // The choice of the target is drawn by the desktop and mobile app only: the browser window is the server's own page and does not sync
+  // to a server, so there the popover is the one it was and nothing of the server is asked.
+  if (currentBackend() === "tauri") {
+    assert.equal(await page.locator(".sync .sy-choice").count(), 1);
+    assert.equal(await page.locator(".sync .set-title").textContent(), "Nextcloud");
+  } else {
+    assert.equal(await page.locator(".sync .sy-choice").count(), 0, "no choice in the browser build");
+    assert.equal(await page.locator(".sync .sy-change").count(), 0);
+    assert.equal(await page.locator('.sync input[type="radio"]').count(), 0);
+    assert.equal(await page.locator(".sync .set-title").textContent(), "Nextcloud");
+    const asked = await page.evaluate(() => window.__MOCK__.calls.map((c) => c[0]).filter((c) => c.startsWith("server_") || c === "sync_use_server"));
+    assert.deepEqual(asked, [], "the browser build asks the host nothing about a server");
+    assert.deepEqual(await page.locator(".sync .set-row label").allTextContents(), ["Folder address", "User", "App password", "Passphrase"]);
+  }
   await page.locator("#sy-endpoint").fill("https://cloud.example.org/remote.php/dav/files/holz/holzwave");
   await page.locator("#sy-user").fill("holz");
   await page.locator("#sy-password").fill("app-password");

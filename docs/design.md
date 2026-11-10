@@ -544,6 +544,11 @@ popover under it (a floating layer, 24 rem wide), and so do the palette entries 
   colour of the other notes of the popover: `Removed on another computer: 2. Copies are kept in sync-conflicts.` It is
   shown only while the count is above zero, is the count of the last run and not a running total, and its cue is its
   words.
+  With the server as the target the line under the title reads `holz.example.net · signed in`. A run that found the sign-in ended
+  (the server refused the token of this device) is not an error: the chip says `not signed in`, the line under the title says
+  `holz.example.net · not signed in`, the state line with the link `Sign in…` of the set-up sits under it, there is no error text, and
+  the button of the title bar takes the word, the colour and the underline of `☁ sync error` until the next run succeeds. The sentence
+  about changing the target is drawn in the set-up only.
 
 ### 6.10 History
 

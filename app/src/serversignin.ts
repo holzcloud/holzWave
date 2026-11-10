@@ -64,16 +64,17 @@ async function status(): Promise<ServerView> {
 
 /**
  * Open the dialog. It resolves when the dialog closes: with the link after a sign-in that was approved, and with null after Cancel,
- * Escape or a failure the person left. A second ask while it is open returns the same promise.
+ * Escape or a failure the person left. A second ask while it is open returns the same promise. The focus goes back to `returnTo`
+ * (the element that was focused when the dialog opened without one), so a caller whose opener is about to be redrawn names its own.
  */
-export function openServerSignIn(): Promise<ServerView | null> {
-  current ??= run().finally(() => {
+export function openServerSignIn(returnTo?: HTMLElement | null): Promise<ServerView | null> {
+  current ??= run(returnTo).finally(() => {
     current = null;
   });
   return current;
 }
 
-async function run(): Promise<ServerView | null> {
+async function run(returnTo?: HTMLElement | null): Promise<ServerView | null> {
   let view = await status();
   return new Promise<ServerView | null>((resolve) => {
     void (async () => {
@@ -97,6 +98,7 @@ async function run(): Promise<ServerView | null> {
         cls: "server-signin",
         labelledBy: "ss-title",
         sheets: SHEETS,
+        returnTo,
         onEscape: () => leave(),
         onEnter: () => {
           if (screen === 1) submit();

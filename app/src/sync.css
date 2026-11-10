@@ -5,7 +5,7 @@
 .sync-btn:hover { border-color: var(--hw-line); color: var(--hw-ink); }
 .sync-btn[data-state="idle"] { color: var(--hw-ok); }
 .sync-btn[data-state="syncing"] { color: var(--hw-info); }
-.sync-btn[data-state="error"] { color: var(--hw-danger); text-decoration: underline; }
+.sync-btn[data-state="error"], .sync-btn[data-state="signed_out"] { color: var(--hw-danger); text-decoration: underline; }
 .sync-btn:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
 .sync-backdrop { align-items: flex-start; justify-content: flex-end; background: transparent; }
 .dlg.sync { width: min(24rem, calc(100vw - 2rem)); margin: 2.75rem .667rem 0 0; font-size: 1rem; line-height: 1.4; }
@@ -15,6 +15,7 @@
                  font-size: calc(11rem / 12); letter-spacing: .1em; text-transform: uppercase; }
 .sync .sy-chip[data-state="idle"] { color: var(--hw-ok); }
 .sync .sy-chip[data-state="error"] { color: var(--hw-danger); }
+.sync .sy-chip[data-state="signed_out"] { color: var(--hw-warn); }
 .sync .set-status { min-height: 1.4em; margin: .333rem 0; color: var(--hw-ink-2); overflow-wrap: anywhere; }
 .sync .set-status[data-failed="true"] { color: var(--hw-danger); }
 .sync .sy-sub { margin: 0 0 .5rem; color: var(--hw-dim); }
@@ -40,3 +41,47 @@
 /* A sync that waits for the secrets to be unlocked is not an error: its line is quiet, with a pause mark before it (docs/design.md 6.6). */
 .sync .set-status[data-quiet="true"] { color: var(--hw-dim); }
 .sync .sy-pause { margin-right: .5ch; font-weight: 700; }
+
+/* The choice of the target (docs/design.md 6.9): two native radios in one row, the chosen one with the filled mark and the other with the
+   hollow one; the word is the cue and the mark the second one. Tab reaches the chosen radio, the arrows move between them. */
+.sync .sy-choice { display: flex; flex-wrap: wrap; gap: .25rem 1rem; margin: 0 0 .5rem; }
+.sync .sy-option { display: inline-flex; align-items: center; gap: .5rem; box-sizing: border-box; min-height: max(28px, calc(28rem / 12)); color: var(--hw-ink); cursor: pointer; }
+.sync .sy-option input[type="radio"] { flex: none; width: 1rem; height: 1rem; margin: 0; accent-color: var(--hw-ink); }
+.sync .sy-option input[type="radio"]:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.sync .sy-change { margin-top: 0; }
+/* The server variant: the address as a read-only box, and the state line under it. */
+.sync .sy-row-address { align-items: center; }
+.sync .sy-address { box-sizing: border-box; flex: 1 1 auto; min-width: 0; min-height: 2rem; padding: .25rem .5rem; color: var(--hw-ink);
+                    background: var(--hw-ground); border: 1px solid var(--hw-line); border-radius: .333rem; overflow-wrap: anywhere; }
+.sync .set-row .sy-label { flex: 0 0 8rem; }
+.sync .sy-target { display: flex; flex-wrap: wrap; align-items: center; gap: 0 .5rem; min-height: max(28px, calc(28rem / 12)); margin: .25rem 0 .5rem; color: var(--hw-ink); overflow-wrap: anywhere; }
+.sync .sy-target[data-bad="true"] { color: var(--hw-warn); }
+.sync .sy-target[data-bad="true"] .sy-word { text-decoration: underline; }
+/* A shape before the words: a hollow ring (not signed in), a filled dot (signed in), a ring with a dash (the server cannot be asked) and the mark `!`. */
+.sync .sy-dot { box-sizing: border-box; flex: none; display: inline-block; width: .667rem; height: .667rem; border-radius: 50%; }
+.sync .sy-hollow { border: 1px solid currentColor; }
+.sync .sy-filled { background: currentColor; }
+.sync .sy-dash { position: relative; border: 1px solid currentColor; }
+.sync .sy-dash::after { content: ""; position: absolute; left: 1px; right: 1px; top: calc(50% - .5px); height: 1px; background: currentColor; }
+.sync .sy-mark { width: auto; height: auto; min-width: .667rem; border-radius: 0; font-weight: 700; text-align: center; }
+.sync .sy-link { all: unset; box-sizing: border-box; display: inline-flex; align-items: center; min-height: max(28px, calc(28rem / 12)); padding: 0 .25rem; color: var(--hw-ink);
+                 text-decoration: underline; cursor: pointer; }
+.sync .sy-link:hover { background: var(--hw-rose-wash); }
+.sync .sy-link:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+/* Connect that cannot be pressed: dim (the opacity above) and a dashed border, so that it is not told by colour alone; the state line is its reason. */
+.sync .sy-connect:disabled { border-style: dashed; }
+
+@media (pointer: coarse) {
+  .sync .sy-option, .sync .sy-link { min-height: max(44px, calc(44rem / 12)); }
+  .sync .sy-option input[type="radio"] { width: 1.25rem; height: 1.25rem; }
+}
+
+@media (forced-colors: active) {
+  .sync .sy-address { border-color: CanvasText; }
+  .sync .sy-filled { background: CanvasText; }
+  .sync .sy-hollow, .sync .sy-dash { border-color: CanvasText; }
+  .sync .sy-dash::after { background: CanvasText; }
+  .sync .sy-target[data-bad="true"] { color: CanvasText; }
+  .sync .sy-connect:disabled { border-color: GrayText; border-style: dashed; opacity: 1; }
+  .sync :is(.sy-link, input[type="radio"]):focus-visible { outline-color: Highlight; }
+}
