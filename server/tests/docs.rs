@@ -155,6 +155,18 @@ fn example_problems(config_md: &str) -> Vec<String> {
         }
         Err(e) => problems.push(format!("server/files.json is refused: {}", e.sentence())),
     }
+    match judge(&documented_example(config_md, "server/ceiling.json")) {
+        Ok(p) => {
+            let ceiling = p.device_access.ceiling();
+            if (ceiling.sync, ceiling.remote) != (false, false) {
+                problems.push("server/ceiling.json does not close both device features".to_owned());
+            }
+            if p.devices.idle != std::time::Duration::from_secs(30 * 86_400) {
+                problems.push("server/ceiling.json does not set the idle time of a device to 30 days".to_owned());
+            }
+        }
+        Err(e) => problems.push(format!("server/ceiling.json is refused: {}", e.sentence())),
+    }
     match judge(&proxy) {
         Ok(p) => {
             if !matches!(&p.tls, TlsSetup::Proxy { trusted_proxies } if trusted_proxies.len() == 2) {
@@ -233,6 +245,7 @@ fn the_example_check_rejects_a_mutated_example() {
     let cases = [
         text.replacen(&first, &format!("<!-- example: server/files.json -->\n```json\n{broken}\n```"), 1),
         mutate("\"mode\": \"files\"", "\"mode\": \"none\""),
+        mutate("\"idle\": \"30d\"", "\"idle\": \"400d\""),
         mutate(&oidc.lines().nth(3).expect("a line").to_owned(), "  \"issuer\": \"http://login.example.net\","),
         mutate(&proxy, &proxy.replacen("[\"10.0.0.0/8\", \"fd00::/8\"]", "[]", 1)),
         mutate(&acme, &acme.replacen("\"terms_agreed\": false", "\"terms_agreed\": true", 1)),
@@ -324,7 +337,7 @@ fn loader_keys() -> BTreeSet<String> {
         "tls": {"mode": "files", "cert_file": "/certs/cert.pem", "key_file": "/certs/key.pem"},
         "auth": {"passkey": true}
     });
-    let sections = ["tls", "auth", "sessions", "limits", "workers", "upload", "transport"];
+    let sections = ["tls", "auth", "sessions", "limits", "workers", "upload", "transport", "device_access", "devices"];
     let mut keys = BTreeSet::new();
     for key in accepted_keys_at(&base, "") {
         if !sections.contains(&key.as_str()) {
@@ -344,7 +357,7 @@ fn loader_keys() -> BTreeSet<String> {
             keys.insert(format!("tls.{name}"));
         }
     }
-    for section in ["auth", "sessions", "limits", "workers", "upload", "transport"] {
+    for section in ["auth", "sessions", "limits", "workers", "upload", "transport", "device_access", "devices"] {
         for key in accepted_keys_at(&base, section) {
             // `workers.mode` exists only in a build with the in-process workers; it is not a key of the image.
             if section == "workers" && key == "mode" {
@@ -411,7 +424,7 @@ fn default_problems(config_md: &str) -> Vec<String> {
     for row in section_from(config_md, "## The server configuration").lines().filter_map(cells) {
         let (Some(key), Some(default)) = (row.first().and_then(|c| code_span(c)), row.get(1)) else { continue };
         let scoped = ["listen", "data_dir", "runtime_dir"].contains(&key.as_str())
-            || ["sessions.", "limits.", "workers.", "upload.", "transport."].iter().any(|p| key.starts_with(p));
+            || ["sessions.", "limits.", "workers.", "upload.", "transport.", "devices."].iter().any(|p| key.starts_with(p));
         let default = default.trim_matches('`');
         if !scoped || default.starts_with("none") || default.is_empty() {
             continue;

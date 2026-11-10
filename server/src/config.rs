@@ -423,6 +423,12 @@ pub struct Config {
     /// The WebSocket.
     #[serde(default)]
     pub transport: Transport,
+    /// What the operator allows of the device features.
+    #[serde(default)]
+    pub device_access: DeviceAccess,
+    /// The devices that sign in to the server.
+    #[serde(default)]
+    pub devices: Devices,
 }
 
 fn default_listen() -> String {
@@ -628,6 +634,40 @@ pub struct Transport {
     pub compression: Compression,
 }
 
+/// The `device_access` section: the operator's ceiling over the two switches an administrator can turn on. A key that is not
+/// written leaves its feature open; `false` keeps it off for good, whatever the switch says. The section never turns a
+/// feature on: both switches are off until an administrator turns them on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct DeviceAccess {
+    /// Whether the server may be a sync target.
+    pub sync: Option<bool>,
+    /// Whether sessions may live on the server for devices to attach to.
+    pub remote: Option<bool>,
+}
+
+impl DeviceAccess {
+    /// The ceiling these keys make: a feature is allowed unless its key says `false`.
+    pub fn ceiling(self) -> crate::http::features::Ceiling {
+        crate::http::features::Ceiling { sync: self.sync.unwrap_or(true), remote: self.remote.unwrap_or(true) }
+    }
+}
+
+/// The `devices` section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Devices {
+    /// How long a device may go unseen before its token ends.
+    #[serde(deserialize_with = "duration")]
+    pub idle: Duration,
+}
+
+impl Default for Devices {
+    fn default() -> Devices {
+        Devices { idle: limits::DEVICE_IDLE }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The file system, as far as `prepare` needs it
 // ---------------------------------------------------------------------------------------------------------------------
@@ -731,6 +771,10 @@ pub struct Prepared {
     pub upload: Upload,
     /// The WebSocket settings.
     pub transport: Transport,
+    /// What the operator allows of the device features.
+    pub device_access: DeviceAccess,
+    /// The devices.
+    pub devices: Devices,
     /// The server key.
     pub key: ServerKey,
 }
@@ -787,6 +831,7 @@ pub fn prepare(env: &Env, probe: &dyn Probe) -> Result<Prepared, Refusal> {
     let sessions = check_sessions(&config.sessions)?;
     let limits = Limits::resolve(&config.limits)?;
     let upload = check_upload(&config.upload)?;
+    let devices = check_devices(&config.devices)?;
     crate::http::transport::check(config.transport.compression).map_err(Refusal::new)?;
 
     let key = probe.load_key(&key_path)?;
@@ -804,6 +849,8 @@ pub fn prepare(env: &Env, probe: &dyn Probe) -> Result<Prepared, Refusal> {
         workers: config.workers,
         upload,
         transport: config.transport,
+        device_access: config.device_access,
+        devices,
         key,
     })
 }
@@ -990,6 +1037,12 @@ fn check_sessions(sessions: &Sessions) -> Result<Sessions, Refusal> {
         )));
     }
     Ok(*sessions)
+}
+
+/// The idle time of a device token, inside its bounds.
+fn check_devices(devices: &Devices) -> Result<Devices, Refusal> {
+    limits::DEVICE_IDLE_SPEC.check(devices.idle)?;
+    Ok(*devices)
 }
 
 /// The upload size, and a directory that stays inside the home.

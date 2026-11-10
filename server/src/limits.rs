@@ -44,6 +44,9 @@ pub const SESSION_ABSOLUTE: Duration = hours(24);
 /// How long after a fresh sign-in a sensitive action is allowed without asking again.
 pub const SESSION_STEP_UP: Duration = minutes(5);
 
+/// How long a device may go unseen before its token ends. The token is renewed by every request, at most once a minute.
+pub const DEVICE_IDLE: Duration = days(90);
+
 /// The first user id a worker may run as; ids below 1000 belong to the system.
 pub const WORKER_UID_MIN: u32 = 20_000;
 
@@ -210,6 +213,8 @@ pub const SESSION_IDLE_SPEC: Spec<Duration> = Spec::new("sessions.idle", SESSION
 pub const SESSION_ABSOLUTE_SPEC: Spec<Duration> = Spec::new("sessions.absolute", SESSION_ABSOLUTE, minutes(5), days(90));
 /// The window of a fresh sign-in.
 pub const SESSION_STEP_UP_SPEC: Spec<Duration> = Spec::new("sessions.step_up", SESSION_STEP_UP, secs(30), hours(1));
+/// The idle time of a device token.
+pub const DEVICE_IDLE_SPEC: Spec<Duration> = Spec::new("devices.idle", DEVICE_IDLE, days(1), days(365));
 /// The idle time of a worker.
 pub const WORKER_IDLE_SPEC: Spec<Duration> = Spec::new("workers.idle_timeout", WORKER_IDLE_TIMEOUT, minutes(1), days(90));
 /// The pane cap.
@@ -472,6 +477,7 @@ pub fn all_rows() -> Vec<Row> {
         SESSION_IDLE_SPEC.row(),
         SESSION_ABSOLUTE_SPEC.row(),
         SESSION_STEP_UP_SPEC.row(),
+        DEVICE_IDLE_SPEC.row(),
         WORKER_IDLE_SPEC.row(),
         MAX_PANES_SPEC.row(),
         SCROLLBACK_SPEC.row(),
@@ -506,12 +512,19 @@ mod tests {
     }
 
     #[test]
+    fn the_idle_time_of_a_device_is_the_one_the_store_assumes() {
+        assert_eq!(i64::try_from(DEVICE_IDLE.as_secs()), Ok(crate::device::DEVICE_IDLE_DEFAULT));
+        assert_eq!(crate::http::features::DeviceSettings::default().idle, DEVICE_IDLE);
+    }
+
+    #[test]
     fn every_default_lies_inside_its_bounds_and_the_defaults_resolve() {
         assert_eq!(Limits::resolve(&LimitsConfig::default()).expect("the defaults resolve"), Limits::DEFAULT);
         for spec in [
             SESSION_IDLE_SPEC,
             SESSION_ABSOLUTE_SPEC,
             SESSION_STEP_UP_SPEC,
+            DEVICE_IDLE_SPEC,
             WORKER_IDLE_SPEC,
         ] {
             spec.check(spec.default).unwrap_or_else(|e| panic!("{e}"));

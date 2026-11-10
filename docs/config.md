@@ -1306,6 +1306,15 @@ Rules for the whole file:
 | `upload.dir` | `uploads` | a relative path inside the home, without `..` | The folder of a person's home that receives uploads. |
 | `upload.max_bytes` | 268435456 | 1024 to 17179869184 | The largest upload. |
 | `transport.compression` | `off` | `off` | Compression of the WebSocket. This build accepts only `off`: it never offers `permessage-deflate`, and the value `deflate` is refused. |
+| `devices.idle` | 90d | 1d to 365d | A device token (the sign-in of the app on a phone or a desktop) ends when its device has not been seen for this long. Every request renews it, written at most once a minute. A person or an administrator can end one at once. |
+| `device_access.sync` | none, open | `true` or `false` | The operator's ceiling over the sync target. Not written, or `true`: an administrator may turn the switch on in the People dialog. `false`: the sync target cannot be turned on, and its paths answer as paths that do not exist. The key never turns the feature on: the switch is off until an administrator turns it on. |
+| `device_access.remote` | none, open | `true` or `false` | The same ceiling for sessions that live on the server and that the app attaches to. |
+
+The two device features, the server as a sync target and sessions that live on the server for the app, are off. An administrator
+turns each on in the People dialog (it asks for a recent sign-in, and every change writes one line `device_access.change` to the
+audit log that names the switch and the new value). While a feature is off, every path that belongs to it answers exactly as a
+path that was never there, before any credential is read, so a probe learns nothing. `device_access` is the ceiling that the
+operator keeps over the switches; it can only forbid.
 
 The `limits` section overrides any of these; every key is optional and has a default and a bound, and a pair that
 contradicts itself is refused (`max_connections_per_address` above `max_connections`, `ws_small_command_bytes` above
@@ -1408,6 +1417,35 @@ you do not want to change. The key is not here: it is the file that `HOLZWAVE_SE
   },
   "transport": {
     "compression": "off"
+  },
+  "devices": {
+    "idle": "90d"
+  }
+}
+```
+
+A server whose operator keeps the device features out of reach: the sync target and the remote sessions cannot be turned on in
+the People dialog, whatever an administrator says, and a device token that is unused for 30 days ends.
+
+<!-- example: server/ceiling.json -->
+```json
+{
+  "public_url": "https://holzwave.example.net",
+  "tls": {
+    "mode": "files",
+    "cert_file": "/etc/holzwave/tls/tls.crt",
+    "key_file": "/etc/holzwave/tls/tls.key"
+  },
+  "auth": {
+    "passkey": true,
+    "password_totp": true
+  },
+  "device_access": {
+    "sync": false,
+    "remote": false
+  },
+  "devices": {
+    "idle": "30d"
   }
 }
 ```

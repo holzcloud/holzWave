@@ -439,7 +439,7 @@ pub async fn assemble(prepared: Prepared, overrides: Overrides) -> Result<Runnin
             audit: audit.clone(),
             clock: clock.clone(),
             view: gate.clone(),
-            devices: DeviceSettings::default(),
+            devices: DeviceSettings { ceiling: prepared.device_access.ceiling(), idle: prepared.devices.idle },
         },
         &prepared.key,
     );

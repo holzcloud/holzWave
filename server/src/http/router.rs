@@ -23,7 +23,7 @@ use serde_json::json;
 use crate::auth::session::SessionError;
 use crate::config::Sessions;
 use crate::proxy::Mode;
-use crate::device::{DEVICE_IDLE_DEFAULT, DeviceToken, TOUCH_INTERVAL};
+use crate::device::{DeviceToken, TOUCH_INTERVAL};
 use crate::store::{Account, Device, Role, Session, TokenHash};
 
 use super::app::{App, StoreState};
@@ -543,10 +543,11 @@ fn resolve_device(app: &App, hash: &TokenHash) -> DeviceOutcome {
         Err(_) => return DeviceOutcome::Busy,
     };
     if now.saturating_sub(device.last_seen) >= TOUCH_INTERVAL {
-        match app.store.write(|tx| tx.device_touch(device.id, now, DEVICE_IDLE_DEFAULT)) {
+        let idle = i64::try_from(app.devices.idle.as_secs()).unwrap_or(i64::MAX);
+        match app.store.write(|tx| tx.device_touch(device.id, now, idle)) {
             Ok(true) => {
                 device.last_seen = now;
-                device.expires_at = now.saturating_add(DEVICE_IDLE_DEFAULT);
+                device.expires_at = now.saturating_add(idle);
             }
             Ok(false) => {}
             Err(_) => return DeviceOutcome::Busy,

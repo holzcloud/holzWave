@@ -16,12 +16,16 @@ mod edge;
 use api_env::ApiEnv;
 use auth_env::{Methods, Tuning};
 use axum::http::Method;
-use edge::{HOST, ORIGIN, Req, Resp};
+use edge::{HOST, ORIGIN, Req, Resp, Signed};
+use holzwave_server::audit::Action;
 use holzwave_server::clock::{Clock as _, from_unix, rfc3339};
+use holzwave_server::config::{self, Env, Probe, Refusal, prepare};
+use holzwave_server::keyfile::ServerKey;
+use std::path::Path;
 use holzwave_server::device::{DEVICE_IDLE_DEFAULT, DeviceToken, TOUCH_INTERVAL};
 use holzwave_server::http::features::{Ceiling, DeviceSettings, Feature};
 use holzwave_server::store::{AccountId, AccountState, Device, NewDevice, Role};
-use serde_json::json;
+use serde_json::{Value, json};
 
 const ME: &str = "/api/device/me";
 const UNKNOWN: &str = "/api/device/no-such-route";
@@ -265,7 +269,7 @@ async fn a_bearer_token_never_authenticates_a_session_route() {
     let (token, _) = mint(&env, "alice");
     turn_on(&env, Feature::Remote);
     assert_eq!(env.send(bearer(ME, &token)).await.status, 200, "the token is good on its own route");
-    for path in ["/api/me", "/api/admin/accounts"] {
+    for path in ["/api/me", "/api/admin/accounts", "/api/admin/device-access"] {
         let resp = env.send(bearer(path, &token)).await;
         assert_eq!((resp.status.as_u16(), code(&resp).as_str()), (401, "invalid"), "{path}");
     }
@@ -338,4 +342,296 @@ async fn an_operator_ceiling_keeps_a_switch_off_even_when_it_is_stored_as_on() {
     turn_on(&env, Feature::Sync);
     assert_eq!(env.send(bearer(ME, &token)).await.status, 200, "the sync switch is allowed and opens the route");
     assert_eq!(env.send(bearer(ME, &token)).await.json()["switches"], json!({"sync": true, "remote": false}));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The configuration: the ceiling and the idle time
+// ---------------------------------------------------------------------------------------------------------------------
+
+const CONFIG_PATH: &str = "/etc/test/server.json";
+
+/// Serves one configuration text and says that the certificate files exist.
+struct FakeProbe(String);
+
+impl Probe for FakeProbe {
+    fn read_config(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        if path == Path::new(CONFIG_PATH) { Ok(self.0.clone().into_bytes()) } else { Err(std::io::ErrorKind::NotFound.into()) }
+    }
+
+    fn readable(&self, path: &Path) -> bool {
+        [Path::new("/certs/cert.pem"), Path::new("/certs/key.pem")].contains(&path)
+    }
+
+    fn own_uid(&self) -> u32 {
+        10_001
+    }
+
+    fn load_key(&self, _path: &Path) -> Result<ServerKey, Refusal> {
+        Ok(ServerKey::from_bytes([4; 32]).expect("a key"))
+    }
+}
+
+fn base() -> Value {
+    json!({
+        "public_url": "https://hw.example.test",
+        "tls": {"mode": "files", "cert_file": "/certs/cert.pem", "key_file": "/certs/key.pem"},
+        "auth": {"passkey": true}
+    })
+}
+
+fn judge(value: &Value) -> Result<config::Prepared, Refusal> {
+    let mut env = Env::new();
+    env.insert("HOLZWAVE_SERVER_KEY_FILE".to_owned(), "/etc/holzwave/key/server.key".to_owned());
+    env.insert("HOLZWAVE_SERVER_CONFIG".to_owned(), CONFIG_PATH.to_owned());
+    prepare(&env, &FakeProbe(value.to_string()))
+}
+
+#[test]
+fn a_configuration_without_the_two_sections_leaves_the_ceiling_open_and_the_idle_time_at_90_days() {
+    let p = judge(&base()).expect("the minimal file");
+    assert_eq!(p.device_access.ceiling(), Ceiling::OPEN);
+    assert_eq!((p.device_access.sync, p.device_access.remote), (None, None));
+    assert_eq!(p.devices.idle, std::time::Duration::from_secs(90 * 86_400));
+    assert_eq!(DeviceSettings::default().idle, p.devices.idle, "the application default is the configuration default");
+}
+
+#[test]
+fn the_ceiling_closes_only_the_feature_whose_key_says_false() {
+    for (sync, remote) in [(Some(false), None), (None, Some(false)), (Some(false), Some(false)), (Some(true), Some(true)), (Some(true), None)] {
+        let mut file = base();
+        let mut section = serde_json::Map::new();
+        if let Some(sync) = sync {
+            section.insert("sync".to_owned(), json!(sync));
+        }
+        if let Some(remote) = remote {
+            section.insert("remote".to_owned(), json!(remote));
+        }
+        file["device_access"] = Value::Object(section);
+        let ceiling = judge(&file).expect("a valid ceiling").device_access.ceiling();
+        assert_eq!((ceiling.sync, ceiling.remote), (sync.unwrap_or(true), remote.unwrap_or(true)), "{file}");
+    }
+}
+
+#[test]
+fn a_wrong_type_an_unknown_key_and_an_idle_time_outside_its_bounds_are_refused() {
+    for (what, section, value) in [
+        ("a text for sync", "device_access", json!({"sync": "yes"})),
+        ("a number for remote", "device_access", json!({"remote": 1})),
+        ("an unknown key", "device_access", json!({"all": true})),
+        ("a number for the idle time", "devices", json!({"idle": 90})),
+        ("an unknown key of devices", "devices", json!({"idle": "90d", "max": 5})),
+        ("a bad unit", "devices", json!({"idle": "90 days"})),
+    ] {
+        let mut file = base();
+        file[section] = value;
+        let error = judge(&file).expect_err(what);
+        assert!(error.sentence().contains("is not valid"), "{what}: {error}");
+    }
+    for (idle, ok) in [("1d", true), ("90d", true), ("365d", true), ("23h", false), ("0s", false), ("366d", false), ("3650d", false)] {
+        let mut file = base();
+        file["devices"] = json!({"idle": idle});
+        match (judge(&file), ok) {
+            (Ok(p), true) => assert_eq!(p.devices.idle, config::parse_duration(idle).expect("a duration")),
+            (Err(error), false) => {
+                assert!(error.sentence().contains(&format!("devices.idle is {idle} but must be between 1d and 365d")), "{error}");
+            }
+            (other, _) => panic!("{idle}: {:?}", other.map(|p| p.devices.idle)),
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_configured_idle_time_is_what_a_device_token_is_renewed_to() {
+    let tuning = Tuning {
+        devices: DeviceSettings { idle: std::time::Duration::from_secs(5 * 86_400), ..DeviceSettings::default() },
+        ..Tuning::default()
+    };
+    let env = ApiEnv::build(Methods { passkey: true, password: true, oidc: false }, tuning);
+    let (token, device) = mint(&env, "alice");
+    turn_on(&env, Feature::Remote);
+    env.clock.advance(TOUCH_INTERVAL);
+    assert_eq!(env.send(bearer(ME, &token)).await.status, 200);
+    let row = env.store.read(|tx| tx.devices_of(device.account_id, env.clock.unix())).expect("list").remove(0);
+    assert_eq!(row.expires_at, env.clock.unix() + 5 * 86_400);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The administrator's switches
+// ---------------------------------------------------------------------------------------------------------------------
+
+const ACCESS: &str = "/api/admin/device-access";
+
+fn state(sync: (bool, bool), remote: (bool, bool)) -> Value {
+    json!({"sync": {"on": sync.0, "allowed": sync.1}, "remote": {"on": remote.0, "allowed": remote.1}})
+}
+
+fn change_lines(env: &ApiEnv) -> Vec<Value> {
+    env.audit_lines().into_iter().filter(|l| l["action"] == "device_access.change").collect()
+}
+
+async fn post_access(env: &ApiEnv, who: &Signed, body: &Value) -> Resp {
+    env.send(env.post_json(ACCESS, body, who)).await
+}
+
+#[tokio::test]
+async fn an_administrator_reads_each_switch_and_whether_the_configuration_allows_it() {
+    let env = env_with_ceiling(Ceiling { sync: true, remote: false });
+    let admin = env.admin_fresh("root");
+    let resp = env.send(env.get_as(ACCESS, &admin)).await;
+    assert_eq!(resp.status, 200, "{}", resp.text());
+    assert_eq!(resp.json(), state((false, true), (false, false)));
+    assert_eq!(resp.header("cache-control").as_deref(), Some("no-store"));
+}
+
+#[tokio::test]
+async fn a_member_and_an_anonymous_caller_are_refused_as_on_any_administrator_route() {
+    let env = env();
+    let member = env.member("alice");
+    for (what, resp) in [
+        ("a member reads", env.send(env.get_as(ACCESS, &member)).await),
+        ("a member changes", post_access(&env, &member, &json!({"sync": true})).await),
+        ("an anonymous caller reads", env.send(Req::new(Method::GET, ACCESS).header("host", HOST)).await),
+        ("an anonymous caller changes", env.send(env.post(ACCESS, &json!({"sync": true}))).await),
+    ] {
+        let want = if what.starts_with("a member") { (403, "forbidden") } else { (401, "invalid") };
+        assert_eq!((resp.status.as_u16(), code(&resp).as_str()), want, "{what}");
+    }
+    assert_eq!(env.app.features.effective(), Default::default(), "nothing changed");
+    assert!(change_lines(&env).is_empty());
+}
+
+#[tokio::test]
+async fn an_administrator_with_a_recent_sign_in_turns_a_switch_on_and_off_and_gets_the_new_state() {
+    let env = env();
+    let admin = env.admin_fresh("root");
+    let resp = post_access(&env, &admin, &json!({"sync": true})).await;
+    assert_eq!(resp.status, 200, "{}", resp.text());
+    assert_eq!(resp.json(), state((true, true), (false, true)));
+    assert!(env.app.features.is_on(Feature::Sync) && !env.app.features.is_on(Feature::Remote));
+    // The state is stored: a second application over the same store would read it.
+    assert!(env.store.read(|tx| tx.setting_get("sync")).expect("read"));
+    let resp = post_access(&env, &admin, &json!({"sync": false, "remote": true})).await;
+    assert_eq!(resp.json(), state((false, true), (true, true)), "both members in one body");
+    assert_eq!(env.send(env.get_as(ACCESS, &admin)).await.json(), state((false, true), (true, true)), "a read shows the same");
+}
+
+#[tokio::test]
+async fn a_stale_sign_in_cannot_change_a_switch() {
+    let env = env();
+    let stale = env.admin_stale("root");
+    let resp = post_access(&env, &stale, &json!({"sync": true})).await;
+    assert_eq!(resp.status, 403);
+    assert_eq!(resp.json(), json!({"code": "forbidden", "step_up": true}));
+    assert!(!env.app.features.is_on(Feature::Sync));
+    assert!(change_lines(&env).is_empty());
+    // A read needs no recent sign-in.
+    assert_eq!(env.send(env.get_as(ACCESS, &stale)).await.status, 200);
+}
+
+#[tokio::test]
+async fn a_ceiling_of_false_refuses_to_turn_the_switch_on_and_changes_nothing() {
+    let env = env_with_ceiling(Ceiling { sync: false, remote: true });
+    let admin = env.admin_fresh("root");
+    let resp = post_access(&env, &admin, &json!({"sync": true, "remote": true})).await;
+    assert_eq!(resp.status, 409, "{}", resp.text());
+    assert_eq!(resp.json(), json!({"code": "conflict", "field": "sync"}));
+    assert_eq!(env.app.features.effective(), Default::default(), "the member that was allowed did not change either");
+    assert!(!env.app.features.stored(Feature::Remote));
+    assert!(change_lines(&env).is_empty());
+    // Turning a switch off, or leaving it off, is allowed under any ceiling.
+    let resp = post_access(&env, &admin, &json!({"sync": false, "remote": true})).await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(resp.json(), state((false, false), (true, true)));
+}
+
+#[tokio::test]
+async fn an_unknown_member_a_wrong_type_and_an_empty_body_are_refused_and_change_nothing() {
+    let env = env();
+    let admin = env.admin_fresh("root");
+    let cases: Vec<(&str, Value, Option<&str>)> = vec![
+        ("an unknown member", json!({"sync": true, "all": true}), None),
+        ("only an unknown member", json!({"other": true}), None),
+        ("a text", json!({"sync": "true"}), Some("sync")),
+        ("a number", json!({"remote": 1}), Some("remote")),
+        ("null", json!({"sync": null}), Some("sync")),
+        ("a good member and a bad one", json!({"sync": true, "remote": "on"}), Some("remote")),
+        ("an empty object", json!({}), None),
+        ("an array", json!([true]), None),
+        ("a bare boolean", json!(true), None),
+    ];
+    for (what, body, field) in cases {
+        let resp = post_access(&env, &admin, &body).await;
+        assert_eq!(resp.status, 400, "{what}: {}", resp.text());
+        let expected = match field {
+            Some(field) => json!({"code": "bad_request", "field": field}),
+            None => json!({"code": "bad_request"}),
+        };
+        assert_eq!(resp.json(), expected, "{what}");
+    }
+    assert_eq!(env.app.features.effective(), Default::default());
+    assert!(change_lines(&env).is_empty());
+}
+
+#[tokio::test]
+async fn each_change_writes_one_line_that_names_the_switch_and_the_new_value_and_nothing_else() {
+    let env = env();
+    let admin = env.admin_fresh("root");
+    assert_eq!(post_access(&env, &admin, &json!({"sync": true})).await.status, 200);
+    let lines = change_lines(&env);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let line = &lines[0];
+    assert_eq!(line["result"], "ok");
+    assert_eq!(line["detail"], json!({"switch": "sync", "state": "on"}), "the switch and the new value, nothing else");
+    assert_eq!(line["actor"], admin.account.to_string());
+    // Two changes in one request are two lines; a request that changes nothing writes none.
+    assert_eq!(post_access(&env, &admin, &json!({"sync": false, "remote": true})).await.status, 200);
+    let lines = change_lines(&env);
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert_eq!(lines[1]["detail"], json!({"switch": "sync", "state": "off"}));
+    assert_eq!(lines[2]["detail"], json!({"switch": "remote", "state": "on"}));
+    assert_eq!(post_access(&env, &admin, &json!({"sync": false, "remote": true})).await.status, 200);
+    assert_eq!(change_lines(&env).len(), 3, "a request that changes nothing writes no line");
+    for line in change_lines(&env) {
+        let members: Vec<&str> = line.as_object().expect("an object").keys().map(String::as_str).collect();
+        assert_eq!(members.len(), 7, "the members every line has: {members:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_switch_turned_on_opens_the_device_route_and_turned_off_closes_it_without_ending_a_token() {
+    let env = env();
+    let (token, _) = mint(&env, "alice");
+    let admin = env.admin_fresh("root");
+    assert_eq!(env.send(bearer(ME, &token)).await.status, 404);
+    assert_eq!(post_access(&env, &admin, &json!({"remote": true})).await.status, 200);
+    assert_eq!(env.send(bearer(ME, &token)).await.status, 200);
+    assert_eq!(post_access(&env, &admin, &json!({"remote": false})).await.status, 200);
+    let off = env.send(bearer(ME, &token)).await;
+    assert_eq!(shape(&off), shape(&env.send(bearer(UNKNOWN, &token)).await), "off again answers as an absent path");
+    assert_eq!(post_access(&env, &admin, &json!({"sync": true})).await.status, 200);
+    assert_eq!(env.send(bearer(ME, &token)).await.status, 200, "either switch opens the device routes, and the token is still good");
+}
+
+#[tokio::test]
+async fn a_change_is_announced_to_a_subscriber_only_when_a_feature_really_changes() {
+    let env = env_with_ceiling(Ceiling { sync: true, remote: false });
+    let mut seen = env.app.features.subscribe();
+    assert!(!seen.has_changed().expect("open"));
+    env.app.features.set(Feature::Sync, true).expect("on");
+    assert!(seen.has_changed().expect("open"));
+    assert_eq!(*seen.borrow_and_update(), holzwave_server::http::features::Switches { sync: true, remote: false });
+    // The ceiling hides this switch: stored as on, still off, nobody is woken.
+    env.app.features.set(Feature::Remote, true).expect("stored");
+    assert!(!seen.has_changed().expect("open"));
+    env.app.features.set(Feature::Sync, false).expect("off");
+    assert!(seen.has_changed().expect("open"));
+    assert_eq!(*seen.borrow_and_update(), Default::default());
+    assert!(!env.app.features.set(Feature::Sync, false).expect("again"), "no change, no announcement");
+    assert!(!seen.has_changed().expect("open"));
+}
+
+#[test]
+fn the_action_vocabulary_lists_the_switch_change() {
+    assert!(Action::ALL.iter().any(|a| a.as_str() == "device_access.change"));
+    assert_eq!(Action::ALL.len(), 27);
 }
