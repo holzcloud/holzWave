@@ -312,6 +312,24 @@ impl Device {
         String::from_utf8_lossy(self.live.get(&session).map_or(&[][..], Vec::as_slice)).into_owned()
     }
 
+    /// Whether the end of the live bytes of a session (the last 8 KiB and the length of the needle) holds `needle`. It looks at
+    /// the end only, so a test of a large output does not look at everything it has read at every step.
+    pub fn live_recent_has(&self, session: u32, needle: &str) -> bool {
+        let bytes = self.live.get(&session).map_or(&[][..], Vec::as_slice);
+        let from = bytes.len().saturating_sub(needle.len() + 8 * 1024);
+        let (first, rest) = (needle.as_bytes()[0], needle.as_bytes());
+        let tail = &bytes[from..];
+        let mut at = 0;
+        while let Some(found) = tail[at..].iter().position(|b| *b == first) {
+            at += found;
+            if tail[at..].starts_with(rest) {
+                return true;
+            }
+            at += 1;
+        }
+        false
+    }
+
     /// The snapshot bytes of a session so far, as text.
     pub fn snapshot_text(&self, session: u32) -> String {
         String::from_utf8_lossy(self.snapshot.get(&session).map_or(&[][..], Vec::as_slice)).into_owned()

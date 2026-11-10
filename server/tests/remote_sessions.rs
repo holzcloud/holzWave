@@ -12,16 +12,20 @@ mod device_socket;
 mod edge;
 #[path = "support/edge_tls.rs"]
 mod edge_tls;
+#[path = "support/sweep.rs"]
+mod sweep;
 #[path = "support/ws_env.rs"]
 mod ws_env;
 
 use std::time::Duration;
 
-use device_socket::{Device, env, env_with, input_frame, mint, mint_for, refused, remote, sync, upgrade, writer_timeout};
+use device_socket::{Device, env, env_with, input_frame, mint, mint_for, refused, remote, revoke, sync, upgrade, writer_timeout};
 use holzwave_core::remote::proto::{Answer, ErrorWord, Event, MAX_ATTACHED, MAX_TEXT, Op, WriterView};
 use holzwave_server::supervisor::SupervisorSettings;
 use holzwave_server::worker::sessions::SessionLimits;
 use holzwave_server::http::ws::SocketSettings;
+use holzwave_server::store::AccountState;
+use sweep::{Canary, Category, Counts, Sweep};
 use ws_env::{Person, WsEnv, WsOptions};
 
 /// How long a test waits for output of a real shell.
@@ -574,4 +578,294 @@ async fn a_tail_above_the_server_maximum_is_clamped_and_none_uses_the_default_an
     }
     assert!(sizes[0] < sizes[1], "the default of 5 lines brings less than 20: {sizes:?}");
     assert_eq!(sizes[1], sizes[2], "a tail above the maximum is clamped to the maximum: {sizes:?}");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The end of a token, an account, the switch and the server
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Short looks at the token, so that a test that wants the periodic recheck does not wait for the real one.
+fn looks_often(settings: &mut SocketSettings) {
+    settings.recheck = Duration::from_millis(150);
+}
+
+/// A write may stall for a long time, so that a client that does not read costs a stream and not the socket.
+fn patient(settings: &mut SocketSettings) {
+    settings.stall = Duration::from_secs(120);
+    settings.silence = Duration::from_secs(120);
+}
+
+const ONE_SECOND: Duration = Duration::from_secs(1);
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoked_token_closes_its_socket_with_4401_within_a_second_and_leaves_the_persons_other_devices_alone() {
+    let env = env().await;
+    let alice = env.person("alice");
+    let doomed = mint(&env, &alice, "doomed");
+    let kept = mint(&env, &alice, "kept");
+    let mut gone = Device::connect(&env, &doomed.token).await;
+    let mut stays = Device::connect(&env, &kept.token).await;
+    let session = gone.new_session().await;
+    gone.attach(session, None).await;
+
+    revoke(&env, &alice, doomed.id).await;
+    assert_eq!(gone.close_code(ONE_SECOND).await, Some((4401, "revoked".to_owned())));
+    // The server waits a short time for the peer's own close, then lets the connection go.
+    gone.ws.send_close(1000).await;
+    assert!(gone.ends_within(Duration::from_secs(5)).await);
+
+    // The other device is not touched, and the session the revoked one made is still there for it.
+    let Answer::List(listed) = stays.ok(Op::List).await else { panic!("a list") };
+    assert_eq!(listed.iter().map(|s| s.id).collect::<Vec<_>>(), vec![session]);
+    // The revoked token opens nothing any more.
+    let refusal = refused(&env, upgrade(Some(&doomed.token))).await;
+    assert_eq!(refusal.status, 401, "{}", refusal.text());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_account_that_ends_closes_the_sockets_of_its_devices_when_announced_and_when_only_the_look_finds_it() {
+    let env = env_with(WsOptions { tune: Some(looks_often), ..WsOptions::default() }).await;
+    let alice = env.person("alice");
+    let bob = env.person("bob");
+    let carol = env.person("carol");
+    let a = mint(&env, &alice, "a");
+    let b = mint(&env, &bob, "b");
+    let c = mint(&env, &carol, "c");
+    let mut of_alice = Device::connect(&env, &a.token).await;
+    let mut of_bob = Device::connect(&env, &b.token).await;
+    let mut of_carol = Device::connect(&env, &c.token).await;
+
+    // Disabled, with the announcement the service makes when it ends the person's sessions.
+    env.test.set_state("alice", AccountState::Disabled);
+    env.test.sessions.end_all(alice.key.id).expect("sessions ended");
+    assert_eq!(of_alice.close_code(ONE_SECOND).await, Some((4401, "revoked".to_owned())));
+
+    // Deleted, with no announcement at all: the next look at the token finds that nothing is left of it.
+    env.test.store.write(|tx| tx.account_delete(bob.key.id)).expect("the account is deleted");
+    assert_eq!(of_bob.close_code(ONE_SECOND).await, Some((4401, "revoked".to_owned())));
+
+    // Another person's socket is untouched by both.
+    assert_eq!(of_carol.ok(Op::List).await, Answer::List(vec![]));
+    assert!(of_carol.closed.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revocation_nobody_announced_is_found_by_the_periodic_look_at_the_token() {
+    let env = env_with(WsOptions { tune: Some(looks_often), ..WsOptions::default() }).await;
+    let alice = env.person("alice");
+    let minted = mint(&env, &alice, "quiet");
+    let mut device = Device::connect(&env, &minted.token).await;
+    assert_eq!(device.ok(Op::List).await, Answer::List(vec![]));
+    // The row goes without a word to the sockets, as when an announcement was missed.
+    assert!(env.test.store.write(|tx| tx.device_revoke(alice.key.id, minted.id)).expect("the row goes"));
+    assert_eq!(device.close_code(ONE_SECOND).await, Some((4401, "revoked".to_owned())));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn switching_remote_access_off_closes_every_device_socket_with_1001_and_the_sessions_run_on_until_it_is_back_on() {
+    let env = env().await;
+    let alice = env.person("alice");
+    let bob = env.person("bob");
+    let a = mint(&env, &alice, "a");
+    let b = mint(&env, &bob, "b");
+    let mut first = Device::connect(&env, &a.token).await;
+    let mut second = Device::connect(&env, &a.token).await;
+    let mut other = Device::connect(&env, &b.token).await;
+    let session = first.new_session().await;
+    first.attach(session, None).await;
+    first.type_into(session, COUNTER.as_bytes()).await;
+    first.until_live(session, "hw-n3", SHELL).await;
+
+    remote(&env, false);
+    for device in [&mut first, &mut second, &mut other] {
+        assert_eq!(device.close_code(ONE_SECOND).await, Some((1001, "going away".to_owned())));
+    }
+    // While it is off the door is hidden, whatever the token.
+    let hidden = refused(&env, upgrade(Some(&a.token))).await;
+    assert_eq!(hidden.status, 404, "{}", hidden.text());
+
+    // The program counted on with nobody there, and the same token works again as soon as the switch is on.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    remote(&env, true);
+    let mut back = Device::connect(&env, &a.token).await;
+    let Answer::List(listed) = back.ok(Op::List).await else { panic!("a list") };
+    assert_eq!(listed.iter().map(|s| s.id).collect::<Vec<_>>(), vec![session], "the session survived the switch");
+    let Answer::Attached { snapshot, .. } = back.attach(session, None).await else { panic!("attached") };
+    back.until("the snapshot", SHELL, |d| d.snapshot.get(&session).is_some_and(|b| b.len() as u32 >= snapshot)).await;
+    let held = numbers(&back.snapshot_text(session));
+    assert!(held.last().is_some_and(|n| *n > 3), "it kept counting while no socket was there: {held:?}");
+}
+
+/// A program that prints `count` bursts of `size` bytes with a pause between them, then a marker. A reader that keeps up
+/// drains a burst in the pause; one that does not read gets further and further behind.
+fn bursts(count: usize, size: usize) -> String {
+    format!(
+        "n=0; while [ $n -lt {count} ]; do head -c {size} /dev/zero | tr '\\0' 'q'; sleep 0.25; n=$((n+1)); done; echo hw-end$((7*7))\r"
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_large_output_arrives_whole_and_in_order_for_a_reader_that_keeps_up() {
+    let env = env().await;
+    let alice = env.person("alice");
+    let mut a = device_of(&env, &alice, "a").await;
+    let session = a.new_session().await;
+    a.attach(session, None).await;
+    const BYTES: usize = 40 * 100_000;
+    a.type_into(session, bursts(40, 100_000).as_bytes()).await;
+    a.until("the end of the output", Duration::from_secs(60), |d| d.live_recent_has(session, "hw-end49")).await;
+    let q = a.live_text(session).matches('q').count();
+    assert!((BYTES..BYTES + 16).contains(&q), "every byte arrived, and the echo of the line: {q}");
+    let seqs = &a.seqs[&session];
+    assert!(seqs.windows(2).all(|w| w[1] == w[0].wrapping_add(1)), "the chunks came with consecutive numbers");
+}
+
+/// The bytes one socket may queue in the test of the slow reader: a quarter of the default, so that the flood is short, and
+/// still far more than a burst of the program that a reader which keeps up has to absorb while its task is not running.
+const QUEUE: usize = 1024 * 1024;
+
+fn small_queues() -> SupervisorSettings {
+    SupervisorSettings { socket_queue_bytes: QUEUE, ..SupervisorSettings::default() }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_that_does_not_read_loses_its_stream_with_a_resync_while_the_other_sees_every_byte_and_the_queue_stays_inside_its_bound() {
+    let env = env_with(WsOptions { tune: Some(patient), supervisor: Some(small_queues()), ..WsOptions::default() }).await;
+    let alice = env.person("alice");
+    let mut slow = device_of(&env, &alice, "slow").await;
+    let mut quick = device_of(&env, &alice, "quick").await;
+    let session = slow.new_session().await;
+    slow.attach(session, None).await;
+    quick.attach(session, None).await;
+    let lost_before = env.supervisor.stats().lost_streams;
+
+    // Six million bytes in bursts; the slow socket reads none of them.
+    const BYTES: usize = 30 * 200_000;
+    slow.type_into(session, bursts(30, 200_000).as_bytes()).await;
+    let most = std::cell::Cell::new(0usize);
+    let key = alice.key;
+    let supervisor = env.supervisor.clone();
+    let finished = quick
+        .eventually(Duration::from_secs(60), |d| {
+            most.set(most.get().max(supervisor.account_stats(key).queued_bytes));
+            d.live_recent_has(session, "hw-end49")
+        })
+        .await;
+    let seen = quick.live.get(&session).map_or(0, Vec::len);
+    assert!(finished, "the flood did not end in time: {seen} bytes seen, events {:?}", quick.events);
+    let q = quick.live_text(session).matches('q').count();
+    assert!((BYTES..BYTES + 16).contains(&q), "the reader that kept up saw every byte, and only the one echo of the line: {q}");
+    assert!(
+        most.get() <= 2 * QUEUE,
+        "the queues of both sockets stayed inside their bound while one of them did not read: {} bytes",
+        most.get()
+    );
+    assert!(env.supervisor.stats().lost_streams > lost_before, "the slow stream was counted as lost");
+    assert!(quick.events.iter().all(|e| !matches!(e, Event::Resync { .. })), "the reader that kept up lost nothing");
+
+    // The slow one reads at last: its socket is open, it is told that the stream was cut, and attaching again works.
+    slow.until("the resync", Duration::from_secs(60), |d| d.events.contains(&Event::Resync { session })).await;
+    assert!(slow.closed.is_none() && !slow.ended, "only the stream was lost, not the socket");
+    slow.snapshot.remove(&session);
+    let Answer::Attached { snapshot, .. } = slow.attach(session, None).await else { panic!("attached") };
+    slow.until("the snapshot", SHELL, |d| d.snapshot.get(&session).is_some_and(|b| b.len() as u32 >= snapshot)).await;
+    assert!(slow.snapshot_text(session).contains("hw-end49"), "the new attachment shows where the output stands");
+    assert!(slow.strange.is_empty() && quick.strange.is_empty(), "{:?} {:?}", slow.strange, quick.strange);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_cap_of_sockets_is_shared_with_the_browser_and_counts_devices() {
+    let env = env().await;
+    let alice = env.person("alice");
+    let mut devices = Vec::new();
+    for n in 0..7 {
+        devices.push(device_of(&env, &alice, &format!("d{n}")).await);
+    }
+    let mut page = env.connect_as(&alice.signed).await;
+    env.eventually("eight sockets counted", |e| e.counts(&alice).sockets == 8).await;
+
+    // The ninth is refused, whether it is a device or the page.
+    let minted = mint(&env, &alice, "ninth");
+    let mut ninth = Device::connect(&env, &minted.token).await;
+    assert_eq!(ninth.close_code(ONE_SECOND * 5).await, Some((1013, "busy".to_owned())));
+    let mut ninth_page = env.connect_as(&alice.signed).await;
+    assert_eq!(ninth_page.close_code(ONE_SECOND * 5).await, Some((1013, "busy".to_owned())));
+    assert_eq!(env.counts(&alice).sockets, 8, "a refused socket attached nothing");
+
+    // The page leaving makes room for a device; and the other way round.
+    page.send_close(1000).await;
+    drop(page);
+    env.eventually("seven sockets counted", |e| e.counts(&alice).sockets == 7).await;
+    let mut eighth = Device::connect(&env, &minted.token).await;
+    assert_eq!(eighth.ok(Op::List).await, Answer::List(vec![]));
+    env.eventually("eight again", |e| e.counts(&alice).sockets == 8).await;
+    devices.pop().expect("a device").ws.send_close(1000).await;
+    env.eventually("seven again", |e| e.counts(&alice).sockets == 7).await;
+    let mut page_again = env.connect_as(&alice.signed).await;
+    assert!(page_again.close_code(Duration::from_millis(500)).await.is_none(), "the page fits again");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_server_stopping_closes_every_device_socket_with_1001_within_a_second_and_every_task_ends() {
+    let env = env().await;
+    let alice = env.person("alice");
+    let bob = env.person("bob");
+    let mut sockets = vec![
+        device_of(&env, &alice, "a1").await,
+        device_of(&env, &alice, "a2").await,
+        device_of(&env, &bob, "b1").await,
+    ];
+    for socket in &mut sockets {
+        assert_eq!(socket.ok(Op::List).await, Answer::List(vec![]));
+    }
+    env.shutdown.trigger();
+    for socket in &mut sockets {
+        assert_eq!(socket.close_code(ONE_SECOND).await, Some((1001, "going away".to_owned())));
+    }
+    assert!(env.state.tracker.wait_empty(ONE_SECOND * 2).await, "every socket task has ended");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// What is never written down
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_terminal_byte_and_no_token_reaches_a_log_the_audit_files_or_the_database() {
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let hooks = holzwave_server::worker::runtime::TestHooks { log: Some(log.clone()), ..Default::default() };
+    let env = env_with(WsOptions { hooks, ..WsOptions::default() }).await;
+    let alice = env.person("alice");
+    let minted = mint(&env, &alice, "laptop");
+    let typed = Canary::new("typed text", Category::Secret);
+    let output = Canary::new("printed text", Category::Secret);
+    let token = Canary::with_text("device token", Category::Secret, &minted.token);
+
+    let mut device = Device::connect(&env, &minted.token).await;
+    let session = device.new_session().await;
+    device.attach(session, None).await;
+    // The typed text is in the line the program echoes; the printed text exists only as the result of the program.
+    let (first, second) = output.text().split_at(12);
+    device.type_into(session, format!("# {}\recho {first}\"\"{second}\r", typed.text()).as_bytes()).await;
+    device.until_live(session, output.text(), SHELL).await;
+    assert!(device.live_text(session).contains(typed.text()));
+    // The person ends the session, a switch is turned, the token is revoked, and the revoked token is refused.
+    device.ok(Op::End { session }).await;
+    revoke(&env, &alice, minted.id).await;
+    let refusal = refused(&env, upgrade(Some(&minted.token))).await;
+    let closing = format!("{:?}", device.closed);
+
+    let canaries = vec![typed, output, token];
+    let sweep = Sweep::new(&canaries);
+    let mut counts = Counts::default();
+    let server_dir = env.test.audit_dir.parent().expect("the server directory").to_path_buf();
+    let mut findings = sweep.scan_tree(&server_dir, &mut counts);
+    let lines = log.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    findings.extend(sweep.scan_lines("the log of the worker", &lines, &mut counts));
+    findings.extend(sweep.scan_text("the refusal", &refusal.text()));
+    findings.extend(sweep.scan_text("the closing message", &closing));
+    findings.extend(sweep.scan_text("the strange messages", &device.strange.join("\n")));
+    assert!(counts.files >= 2, "the scan read the database and the audit files: {counts:?}");
+    assert!(findings.is_empty(), "{:?}", findings.iter().map(sweep::Finding::line).collect::<Vec<_>>());
+    // The scan is not blind.
+    assert!(!sweep.scan_text("a planted line", &format!("typed {}", canaries[0].text())).is_empty());
 }
