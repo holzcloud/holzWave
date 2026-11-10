@@ -18,6 +18,7 @@ use holzwave_server::wire::{
     CmdFrame, Ctl, CtlOutcome, Evt, Frame, Note, PROTOCOL_VERSION, Res, ResBody, StoreState, read_frame, write_frame,
 };
 use holzwave_server::worker::runtime::{RunEnd, TestHooks, WorkerEnv, run_with};
+use holzwave_server::worker::sessions::SessionLimits;
 use serde_json::{Value, json};
 
 use crate::scratch::Scratch;
@@ -182,7 +183,13 @@ impl Rig {
 
     /// [`Rig::init_with`] and the picture cap in whole MiB (0 turns pictures off).
     pub fn init_with_images(&mut self, max_panes: u32, max_scrollback_lines: u32, max_image_mib: u32) {
-        self.send(Frame::Ctl(Ctl::Init { version: PROTOCOL_VERSION, max_panes, max_scrollback_lines, max_image_mib }));
+        self.send(Frame::Ctl(Ctl::Init {
+            version: PROTOCOL_VERSION,
+            max_panes,
+            max_scrollback_lines,
+            max_image_mib,
+            sessions: SessionLimits::DEFAULT,
+        }));
         self.wait_for("Ready", PATIENCE, |f| matches!(f, Frame::Note(Note::Ready)));
     }
 

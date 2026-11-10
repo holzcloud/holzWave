@@ -18,8 +18,8 @@ use holzwave_host::commands::registry::{COMMANDS, Mode, NOT_IN_BROWSER, Outcome}
 use holzwave_host::state::{Out, Sink, Target};
 use holzwave_host::state::ShellSpec;
 use holzwave_server::wire::{
-    CmdFrame, Ctl, CtlOutcome, Evt, ExitReason, Frame, Key, Note, OpeningKey, PROTOCOL_VERSION, Res, ResBody, SlotKey,
-    StoreState, read_frame,
+    CmdFrame, Ctl, CtlOutcome, Evt, ExitReason, Frame, Key, Note, OpeningKey, PROTOCOL_VERSION, Res, ResBody, Ses,
+    SesAnswer, SesEvent, SlotKey, StoreState, read_frame,
 };
 use holzwave_server::worker::dispatch::{Gate, Outbound, Pushed, QueueLimits, ServerSink, spawn_writer};
 use holzwave_server::cli::{parse_worker_args, worker_main};
@@ -29,6 +29,8 @@ use holzwave_server::worker::runtime::{
     wipe_secrets,
 };
 use holzwave_server::worker::secretstore::{SecretsHandle, SlotKind};
+use holzwave_server::worker::lease::WriterState;
+use holzwave_server::worker::sessions::{Attached, SesError, SessionLimits};
 use serde_json::{Value, json};
 use worker_env::{PATIENCE, Rig, RigOptions, process_exists};
 
@@ -139,7 +141,13 @@ fn tracer_the_end_of_the_socket_ends_the_run_and_the_shell() {
 #[test]
 fn tracer_an_init_with_another_protocol_version_ends_the_worker() {
     let mut rig = Rig::start();
-    rig.send(Frame::Ctl(Ctl::Init { version: PROTOCOL_VERSION + 1, max_panes: 0, max_scrollback_lines: 0, max_image_mib: 64 }));
+    rig.send(Frame::Ctl(Ctl::Init {
+        version: PROTOCOL_VERSION + 1,
+        max_panes: 0,
+        max_scrollback_lines: 0,
+        max_image_mib: 64,
+        sessions: SessionLimits::DEFAULT,
+    }));
     let end = rig.finish();
     assert_eq!(end, RunEnd::Failed);
 }
@@ -275,7 +283,26 @@ fn images_a_refused_picture_has_no_pixels_and_every_read_for_it_fails_with_the_f
 fn init_a_first_frame_of_version_1_ends_the_worker_in_a_failure_and_so_does_the_old_twelve_byte_layout() {
     // Version 1 with the four new bytes: it decodes, and the version is what the worker refuses.
     let mut rig = Rig::start();
-    rig.send(Frame::Ctl(Ctl::Init { version: 1, max_panes: 3, max_scrollback_lines: 100, max_image_mib: 64 }));
+    rig.send(Frame::Ctl(Ctl::Init {
+        version: 1,
+        max_panes: 3,
+        max_scrollback_lines: 100,
+        max_image_mib: 64,
+        sessions: SessionLimits::DEFAULT,
+    }));
+    rig.wait_for("the failure note", PATIENCE, |f| matches!(f, Frame::Note(Note::Exiting(ExitReason::Failure))));
+    assert!(!rig.seen().iter().any(|f| matches!(f, Frame::Note(Note::Ready))), "nothing was started");
+    assert_eq!(rig.finish(), RunEnd::Failed);
+
+    // Version 2 with the session limits: it decodes, and the version is what the worker refuses, with the same failure.
+    let mut rig = Rig::start();
+    rig.send(Frame::Ctl(Ctl::Init {
+        version: 2,
+        max_panes: 3,
+        max_scrollback_lines: 100,
+        max_image_mib: 64,
+        sessions: SessionLimits::DEFAULT,
+    }));
     rig.wait_for("the failure note", PATIENCE, |f| matches!(f, Frame::Note(Note::Exiting(ExitReason::Failure))));
     assert!(!rig.seen().iter().any(|f| matches!(f, Frame::Note(Note::Ready))), "nothing was started");
     assert_eq!(rig.finish(), RunEnd::Failed);
@@ -1021,7 +1048,13 @@ fn end_a_link_that_closes_while_a_pane_is_still_writing_is_the_end_of_the_link_a
 #[test]
 fn end_a_second_init_a_frame_that_belongs_to_the_worker_and_a_bad_frame_end_it_with_a_failure_note() {
     let cases: Vec<Frame> = vec![
-        Frame::Ctl(Ctl::Init { version: PROTOCOL_VERSION, max_panes: 0, max_scrollback_lines: 0, max_image_mib: 64 }),
+        Frame::Ctl(Ctl::Init {
+            version: PROTOCOL_VERSION,
+            max_panes: 0,
+            max_scrollback_lines: 0,
+            max_image_mib: 64,
+            sessions: SessionLimits::DEFAULT,
+        }),
         Frame::Res(Res { socket: 1, request: 1, body: ResBody::Ok("1".into()) }),
         Frame::Evt(Evt { target: 1, name: "frame".into(), text: "{}".into() }),
         Frame::Note(Note::Ready),
@@ -1564,7 +1597,13 @@ fn hostile_a_control_before_init_an_attach_for_socket_zero_and_a_second_init_end
 
     let mut rig = Rig::start();
     rig.init();
-    rig.send(Frame::Ctl(Ctl::Init { version: PROTOCOL_VERSION, max_panes: 1, max_scrollback_lines: 1, max_image_mib: 64 }));
+    rig.send(Frame::Ctl(Ctl::Init {
+        version: PROTOCOL_VERSION,
+        max_panes: 1,
+        max_scrollback_lines: 1,
+        max_image_mib: 64,
+        sessions: SessionLimits::DEFAULT,
+    }));
     wait_failure(&mut rig);
     assert_eq!(rig.finish(), RunEnd::Failed);
 }
@@ -1836,7 +1875,13 @@ mod on_linux {
     fn handshake(started: &mut Started) {
         holzwave_server::wire::write_frame(
             &mut started.ours,
-            &Frame::Ctl(Ctl::Init { version: PROTOCOL_VERSION, max_panes: 0, max_scrollback_lines: 0, max_image_mib: 64 }),
+            &Frame::Ctl(Ctl::Init {
+                version: PROTOCOL_VERSION,
+                max_panes: 0,
+                max_scrollback_lines: 0,
+                max_image_mib: 64,
+                sessions: SessionLimits::DEFAULT,
+            }),
         )
         .expect("init");
         read_until(&mut started.ours, |f| matches!(f, Frame::Note(Note::Ready)));
@@ -1911,4 +1956,336 @@ mod on_linux {
         started.ours.shutdown(std::net::Shutdown::Both).expect("close");
         assert_eq!(wait_exit(&mut started.child).code(), Some(0));
     }
+}
+
+// ---- the sessions that live in the worker -------------------------------------------------------------------------------------
+
+/// Reads frames until `done` holds for everything seen so far.
+fn wait_until(rig: &mut Rig, what: &str, done: impl Fn(&[Frame]) -> bool) {
+    while !done(rig.seen()) {
+        assert!(rig.next(PATIENCE).is_some(), "waited for {what}; the worker wrote {:?}", rig.describe());
+    }
+}
+
+/// The answer to the session request `request` of `socket`.
+fn ses_answer(rig: &mut Rig, socket: u32, request: u64) -> SesAnswer {
+    match rig.wait_for(
+        &format!("the answer to session request {request}"),
+        PATIENCE,
+        |f| matches!(f, Frame::Ses(Ses::Answer { socket: s, request: r, .. }) if *s == socket && *r == request),
+    ) {
+        Frame::Ses(Ses::Answer { answer, .. }) => answer,
+        other => unreachable!("{other:?}"),
+    }
+}
+
+fn ses_new(rig: &mut Rig, socket: u32, request: u64) -> u32 {
+    rig.send(Frame::Ses(Ses::New { socket, request, cols: 80, rows: 24 }));
+    match ses_answer(rig, socket, request) {
+        SesAnswer::Created { session } => session,
+        other => panic!("a session was not made: {other:?}"),
+    }
+}
+
+/// The bytes of the given kind (`snapshot` or live) that `socket` was sent for `session`, in order.
+fn stream_of(seen: &[Frame], socket: u32, session: u32, snapshot: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    for frame in seen {
+        match frame {
+            Frame::Ses(Ses::Snapshot { socket: s, session: n, bytes, .. })
+                if snapshot && *s == socket && *n == session =>
+            {
+                out.extend_from_slice(bytes);
+            }
+            Frame::Ses(Ses::Live { socket: s, session: n, bytes, .. })
+                if !snapshot && *s == socket && *n == session =>
+            {
+                out.extend_from_slice(bytes);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The live text that `socket` was sent for `session`.
+fn live_of(seen: &[Frame], socket: u32, session: u32) -> String {
+    String::from_utf8_lossy(&stream_of(seen, socket, session, false)).into_owned()
+}
+
+/// Attaches `socket` to `session` and waits for the whole snapshot; returns the answer.
+fn ses_attach(rig: &mut Rig, socket: u32, request: u64, session: u32, tail: Option<u32>) -> Attached {
+    rig.send(Frame::Ses(Ses::Attach { socket, request, session, tail }));
+    let attached = match ses_answer(rig, socket, request) {
+        SesAnswer::Attached(attached) => attached,
+        other => panic!("the attach was not accepted: {other:?}"),
+    };
+    let want = attached.snapshot_bytes as usize;
+    wait_until(rig, "the whole snapshot", |seen| {
+        let have: usize = seen
+            .iter()
+            .map(|f| match f {
+                Frame::Ses(Ses::Snapshot { socket: s, session: n, bytes, .. }) if *s == socket && *n == session => {
+                    bytes.len()
+                }
+                _ => 0,
+            })
+            .sum();
+        have >= want
+    });
+    attached
+}
+
+#[test]
+fn tracer_ses_a_session_is_made_listed_attached_and_its_bytes_come_back_as_live_frames() {
+    let mut rig = Rig::start();
+    rig.init();
+    let session = ses_new(&mut rig, 5, 1);
+    assert_ne!(session, 0);
+
+    rig.send(Frame::Ses(Ses::List { socket: 5, request: 2 }));
+    match ses_answer(&mut rig, 5, 2) {
+        SesAnswer::Listed(list) => {
+            assert_eq!(list.len(), 1, "{list:?}");
+            assert_eq!((list[0].id, list[0].cols, list[0].rows), (session, 80, 24));
+            assert!(list[0].writer_held, "the creator holds the right to write");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let attached = ses_attach(&mut rig, 5, 3, session, None);
+    assert_eq!((attached.cols, attached.rows, attached.writer), (80, 24, WriterState::Writing));
+    // The answer comes before the first byte of the snapshot.
+    let answer_at =
+        rig.seen().iter().position(|f| matches!(f, Frame::Ses(Ses::Answer { request: 3, .. }))).expect("answered");
+    let first_chunk = rig.seen().iter().position(|f| matches!(f, Frame::Ses(Ses::Snapshot { .. })));
+    assert!(first_chunk.is_none_or(|at| at > answer_at), "{:?}", rig.describe());
+
+    // What the socket types reaches the program (the fixed shell echoes it) and comes back as live bytes.
+    rig.send(Frame::Ses(Ses::Input { socket: 5, session, bytes: b"hello-session\r".to_vec() }));
+    wait_until(&mut rig, "the echo", |seen| live_of(seen, 5, session).contains("hello-session"));
+    rig.finish();
+}
+
+#[test]
+fn ses_the_pane_count_the_supervisor_is_told_counts_the_sessions_with_the_panes_and_falls_when_one_ends() {
+    let mut rig = Rig::start();
+    rig.init();
+    rig.ok(1, "get_layout", json!({}));
+    let before = rig.pane_counts().last().copied().expect("a count was announced");
+    let session = ses_new(&mut rig, 5, 1);
+    wait_until(&mut rig, "the count with the session", |seen| {
+        seen.iter().rev().find_map(|f| if let Frame::Note(Note::PaneCount(n)) = f { Some(*n) } else { None })
+            == Some(before + 1)
+    });
+    // The program ends, the one attached socket hears it and leaves, and the session is gone with its place.
+    rig.send(Frame::Ses(Ses::End { socket: 5, request: 2, session }));
+    assert!(matches!(ses_answer(&mut rig, 5, 2), SesAnswer::Ended));
+    wait_until(&mut rig, "the end of the program", |seen| {
+        seen.iter().any(|f| matches!(f, Frame::Ses(Ses::Event { event: SesEvent::Exited(_), .. })))
+    });
+    rig.send(Frame::Ses(Ses::Detach { socket: 5, request: 3, session }));
+    assert!(matches!(ses_answer(&mut rig, 5, 3), SesAnswer::Done));
+    wait_until(&mut rig, "the count without the session", |seen| {
+        seen.iter().rev().find_map(|f| if let Frame::Note(Note::PaneCount(n)) = f { Some(*n) } else { None })
+            == Some(before)
+    });
+    rig.finish();
+}
+
+#[test]
+fn ses_a_second_socket_watches_its_input_is_dropped_and_a_takeover_changes_who_writes() {
+    let mut rig = Rig::start();
+    rig.init();
+    let session = ses_new(&mut rig, 5, 1);
+    assert_eq!(ses_attach(&mut rig, 5, 2, session, None).writer, WriterState::Writing);
+    assert_eq!(ses_attach(&mut rig, 6, 3, session, None).writer, WriterState::Watching);
+
+    // The watcher's input is dropped without an answer; the writer's reaches the program, and both streams show only that.
+    rig.send(Frame::Ses(Ses::Input { socket: 6, session, bytes: b"from-the-watcher\r".to_vec() }));
+    rig.send(Frame::Ses(Ses::Input { socket: 5, session, bytes: b"from-the-writer\r".to_vec() }));
+    wait_until(&mut rig, "the writer's echo on both streams", |seen| {
+        live_of(seen, 5, session).contains("from-the-writer") && live_of(seen, 6, session).contains("from-the-writer")
+    });
+    assert!(!live_of(rig.seen(), 5, session).contains("from-the-watcher"), "the watcher typed into the program");
+    assert!(!live_of(rig.seen(), 6, session).contains("from-the-watcher"));
+
+    // The takeover is explicit, answered, and every socket is told its own new view.
+    rig.send(Frame::Ses(Ses::Takeover { socket: 6, request: 4, session }));
+    assert!(matches!(ses_answer(&mut rig, 6, 4), SesAnswer::Done));
+    wait_until(&mut rig, "both views", |seen| {
+        let told = |socket: u32, state: WriterState| {
+            seen.iter().any(|f| {
+                matches!(f, Frame::Ses(Ses::Event { socket: s, event: SesEvent::Writer(w), .. }) if *s == socket && *w == state)
+            })
+        };
+        told(5, WriterState::Watching) && told(6, WriterState::Writing)
+    });
+    rig.send(Frame::Ses(Ses::Input { socket: 6, session, bytes: b"after-takeover\r".to_vec() }));
+    wait_until(&mut rig, "the new writer's echo", |seen| live_of(seen, 5, session).contains("after-takeover"));
+    rig.finish();
+}
+
+#[test]
+fn ses_a_socket_that_ends_frees_its_right_through_a_gone_frame_and_a_detach_control_alike() {
+    let mut rig = Rig::start();
+    rig.init();
+    let session = ses_new(&mut rig, 5, 1);
+    ses_attach(&mut rig, 5, 2, session, None);
+    ses_attach(&mut rig, 6, 3, session, None);
+
+    // The supervisor says that socket 5 ended in one of its two ways; socket 6 is told that the right is free.
+    rig.send(Frame::Ses(Ses::Gone { socket: 5 }));
+    wait_until(&mut rig, "the free view", |seen| {
+        seen.iter()
+            .any(|f| matches!(f, Frame::Ses(Ses::Event { socket: 6, event: SesEvent::Writer(WriterState::Free), .. })))
+    });
+    rig.send(Frame::Ses(Ses::List { socket: 6, request: 4 }));
+    match ses_answer(&mut rig, 6, 4) {
+        SesAnswer::Listed(list) => assert_eq!((list[0].attached, list[0].writer_held), (1, false), "{list:?}"),
+        other => panic!("{other:?}"),
+    }
+    // The same through the control the supervisor sends when a page's socket ends.
+    ses_attach(&mut rig, 7, 5, session, None);
+    rig.send(Frame::Ctl(Ctl::Detach { socket: 7 }));
+    rig.send(Frame::Ses(Ses::List { socket: 6, request: 6 }));
+    match ses_answer(&mut rig, 6, 6) {
+        SesAnswer::Listed(list) => assert_eq!(list[0].attached, 1, "{list:?}"),
+        other => panic!("{other:?}"),
+    }
+    rig.finish();
+}
+
+#[test]
+fn ses_a_request_that_names_no_session_is_failed_not_found_and_a_request_before_init_is_busy() {
+    let mut rig = Rig::start();
+    // Before `Init` nothing runs: the request is answered and the run goes on.
+    rig.send(Frame::Ses(Ses::List { socket: 5, request: 1 }));
+    assert!(matches!(ses_answer(&mut rig, 5, 1), SesAnswer::Failed(SesError::Busy)));
+    rig.init();
+    for (request, frame) in [
+        (2, Ses::Attach { socket: 5, request: 2, session: 99, tail: None }),
+        (3, Ses::Detach { socket: 5, request: 3, session: 99 }),
+        (4, Ses::Resize { socket: 5, request: 4, session: 99, cols: 80, rows: 24 }),
+        (5, Ses::Takeover { socket: 5, request: 5, session: 99 }),
+        (6, Ses::End { socket: 5, request: 6, session: 99 }),
+        (7, Ses::Beat { socket: 5, request: 7, session: 99 }),
+    ] {
+        rig.send(Frame::Ses(frame));
+        assert!(matches!(ses_answer(&mut rig, 5, request), SesAnswer::Failed(SesError::NotFound)), "request {request}");
+    }
+    // Input for a session that is not there is dropped without an answer, and the worker is still alive.
+    rig.send(Frame::Ses(Ses::Input { socket: 5, session: 99, bytes: vec![b'x'] }));
+    let session = ses_new(&mut rig, 5, 8);
+    assert_ne!(session, 0);
+    rig.finish();
+}
+
+#[test]
+fn ses_the_frames_a_worker_writes_are_not_frames_a_worker_reads() {
+    for frame in [
+        Ses::Answer { socket: 5, request: 1, answer: SesAnswer::Done },
+        Ses::Snapshot { socket: 5, session: 1, seq: 0, bytes: vec![1] },
+        Ses::Live { socket: 5, session: 1, seq: 0, bytes: vec![1] },
+        Ses::Event { socket: 5, session: 1, event: SesEvent::Resync },
+    ] {
+        let mut rig = Rig::start();
+        rig.init();
+        rig.send(Frame::Ses(frame));
+        rig.wait_for("the failure note", PATIENCE, |f| matches!(f, Frame::Note(Note::Exiting(ExitReason::Failure))));
+        assert_eq!(rig.finish(), RunEnd::Failed);
+    }
+}
+
+#[test]
+fn ses_the_pane_cap_is_shared_a_session_takes_a_place_and_the_next_one_is_refused() {
+    let mut rig = Rig::start();
+    // One pane in all: the window's first pane takes it, so no session can start.
+    rig.init_with(1, 0);
+    rig.ok(1, "get_layout", json!({}));
+    rig.send(Frame::Ses(Ses::New { socket: 5, request: 1, cols: 80, rows: 24 }));
+    assert!(matches!(ses_answer(&mut rig, 5, 1), SesAnswer::Failed(SesError::TooMany)));
+    rig.finish();
+
+    // Two: one for the window and one session, and then no more.
+    let mut rig = Rig::start();
+    rig.init_with(2, 0);
+    rig.ok(1, "get_layout", json!({}));
+    let session = ses_new(&mut rig, 5, 1);
+    rig.send(Frame::Ses(Ses::New { socket: 5, request: 2, cols: 80, rows: 24 }));
+    assert!(matches!(ses_answer(&mut rig, 5, 2), SesAnswer::Failed(SesError::TooMany)));
+    // The end of the session gives its place back.
+    rig.send(Frame::Ses(Ses::End { socket: 5, request: 3, session }));
+    assert!(matches!(ses_answer(&mut rig, 5, 3), SesAnswer::Ended));
+    wait_until(&mut rig, "the end of the program", |seen| {
+        seen.iter().any(|f| matches!(f, Frame::Ses(Ses::Event { event: SesEvent::Exited(_), .. })))
+    });
+    rig.send(Frame::Ses(Ses::Detach { socket: 5, request: 100, session }));
+    assert!(matches!(ses_answer(&mut rig, 5, 100), SesAnswer::Done));
+    let mut again = None;
+    for request in 4..40 {
+        rig.send(Frame::Ses(Ses::New { socket: 5, request, cols: 80, rows: 24 }));
+        if let SesAnswer::Created { session } = ses_answer(&mut rig, 5, request) {
+            again = Some(session);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(again.is_some(), "the place of the ended session was never given back");
+    rig.finish();
+}
+
+#[test]
+fn ses_the_bytes_of_a_stream_are_refused_over_the_soft_cap_and_never_grow_the_queue_to_the_dead_mark() {
+    let queue = Outbound::new(limits());
+    let chunk = || Frame::Ses(Ses::Live { socket: 5, session: 1, seq: 0, bytes: vec![b'x'; 10_000] });
+    let mut refused = 0;
+    // A socket that never reads: its bytes stop being taken at the soft cap, long before the hard cap that kills the link.
+    for _ in 0..1_000 {
+        if queue.push_stream(chunk()) == Pushed::Dropped {
+            refused += 1;
+        }
+    }
+    assert!(refused > 900, "{refused} refused");
+    assert!(queue.queued_bytes() <= limits().soft + 20_000, "{} bytes queued", queue.queued_bytes());
+    assert!(!queue.is_dead(), "a stream that is not read must not end the worker of the whole person");
+    // What the client is told about it (an event and an answer) is kept, as every other event is.
+    assert_eq!(queue.push(Frame::Ses(Ses::Event { socket: 5, session: 1, event: SesEvent::Resync })), Pushed::Queued);
+    assert_eq!(queue.push(Frame::Ses(Ses::Answer { socket: 5, request: 1, answer: SesAnswer::Done })), Pushed::Queued);
+}
+
+#[test]
+fn ses_the_end_of_the_program_is_told_to_every_attached_socket_with_an_exited_event() {
+    let mut rig = Rig::start();
+    rig.init();
+    let session = ses_new(&mut rig, 5, 1);
+    ses_attach(&mut rig, 5, 2, session, None);
+    ses_attach(&mut rig, 6, 3, session, None);
+    // End of input at the start of a line ends the `cat` of the fixed shell.
+    rig.send(Frame::Ses(Ses::Input { socket: 5, session, bytes: vec![0x04] }));
+    wait_until(&mut rig, "the exited event for both sockets", |seen| {
+        [5, 6].iter().all(|socket| {
+            seen.iter().any(|f| {
+                matches!(f, Frame::Ses(Ses::Event { socket: s, event: SesEvent::Exited(_), .. }) if s == socket)
+            })
+        })
+    });
+    rig.finish();
+}
+
+#[test]
+fn ses_a_session_and_the_panes_of_the_window_run_side_by_side_without_disturbing_each_other() {
+    let mut rig = Rig::start();
+    rig.init();
+    let first = first_pane(&rig.ok(1, "get_layout", json!({})));
+    rig.ok(1, "start_pane", json!({"pane": first, "cols": 80, "rows": 24, "cell_w": 8, "cell_h": 16}));
+    rig.wait_event("frame", |_, payload| payload["pane"] == json!(first));
+    let session = ses_new(&mut rig, 5, 1);
+    ses_attach(&mut rig, 5, 2, session, None);
+    rig.send(Frame::Ses(Ses::Input { socket: 5, session, bytes: b"for-the-session\r".to_vec() }));
+    wait_until(&mut rig, "the echo of the session", |seen| live_of(seen, 5, session).contains("for-the-session"));
+    // The window's pane still answers its commands and still draws.
+    rig.ok(1, "request_full", json!({"pane": first}));
+    rig.wait_event("frame", |_, payload| payload["pane"] == json!(first));
+    rig.finish();
 }

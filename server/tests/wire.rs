@@ -11,9 +11,12 @@ use std::io::{self, Cursor, Read};
 
 use holzwave_server::wire::{
     CmdFrame, Ctl, CtlOutcome, Evt, ExitReason, FILE_PIECE, FILE_SOCKET, FileWhat, Frame, Key, MAX_PAYLOAD, Note,
-    OpeningKey, PROTOCOL_VERSION, Res, ResBody, SlotKey, StoreState, WireError, codec, read_frame, write_frame,
+    OpeningKey, PROTOCOL_VERSION, Res, ResBody, Ses, SesAnswer, SesEvent, SlotKey, StoreState, WireError, codec,
+    read_frame, write_frame,
 };
+use holzwave_server::worker::lease::WriterState;
 use holzwave_server::worker::secretstore::SlotKind;
+use holzwave_server::worker::sessions::{Attached, SesError, SessionInfo, SessionLimits};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 use tokio_util::bytes::BytesMut;
 use tokio_util::codec::{Decoder, Encoder};
@@ -83,12 +86,47 @@ fn tracer_an_event_is_kind_3_then_target_name_length_name_and_the_final_text() {
     assert_eq!(Frame::from_payload(&expected).expect("decodes"), to_one);
 }
 
+/// The four session limits of a default server as they travel: 1000, 10000, 4 MiB and 30000, each as a big-endian u32.
+const SESSION_LIMITS_BYTES: [u8; 16] = [0, 0, 0x03, 0xE8, 0, 0, 0x27, 0x10, 0, 0x40, 0, 0, 0, 0, 0x75, 0x30];
+
+/// `head` and the session limits of a default server after it.
+fn init_bytes(head: [u8; 16]) -> Vec<u8> {
+    let mut bytes = head.to_vec();
+    bytes.extend_from_slice(&SESSION_LIMITS_BYTES);
+    bytes
+}
+
 #[test]
-fn tracer_init_is_kind_4_operation_1_then_version_and_the_three_caps() {
-    // Version 2: the bytes of version 1 with the new version and four more bytes at the end, the picture cap in MiB.
-    let frame = Frame::Ctl(Ctl::Init { version: 2, max_panes: 3, max_scrollback_lines: 0x0001_0000, max_image_mib: 0x0000_0040 });
-    let expected = vec![0x04, 0x01, 0, 2, 0, 0, 0, 3, 0, 1, 0, 0, 0, 0, 0, 0x40];
+fn tracer_init_is_kind_4_operation_1_then_version_the_caps_and_the_session_limits() {
+    // Version 3: the bytes of version 2 with the new version and sixteen more bytes at the end, the four session limits.
+    let frame = Frame::Ctl(Ctl::Init {
+        version: 3,
+        max_panes: 3,
+        max_scrollback_lines: 0x0001_0000,
+        max_image_mib: 0x0000_0040,
+        sessions: SessionLimits::DEFAULT,
+    });
+    let expected = init_bytes([0x04, 0x01, 0, 3, 0, 0, 0, 3, 0, 1, 0, 0, 0, 0, 0, 0x40]);
     assert_eq!(payload(&frame), expected);
+    assert_eq!(Frame::from_payload(&expected).expect("decodes"), frame);
+}
+
+#[test]
+fn init_the_session_limits_are_the_last_sixteen_bytes_in_the_order_tail_history_snapshot_timeout() {
+    // Every number differs and every byte of it is non-zero, so a swap of two fields or of two bytes shows.
+    let sessions = SessionLimits {
+        attach_tail_lines: 0x0102_0304,
+        history_max_lines: 0x1112_1314,
+        snapshot_max_bytes: 0x2122_2324,
+        writer_timeout_ms: 0x3132_3334,
+    };
+    let frame = Frame::Ctl(Ctl::Init { version: 3, max_panes: 0, max_scrollback_lines: 0, max_image_mib: 0, sessions });
+    let expected = vec![
+        0x04, 0x01, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 0x11, 0x12, 0x13, 0x14, 0x21, 0x22, 0x23,
+        0x24, 0x31, 0x32, 0x33, 0x34,
+    ];
+    assert_eq!(payload(&frame), expected);
+    assert_eq!(on_the_wire(&frame), prefixed(&expected));
     assert_eq!(Frame::from_payload(&expected).expect("decodes"), frame);
 }
 
@@ -96,44 +134,68 @@ fn tracer_init_is_kind_4_operation_1_then_version_and_the_three_caps() {
 const OLD_INIT: [u8; 12] = [0x04, 0x01, 0, 1, 0, 0, 0, 3, 0, 1, 0, 0];
 
 #[test]
-fn init_the_picture_cap_is_the_last_four_bytes_in_big_endian_and_the_edges_are_pinned() {
-    // Written out by hand: kind, operation, version 2, max_panes 0, max_scrollback_lines 0, then 4096 = 0x00001000.
-    let frame = Frame::Ctl(Ctl::Init { version: 2, max_panes: 0, max_scrollback_lines: 0, max_image_mib: 4096 });
-    let expected = vec![0x04, 0x01, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0];
+fn init_the_picture_cap_is_four_big_endian_bytes_and_the_edges_are_pinned() {
+    // Written out by hand: kind, operation, version 3, max_panes 0, max_scrollback_lines 0, then 4096 = 0x00001000.
+    let frame = Frame::Ctl(Ctl::Init {
+        version: 3,
+        max_panes: 0,
+        max_scrollback_lines: 0,
+        max_image_mib: 4096,
+        sessions: SessionLimits::DEFAULT,
+    });
+    let expected = init_bytes([0x04, 0x01, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10, 0]);
     assert_eq!(payload(&frame), expected);
     assert_eq!(on_the_wire(&frame), prefixed(&expected));
     assert_eq!(Frame::from_payload(&expected).expect("decodes"), frame);
 
     // Zero is a value, not an absence: the worker reads it as "no pictures".
-    let off = Frame::Ctl(Ctl::Init { version: 2, max_panes: 64, max_scrollback_lines: 10_000, max_image_mib: 0 });
-    let expected = vec![0x04, 0x01, 0, 2, 0, 0, 0, 64, 0, 0, 0x27, 0x10, 0, 0, 0, 0];
+    let off = Frame::Ctl(Ctl::Init {
+        version: 3,
+        max_panes: 64,
+        max_scrollback_lines: 10_000,
+        max_image_mib: 0,
+        sessions: SessionLimits::DEFAULT,
+    });
+    let expected = init_bytes([0x04, 0x01, 0, 3, 0, 0, 0, 64, 0, 0, 0x27, 0x10, 0, 0, 0, 0]);
     assert_eq!(payload(&off), expected);
     assert_eq!(Frame::from_payload(&expected).expect("decodes"), off);
 
     // The frame carries what it is given; the range of the key is the configuration's business.
-    let widest = Frame::Ctl(Ctl::Init { version: 2, max_panes: 1, max_scrollback_lines: 100, max_image_mib: u32::MAX });
-    let expected = vec![0x04, 0x01, 0, 2, 0, 0, 0, 1, 0, 0, 0, 100, 0xFF, 0xFF, 0xFF, 0xFF];
+    let widest = Frame::Ctl(Ctl::Init {
+        version: 3,
+        max_panes: 1,
+        max_scrollback_lines: 100,
+        max_image_mib: u32::MAX,
+        sessions: SessionLimits::DEFAULT,
+    });
+    let expected = init_bytes([0x04, 0x01, 0, 3, 0, 0, 0, 1, 0, 0, 0, 100, 0xFF, 0xFF, 0xFF, 0xFF]);
     assert_eq!(payload(&widest), expected);
     assert_eq!(Frame::from_payload(&expected).expect("decodes"), widest);
 }
 
 #[test]
-fn init_the_protocol_version_is_2() {
-    assert_eq!(PROTOCOL_VERSION, 2, "the first frame has a field that version 1 did not");
+fn init_the_protocol_version_is_3() {
+    assert_eq!(
+        PROTOCOL_VERSION, 3,
+        "the first frame has fields that version 2 did not, and the session frames are new"
+    );
 }
 
 #[test]
-fn init_a_frame_of_the_old_length_is_cut_off_and_one_byte_more_than_the_new_length_is_trailing() {
-    // The twelve bytes of version 1 end four bytes before the picture cap: the decoder says so and does not guess a cap.
+fn init_a_frame_of_an_older_length_is_cut_off_and_one_byte_more_than_the_new_length_is_trailing() {
+    // The twelve bytes of version 1 and the sixteen of version 2 end before the session limits: the decoder says so and
+    // does not guess a limit.
     assert!(matches!(Frame::from_payload(&OLD_INIT), Err(WireError::Truncated)));
-    let mut longer = vec![0x04, 0x01, 0, 2, 0, 0, 0, 3, 0, 1, 0, 0, 0, 0, 0, 0x40];
+    let version_2 = [0x04, 0x01, 0, 2, 0, 0, 0, 3, 0, 1, 0, 0, 0, 0, 0, 0x40];
+    assert!(matches!(Frame::from_payload(&version_2), Err(WireError::Truncated)));
+    let mut longer = init_bytes([0x04, 0x01, 0, 3, 0, 0, 0, 3, 0, 1, 0, 0, 0, 0, 0, 0x40]);
     assert!(Frame::from_payload(&longer).is_ok());
-    longer.push(0);
-    assert!(matches!(Frame::from_payload(&longer), Err(WireError::Trailing)));
-    // A frame cut anywhere inside the new four bytes is cut off as well.
-    for cut in 12..16 {
+    // A frame cut anywhere inside the new sixteen bytes is cut off as well.
+    for cut in 12..longer.len() {
         assert!(matches!(Frame::from_payload(&longer[..cut]), Err(WireError::Truncated)), "cut at {cut}");
     }
+    longer.push(0);
+    assert!(matches!(Frame::from_payload(&longer), Err(WireError::Trailing)));
 }
 
 #[test]
@@ -154,7 +216,13 @@ fn tracer_ready_is_kind_5_operation_1_and_nothing_else() {
 #[test]
 fn tracer_frames_read_back_one_after_another_and_the_end_between_two_is_none() {
     let frames = vec![
-        Frame::Ctl(Ctl::Init { version: 2, max_panes: 0, max_scrollback_lines: 0, max_image_mib: 0 }),
+        Frame::Ctl(Ctl::Init {
+            version: 3,
+            max_panes: 0,
+            max_scrollback_lines: 0,
+            max_image_mib: 0,
+            sessions: SessionLimits::DEFAULT,
+        }),
         Frame::Cmd(CmdFrame { socket: 1, request: 1, json: "{}".into() }),
         Frame::Res(Res { socket: 1, request: 1, body: ResBody::Ok("null".into()) }),
         Frame::Evt(Evt { target: 0, name: "frame".into(), text: "{}".into() }),
@@ -388,7 +456,13 @@ fn layout_pane_count_exiting_and_ctl_done() {
 /// One frame of every shape with a fixed length.
 fn fixed_frames() -> Vec<Frame> {
     vec![
-        Frame::Ctl(Ctl::Init { version: 2, max_panes: 3, max_scrollback_lines: 100, max_image_mib: 64 }),
+        Frame::Ctl(Ctl::Init {
+            version: 3,
+            max_panes: 3,
+            max_scrollback_lines: 100,
+            max_image_mib: 64,
+            sessions: SessionLimits::DEFAULT,
+        }),
         Frame::Ctl(Ctl::Attach { socket: 9 }),
         Frame::Ctl(Ctl::Detach { socket: 9 }),
         Frame::Ctl(Ctl::Unlock { ctl: 5, kind: SlotKind::Prf, key: key(1) }),
@@ -467,11 +541,18 @@ fn the_four_numbers_once_reserved_are_the_file_controls_and_a_short_frame_of_eac
 
 #[test]
 fn an_unknown_kind_or_operation_is_an_error_never_a_panic() {
-    for kind in [0u8, 6, 7, 0x7F, 0x80, 0xFF] {
+    // Kind 6 is the session frames; 7 is the first number nobody has.
+    for kind in [0u8, 7, 8, 0x7F, 0x80, 0xFF] {
         assert!(matches!(Frame::from_payload(&[kind, 0, 0, 0, 0]), Err(WireError::UnknownKind(k)) if k == kind));
     }
     for op in [0u8, 15, 16, 100, 255] {
         assert!(matches!(Frame::from_payload(&[0x04, op]), Err(WireError::UnknownOp { kind: 4, op: o }) if o == op), "ctl {op}");
+    }
+    for op in [0u8, 11, 12, 15, 20, 255] {
+        assert!(
+            matches!(Frame::from_payload(&[0x06, op, 0, 0, 0, 1]), Err(WireError::UnknownOp { kind: 6, op: o }) if o == op),
+            "ses {op}"
+        );
     }
     for op in [0u8, 6, 7, 255] {
         assert!(matches!(Frame::from_payload(&[0x05, op]), Err(WireError::UnknownOp { kind: 5, op: o }) if o == op), "note {op}");
@@ -947,4 +1028,475 @@ fn a_garbage_stream_of_file_controls_never_panics() {
         }
     }
     assert!(decoded > 100, "{decoded}");
+}
+
+// ---- the session frames ---------------------------------------------------------------------------------------------------
+
+const SOCKET_BYTES: [u8; 4] = [0x0A, 0x0B, 0x0C, 0x0D];
+const SOCKET: u32 = 0x0A0B_0C0D;
+const SESSION_BYTES: [u8; 4] = [0, 0, 1, 2];
+const SESSION: u32 = 0x0102;
+
+/// A session frame head: kind 6, the operation, the socket and, when there is one, the request number.
+fn ses_head(op: u8, request: bool) -> Vec<u8> {
+    let mut bytes = vec![0x06, op];
+    bytes.extend_from_slice(&SOCKET_BYTES);
+    if request {
+        bytes.extend_from_slice(&ID_BYTES);
+    }
+    bytes
+}
+
+fn info(id: u32, title: &str, cwd: &str) -> SessionInfo {
+    SessionInfo {
+        id,
+        title: title.into(),
+        cwd: cwd.into(),
+        cols: 80,
+        rows: 24,
+        started: 0x0102_0304_0506_0708,
+        attached: 2,
+        writer_held: true,
+    }
+}
+
+#[test]
+fn tracer_a_session_list_request_is_kind_6_operation_1_then_the_socket_and_the_request() {
+    let frame = Frame::Ses(Ses::List { socket: SOCKET, request: ID });
+    let expected = ses_head(1, true);
+    assert_eq!(expected.len(), 14);
+    pinned(frame, expected);
+}
+
+#[test]
+fn ses_new_is_operation_2_then_the_size() {
+    let mut expected = ses_head(2, true);
+    expected.extend_from_slice(&[0, 132, 0, 43]);
+    assert_eq!(expected.len(), 18);
+    pinned(Frame::Ses(Ses::New { socket: SOCKET, request: ID, cols: 132, rows: 43 }), expected);
+}
+
+#[test]
+fn ses_attach_is_operation_3_and_the_tail_is_a_flag_and_a_number_only_when_there_is_one() {
+    let mut without = ses_head(3, true);
+    without.extend_from_slice(&SESSION_BYTES);
+    without.push(0);
+    assert_eq!(without.len(), 19);
+    pinned(Frame::Ses(Ses::Attach { socket: SOCKET, request: ID, session: SESSION, tail: None }), without);
+
+    let mut with = ses_head(3, true);
+    with.extend_from_slice(&SESSION_BYTES);
+    with.extend_from_slice(&[1, 0, 0, 0x03, 0xE8]);
+    assert_eq!(with.len(), 23);
+    pinned(Frame::Ses(Ses::Attach { socket: SOCKET, request: ID, session: SESSION, tail: Some(1000) }), with);
+
+    // Zero rows of tail is a value: the client asked for the screen alone.
+    let mut none = ses_head(3, true);
+    none.extend_from_slice(&SESSION_BYTES);
+    none.extend_from_slice(&[1, 0, 0, 0, 0]);
+    pinned(Frame::Ses(Ses::Attach { socket: SOCKET, request: ID, session: SESSION, tail: Some(0) }), none);
+
+    // A flag that is neither 0 nor 1, and a tail that is cut off or has a byte too many.
+    let mut bad = ses_head(3, true);
+    bad.extend_from_slice(&SESSION_BYTES);
+    bad.push(2);
+    assert!(matches!(Frame::from_payload(&bad), Err(WireError::BadValue(_))));
+    let mut cut = ses_head(3, true);
+    cut.extend_from_slice(&SESSION_BYTES);
+    cut.extend_from_slice(&[1, 0, 0]);
+    assert!(matches!(Frame::from_payload(&cut), Err(WireError::Truncated)));
+    let mut long = ses_head(3, true);
+    long.extend_from_slice(&SESSION_BYTES);
+    long.extend_from_slice(&[0, 0]);
+    assert!(matches!(Frame::from_payload(&long), Err(WireError::Trailing)));
+}
+
+#[test]
+fn ses_detach_takeover_end_and_beat_are_operations_4_7_8_and_9_then_the_session() {
+    for (op, frame) in [
+        (4, Ses::Detach { socket: SOCKET, request: ID, session: SESSION }),
+        (7, Ses::Takeover { socket: SOCKET, request: ID, session: SESSION }),
+        (8, Ses::End { socket: SOCKET, request: ID, session: SESSION }),
+        (9, Ses::Beat { socket: SOCKET, request: ID, session: SESSION }),
+    ] {
+        let mut expected = ses_head(op, true);
+        expected.extend_from_slice(&SESSION_BYTES);
+        assert_eq!(expected.len(), 18);
+        pinned(Frame::Ses(frame), expected);
+    }
+}
+
+#[test]
+fn ses_input_is_operation_5_then_the_socket_the_session_and_the_bytes_to_the_end() {
+    let mut expected = ses_head(5, false);
+    expected.extend_from_slice(&SESSION_BYTES);
+    expected.extend_from_slice(b"ls -la\r");
+    pinned(Frame::Ses(Ses::Input { socket: SOCKET, session: SESSION, bytes: b"ls -la\r".to_vec() }), expected);
+}
+
+#[test]
+fn ses_resize_is_operation_6_then_the_session_and_the_size() {
+    let mut expected = ses_head(6, true);
+    expected.extend_from_slice(&SESSION_BYTES);
+    expected.extend_from_slice(&[0x01, 0x2C, 0, 50]);
+    assert_eq!(expected.len(), 22);
+    pinned(Frame::Ses(Ses::Resize { socket: SOCKET, request: ID, session: SESSION, cols: 300, rows: 50 }), expected);
+}
+
+#[test]
+fn ses_gone_is_operation_10_then_the_socket() {
+    pinned(Frame::Ses(Ses::Gone { socket: SOCKET }), vec![0x06, 0x0A, 0x0A, 0x0B, 0x0C, 0x0D]);
+}
+
+#[test]
+fn ses_answers_are_operation_16_then_the_socket_the_request_the_answer_kind_and_its_body() {
+    // The list: a count, then per session the id, the title, the directory, the size, the start, the clients, the writer.
+    let mut list = ses_head(16, true);
+    list.extend_from_slice(&[1, 0, 1]);
+    list.extend_from_slice(&SESSION_BYTES);
+    list.extend_from_slice(&[0, 2, b'h', b'i', 0, 4]);
+    list.extend_from_slice(b"/tmp");
+    list.extend_from_slice(&[0, 80, 0, 24]);
+    list.extend_from_slice(&ID_BYTES);
+    list.extend_from_slice(&[0, 2, 1]);
+    pinned(
+        Frame::Ses(Ses::Answer {
+            socket: SOCKET,
+            request: ID,
+            answer: SesAnswer::Listed(vec![info(SESSION, "hi", "/tmp")]),
+        }),
+        list,
+    );
+
+    let mut empty = ses_head(16, true);
+    empty.extend_from_slice(&[1, 0, 0]);
+    pinned(Frame::Ses(Ses::Answer { socket: SOCKET, request: ID, answer: SesAnswer::Listed(Vec::new()) }), empty);
+
+    let mut created = ses_head(16, true);
+    created.push(2);
+    created.extend_from_slice(&SESSION_BYTES);
+    pinned(
+        Frame::Ses(Ses::Answer { socket: SOCKET, request: ID, answer: SesAnswer::Created { session: SESSION } }),
+        created,
+    );
+
+    let mut attached = ses_head(16, true);
+    attached.extend_from_slice(&[3, 0, 100, 0, 30, 1, 1, 0, 0, 0x10, 0]);
+    pinned(
+        Frame::Ses(Ses::Answer {
+            socket: SOCKET,
+            request: ID,
+            answer: SesAnswer::Attached(Attached {
+                cols: 100,
+                rows: 30,
+                writer: WriterState::Watching,
+                more: true,
+                snapshot_bytes: 4096,
+            }),
+        }),
+        attached,
+    );
+
+    let mut done = ses_head(16, true);
+    done.push(4);
+    pinned(Frame::Ses(Ses::Answer { socket: SOCKET, request: ID, answer: SesAnswer::Done }), done);
+    let mut ended = ses_head(16, true);
+    ended.push(5);
+    pinned(Frame::Ses(Ses::Answer { socket: SOCKET, request: ID, answer: SesAnswer::Ended }), ended);
+
+    for (byte, error) in [
+        (1, SesError::NotFound),
+        (2, SesError::Refused),
+        (3, SesError::Busy),
+        (4, SesError::TooMany),
+        (5, SesError::BadRequest),
+    ] {
+        let mut failed = ses_head(16, true);
+        failed.extend_from_slice(&[6, byte]);
+        pinned(Frame::Ses(Ses::Answer { socket: SOCKET, request: ID, answer: SesAnswer::Failed(error) }), failed);
+    }
+    for (byte, state) in [(0, WriterState::Writing), (1, WriterState::Watching), (2, WriterState::Free)] {
+        let mut attached = ses_head(16, true);
+        attached.extend_from_slice(&[3, 0, 1, 0, 1, byte, 0, 0, 0, 0, 0]);
+        let frame = Frame::Ses(Ses::Answer {
+            socket: SOCKET,
+            request: ID,
+            answer: SesAnswer::Attached(Attached { cols: 1, rows: 1, writer: state, more: false, snapshot_bytes: 0 }),
+        });
+        pinned(frame, attached);
+    }
+}
+
+#[test]
+fn ses_snapshot_and_live_are_operations_17_and_18_then_the_session_the_sequence_and_the_bytes() {
+    let mut snapshot = ses_head(17, false);
+    snapshot.extend_from_slice(&SESSION_BYTES);
+    snapshot.extend_from_slice(&[0, 0, 0, 0]);
+    snapshot.extend_from_slice(b"\x1b[2Jhello");
+    pinned(
+        Frame::Ses(Ses::Snapshot { socket: SOCKET, session: SESSION, seq: 0, bytes: b"\x1b[2Jhello".to_vec() }),
+        snapshot,
+    );
+
+    let mut live = ses_head(18, false);
+    live.extend_from_slice(&SESSION_BYTES);
+    live.extend_from_slice(&[0, 0, 1, 0]);
+    live.extend_from_slice(&[0, 255, 7]);
+    pinned(Frame::Ses(Ses::Live { socket: SOCKET, session: SESSION, seq: 256, bytes: vec![0, 255, 7] }), live);
+}
+
+#[test]
+fn ses_events_are_operation_19_then_the_session_the_event_and_its_body() {
+    let head = |body: &[u8]| {
+        let mut bytes = ses_head(19, false);
+        bytes.extend_from_slice(&SESSION_BYTES);
+        bytes.extend_from_slice(body);
+        bytes
+    };
+    for (byte, state) in [(0, WriterState::Writing), (1, WriterState::Watching), (2, WriterState::Free)] {
+        pinned(
+            Frame::Ses(Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Writer(state) }),
+            head(&[1, byte]),
+        );
+    }
+    pinned(Frame::Ses(Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Exited(None) }), head(&[2, 0]));
+    pinned(
+        Frame::Ses(Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Exited(Some(0x0000_0102)) }),
+        head(&[2, 1, 0, 0, 1, 2]),
+    );
+    pinned(Frame::Ses(Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Resync }), head(&[3]));
+    pinned(
+        Frame::Ses(Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Size { cols: 90, rows: 20 } }),
+        head(&[4, 0, 90, 0, 20]),
+    );
+}
+
+#[test]
+fn ses_frames_with_a_fixed_length_are_an_error_cut_anywhere_or_with_a_byte_too_many() {
+    let frames = vec![
+        Ses::List { socket: SOCKET, request: ID },
+        Ses::New { socket: SOCKET, request: ID, cols: 80, rows: 24 },
+        Ses::Attach { socket: SOCKET, request: ID, session: SESSION, tail: Some(5) },
+        Ses::Detach { socket: SOCKET, request: ID, session: SESSION },
+        Ses::Resize { socket: SOCKET, request: ID, session: SESSION, cols: 80, rows: 24 },
+        Ses::Takeover { socket: SOCKET, request: ID, session: SESSION },
+        Ses::End { socket: SOCKET, request: ID, session: SESSION },
+        Ses::Beat { socket: SOCKET, request: ID, session: SESSION },
+        Ses::Gone { socket: SOCKET },
+        Ses::Answer { socket: SOCKET, request: ID, answer: SesAnswer::Done },
+        Ses::Answer { socket: SOCKET, request: ID, answer: SesAnswer::Created { session: SESSION } },
+        Ses::Answer {
+            socket: SOCKET,
+            request: ID,
+            answer: SesAnswer::Attached(Attached {
+                cols: 80,
+                rows: 24,
+                writer: WriterState::Writing,
+                more: false,
+                snapshot_bytes: 9,
+            }),
+        },
+        Ses::Answer { socket: SOCKET, request: ID, answer: SesAnswer::Failed(SesError::Busy) },
+        Ses::Answer { socket: SOCKET, request: ID, answer: SesAnswer::Listed(vec![info(SESSION, "t", "/")]) },
+        Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Exited(Some(3)) },
+        Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Size { cols: 1, rows: 1 } },
+        Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Resync },
+    ];
+    for ses in frames {
+        let frame = Frame::Ses(ses);
+        let full = payload(&frame);
+        for cut in 0..full.len() {
+            assert!(Frame::from_payload(&full[..cut]).is_err(), "{frame:?} cut to {cut} of {} bytes", full.len());
+        }
+        assert_eq!(Frame::from_payload(&full).expect("whole"), frame);
+        let mut longer = full.clone();
+        longer.push(0);
+        assert!(Frame::from_payload(&longer).is_err(), "{frame:?} with a byte too many");
+    }
+}
+
+#[test]
+fn a_session_frame_refuses_an_id_of_0_a_size_of_0_and_a_byte_it_does_not_know() {
+    // The encoder and the decoder say the same.
+    for bad in [
+        Ses::List { socket: 0, request: ID },
+        Ses::List { socket: SOCKET, request: 0 },
+        Ses::New { socket: SOCKET, request: ID, cols: 0, rows: 24 },
+        Ses::New { socket: SOCKET, request: ID, cols: 80, rows: 0 },
+        Ses::Attach { socket: SOCKET, request: ID, session: 0, tail: None },
+        Ses::Resize { socket: SOCKET, request: ID, session: SESSION, cols: 0, rows: 1 },
+        Ses::Gone { socket: 0 },
+        Ses::Input { socket: SOCKET, session: 0, bytes: vec![1] },
+        Ses::Event { socket: SOCKET, session: 0, event: SesEvent::Resync },
+        Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Size { cols: 0, rows: 1 } },
+        Ses::Answer { socket: SOCKET, request: ID, answer: SesAnswer::Created { session: 0 } },
+    ] {
+        assert!(Frame::Ses(bad.clone()).to_payload().is_err(), "{bad:?} encoded");
+    }
+    for bytes in [
+        // The socket 0 of a list, a request of 0, a session of 0, a size of 0.
+        vec![0x06, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        vec![0x06, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+        vec![0x06, 4, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+        vec![0x06, 2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 24],
+        // An operation, an answer kind, an error, a writer state and an event that do not exist.
+        vec![0x06, 0, 0, 0, 0, 1],
+        vec![0x06, 11, 0, 0, 0, 1],
+        vec![0x06, 20, 0, 0, 0, 1],
+        vec![0x06, 16, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0],
+        vec![0x06, 16, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 7],
+        vec![0x06, 16, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 6, 0],
+        vec![0x06, 16, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 6, 6],
+        vec![0x06, 16, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 3, 0, 1, 0, 1, 3, 0, 0, 0, 0, 0],
+        vec![0x06, 19, 0, 0, 0, 1, 0, 0, 0, 1, 0],
+        vec![0x06, 19, 0, 0, 0, 1, 0, 0, 0, 1, 5],
+        vec![0x06, 19, 0, 0, 0, 1, 0, 0, 0, 1, 1, 3],
+        vec![0x06, 19, 0, 0, 0, 1, 0, 0, 0, 1, 2, 2],
+        vec![0x06, 19, 0, 0, 0, 1, 0, 0, 0, 1, 4, 0, 0, 0, 1],
+    ] {
+        assert!(Frame::from_payload(&bytes).is_err(), "{bytes:?} decoded");
+    }
+    // A kind 7 is still not a kind.
+    assert!(matches!(Frame::from_payload(&[0x07, 1]), Err(WireError::UnknownKind(7))));
+}
+
+#[test]
+fn the_bytes_of_a_session_frame_are_one_to_65536_and_nothing_else_travels() {
+    let chunk = |len: usize| vec![0x41; len];
+    for (empty, edge, over) in [
+        (
+            Ses::Input { socket: SOCKET, session: SESSION, bytes: Vec::new() },
+            Ses::Input { socket: SOCKET, session: SESSION, bytes: chunk(65_536) },
+            Ses::Input { socket: SOCKET, session: SESSION, bytes: chunk(65_537) },
+        ),
+        (
+            Ses::Snapshot { socket: SOCKET, session: SESSION, seq: 0, bytes: Vec::new() },
+            Ses::Snapshot { socket: SOCKET, session: SESSION, seq: 0, bytes: chunk(65_536) },
+            Ses::Snapshot { socket: SOCKET, session: SESSION, seq: 0, bytes: chunk(65_537) },
+        ),
+        (
+            Ses::Live { socket: SOCKET, session: SESSION, seq: 1, bytes: Vec::new() },
+            Ses::Live { socket: SOCKET, session: SESSION, seq: 1, bytes: chunk(65_536) },
+            Ses::Live { socket: SOCKET, session: SESSION, seq: 1, bytes: chunk(65_537) },
+        ),
+    ] {
+        assert!(Frame::Ses(empty.clone()).to_payload().is_err(), "{empty:?} encoded");
+        assert!(Frame::Ses(over.clone()).to_payload().is_err(), "{over:?} encoded");
+        let frame = Frame::Ses(edge);
+        let bytes = payload(&frame);
+        assert_eq!(Frame::from_payload(&bytes).expect("the widest chunk"), frame);
+        // The same two refusals on the decoding side: nothing after the head, and one byte past the cap.
+        let head = bytes.len() - 65_536;
+        assert!(Frame::from_payload(&bytes[..head]).is_err(), "no bytes decoded");
+        let mut over = bytes.clone();
+        over.push(0x41);
+        assert!(Frame::from_payload(&over).is_err(), "65537 bytes decoded");
+    }
+}
+
+#[test]
+fn a_list_has_at_most_1024_sessions_and_a_title_and_a_directory_have_their_own_caps() {
+    let many = |count: usize| (1..=u32::try_from(count).expect("small")).map(|id| info(id, "", "")).collect::<Vec<_>>();
+    let ok = Frame::Ses(Ses::Answer { socket: SOCKET, request: ID, answer: SesAnswer::Listed(many(1024)) });
+    assert_eq!(Frame::from_payload(&payload(&ok)).expect("1024 sessions"), ok);
+    assert!(
+        Frame::Ses(Ses::Answer { socket: SOCKET, request: ID, answer: SesAnswer::Listed(many(1025)) })
+            .to_payload()
+            .is_err()
+    );
+    // The decoder refuses the count before it reads a session.
+    let mut over = ses_head(16, true);
+    over.extend_from_slice(&[1, 0x04, 0x01]);
+    assert!(matches!(Frame::from_payload(&over), Err(WireError::BadValue(_))));
+
+    let title = |len: usize| {
+        Frame::Ses(Ses::Answer {
+            socket: SOCKET,
+            request: ID,
+            answer: SesAnswer::Listed(vec![info(1, &"t".repeat(len), "")]),
+        })
+    };
+    let cwd = |len: usize| {
+        Frame::Ses(Ses::Answer {
+            socket: SOCKET,
+            request: ID,
+            answer: SesAnswer::Listed(vec![info(1, "", &"d".repeat(len))]),
+        })
+    };
+    for frame in [title(256), cwd(4096)] {
+        assert_eq!(Frame::from_payload(&payload(&frame)).expect("the widest text"), frame);
+    }
+    assert!(title(257).to_payload().is_err());
+    assert!(cwd(4097).to_payload().is_err());
+    // On the decoding side: a length of 257 for a title is refused even when the bytes are there.
+    let mut long_title = ses_head(16, true);
+    long_title.extend_from_slice(&[1, 0, 1, 0, 0, 0, 1, 0x01, 0x01]);
+    long_title.extend_from_slice(&[b't'; 257]);
+    long_title.extend_from_slice(&[0, 0, 0, 80, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert!(matches!(Frame::from_payload(&long_title), Err(WireError::BadValue(_))));
+    // A title that is not UTF-8 is not a title.
+    let mut bad_text = ses_head(16, true);
+    bad_text.extend_from_slice(&[1, 0, 1, 0, 0, 0, 1, 0, 1, 0xFF, 0, 0, 0, 80, 0, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert!(Frame::from_payload(&bad_text).is_err());
+}
+
+#[test]
+fn only_the_requests_a_supervisor_sends_are_requests() {
+    for (ses, request) in [
+        (Ses::List { socket: 1, request: 1 }, true),
+        (Ses::Input { socket: 1, session: 1, bytes: vec![1] }, true),
+        (Ses::Gone { socket: 1 }, true),
+        (Ses::Answer { socket: 1, request: 1, answer: SesAnswer::Done }, false),
+        (Ses::Snapshot { socket: 1, session: 1, seq: 0, bytes: vec![1] }, false),
+        (Ses::Live { socket: 1, session: 1, seq: 0, bytes: vec![1] }, false),
+        (Ses::Event { socket: 1, session: 1, event: SesEvent::Resync }, false),
+    ] {
+        assert_eq!(ses.is_request(), request, "{ses:?}");
+    }
+}
+
+#[test]
+fn the_debug_text_of_a_session_frame_holds_no_byte_of_a_terminal_no_title_and_no_directory() {
+    let secret = "hunter2-the-secret";
+    let frames = [
+        Ses::Input { socket: 1, session: 1, bytes: secret.as_bytes().to_vec() },
+        Ses::Snapshot { socket: 1, session: 1, seq: 0, bytes: secret.as_bytes().to_vec() },
+        Ses::Live { socket: 1, session: 1, seq: 0, bytes: secret.as_bytes().to_vec() },
+        Ses::Answer { socket: 1, request: 1, answer: SesAnswer::Listed(vec![info(1, secret, secret)]) },
+    ];
+    for ses in frames {
+        let text = format!("{ses:?} {:?}", Frame::Ses(ses.clone()));
+        assert!(!text.contains(secret), "{text}");
+        assert!(!text.contains("104, 117"), "the bytes as numbers: {text}");
+    }
+    let text = format!("{:?}", Ses::Live { socket: 4, session: 5, seq: 6, bytes: vec![1, 2, 3] });
+    assert!(text.contains("Live") && text.contains("bytes: 3"), "{text}");
+}
+
+#[test]
+fn a_garbage_stream_of_session_frames_never_panics_and_what_decodes_encodes_again() {
+    let mut noise = Noise(0x1234_5678_9ABC_DEF0);
+    let mut decoded = 0usize;
+    for case in 0..10_000 {
+        let length = 2 + usize::try_from(noise.below(40)).expect("small");
+        let mut bytes: Vec<u8> = (0..length).map(|_| u8::try_from(noise.below(256)).expect("a byte")).collect();
+        bytes[0] = 6;
+        // The operation is mostly a real one, and the numbers small, so that the fields get past the zeros.
+        if noise.below(10) < 8 {
+            let ops = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 16, 17, 18, 19];
+            bytes[1] = ops[usize::try_from(noise.below(ops.len() as u64)).expect("small")];
+            for byte in bytes.iter_mut().skip(2) {
+                if noise.below(3) != 0 {
+                    *byte = u8::try_from(noise.below(4)).expect("small");
+                }
+            }
+        }
+        if let Ok(frame) = Frame::from_payload(&bytes) {
+            decoded += 1;
+            let again = Frame::from_payload(&payload(&frame)).expect("a decoded frame encodes and decodes");
+            assert_eq!(again, frame, "case {case}");
+        }
+        let _ = read_frame(&mut Cursor::new(prefixed(&bytes)));
+    }
+    assert!(decoded > 50, "the generator reached the decoder: {decoded} frames decoded");
 }

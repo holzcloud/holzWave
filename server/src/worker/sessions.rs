@@ -908,8 +908,9 @@ impl StreamStart {
             }
             seq = seq.wrapping_add(1);
         }
-        while healthy {
-            if self.stop.load(Ordering::SeqCst) {
+        loop {
+            // A snapshot that could not be sent ends the stream before it starts; so does a stream ended on purpose.
+            if !healthy || self.stop.load(Ordering::SeqCst) {
                 break;
             }
             match self.rx.recv(Duration::from_millis(250)) {

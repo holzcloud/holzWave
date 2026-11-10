@@ -27,6 +27,7 @@ use holzwave_server::wire::{
 };
 use holzwave_server::worker::runtime::WorkerMode;
 use holzwave_server::worker::secretstore::SlotKind;
+use holzwave_server::worker::sessions::SessionLimits;
 use serde_json::Value;
 use sup_env::{Client, PATIENCE, Reply, ScriptEnv, ScriptHandle, account, expected_init};
 #[cfg(feature = "in-process-workers")]
@@ -1783,7 +1784,13 @@ async fn control_the_four_frames_the_supervisor_owns_are_refused_with_a_sentence
     let mut script = env.launcher.script(PATIENCE);
     let settings = SupervisorSettings::default();
     for control in [
-        Ctl::Init { version: 1, max_panes: 0, max_scrollback_lines: 0, max_image_mib: 64 },
+        Ctl::Init {
+            version: 1,
+            max_panes: 0,
+            max_scrollback_lines: 0,
+            max_image_mib: 64,
+            sessions: SessionLimits::DEFAULT,
+        },
         Ctl::Attach { socket: 99 },
         Ctl::Detach { socket: 1 },
         Ctl::Shutdown,

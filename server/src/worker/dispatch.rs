@@ -27,7 +27,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::log::{self, Level};
-use crate::wire::{CmdFrame, Evt, ExitReason, Frame, Note, Res, ResBody, valid_event_name, write_frame};
+use crate::wire::{CmdFrame, Evt, ExitReason, Frame, Note, Res, ResBody, Ses, SesAnswer, valid_event_name, write_frame};
 
 /// The label of the one window of a person (every browser connection shows it).
 pub const WINDOW: &str = "main";
@@ -220,7 +220,11 @@ fn weight(frame: &Frame) -> usize {
             ResBody::Binary(b) => b.len(),
         },
         Frame::Evt(evt) => evt.name.len() + evt.text.len(),
-        Frame::Ctl(_) | Frame::Note(_) => 0,
+        Frame::Ses(Ses::Snapshot { bytes, .. } | Ses::Live { bytes, .. } | Ses::Input { bytes, .. }) => bytes.len(),
+        Frame::Ses(Ses::Answer { answer: SesAnswer::Listed(list), .. }) => {
+            list.iter().map(|info| 40 + info.title.len() + info.cwd.len()).sum()
+        }
+        Frame::Ses(_) | Frame::Ctl(_) | Frame::Note(_) => 0,
     }
 }
 
@@ -300,6 +304,22 @@ impl Outbound {
         drop(inner);
         self.ready.notify_one();
         Pushed::Queued
+    }
+
+    /// Offers the bytes of a session's stream: over the soft cap they are refused, and the caller ends that stream and tells
+    /// its client to attach again. Unlike an event or an answer they must not be kept: a client that does not read would
+    /// otherwise grow the queue to the hard cap, which ends the worker of the whole person.
+    pub fn push_stream(&self, frame: Frame) -> Pushed {
+        {
+            let inner = self.inner();
+            if inner.dead {
+                return Pushed::Dead;
+            }
+            if inner.closed || inner.bytes >= self.limits.soft {
+                return Pushed::Dropped;
+            }
+        }
+        self.push(frame)
     }
 
     /// Offers the frame event of `pane` without building it when the queue is over the soft cap.
@@ -457,7 +477,10 @@ const UNKNOWN: u64 = u64::MAX;
 /// The sink of the core over the outbound queue: every event becomes one `Evt` frame with the text the desktop sends.
 pub struct ServerSink {
     queue: Arc<Outbound>,
+    /// The count the supervisor was told last.
     panes: AtomicU64,
+    /// The panes of the layout and the sessions that run outside it, which are announced together.
+    counts: Mutex<(usize, usize)>,
     log: WorkerLog,
     /// Told the name, the arguments and the outcome of every command that ran, once it has run.
     observer: OnceLock<Observer>,
@@ -472,7 +495,7 @@ impl ServerSink {
     }
 
     pub fn with_log(queue: Arc<Outbound>, log: WorkerLog) -> ServerSink {
-        ServerSink { queue, panes: AtomicU64::new(UNKNOWN), log, observer: OnceLock::new() }
+        ServerSink { queue, panes: AtomicU64::new(UNKNOWN), counts: Mutex::new((0, 0)), log, observer: OnceLock::new() }
     }
 
     /// Lets `observer` see every command that ran. It can be set once; a second call changes nothing.
@@ -486,12 +509,27 @@ impl ServerSink {
         }
     }
 
-    /// Tells the supervisor how many panes there are, when that is not what it was told last.
+    /// Tells the supervisor how many panes there are, when that is not what it was told last. `count` is the panes of the
+    /// layout; the sessions that run outside it ([`ServerSink::announce_sessions`]) are counted with them.
     pub fn announce_panes(&self, count: usize) {
-        let count = u64::try_from(count).unwrap_or(u64::MAX - 1);
-        if self.panes.swap(count, Ordering::SeqCst) != count {
-            let count = u32::try_from(count).unwrap_or(u32::MAX);
-            self.queue.push(Frame::Note(Note::PaneCount(count)));
+        let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
+        counts.0 = count;
+        self.announce_total(*counts);
+    }
+
+    /// Tells the supervisor the new count when the number of sessions changed.
+    pub fn announce_sessions(&self, count: usize) {
+        let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
+        counts.1 = count;
+        self.announce_total(*counts);
+    }
+
+    /// Announces the sum while the lock of the counts is held, so that the order of the notes is the order of the changes.
+    fn announce_total(&self, (layout, sessions): (usize, usize)) {
+        let total = u64::try_from(layout.saturating_add(sessions)).unwrap_or(u64::MAX - 1);
+        if self.panes.swap(total, Ordering::SeqCst) != total {
+            let total = u32::try_from(total).unwrap_or(u32::MAX);
+            self.queue.push(Frame::Note(Note::PaneCount(total)));
         }
     }
 

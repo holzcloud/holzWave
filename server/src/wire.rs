@@ -39,8 +39,10 @@
 //! 0x04 Ctl   supervisor -> worker
 //!   0      u8    kind = 4
 //!   1      u8    operation
-//!   1 Init          2..4 u16 protocol version (1) | 4..8 u32 most panes, 0 for no cap | 8..12 u32 most scrollback lines,
-//!                   0 for no cap                                                                      (12 bytes)
+//!   1 Init          2..4 u16 protocol version (3) | 4..8 u32 most panes, 0 for no cap | 8..12 u32 most scrollback lines,
+//!                   0 for no cap | 12..16 u32 most MiB of pictures, 0 for none | 16..20 u32 rows of scrollback an attach
+//!                   brings by default | 20..24 u32 most rows an attach may bring | 24..28 u32 most bytes of a snapshot |
+//!                   28..32 u32 milliseconds of silence after which the writer of a session loses the right  (32 bytes)
 //!   2 Attach        2..6 u32 socket id (not 0)                                                         (6 bytes)
 //!   3 Detach        2..6 u32 socket id (not 0)                                                         (6 bytes)
 //!   4 Unlock        2..10 u64 control id | 10 u8 key kind | 11..43 the key                             (43 bytes)
@@ -80,6 +82,37 @@
 //!   3 PaneCount     2..6 u32 panes in all windows                                                      (6 bytes)
 //!   4 Exiting       2 u8 reason: 0 clean, 1 failure                                                    (3 bytes)
 //!   5 CtlDone       2..10 u64 control id | 10 u8 outcome: 0 done, 1 locked, 2 refused, 3 failed, 4 absent (11 bytes)
+//!
+//! 0x06 Ses   both ways: the sessions that live in the worker, for the sockets of devices. `socket` is the id of the
+//!            device socket (not 0), `session` the id the worker made (not 0), `request` the supervisor's number (not 0).
+//!   0      u8    kind = 6
+//!   1      u8    operation
+//!   supervisor -> worker (a request is answered by exactly one `Answer` with its number, except `Input` and `Gone`):
+//!   1 List       2..6 socket | 6..14 request                                                              (14 bytes)
+//!   2 New        2..6 socket | 6..14 request | 14..16 u16 cols, not 0 | 16..18 u16 rows, not 0            (18 bytes)
+//!   3 Attach     2..6 socket | 6..14 request | 14..18 session | 18 u8 has a tail: 0 or 1 | 19..23 u32 rows of tail,
+//!                only when there is one                                                              (19 or 23 bytes)
+//!   4 Detach     2..6 socket | 6..14 request | 14..18 session                                              (18 bytes)
+//!   5 Input      2..6 socket | 6..10 session | 10.. the bytes, 1 to 65536, to the end of the frame; never answered
+//!   6 Resize     2..6 socket | 6..14 request | 14..18 session | 18..20 u16 cols | 20..22 u16 rows, neither 0 (22 bytes)
+//!   7 Takeover   2..6 socket | 6..14 request | 14..18 session                                              (18 bytes)
+//!   8 End        2..6 socket | 6..14 request | 14..18 session                                              (18 bytes)
+//!   9 Beat       2..6 socket | 6..14 request | 14..18 session                                              (18 bytes)
+//!   10 Gone      2..6 socket; the socket ended: it leaves every session; never answered                    (6 bytes)
+//!   worker -> supervisor:
+//!   16 Answer    2..6 socket | 6..14 request | 14 u8 answer: 1 list, 2 created, 3 attached, 4 done, 5 ended, 6 failed
+//!                1 list: u16 count 0 to 1024, then per session: u32 id | u16 title length 0 to 256 and the title |
+//!                  u16 directory length 0 to 4096 and the directory | u16 cols | u16 rows | u64 start in Unix seconds |
+//!                  u16 attached | u8 writer held: 0 or 1
+//!                2 created: u32 session
+//!                3 attached: u16 cols | u16 rows | u8 writer: 0 writing, 1 watching, 2 free | u8 older lines exist: 0 or 1 |
+//!                  u32 bytes of snapshot that follow in `Snapshot` frames
+//!                6 failed: u8 error: 1 not found, 2 refused, 3 busy, 4 too many, 5 bad request
+//!   17 Snapshot  2..6 socket | 6..10 session | 10..14 u32 seq | 14.. the bytes, 1 to 65536
+//!   18 Live      2..6 socket | 6..10 session | 10..14 u32 seq, which continues the count of the snapshot | 14.. the bytes,
+//!                1 to 65536
+//!   19 Event     2..6 socket | 6..10 session | 10 u8 event: 1 writer (u8 state as above), 2 exited (u8 has a status: 0 or 1,
+//!                u32 status only when there is one), 3 resync, 4 size (u16 cols, u16 rows)
 //! ```
 //!
 //! A frame that holds a key prints nothing of it in `Debug`, and the key is wiped from the frame when it is dropped.
@@ -92,7 +125,12 @@ use tokio_util::codec::LengthDelimitedCodec;
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 use crate::unlock::{KEY_BYTES, Kek};
+use crate::worker::lease::WriterState;
 use crate::worker::secretstore::SlotKind;
+use crate::worker::sessions::{
+    Attached, CHUNK_BYTES, MAX_CWD_BYTES, MAX_INPUT_BYTES, MAX_LISTED, MAX_TITLE_BYTES, SesError, SessionInfo,
+    SessionLimits,
+};
 
 /// The most bytes of payload a frame carries: the largest command message (8 MiB for a paste, doubled for the JSON
 /// escaping of a document) is below 16 MiB, plus room for the fixed head.
@@ -108,6 +146,8 @@ pub const KIND_EVT: u8 = 3;
 pub const KIND_CTL: u8 = 4;
 /// The kind byte of a note.
 pub const KIND_NOTE: u8 = 5;
+/// The kind byte of a session frame.
+pub const KIND_SES: u8 = 6;
 
 /// The operation number of `Init`.
 pub const OP_INIT: u8 = 1;
@@ -149,8 +189,8 @@ pub const NOTE_EXITING: u8 = 4;
 /// The operation number of the note `CtlDone`.
 pub const NOTE_CTL_DONE: u8 = 5;
 
-/// The protocol version of the `Init` control.
-pub const PROTOCOL_VERSION: u16 = 2;
+/// The protocol version of the `Init` control. Version 3 added the session frames and the session limits of `Init`.
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// The socket id on which a worker answers a file control. A browser connection never has this id.
 pub const FILE_SOCKET: u32 = u32::MAX;
@@ -183,7 +223,7 @@ pub enum WireError {
     Truncated,
     /// Bytes follow the last field.
     Trailing,
-    /// The kind byte is not one of the five.
+    /// The kind byte is not one of the six.
     UnknownKind(u8),
     /// The operation byte of a control or note is not one the decoder knows.
     UnknownOp { kind: u8, op: u8 },
@@ -358,8 +398,9 @@ pub fn valid_token(token: &str) -> bool {
 #[derive(Clone, PartialEq, Eq)]
 pub enum Ctl {
     /// The first frame: the protocol version and the caps of this person. 0 is no cap for the panes and the scrollback;
-    /// for `max_image_mib`, the most MiB of pictures one pane keeps, 0 means no pictures at all.
-    Init { version: u16, max_panes: u32, max_scrollback_lines: u32, max_image_mib: u32 },
+    /// for `max_image_mib`, the most MiB of pictures one pane keeps, 0 means no pictures at all. `sessions` are the four
+    /// numbers that bound what a device may ask of a session.
+    Init { version: u16, max_panes: u32, max_scrollback_lines: u32, max_image_mib: u32, sessions: SessionLimits },
     /// A browser connection is attached: it gets the replay of titles and working directories.
     Attach { socket: u32 },
     /// A browser connection is gone.
@@ -394,12 +435,13 @@ pub enum Ctl {
 impl fmt::Debug for Ctl {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Ctl::Init { version, max_panes, max_scrollback_lines, max_image_mib } => f
+            Ctl::Init { version, max_panes, max_scrollback_lines, max_image_mib, sessions } => f
                 .debug_struct("Init")
                 .field("version", version)
                 .field("max_panes", max_panes)
                 .field("max_scrollback_lines", max_scrollback_lines)
                 .field("max_image_mib", max_image_mib)
+                .field("sessions", sessions)
                 .finish(),
             Ctl::Attach { socket } => f.debug_struct("Attach").field("socket", socket).finish(),
             Ctl::Detach { socket } => f.debug_struct("Detach").field("socket", socket).finish(),
@@ -485,6 +527,236 @@ pub enum Frame {
     Evt(Evt),
     Ctl(Ctl),
     Note(Note),
+    Ses(Ses),
+}
+
+/// What a worker answers to a request about sessions.
+#[derive(Clone, PartialEq, Eq)]
+pub enum SesAnswer {
+    /// The sessions of the person, with an id, a title and a size.
+    Listed(Vec<SessionInfo>),
+    /// A session was made.
+    Created { session: u32 },
+    /// The attach was accepted: what follows are the snapshot's bytes and then the live bytes.
+    Attached(Attached),
+    /// Done (a detach, a resize, a takeover, a beat).
+    Done,
+    /// The program of the session was told to end.
+    Ended,
+    /// Not done, for one of a closed set of reasons.
+    Failed(SesError),
+}
+
+/// What a worker tells a device socket about a session on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SesEvent {
+    /// This socket's own view of the right to write changed.
+    Writer(WriterState),
+    /// The program ended, with its status when it could be read.
+    Exited(Option<u32>),
+    /// The stream of this socket was lost; attach again.
+    Resync,
+    /// The grid of the session changed.
+    Size { cols: u16, rows: u16 },
+}
+
+/// A frame about the sessions that live in a worker. The requests come from the supervisor on behalf of a device socket,
+/// the answers, the bytes and the events go back.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Ses {
+    List {
+        socket: u32,
+        request: u64,
+    },
+    New {
+        socket: u32,
+        request: u64,
+        cols: u16,
+        rows: u16,
+    },
+    Attach {
+        socket: u32,
+        request: u64,
+        session: u32,
+        tail: Option<u32>,
+    },
+    Detach {
+        socket: u32,
+        request: u64,
+        session: u32,
+    },
+    /// Input bytes; never answered, dropped unless the socket holds the right to write.
+    Input {
+        socket: u32,
+        session: u32,
+        bytes: Vec<u8>,
+    },
+    Resize {
+        socket: u32,
+        request: u64,
+        session: u32,
+        cols: u16,
+        rows: u16,
+    },
+    Takeover {
+        socket: u32,
+        request: u64,
+        session: u32,
+    },
+    End {
+        socket: u32,
+        request: u64,
+        session: u32,
+    },
+    Beat {
+        socket: u32,
+        request: u64,
+        session: u32,
+    },
+    /// The socket ended: it leaves every session. Never answered.
+    Gone {
+        socket: u32,
+    },
+    Answer {
+        socket: u32,
+        request: u64,
+        answer: SesAnswer,
+    },
+    Snapshot {
+        socket: u32,
+        session: u32,
+        seq: u32,
+        bytes: Vec<u8>,
+    },
+    Live {
+        socket: u32,
+        session: u32,
+        seq: u32,
+        bytes: Vec<u8>,
+    },
+    Event {
+        socket: u32,
+        session: u32,
+        event: SesEvent,
+    },
+}
+
+impl Ses {
+    /// Whether the supervisor sends this frame (and a worker accepts it), as opposed to the frames only a worker writes.
+    pub fn is_request(&self) -> bool {
+        matches!(
+            self,
+            Ses::List { .. }
+                | Ses::New { .. }
+                | Ses::Attach { .. }
+                | Ses::Detach { .. }
+                | Ses::Input { .. }
+                | Ses::Resize { .. }
+                | Ses::Takeover { .. }
+                | Ses::End { .. }
+                | Ses::Beat { .. }
+                | Ses::Gone { .. }
+        )
+    }
+}
+
+/// What a session frame prints: its name and the numbers that name it, never a byte of a terminal, a title or a directory.
+impl fmt::Debug for Ses {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Ses::List { socket, request } => {
+                f.debug_struct("List").field("socket", socket).field("request", request).finish()
+            }
+            Ses::New { socket, request, cols, rows } => f
+                .debug_struct("New")
+                .field("socket", socket)
+                .field("request", request)
+                .field("size", &(cols, rows))
+                .finish(),
+            Ses::Attach { socket, request, session, tail } => f
+                .debug_struct("Attach")
+                .field("socket", socket)
+                .field("request", request)
+                .field("session", session)
+                .field("tail", tail)
+                .finish(),
+            Ses::Detach { socket, request, session } => f
+                .debug_struct("Detach")
+                .field("socket", socket)
+                .field("request", request)
+                .field("session", session)
+                .finish(),
+            Ses::Input { socket, session, bytes } => f
+                .debug_struct("Input")
+                .field("socket", socket)
+                .field("session", session)
+                .field("bytes", &bytes.len())
+                .finish(),
+            Ses::Resize { socket, request, session, cols, rows } => f
+                .debug_struct("Resize")
+                .field("socket", socket)
+                .field("request", request)
+                .field("session", session)
+                .field("size", &(cols, rows))
+                .finish(),
+            Ses::Takeover { socket, request, session } => f
+                .debug_struct("Takeover")
+                .field("socket", socket)
+                .field("request", request)
+                .field("session", session)
+                .finish(),
+            Ses::End { socket, request, session } => f
+                .debug_struct("End")
+                .field("socket", socket)
+                .field("request", request)
+                .field("session", session)
+                .finish(),
+            Ses::Beat { socket, request, session } => f
+                .debug_struct("Beat")
+                .field("socket", socket)
+                .field("request", request)
+                .field("session", session)
+                .finish(),
+            Ses::Gone { socket } => f.debug_struct("Gone").field("socket", socket).finish(),
+            Ses::Answer { socket, request, answer } => f
+                .debug_struct("Answer")
+                .field("socket", socket)
+                .field("request", request)
+                .field("answer", answer)
+                .finish(),
+            Ses::Snapshot { socket, session, seq, bytes } => f
+                .debug_struct("Snapshot")
+                .field("socket", socket)
+                .field("session", session)
+                .field("seq", seq)
+                .field("bytes", &bytes.len())
+                .finish(),
+            Ses::Live { socket, session, seq, bytes } => f
+                .debug_struct("Live")
+                .field("socket", socket)
+                .field("session", session)
+                .field("seq", seq)
+                .field("bytes", &bytes.len())
+                .finish(),
+            Ses::Event { socket, session, event } => {
+                f.debug_struct("Event").field("socket", socket).field("session", session).field("event", event).finish()
+            }
+        }
+    }
+}
+
+/// An answer prints its kind, and a list its count: a title and a directory are what a program chose.
+impl fmt::Debug for SesAnswer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SesAnswer::Listed(list) => f.debug_struct("Listed").field("sessions", &list.len()).finish(),
+            SesAnswer::Created { session } => f.debug_struct("Created").field("session", session).finish(),
+            SesAnswer::Attached(attached) => f.debug_tuple("Attached").field(attached).finish(),
+            SesAnswer::Done => f.write_str("Done"),
+            SesAnswer::Ended => f.write_str("Ended"),
+            SesAnswer::Failed(error) => f.debug_tuple("Failed").field(error).finish(),
+        }
+    }
 }
 
 /// Whether `name` is a valid event name: one to 255 lower-case ASCII letters, `-` or `_`.
@@ -535,6 +807,49 @@ impl<'a> Fields<'a> {
             0 => Err(WireError::BadValue("an id is not 0")),
             id => Ok(id),
         }
+    }
+
+    /// A session id that is not 0.
+    fn session(&mut self) -> Result<u32, WireError> {
+        match self.u32()? {
+            0 => Err(WireError::BadValue("a session id is not 0")),
+            session => Ok(session),
+        }
+    }
+
+    /// A number of columns or rows that is not 0.
+    fn dim(&mut self) -> Result<u16, WireError> {
+        match self.u16()? {
+            0 => Err(WireError::BadValue("a size is not 0")),
+            dim => Ok(dim),
+        }
+    }
+
+    /// A flag that is 0 or 1.
+    fn flag(&mut self, what: &'static str) -> Result<bool, WireError> {
+        match self.u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(WireError::BadValue(what)),
+        }
+    }
+
+    /// A text of at most `max` bytes behind a u16 length.
+    fn text16(&mut self, max: usize, what: &'static str) -> Result<String, WireError> {
+        let length = usize::from(self.u16()?);
+        if length > max {
+            return Err(WireError::BadValue(what));
+        }
+        text(self.take(length)?)
+    }
+
+    /// Bytes to the end of the frame, 1 to `max`.
+    fn chunk(&mut self, max: usize, what: &'static str) -> Result<Vec<u8>, WireError> {
+        let bytes = self.rest();
+        if bytes.is_empty() || bytes.len() > max {
+            return Err(WireError::BadValue(what));
+        }
+        Ok(bytes.to_vec())
     }
 
     /// A socket id that is not 0.
@@ -588,6 +903,327 @@ fn put_slot_key(out: &mut Vec<u8>, slot: &SlotKey) {
     out.extend_from_slice(slot.key.expose());
 }
 
+// ---- the session frames -------------------------------------------------------------------------------------------------
+
+const SES_LIST: u8 = 1;
+const SES_NEW: u8 = 2;
+const SES_ATTACH: u8 = 3;
+const SES_DETACH: u8 = 4;
+const SES_INPUT: u8 = 5;
+const SES_RESIZE: u8 = 6;
+const SES_TAKEOVER: u8 = 7;
+const SES_END: u8 = 8;
+const SES_BEAT: u8 = 9;
+const SES_GONE: u8 = 10;
+const SES_ANSWER: u8 = 16;
+const SES_SNAPSHOT: u8 = 17;
+const SES_LIVE: u8 = 18;
+const SES_EVENT: u8 = 19;
+
+const ANSWER_LIST: u8 = 1;
+const ANSWER_CREATED: u8 = 2;
+const ANSWER_ATTACHED: u8 = 3;
+const ANSWER_DONE: u8 = 4;
+const ANSWER_ENDED: u8 = 5;
+const ANSWER_FAILED: u8 = 6;
+
+const EVENT_WRITER: u8 = 1;
+const EVENT_EXITED: u8 = 2;
+const EVENT_RESYNC: u8 = 3;
+const EVENT_SIZE: u8 = 4;
+
+fn error_byte(error: SesError) -> u8 {
+    match error {
+        SesError::NotFound => 1,
+        SesError::Refused => 2,
+        SesError::Busy => 3,
+        SesError::TooMany => 4,
+        SesError::BadRequest => 5,
+    }
+}
+
+fn error_of(byte: u8) -> Result<SesError, WireError> {
+    match byte {
+        1 => Ok(SesError::NotFound),
+        2 => Ok(SesError::Refused),
+        3 => Ok(SesError::Busy),
+        4 => Ok(SesError::TooMany),
+        5 => Ok(SesError::BadRequest),
+        _ => Err(WireError::BadValue("a session error is not 1 to 5")),
+    }
+}
+
+fn writer_byte(state: WriterState) -> u8 {
+    match state {
+        WriterState::Writing => 0,
+        WriterState::Watching => 1,
+        WriterState::Free => 2,
+    }
+}
+
+fn writer_of(byte: u8) -> Result<WriterState, WireError> {
+    match byte {
+        0 => Ok(WriterState::Writing),
+        1 => Ok(WriterState::Watching),
+        2 => Ok(WriterState::Free),
+        _ => Err(WireError::BadValue("a writer state is not 0, 1 or 2")),
+    }
+}
+
+fn nonzero_id(request: u64) -> Result<u64, WireError> {
+    if request == 0 { Err(WireError::BadValue("an id is not 0")) } else { Ok(request) }
+}
+
+fn nonzero_session(session: u32) -> Result<u32, WireError> {
+    if session == 0 { Err(WireError::BadValue("a session id is not 0")) } else { Ok(session) }
+}
+
+fn nonzero_dim(dim: u16) -> Result<u16, WireError> {
+    if dim == 0 { Err(WireError::BadValue("a size is not 0")) } else { Ok(dim) }
+}
+
+fn put_text16(out: &mut Vec<u8>, text: &str, max: usize, what: &'static str) -> Result<(), WireError> {
+    if text.len() > max {
+        return Err(WireError::BadValue(what));
+    }
+    out.extend_from_slice(&u16::try_from(text.len()).map_err(|_| WireError::BadValue(what))?.to_be_bytes());
+    out.extend_from_slice(text.as_bytes());
+    Ok(())
+}
+
+fn put_chunk(out: &mut Vec<u8>, bytes: &[u8], max: usize, what: &'static str) -> Result<(), WireError> {
+    if bytes.is_empty() || bytes.len() > max {
+        return Err(WireError::BadValue(what));
+    }
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn encode_ses(ses: &Ses, out: &mut Vec<u8>) -> Result<(), WireError> {
+    out.push(KIND_SES);
+    // The head every request carries: the operation, the socket, the request number.
+    let head = |out: &mut Vec<u8>, op: u8, socket: u32, request: u64| -> Result<(), WireError> {
+        out.push(op);
+        out.extend_from_slice(&nonzero(socket)?.to_be_bytes());
+        out.extend_from_slice(&nonzero_id(request)?.to_be_bytes());
+        Ok(())
+    };
+    match ses {
+        Ses::List { socket, request } => head(out, SES_LIST, *socket, *request)?,
+        Ses::New { socket, request, cols, rows } => {
+            head(out, SES_NEW, *socket, *request)?;
+            out.extend_from_slice(&nonzero_dim(*cols)?.to_be_bytes());
+            out.extend_from_slice(&nonzero_dim(*rows)?.to_be_bytes());
+        }
+        Ses::Attach { socket, request, session, tail } => {
+            head(out, SES_ATTACH, *socket, *request)?;
+            out.extend_from_slice(&nonzero_session(*session)?.to_be_bytes());
+            match tail {
+                None => out.push(0),
+                Some(rows) => {
+                    out.push(1);
+                    out.extend_from_slice(&rows.to_be_bytes());
+                }
+            }
+        }
+        Ses::Detach { socket, request, session }
+        | Ses::Takeover { socket, request, session }
+        | Ses::End { socket, request, session }
+        | Ses::Beat { socket, request, session } => {
+            let op = match ses {
+                Ses::Detach { .. } => SES_DETACH,
+                Ses::Takeover { .. } => SES_TAKEOVER,
+                Ses::End { .. } => SES_END,
+                _ => SES_BEAT,
+            };
+            head(out, op, *socket, *request)?;
+            out.extend_from_slice(&nonzero_session(*session)?.to_be_bytes());
+        }
+        Ses::Input { socket, session, bytes } => {
+            out.push(SES_INPUT);
+            out.extend_from_slice(&nonzero(*socket)?.to_be_bytes());
+            out.extend_from_slice(&nonzero_session(*session)?.to_be_bytes());
+            put_chunk(out, bytes, MAX_INPUT_BYTES, "input is 1 byte to 64 KiB")?;
+        }
+        Ses::Resize { socket, request, session, cols, rows } => {
+            head(out, SES_RESIZE, *socket, *request)?;
+            out.extend_from_slice(&nonzero_session(*session)?.to_be_bytes());
+            out.extend_from_slice(&nonzero_dim(*cols)?.to_be_bytes());
+            out.extend_from_slice(&nonzero_dim(*rows)?.to_be_bytes());
+        }
+        Ses::Gone { socket } => {
+            out.push(SES_GONE);
+            out.extend_from_slice(&nonzero(*socket)?.to_be_bytes());
+        }
+        Ses::Answer { socket, request, answer } => {
+            head(out, SES_ANSWER, *socket, *request)?;
+            match answer {
+                SesAnswer::Listed(list) => {
+                    if list.len() > MAX_LISTED {
+                        return Err(WireError::BadValue("a list has at most 1024 sessions"));
+                    }
+                    out.push(ANSWER_LIST);
+                    out.extend_from_slice(
+                        &u16::try_from(list.len()).map_err(|_| WireError::BadValue("too many sessions"))?.to_be_bytes(),
+                    );
+                    for info in list {
+                        out.extend_from_slice(&nonzero_session(info.id)?.to_be_bytes());
+                        put_text16(out, &info.title, MAX_TITLE_BYTES, "a title is at most 256 bytes")?;
+                        put_text16(out, &info.cwd, MAX_CWD_BYTES, "a directory is at most 4096 bytes")?;
+                        out.extend_from_slice(&nonzero_dim(info.cols)?.to_be_bytes());
+                        out.extend_from_slice(&nonzero_dim(info.rows)?.to_be_bytes());
+                        out.extend_from_slice(&info.started.to_be_bytes());
+                        out.extend_from_slice(&info.attached.to_be_bytes());
+                        out.push(u8::from(info.writer_held));
+                    }
+                }
+                SesAnswer::Created { session } => {
+                    out.push(ANSWER_CREATED);
+                    out.extend_from_slice(&nonzero_session(*session)?.to_be_bytes());
+                }
+                SesAnswer::Attached(attached) => {
+                    out.push(ANSWER_ATTACHED);
+                    out.extend_from_slice(&nonzero_dim(attached.cols)?.to_be_bytes());
+                    out.extend_from_slice(&nonzero_dim(attached.rows)?.to_be_bytes());
+                    out.push(writer_byte(attached.writer));
+                    out.push(u8::from(attached.more));
+                    out.extend_from_slice(&attached.snapshot_bytes.to_be_bytes());
+                }
+                SesAnswer::Done => out.push(ANSWER_DONE),
+                SesAnswer::Ended => out.push(ANSWER_ENDED),
+                SesAnswer::Failed(error) => {
+                    out.push(ANSWER_FAILED);
+                    out.push(error_byte(*error));
+                }
+            }
+        }
+        Ses::Snapshot { socket, session, seq, bytes } | Ses::Live { socket, session, seq, bytes } => {
+            out.push(if matches!(ses, Ses::Snapshot { .. }) { SES_SNAPSHOT } else { SES_LIVE });
+            out.extend_from_slice(&nonzero(*socket)?.to_be_bytes());
+            out.extend_from_slice(&nonzero_session(*session)?.to_be_bytes());
+            out.extend_from_slice(&seq.to_be_bytes());
+            put_chunk(out, bytes, CHUNK_BYTES, "a chunk is 1 byte to 64 KiB")?;
+        }
+        Ses::Event { socket, session, event } => {
+            out.push(SES_EVENT);
+            out.extend_from_slice(&nonzero(*socket)?.to_be_bytes());
+            out.extend_from_slice(&nonzero_session(*session)?.to_be_bytes());
+            match event {
+                SesEvent::Writer(state) => out.extend_from_slice(&[EVENT_WRITER, writer_byte(*state)]),
+                SesEvent::Exited(None) => out.extend_from_slice(&[EVENT_EXITED, 0]),
+                SesEvent::Exited(Some(code)) => {
+                    out.extend_from_slice(&[EVENT_EXITED, 1]);
+                    out.extend_from_slice(&code.to_be_bytes());
+                }
+                SesEvent::Resync => out.push(EVENT_RESYNC),
+                SesEvent::Size { cols, rows } => {
+                    out.push(EVENT_SIZE);
+                    out.extend_from_slice(&nonzero_dim(*cols)?.to_be_bytes());
+                    out.extend_from_slice(&nonzero_dim(*rows)?.to_be_bytes());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn decode_ses(fields: &mut Fields<'_>) -> Result<Ses, WireError> {
+    let op = fields.u8()?;
+    let ses = match op {
+        SES_LIST => Ses::List { socket: fields.socket()?, request: fields.id()? },
+        SES_NEW => {
+            Ses::New { socket: fields.socket()?, request: fields.id()?, cols: fields.dim()?, rows: fields.dim()? }
+        }
+        SES_ATTACH => {
+            let (socket, request, session) = (fields.socket()?, fields.id()?, fields.session()?);
+            let tail = if fields.flag("the tail flag is not 0 or 1")? { Some(fields.u32()?) } else { None };
+            Ses::Attach { socket, request, session, tail }
+        }
+        SES_DETACH => Ses::Detach { socket: fields.socket()?, request: fields.id()?, session: fields.session()? },
+        SES_TAKEOVER => Ses::Takeover { socket: fields.socket()?, request: fields.id()?, session: fields.session()? },
+        SES_END => Ses::End { socket: fields.socket()?, request: fields.id()?, session: fields.session()? },
+        SES_BEAT => Ses::Beat { socket: fields.socket()?, request: fields.id()?, session: fields.session()? },
+        SES_INPUT => {
+            let (socket, session) = (fields.socket()?, fields.session()?);
+            Ses::Input { socket, session, bytes: fields.chunk(MAX_INPUT_BYTES, "input is 1 byte to 64 KiB")? }
+        }
+        SES_RESIZE => Ses::Resize {
+            socket: fields.socket()?,
+            request: fields.id()?,
+            session: fields.session()?,
+            cols: fields.dim()?,
+            rows: fields.dim()?,
+        },
+        SES_GONE => Ses::Gone { socket: fields.socket()? },
+        SES_ANSWER => {
+            let (socket, request) = (fields.socket()?, fields.id()?);
+            let answer = match fields.u8()? {
+                ANSWER_LIST => {
+                    let count = usize::from(fields.u16()?);
+                    if count > MAX_LISTED {
+                        return Err(WireError::BadValue("a list has at most 1024 sessions"));
+                    }
+                    let mut list = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        list.push(SessionInfo {
+                            id: fields.session()?,
+                            title: fields.text16(MAX_TITLE_BYTES, "a title is at most 256 bytes")?,
+                            cwd: fields.text16(MAX_CWD_BYTES, "a directory is at most 4096 bytes")?,
+                            cols: fields.dim()?,
+                            rows: fields.dim()?,
+                            started: fields.u64()?,
+                            attached: fields.u16()?,
+                            writer_held: fields.flag("the writer flag is not 0 or 1")?,
+                        });
+                    }
+                    SesAnswer::Listed(list)
+                }
+                ANSWER_CREATED => SesAnswer::Created { session: fields.session()? },
+                ANSWER_ATTACHED => SesAnswer::Attached(Attached {
+                    cols: fields.dim()?,
+                    rows: fields.dim()?,
+                    writer: writer_of(fields.u8()?)?,
+                    more: fields.flag("the older-lines flag is not 0 or 1")?,
+                    snapshot_bytes: fields.u32()?,
+                }),
+                ANSWER_DONE => SesAnswer::Done,
+                ANSWER_ENDED => SesAnswer::Ended,
+                ANSWER_FAILED => SesAnswer::Failed(error_of(fields.u8()?)?),
+                _ => return Err(WireError::BadValue("a session answer is not 1 to 6")),
+            };
+            Ses::Answer { socket, request, answer }
+        }
+        SES_SNAPSHOT | SES_LIVE => {
+            let (socket, session, seq) = (fields.socket()?, fields.session()?, fields.u32()?);
+            let bytes = fields.chunk(CHUNK_BYTES, "a chunk is 1 byte to 64 KiB")?;
+            if op == SES_SNAPSHOT {
+                Ses::Snapshot { socket, session, seq, bytes }
+            } else {
+                Ses::Live { socket, session, seq, bytes }
+            }
+        }
+        SES_EVENT => {
+            let (socket, session) = (fields.socket()?, fields.session()?);
+            let event = match fields.u8()? {
+                EVENT_WRITER => SesEvent::Writer(writer_of(fields.u8()?)?),
+                EVENT_EXITED => {
+                    if fields.flag("the status flag is not 0 or 1")? {
+                        SesEvent::Exited(Some(fields.u32()?))
+                    } else {
+                        SesEvent::Exited(None)
+                    }
+                }
+                EVENT_RESYNC => SesEvent::Resync,
+                EVENT_SIZE => SesEvent::Size { cols: fields.dim()?, rows: fields.dim()? },
+                _ => return Err(WireError::BadValue("a session event is not 1 to 4")),
+            };
+            Ses::Event { socket, session, event }
+        }
+        op => return Err(WireError::UnknownOp { kind: KIND_SES, op }),
+    };
+    Ok(ses)
+}
+
 impl Frame {
     /// Appends the payload of this frame (without the length prefix) to `out`.
     fn encode_into(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
@@ -628,12 +1264,16 @@ impl Frame {
                 out.extend_from_slice(evt.name.as_bytes());
                 out.extend_from_slice(evt.text.as_bytes());
             }
-            Frame::Ctl(Ctl::Init { version, max_panes, max_scrollback_lines, max_image_mib }) => {
+            Frame::Ctl(Ctl::Init { version, max_panes, max_scrollback_lines, max_image_mib, sessions }) => {
                 out.extend_from_slice(&[KIND_CTL, OP_INIT]);
                 out.extend_from_slice(&version.to_be_bytes());
                 out.extend_from_slice(&max_panes.to_be_bytes());
                 out.extend_from_slice(&max_scrollback_lines.to_be_bytes());
                 out.extend_from_slice(&max_image_mib.to_be_bytes());
+                out.extend_from_slice(&sessions.attach_tail_lines.to_be_bytes());
+                out.extend_from_slice(&sessions.history_max_lines.to_be_bytes());
+                out.extend_from_slice(&sessions.snapshot_max_bytes.to_be_bytes());
+                out.extend_from_slice(&sessions.writer_timeout_ms.to_be_bytes());
             }
             Frame::Ctl(Ctl::Attach { socket }) => {
                 out.extend_from_slice(&[KIND_CTL, OP_ATTACH]);
@@ -744,6 +1384,7 @@ impl Frame {
                 out.extend_from_slice(&id.to_be_bytes());
                 out.push(u8::from(*commit));
             }
+            Frame::Ses(ses) => encode_ses(ses, out)?,
             Frame::Note(Note::Ready) => out.extend_from_slice(&[KIND_NOTE, NOTE_READY]),
             Frame::Note(Note::StoreState(state)) => out.extend_from_slice(&[KIND_NOTE, NOTE_STORE_STATE, *state as u8]),
             Frame::Note(Note::PaneCount(count)) => {
@@ -811,7 +1452,13 @@ impl Frame {
                         let max_panes = fields.u32()?;
                         let max_scrollback_lines = fields.u32()?;
                         let max_image_mib = fields.u32()?;
-                        Frame::Ctl(Ctl::Init { version, max_panes, max_scrollback_lines, max_image_mib })
+                        let sessions = SessionLimits {
+                            attach_tail_lines: fields.u32()?,
+                            history_max_lines: fields.u32()?,
+                            snapshot_max_bytes: fields.u32()?,
+                            writer_timeout_ms: fields.u32()?,
+                        };
+                        Frame::Ctl(Ctl::Init { version, max_panes, max_scrollback_lines, max_image_mib, sessions })
                     }
                     OP_ATTACH => Frame::Ctl(Ctl::Attach { socket: fields.socket()? }),
                     OP_DETACH => Frame::Ctl(Ctl::Detach { socket: fields.socket()? }),
@@ -938,6 +1585,7 @@ impl Frame {
                 }
                 op => return Err(WireError::UnknownOp { kind, op }),
             },
+            KIND_SES => Frame::Ses(decode_ses(&mut fields)?),
             kind => return Err(WireError::UnknownKind(kind)),
         };
         fields.finish()?;

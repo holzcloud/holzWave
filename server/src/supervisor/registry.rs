@@ -32,6 +32,7 @@ use crate::accounts::{AccountObserver, Ending};
 use crate::supervisor::socket::{self, Attached, SocketCore, SocketHandle, SocketRx, SubmitError};
 use crate::wire::{self, CmdFrame, Ctl, CtlOutcome, Frame, Note, PROTOCOL_VERSION, ResBody, StoreState};
 use crate::worker::runtime::WorkerMode;
+use crate::worker::sessions::SessionLimits;
 
 /// The close code for a socket whose worker ended.
 pub const CLOSE_WORKER_ENDED: u16 = 1012;
@@ -60,6 +61,8 @@ pub struct SupervisorSettings {
     pub max_scrollback_lines: u32,
     /// The most MiB of pictures one pane keeps, sent to the worker (0 is none).
     pub max_image_mib: u32,
+    /// What a device may ask of a session that lives in the worker, sent to the worker.
+    pub sessions: SessionLimits,
     /// The most sockets one person has attached at once.
     pub sockets_per_person: usize,
     /// The bytes one socket may have queued before it is dropped from or closed.
@@ -84,6 +87,7 @@ impl Default for SupervisorSettings {
             max_panes: limits::MAX_PANES,
             max_scrollback_lines: limits::MAX_SCROLLBACK_LINES,
             max_image_mib: limits::MAX_IMAGE_MIB,
+            sessions: SessionLimits::DEFAULT,
             sockets_per_person: limits::SOCKETS_PER_PERSON as usize,
             socket_queue_bytes: limits::WS_QUEUE_BYTES as usize,
             idle_timeout: limits::WORKER_IDLE_TIMEOUT,
@@ -643,6 +647,9 @@ impl Worker {
                 None => Counters::bump(&self.shared.counters.dropped_ctl_done),
             },
             Frame::Note(Note::PaneCount(_)) => {}
+            // The supervisor sends no session request yet, so a worker has nothing to answer; the frames that a worker writes
+            // for a device socket are dropped here until the device socket takes them over.
+            Frame::Ses(_) => {}
         }
         Ok(())
     }
@@ -909,6 +916,7 @@ impl Supervisor {
             max_panes: shared.settings.max_panes,
             max_scrollback_lines: shared.settings.max_scrollback_lines,
             max_image_mib: shared.settings.max_image_mib,
+            sessions: shared.settings.sessions,
         };
         worker.push_control(init).map_err(|_| AttachError::Launch("the worker could not be started".into()))?;
         let (ready_tx, ready_rx) = oneshot::channel();

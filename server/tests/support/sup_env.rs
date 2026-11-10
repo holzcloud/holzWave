@@ -32,6 +32,7 @@ use holzwave_server::supervisor::{
 use holzwave_server::supervisor::{AttachError, InProcessLauncher};
 use holzwave_server::wire::{CmdFrame, Ctl, Frame, Note, PROTOCOL_VERSION, read_frame, write_frame};
 use holzwave_server::worker::runtime::WorkerMode;
+use holzwave_server::worker::sessions::SessionLimits;
 use serde_json::Value;
 use tokio::sync::watch;
 
@@ -628,7 +629,13 @@ impl ScriptEnv {
 
 /// The `Init` the supervisor must send first.
 pub fn expected_init(max_panes: u32, max_scrollback_lines: u32, max_image_mib: u32) -> Ctl {
-    Ctl::Init { version: PROTOCOL_VERSION, max_panes, max_scrollback_lines, max_image_mib }
+    Ctl::Init {
+        version: PROTOCOL_VERSION,
+        max_panes,
+        max_scrollback_lines,
+        max_image_mib,
+        sessions: SessionLimits::DEFAULT,
+    }
 }
 
 

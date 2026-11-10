@@ -282,6 +282,7 @@ fn supervisor_settings(prepared: &Prepared) -> SupervisorSettings {
         max_panes: prepared.workers.max_panes,
         max_scrollback_lines: prepared.workers.max_scrollback_lines,
         max_image_mib: prepared.workers.max_image_mib,
+        sessions: prepared.remote.session_limits(),
         sockets_per_person: usize::try_from(prepared.limits.sockets_per_person).unwrap_or(usize::MAX),
         socket_queue_bytes: usize::try_from(prepared.limits.ws_queue_bytes).unwrap_or(usize::MAX),
         idle_timeout: prepared.workers.idle_timeout,

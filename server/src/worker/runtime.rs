@@ -9,20 +9,25 @@ use std::fs::DirBuilder;
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
+use holzwave_core::pane::PaneSpec;
 use holzwave_core::secrets::SecretStore;
 use holzwave_host::local_network::{Source, Unsupported};
 use holzwave_host::seams::{Host, HostLimits, Platform};
 use holzwave_host::state::{AppCore, ShellSpec};
 
 use crate::log::Level;
-use crate::wire::{Ctl, ExitReason, Frame, Note, PROTOCOL_VERSION, StoreState, read_frame};
+use crate::wire::{Ctl, ExitReason, Frame, Note, PROTOCOL_VERSION, Ses, SesAnswer, SesEvent, StoreState, read_frame};
 use crate::worker::files::{FileHooks, Files};
 pub use crate::worker::dispatch::{Gate, HookRow, Probe, QueueLimits};
-use crate::worker::dispatch::{self, Dispatcher, Outbound, Pin, ServerSink, WorkerLog};
+use crate::worker::dispatch::{self, Dispatcher, Outbound, Pin, Pushed, ServerSink, WorkerLog};
+use crate::worker::lease::WriterState;
 pub use crate::worker::secretstore::DATA_DIR;
 use crate::worker::secretstore::SecretsHandle;
+use crate::worker::sessions::{Attachment, Place, SesError, SessionHost, SessionLimits, Spawner};
 
 /// The command a page sends when it is ready for the state of the window; the events it causes are for that page alone.
 pub const REPLAY_COMMAND: &str = "window_ready";
@@ -145,6 +150,182 @@ struct Running {
     files: Files,
     /// The store state the supervisor was told last.
     told: StoreState,
+    /// The sessions that live here for devices; the lane runs the requests about them.
+    sessions: Arc<SessionHost>,
+    lane: SessionLane,
+}
+
+// ---- the sessions -------------------------------------------------------------------------------------------------------
+
+/// How many requests about sessions may wait for the lane before the next one is refused as busy.
+pub const LANE_QUEUE: usize = 256;
+
+/// What starts a session in this worker: the person's own shell, through the core, and a place under the pane cap that the
+/// layout's panes share.
+struct CoreSpawner {
+    core: Arc<AppCore>,
+}
+
+impl Spawner for CoreSpawner {
+    fn spec(&self, cols: u16, rows: u16) -> PaneSpec {
+        self.core.session_pane_spec(cols, rows)
+    }
+
+    fn take_place(&self) -> Option<Place> {
+        self.core.take_outside_pane().map(|place| Box::new(place) as Place)
+    }
+}
+
+/// A device socket as the session host sees it: everything it is handed becomes a `Ses` frame to the supervisor. The stream
+/// goes through the part of the outbound queue that refuses over the soft cap, so a socket that does not read loses its
+/// stream (and is told) instead of growing the queue until the whole worker is declared dead.
+struct SocketAttachment {
+    socket: u32,
+    queue: Arc<Outbound>,
+}
+
+impl SocketAttachment {
+    fn event(&self, session: u32, event: SesEvent) {
+        self.queue.push(Frame::Ses(Ses::Event { socket: self.socket, session, event }));
+    }
+}
+
+impl Attachment for SocketAttachment {
+    fn snapshot_chunk(&self, session: u32, seq: u32, bytes: &[u8]) -> bool {
+        let frame = Frame::Ses(Ses::Snapshot { socket: self.socket, session, seq, bytes: bytes.to_vec() });
+        self.queue.push_stream(frame) == Pushed::Queued
+    }
+
+    fn live(&self, session: u32, seq: u32, bytes: &[u8]) -> bool {
+        let frame = Frame::Ses(Ses::Live { socket: self.socket, session, seq, bytes: bytes.to_vec() });
+        self.queue.push_stream(frame) == Pushed::Queued
+    }
+
+    fn writer(&self, session: u32, state: WriterState) {
+        self.event(session, SesEvent::Writer(state));
+    }
+
+    fn size(&self, session: u32, cols: u16, rows: u16) {
+        self.event(session, SesEvent::Size { cols, rows });
+    }
+
+    fn exited(&self, session: u32, code: Option<u32>) {
+        self.event(session, SesEvent::Exited(code));
+    }
+
+    fn resync(&self, session: u32) {
+        self.event(session, SesEvent::Resync);
+    }
+}
+
+/// The socket and the request number of a request that is answered.
+fn answered(ses: &Ses) -> Option<(u32, u64)> {
+    match ses {
+        Ses::List { socket, request }
+        | Ses::New { socket, request, .. }
+        | Ses::Attach { socket, request, .. }
+        | Ses::Detach { socket, request, .. }
+        | Ses::Resize { socket, request, .. }
+        | Ses::Takeover { socket, request, .. }
+        | Ses::End { socket, request, .. }
+        | Ses::Beat { socket, request, .. } => Some((*socket, *request)),
+        _ => None,
+    }
+}
+
+fn answer(queue: &Outbound, socket: u32, request: u64, answer: SesAnswer) {
+    queue.push(Frame::Ses(Ses::Answer { socket, request, answer }));
+}
+
+fn done(result: Result<(), SesError>) -> SesAnswer {
+    result.map_or_else(SesAnswer::Failed, |()| SesAnswer::Done)
+}
+
+/// Runs one request about sessions and answers it. A request that has no answer (input, a socket that ended) says nothing.
+fn handle_ses(host: &SessionHost, queue: &Arc<Outbound>, ses: Ses) {
+    let attachment =
+        |socket: u32| -> Arc<dyn Attachment> { Arc::new(SocketAttachment { socket, queue: queue.clone() }) };
+    match ses {
+        Ses::List { socket, request } => answer(queue, socket, request, SesAnswer::Listed(host.list())),
+        Ses::New { socket, request, cols, rows } => {
+            let made = host.create(u64::from(socket), attachment(socket), cols, rows);
+            answer(
+                queue,
+                socket,
+                request,
+                made.map_or_else(SesAnswer::Failed, |session| SesAnswer::Created { session }),
+            );
+        }
+        Ses::Attach { socket, request, session, tail } => {
+            // The answer goes out first and the snapshot after it, which the host guarantees by calling this before it
+            // starts the stream.
+            host.attach(u64::from(socket), attachment(socket), session, tail, |result| {
+                answer(queue, socket, request, result.map_or_else(SesAnswer::Failed, SesAnswer::Attached));
+            });
+        }
+        Ses::Detach { socket, request, session } => {
+            answer(queue, socket, request, done(host.detach(u64::from(socket), session)))
+        }
+        Ses::Input { socket, session, bytes } => {
+            let _ = host.input(u64::from(socket), session, &bytes);
+        }
+        Ses::Resize { socket, request, session, cols, rows } => {
+            answer(queue, socket, request, done(host.resize(u64::from(socket), session, cols, rows)));
+        }
+        Ses::Takeover { socket, request, session } => {
+            answer(queue, socket, request, done(host.takeover(u64::from(socket), session)));
+        }
+        Ses::End { socket, request, session } => {
+            answer(queue, socket, request, host.end(session).map_or_else(SesAnswer::Failed, |()| SesAnswer::Ended));
+        }
+        Ses::Beat { socket, request, session } => {
+            answer(queue, socket, request, done(host.beat(u64::from(socket), session)))
+        }
+        Ses::Gone { socket } => host.gone(u64::from(socket)),
+        // The frames a worker writes are not for a worker; the loop never hands them over.
+        Ses::Answer { .. } | Ses::Snapshot { .. } | Ses::Live { .. } | Ses::Event { .. } => {}
+    }
+}
+
+/// The thread that runs the requests about sessions in the order they came. A request can wait for a pane (it starts one, or
+/// waits for the engine's snapshot), and the reader of the link never waits for anything but the link, so the requests go
+/// through here. A socket that ends is never refused: leaving is what frees a lease.
+struct SessionLane {
+    jobs: mpsc::Sender<Ses>,
+    pending: Arc<AtomicUsize>,
+}
+
+impl SessionLane {
+    fn start(host: Arc<SessionHost>, queue: Arc<Outbound>) -> SessionLane {
+        let (jobs, inbox) = mpsc::channel::<Ses>();
+        let pending = Arc::new(AtomicUsize::new(0));
+        let counted = pending.clone();
+        std::thread::Builder::new()
+            .name("hw-ses-lane".into())
+            .spawn(move || {
+                while let Ok(ses) = inbox.recv() {
+                    handle_ses(&host, &queue, ses);
+                    counted.fetch_sub(1, Ordering::SeqCst);
+                }
+            })
+            .expect("the session lane starts");
+        SessionLane { jobs, pending }
+    }
+
+    /// Queues a request. When too many wait, a request that has an answer is answered `busy` and input is dropped.
+    fn submit(&self, ses: Ses, queue: &Outbound) {
+        let leaving = matches!(ses, Ses::Gone { .. });
+        if !leaving && self.pending.load(Ordering::SeqCst) >= LANE_QUEUE {
+            if let Some((socket, request)) = answered(&ses) {
+                answer(queue, socket, request, SesAnswer::Failed(SesError::Busy));
+            }
+            return;
+        }
+        self.pending.fetch_add(1, Ordering::SeqCst);
+        if self.jobs.send(ses).is_err() {
+            self.pending.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
 }
 
 /// Ends the run with a failure note.
@@ -169,7 +350,7 @@ fn serve(
             Err(_) => break fail(queue, log, "bad frame"),
         };
         match (frame, running.as_mut()) {
-            (Frame::Ctl(Ctl::Init { version, max_panes, max_scrollback_lines, max_image_mib }), None) => {
+            (Frame::Ctl(Ctl::Init { version, max_panes, max_scrollback_lines, max_image_mib, sessions }), None) => {
                 if version != PROTOCOL_VERSION {
                     break fail(queue, log, "protocol version");
                 }
@@ -180,7 +361,9 @@ fn serve(
                     // 0 is not "no cap" here: it is a cap of no bytes, and the host keeps no picture under it.
                     max_image_bytes: Some(max_image_bytes),
                 };
-                let Some(started) = start(env, queue, hooks, log, limits) else { break fail(queue, log, "setup") };
+                let Some(started) = start(env, queue, hooks, log, limits, sessions) else {
+                    break fail(queue, log, "setup");
+                };
                 queue.push(Frame::Note(Note::Ready));
                 let state = started.secrets.state();
                 queue.push(Frame::Note(Note::StoreState(state)));
@@ -197,7 +380,15 @@ fn serve(
             (Frame::Cmd(cmd), None) => {
                 queue.push(dispatch::refusal(cmd.socket, cmd.request, "the worker is not ready"));
             }
+            (Frame::Ses(ses), Some(running)) if ses.is_request() => running.lane.submit(ses, queue),
+            // A request about sessions before `Init` is refused like a command before it: answered, and the run goes on.
+            (Frame::Ses(ses), None) if ses.is_request() => {
+                if let Some((socket, request)) = answered(&ses) {
+                    answer(queue, socket, request, SesAnswer::Failed(SesError::Busy));
+                }
+            }
             (Frame::Ctl(Ctl::Shutdown), Some(running)) => {
+                running.sessions.shutdown();
                 running.core.shutdown();
                 queue.push(Frame::Note(Note::Exiting(ExitReason::Clean)));
                 break RunEnd::Shutdown;
@@ -207,7 +398,8 @@ fn serve(
                 let _pin = Pin::to(socket);
                 let _ = running.core.window_ready_in(dispatch::WINDOW);
             }
-            (Frame::Ctl(Ctl::Detach { .. }), Some(_)) => {}
+            // The socket of a page that ended; the same socket id may have been a device's, whose sessions it leaves.
+            (Frame::Ctl(Ctl::Detach { socket }), Some(running)) => running.lane.submit(Ses::Gone { socket }, queue),
             (Frame::Ctl(Ctl::FileServe { request, what, token, offset, length }), Some(running)) => {
                 running.files.serve(request, what, &token, offset, length);
             }
@@ -223,6 +415,7 @@ fn serve(
         }
     };
     if let Some(running) = running {
+        running.sessions.shutdown();
         running.core.shutdown();
     }
     end
@@ -274,6 +467,7 @@ fn start(
     hooks: &TestHooks,
     log: &WorkerLog,
     limits: HostLimits,
+    session_limits: SessionLimits,
 ) -> Option<Running> {
     let dir = env.home.join(DATA_DIR);
     if !dir.is_dir() {
@@ -302,7 +496,14 @@ fn start(
         Dispatcher::start(&core, &sink, queue, hooks.rows.clone(), hooks.probe.clone(), log.clone(), REPLAY_COMMAND);
     let files = Files::new(&core, queue, &env.home, hooks.files.clone(), log.clone());
     sink.set_observer(files.observer());
-    Some(Running { core, sink, secrets, dispatcher, files, told: StoreState::Absent })
+    let sessions = Arc::new(SessionHost::new(Arc::new(CoreSpawner { core: core.clone() }), session_limits));
+    {
+        // The sessions count with the layout's panes in what the supervisor is told.
+        let sink = sink.clone();
+        sessions.set_count_hook(move |count| sink.announce_sessions(count));
+    }
+    let lane = SessionLane::start(sessions.clone(), queue.clone());
+    Some(Running { core, sink, secrets, dispatcher, files, told: StoreState::Absent, sessions, lane })
 }
 
 // ---- the self-check, the modes and the wipes ----------------------------------------------------------------------------
