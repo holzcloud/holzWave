@@ -467,7 +467,7 @@ async fn guard(State(guard): State<Guard>, mut request: Request, next: Next) -> 
     if changing && access != Access::Socket && access != Access::Upload {
         request = match buffer_body(request, cap).await {
             Ok(request) => request,
-            Err(response) => return response,
+            Err(refusal) => return refusal.into_response(),
         };
     }
     next.run(request).await
@@ -475,14 +475,14 @@ async fn guard(State(guard): State<Guard>, mut request: Request, next: Next) -> 
 
 /// Reads the whole body, up to the cap, so that a streamed body over the cap is refused whether or not the handler would have
 /// read it, and a declared length that lies is refused too. The request goes on with the bytes as its body.
-async fn buffer_body(request: Request, cap: usize) -> Result<Request, Response> {
+async fn buffer_body(request: Request, cap: usize) -> Result<Request, ApiError> {
     let declared = csrf::declared_length(request.headers()).ok().flatten();
     let (parts, body) = request.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, cap).await else {
-        return Err(ApiError::BadRequest { field: None }.into_response());
+        return Err(ApiError::BadRequest { field: None });
     };
     if declared.is_some_and(|length| length != bytes.len() as u64) {
-        return Err(ApiError::BadRequest { field: None }.into_response());
+        return Err(ApiError::BadRequest { field: None });
     }
     Ok(Request::from_parts(parts, Body::from(bytes)))
 }
@@ -503,7 +503,7 @@ async fn open_guard(changing: bool, cap: usize, request: Request, next: Next) ->
     }
     match buffer_body(request, cap).await {
         Ok(request) => next.run(request).await,
-        Err(response) => response,
+        Err(refusal) => refusal.into_response(),
     }
 }
 

@@ -174,10 +174,8 @@ pub fn wrong_method_expectation(row: &Row, feature_on: bool) -> (u16, &'static s
         (404, "not_found")
     } else if row.kind.needs_session() {
         (401, "invalid")
-    } else if let Some(refusal) = kind_refusal(row.kind) {
-        refusal
     } else {
-        (405, "bad_request")
+        kind_refusal(row.kind).unwrap_or((405, "bad_request"))
     }
 }
 

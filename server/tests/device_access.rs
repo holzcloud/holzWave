@@ -106,7 +106,8 @@ async fn tracer_a_device_route_of_a_feature_that_is_off_answers_exactly_as_a_pat
     let (token, _) = mint(&env, "alice");
     let member = env.signed_aged("alice", 0);
     let (other, _) = mint(&env, "bob");
-    let requests: Vec<(&str, Box<dyn Fn(&str) -> Req>)> = vec![
+    type Build<'a> = Box<dyn Fn(&str) -> Req + 'a>;
+    let requests: Vec<(&str, Build)> = vec![
         ("no header", Box::new(native)),
         ("a valid token", Box::new(|p| bearer(p, &token))),
         ("an invalid token", Box::new(|p| native(p).header("authorization", "Bearer hwd_not-a-token"))),
