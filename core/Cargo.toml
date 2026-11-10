@@ -57,6 +57,11 @@ rustls-platform-verifier = "0.7.1"
 # parse is done by the established crate and not by a hand-written one; the module only adds caps around it. Pinned to
 # the exact current release for the same reason as the other security-relevant crates; it adds csv-core and ryu.
 csv = "=1.4.0"
+# The client side of the byte bridge to a holzWave server (core/src/remote/ws.rs): WebSocket framing, the handshake, masking and the
+# close handshake, which are not worth writing by hand. Pinned to the exact release and with the handshake feature only, for
+# security: the TLS is not tungstenite's but the core's own rustls stream with the platform verifier, so none of its TLS
+# features is on. It was already in the lock as the parent of the server's test client.
+tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
 
 [dev-dependencies]
 rand = { version = "0.10", features = ["thread_rng"] }

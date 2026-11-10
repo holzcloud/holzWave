@@ -125,6 +125,13 @@ const WORKSPACE_ALLOWLIST: &[(&str, &[Dependency])] = &[
             ("sha2", "SHA-256 content hashes of the sync engine (sync/engine)"),
             ("sysinfo", "the numbers of the local system monitor (monitor.rs)"),
             ("tokio", "runtime of the SSH and SFTP connections (ssh.rs, files.rs)"),
+            (
+                "tungstenite",
+                "the client side of the byte bridge to a holzWave server (remote/ws.rs): WebSocket framing, the handshake, \
+                 masking and the close handshake. Handshake feature only, exact version: the TLS is the core's own rustls \
+                 stream with the platform verifier and none of the library's TLS features is on. The server keeps its own \
+                 copy only as a dev dependency",
+            ),
             ("ureq", "WebDAV transport of the sync, a named exception in EXCEPTIONS (sync/webdav.rs)"),
             ("zeroize", "wipes the derived sync key and the decrypted content from memory (sync/crypto.rs)"),
         ],
@@ -462,6 +469,20 @@ const PERMITTED_HITS: &[(&str, &str, &str)] = &[
         "core/src/sync/webdav.rs",
         "ureq",
         "the WebDAV transport of the sync, a named exception of the closure guard (see EXCEPTIONS)",
+    ),
+    (
+        "core/src/remote/ws.rs",
+        "std::net",
+        "the address types and the resolver of the standard library, for the one WebSocket connection to the holzWave server \
+         the person signed in to: the file resolves the host of that address, uses only loopback addresses for a plain \
+         connection and listens on no port",
+    ),
+    (
+        "core/src/remote/ws.rs",
+        "TcpStream",
+        "the one socket of the WebSocket client of the byte bridge: it connects to the holzWave server the person signed in \
+         to, only when the person asks for a remote session after sign-in, over TLS with the platform verifier (a plain \
+         connection only to a loopback address), with bounded connects, handshakes, reads, writes and messages",
     ),
     (
         "core/src/ai/http.rs",

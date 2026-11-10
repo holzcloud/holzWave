@@ -37,6 +37,8 @@
 //! - [`exec`]: the local runner of the agent's command tool: a separate process, a scrubbed environment, bounded output.
 //! - [`winshell`]: the PowerShell prompt wrapper that announces the directory, and the Windows reading of its OSC 7.
 //! - [`wshinstall`]: the one explicit act that puts the bundled `wsh` on a Linux host reached over SSH, and verifies it.
+//! - [`remote`]: the client side of the byte bridge to a holzWave server (a WebSocket client over TLS).
+//! - [`server_link`]: the device token and the faults of the link to a server.
 //! - `platform_tls` (Android only): the one-time set-up of the certificate verifier both network clients use.
 
 pub mod ai;
@@ -67,7 +69,9 @@ pub mod profiles;
 pub mod pty;
 pub mod queue;
 pub mod reach;
+pub mod remote;
 pub mod secrets;
+pub mod server_link;
 pub mod session;
 pub mod settings;
 pub mod ssh;
