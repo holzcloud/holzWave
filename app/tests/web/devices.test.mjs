@@ -231,14 +231,23 @@ await runTest("devices", {}, async ({ harness, open }) => {
     // ---- the switches: both are drawn as the server holds them, and turning one on or off reaches the routes it guards ------------------
     const switches = async () => again.locator('[data-group="device-access"] .dev-switch').evaluateAll((bs) => bs.map((b) => `${b.getAttribute("aria-labelledby") ? document.getElementById(b.getAttribute("aria-labelledby")).textContent : "?"}=${b.textContent}`));
     equal((await switches()).join(", "), "Sync target=OFF, Remote sessions=ON", "the switches show what the server holds (remote was turned on above)");
+    // The sync routes belong to the Sync target switch alone: a valid token and the other switch on do not open them.
+    const listing = () => native.call("GET", "/sync/v1/list/-", { token: adminLaptop.token });
+    equal((await listing()).status, 404, "the sync routes are hidden while Sync target is off, for a valid token and with Remote sessions on");
     await again.getByRole("switch", { name: "Sync target" }).click();
     await poll(async () => ((await switches()).join(", ") === "Sync target=ON, Remote sessions=ON" ? true : undefined), "Sync target is on");
+    const open = await listing();
+    equal(open.status, 200, "with Sync target on the same token reads its own, still empty, sync folder");
+    equal(JSON.stringify(open.body), "[]", "the folder is empty");
+    equal((await native.call("GET", "/sync/v1/list/-", {})).status, 401, "without a token the sync routes ask for one");
     await again.getByRole("switch", { name: "Remote sessions" }).click();
     await poll(async () => ((await switches()).join(", ") === "Sync target=ON, Remote sessions=OFF" ? true : undefined), "Remote sessions is off");
+    equal((await listing()).status, 200, "turning Remote sessions off leaves the sync routes where they are");
     // The grant routes serve either feature, so they stay while one switch is on; the stored devices are never touched by a switch.
     equal((await native.start("Second try", "linux")).status, 200, "the grant routes are there while one of the switches is on");
     await again.getByRole("switch", { name: "Sync target" }).click();
     await poll(async () => ((await switches()).join(", ") === "Sync target=OFF, Remote sessions=OFF" ? true : undefined), "both switches are off");
+    equal((await listing()).status, 404, "turning Sync target off hides the sync routes again");
     equal((await native.start()).status, 404, "with both switches off a native client cannot start a grant");
     equal((await native.me(adminLaptop.token)).status, 404, "nor can a device ask who it is: the feature is hidden, not refused");
     await again.getByRole("button", { name: "Close" }).click();
