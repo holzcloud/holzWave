@@ -2,8 +2,7 @@
 //! the loopback address, and the runtimes that the apps use. The sign-in goes through the whole grant (the person's approval is
 //! played by the rig), the keychain is a memory store, and the server's clock is the environment's manual one.
 //!
-//! Two tests that need the server's sync routes are marked `ignore` with their reason; they were written against the contract
-//! and have never been run (see the reason on each).
+//! The last test runs two devices of one person through the server's sync routes with the real engine and one passphrase.
 
 #![cfg(feature = "in-process-workers")]
 
@@ -167,7 +166,6 @@ async fn a_device_the_person_revokes_is_seen_as_signed_out_on_its_next_request()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "needs the sync routes of the server, which are not built yet; never run"]
 async fn two_devices_of_one_person_sync_through_the_server_with_one_passphrase() {
     let env = ApiEnv::new();
     turn_on(&env, Feature::Sync);
