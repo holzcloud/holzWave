@@ -594,6 +594,13 @@ const PERMITTED_HITS: &[(&str, &str, &str)] = &[
         "the example address shown inside the endpoint field of the sync form, not a request",
     ),
     (
+        "app/src/serverstate.ts",
+        "https://",
+        "the two sentences of the sign-in dialog that tell a person to type an address that starts with this scheme; the page only \
+         displays them and checks the typed text with the URL parser before any command is called, and the request itself is made \
+         by the host, never by the page",
+    ),
+    (
         "app/src/bridge.ts",
         "fetch(",
         "the one same-origin request function of the page (`http`): the path is checked against the page's own origin before \
