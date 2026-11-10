@@ -10,6 +10,7 @@
 import { http } from "./bridge.js";
 import { agoText, changeMessage, CHANGE_FAILED, groupStates, readMe, REPLACES_OLD, SAVED, sessionRows, usedText } from "./accountstate.js";
 import type { Group, Me } from "./accountstate.js";
+import { buildDevicesGroup } from "./devices.js";
 import { el } from "./dom.js";
 import { decodeCreationOptions, encodeAttestation } from "./loginpasskey.js";
 import { PASSKEY_NOT_SAVED, readRecovery, readTotpSetup, UNREACHABLE } from "./loginstate.js";
@@ -52,7 +53,7 @@ export async function openAccount(): Promise<void> {
     cls: "account",
     labelledBy: "acc-title",
     returnTo: null,
-    sheets: ["./websession.css", "./account.css"],
+    sheets: ["./websession.css", "./account.css", "./devices.css"],
     onEscape: () => {
       if (!onceOnly) closeAll();
     },
@@ -72,6 +73,8 @@ export async function openAccount(): Promise<void> {
   const status = el("p", "set-status", box);
   status.setAttribute("role", "status");
   const groups = el("div", "acc-groups", box);
+  // The Devices group follows the groups of the account (docs/design.md 6.35); it reads its own list and is not drawn again with them.
+  const devicesArea = el("div", "acc-devices", box);
   const actions = el("div", "dlg-actions", box);
   const close = el("button", "", actions);
   close.type = "button";
@@ -81,8 +84,16 @@ export async function openAccount(): Promise<void> {
     status.textContent = text;
   };
 
+  const devices = buildDevicesGroup(devicesArea, "person", {
+    box,
+    say,
+    isOpen: () => shown === layer,
+    fallback: () => close.focus(),
+  });
+
   function closeAll(): void {
     current?.close(false);
+    devices.end();
     layer.close();
     shown = null;
   }
@@ -486,6 +497,7 @@ export async function openAccount(): Promise<void> {
   }
 
   await reload();
+  await devices.load();
   (groups.querySelector<HTMLElement>(".acc-main") ?? close).focus();
 }
 
@@ -494,7 +506,7 @@ export async function openAccount(): Promise<void> {
  * the focus or the pointer goes anywhere else in `scope`; that is not left to `blur` alone, because a button that a press did not
  * focus (as in WebKit on a Mac) never blurs.
  */
-function armed(button: HTMLButtonElement, label: string, armedLabel: string, scope: HTMLElement, signal: AbortSignal, act: () => Promise<void>): void {
+export function armed(button: HTMLButtonElement, label: string, armedLabel: string, scope: HTMLElement, signal: AbortSignal, act: () => Promise<void>): void {
   button.type = "button";
   button.textContent = label;
   button.dataset.armed = "false";

@@ -2442,7 +2442,7 @@ for an account that has a password, the others always.
 | Recovery code | `saved` or `none` | `Make a new code`; while the saved passwords are locked `Unlock` instead |
 | Sessions | none | `Sign out` on every row but this one, and `Sign out everywhere` |
 
-A seventh group, `Devices`, follows `Sessions` while a device switch is on (6.35).
+A seventh group, `Devices`, follows `Sessions` (6.35). It is drawn whether or not a device switch is on: a device must always be possible to end, and the page cannot tell a member what the switches say.
 
 A state word is its own cue: `set` and `saved` are in the ok colour, `not set` and `none` are dim; the colour is never alone.
 A change opens its form in the place of the group's row, with `Save` and `Cancel`: the password asks `Current password` and `New password`
@@ -2517,7 +2517,7 @@ sentence `Shown once. Copy it now and send it to the person. It works for 7 days
 a bordered block in mono cut with an ellipsis, `Copy link` and the solid `Done`. The link is never listed again, is not put into
 the status line or the title, and is removed from the page when `Done` is pressed or the layer closes.
 
-While a device switch is on, the dialog also has the groups `Devices` and `Device access` below the table (6.35).
+The dialog also has the groups `Devices` and `Device access` below the table (6.35), drawn while both switches are off as well: the switches are how a feature is turned on.
 
 No dialog of this section shows any person's secrets, terminal output, commands, scrollback or layout, and there is no audit viewer. An
 administrator reads and changes the account rows and nothing else.
@@ -2978,7 +2978,7 @@ On attach the server sends the current screen and a bounded tail of the scrollba
 
 ### 6.35 Devices and signing in to a server
 
-An app (desktop or phone) signs in to the server with the person's own login in a browser and keeps a token of its own, a **device**, in the OS keychain. The server never learns the passphrase of the sync and never sees a file in plain text. Two switches of the operator, `Sync target` and `Remote sessions`, are off by default, and while both are off nothing on this page is reachable.
+An app (desktop or phone) signs in to the server with the person's own login in a browser and keeps a token of its own, a **device**, in the OS keychain. The server never learns the passphrase of the sync and never sees a file in plain text. Two switches of the operator, `Sync target` and `Remote sessions`, are off by default, and while both are off the sign-in of an app cannot be reached (the lists of devices and the revocation still work, so a device can always be ended).
 
 **The step in the app.** A small dialog over the window, in the box of the Settings dialog, opened by `Sign in…` of the server row (6.34) and of the sync popover (6.9). Two screens. The first asks for the address; once an address is known it is not shown again (`Sign out` forgets the token and keeps the address, so `Sign in…` goes straight to the second screen). The second shows the request.
 
@@ -3014,7 +3014,7 @@ The states of the second screen are a dot shape and words; the failures also car
 
 ![Device sign-in](design/device-authorize.png)
 
-**The Devices group.** In the Account dialog (6.29), after Sessions, drawn only while a device switch is on: one row for each device of the person with its name, `macOS · just now` (platform and last seen: `just now`, `3 min ago`, `3 h ago`, `2 days ago` or `never`) and the button `Revoke`, which asks with a second click (`Click again to revoke`). With none: `No devices.` In the People dialog an administrator has the same list for everybody, below the table of people, with the extra column `Owner`; `Revoke` asks twice there too and needs a recent sign-in. A revoked device is refused on its next request and its sockets close.
+**The Devices group.** In the Account dialog (6.29), after Sessions, drawn whether or not a device switch is on (a device must always be possible to end): one row for each device of the person with its name, `macOS · just now` (platform and last seen: `just now`, `3 min ago`, `3 h ago`, `2 days ago` or `never`) and the button `Revoke`, which asks with a second click (`Click again to revoke`). With none: `No devices.` In the People dialog an administrator has the same list for everybody, below the table of people, with the extra column `Owner`; `Revoke` asks twice there too and needs a recent sign-in. A revoked device is refused on its next request and its sockets close.
 
 **The group `Device access`.** In the People dialog, below the Devices group: two switches, `Sync target` and `Remote sessions`, each the switch of the Android Security row (6.6) at the desktop's size (28 px high): the word `ON` or `OFF` is inside the knob, `ON` has the knob at the right, filled, a rose outline and the rose wash, `OFF` has the knob at the left, hollow, and a dim hairline. Both are `OFF` by default. A switch that the operator's configuration has turned off for good is drawn `OFF` with a dashed outline, is not operable (`aria-disabled`) and has the dim line `Turned off in the server configuration.`. One dim line sits under the group: `Off by default. Turning one off ends the matching connections; devices stay signed in.` Changing a switch asks for a fresh sign-in like every change in that dialog.
 

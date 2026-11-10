@@ -46,7 +46,15 @@ export const entryReady = (page) =>
 /** Open the main page as an administrator with the scripted server and the dialog. */
 export async function openPeople(page, url, state, table = [], sessionOver = {}) {
   await installClipboard(page);
-  const server = await openMain(page, url, [sessionRoute(sessionOver), meRoute({ me: fixture() }), listRoute(state), ...table]);
+  // The groups below the table read their own answers; a test about devices puts its own routes in `table`, which is looked at first.
+  const server = await openMain(page, url, [
+    sessionRoute(sessionOver),
+    meRoute({ me: fixture() }),
+    listRoute(state),
+    ...table,
+    { path: "/api/admin/devices", body: () => ({ devices: structuredClone(state.devices ?? []) }) },
+    { path: "/api/admin/device-access", body: () => structuredClone(state.access ?? { sync: { on: false, allowed: true }, remote: { on: false, allowed: true } }) },
+  ]);
   await entryReady(page);
   assert.equal(await runAction(page, "people.open"), true, "the action runs");
   await dialog(page).waitFor();
@@ -655,6 +663,8 @@ export async function second({ page, url }) {
         ...["1", "3", "7", "14", "30"].map((d) => `radio:${d}`),
         "radio:Administrator",
         "radio:Member",
+        // The two switches of Device access, both off by default; the devices list is empty here, so it has no Revoke.
+        "switch:OFF",
       ].sort(),
     );
     assert.equal(controls.filter((c) => /password|scrollback|command|layout|export|audit|impersonat|file|terminal|key/i.test(c.split(":")[1]) && !/^(button|menuitem):Reset secrets$/.test(c)).length, 0, "nothing in the dialog names another person's data");

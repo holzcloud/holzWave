@@ -112,6 +112,11 @@ async function openAccountDialog(): Promise<void> {
   await openAccount();
 }
 
+async function openTypedCode(): Promise<void> {
+  const { openTypedCode: open } = await import("./devices.js");
+  await open();
+}
+
 /** Open the dialog for the code the address carried; the code is forgotten once it is handed over. */
 async function openDeviceCode(): Promise<void> {
   const code = deviceCode;
@@ -206,6 +211,8 @@ export function initWebSession(onChange: () => void): Promise<void> {
   // The palette entries of the account: the dialog and the end of this session.
   registerAction({ id: "account.open", title: "Account…", run: () => void openAccountDialog() });
   registerAction({ id: "account.signout", title: "Sign out", run: () => void signOut() });
+  // A code typed from the screen of an app (docs/design.md 6.35): the browser build only, and nothing is asked until it is well formed.
+  registerAction({ id: "device.authorize", title: "Authorize device…", run: () => void openTypedCode() });
   // The rules of the marks; a sheet that cannot load leaves the marks as plain text.
   void loadStyles("./websession.css").catch(() => {});
   onSession((event) => {

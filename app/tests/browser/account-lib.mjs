@@ -31,6 +31,9 @@ export function fixture(over = {}) {
 /** The route for `GET /api/me`: it answers what `state.me` is at that moment, so a test changes the account between requests. */
 export const meRoute = (state) => ({ path: "/api/me", body: () => structuredClone(state.me) });
 
+/** The route for `GET /api/me/devices`: the person's devices as `state.devices` holds them at that moment (none by default). */
+export const devicesRoute = (state = {}) => ({ path: "/api/me/devices", body: () => ({ devices: structuredClone(state.devices ?? []) }) });
+
 /** The step the server asks for: a 403 that says a recent sign-in is needed. */
 export const STEP = { status: 403, body: { code: "forbidden", step_up: true } };
 /** The answer of `POST /auth/step-up`. */
@@ -38,7 +41,8 @@ export const stepUpRoute = { method: "POST", path: "/auth/step-up", body: { step
 
 /** Open the main page with the scripted server and the account dialog. `table` is added to the session and `/api/me`. */
 export async function openAccountDialog(page, url, state, table = [], suffix = "?renderer=canvas") {
-  const server = await openMain(page, url, [sessionRoute(), meRoute(state), ...table], suffix);
+  // The Devices group reads its own list; a test that is about devices puts its own route in `table`, which is looked at first.
+  const server = await openMain(page, url, [sessionRoute(), meRoute(state), ...table, devicesRoute(state)], suffix);
   await runAction(page, "account.open");
   await page.getByRole("dialog", { name: "Account", exact: true }).waitFor();
   await page.waitForSelector(".acc-group");

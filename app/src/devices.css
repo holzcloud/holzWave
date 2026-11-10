@@ -27,10 +27,48 @@
 .dlg.device-code .dev-input { text-transform: uppercase; letter-spacing: .1em; }
 .dlg.device-code .web-err { margin: 0 0 .5rem; }
 
+/* The groups `Devices` and `Device access`, in the Account dialog and in the People dialog. */
+.dlg .dev-group { margin: 0 0 .833rem; }
+.dlg.people .dev-group { margin: .833rem 0 0; }
+.dlg.settings .dev-group > legend { color: var(--hw-dim); }
+.dlg .dev-empty { margin: 0; min-height: 2rem; display: flex; align-items: center; color: var(--hw-ink-2); }
+.dlg .dev-items { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
+.dlg .dev-item { display: flex; align-items: center; gap: .667rem; min-height: 2rem; }
+.dlg .dev-name { flex: 0 1 auto; min-width: 0; font-weight: 700; color: var(--hw-ink); overflow-wrap: anywhere; }
+.dlg .dev-meta { flex: 1 1 auto; min-width: 0; color: var(--hw-dim); overflow-wrap: anywhere; }
+.dlg.settings .dev-revoke { flex: none; min-height: calc(28rem / 12); }
+.dlg.settings .dev-revoke[data-armed="true"] { color: var(--hw-danger); border-color: var(--hw-danger); }
+.dlg.settings .dev-revoke:focus-visible, .dlg.settings .dev-switch:focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 2px; }
+
+/* The administrator's list: the table of the People dialog, with the extra column `Owner`. */
+.dlg .dev-table { width: 100%; border-collapse: collapse; }
+.dlg .dev-table th { padding: .5rem .667rem; text-align: left; font-weight: 400; color: var(--hw-dim); border-bottom: 1px solid var(--hw-line); }
+.dlg .dev-row > td { padding: .5rem .667rem; vertical-align: middle; border-bottom: 1px solid var(--hw-line); }
+.dlg .dev-row .dev-name { font-weight: 700; }
+.dlg .dev-row .dev-owner, .dlg .dev-row .dev-platform, .dlg .dev-row .dev-seen { color: var(--hw-ink-2); overflow-wrap: anywhere; }
+.dlg .dev-row .dev-seen { white-space: nowrap; }
+.dlg .dev-row .dev-act { width: 1%; text-align: right; white-space: nowrap; }
+
+/* The two switches are the one of the Security row on Android (vault.css) at the desktop's size. A switch that the configuration has closed
+   is drawn `OFF` with a dashed outline and says why in dim text; the dashes and the words are its cues besides colour. */
+.dlg .dev-sw-row { display: flex; align-items: center; justify-content: space-between; gap: .667rem; min-height: 2rem; }
+.dlg .dev-sw-label { min-width: 0; color: var(--hw-ink); overflow-wrap: anywhere; }
+.dlg.settings .dev-switch { min-width: calc(28rem / 12 * 2.4); min-height: calc(28rem / 12); }
+.dlg .dev-switch[data-locked="true"] { border-style: dashed; cursor: default; color: var(--hw-dim); background: none; }
+.dlg .dev-dim, .dlg .dev-help { margin: .167rem 0 .333rem; color: var(--hw-dim); overflow-wrap: anywhere; }
+.dlg .dev-help { margin-top: .5rem; }
+
 @media (pointer: coarse) {
   .dlg.device-authorize button, .dlg.device-code button, .dlg.device-code .dev-input { min-height: max(44px, calc(44rem / 12)); }
+  .dlg.settings .dev-revoke, .dlg.settings .dev-switch { min-height: max(44px, calc(44rem / 12)); }
+  .dlg.settings .dev-switch { min-width: max(44px, calc(44rem / 12) * 1.25); }
 }
 
 @media (forced-colors: active) {
   .dlg.device-authorize .dev-code { border-color: CanvasText; }
+  .dlg .dev-table th, .dlg .dev-row > td { border-color: CanvasText; }
+  .dlg.settings .dev-revoke { border-color: CanvasText; }
+  .dlg.settings .dev-revoke[data-armed="true"] { outline: 2px solid Mark; }
+  .dlg .dev-switch[data-locked="true"] { border-style: dashed; }
+  .dlg.settings :is(.dev-revoke, .dev-switch):focus-visible { outline-color: Highlight; }
 }

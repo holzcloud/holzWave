@@ -13,6 +13,7 @@
 import { registerAction } from "./actions.js";
 import { http } from "./bridge.js";
 import { CHANGE_FAILED } from "./accountstate.js";
+import { buildAccessGroup, buildDevicesGroup } from "./devices.js";
 import { el } from "./dom.js";
 import { UNREACHABLE } from "./loginstate.js";
 import {
@@ -99,7 +100,7 @@ export async function openPeople(): Promise<void> {
     cls: "people",
     labelledBy: "ppl-title",
     returnTo: null,
-    sheets: ["./websession.css", "./people.css"],
+    sheets: ["./websession.css", "./people.css", "./vault.css", "./devices.css"],
     onEscape: () => {
       // The menu is closed first and the dialog second.
       if (menu !== null) closeMenu(true);
@@ -135,6 +136,7 @@ export async function openPeople(): Promise<void> {
 
   function closeAll(): void {
     dialogOpen = false;
+    devices.end();
     endAsk?.();
     endInvite?.();
     layer.close();
@@ -153,6 +155,30 @@ export async function openPeople(): Promise<void> {
   }
   const tbody = el("tbody", "", table);
   el("p", "ppl-note", body).textContent = LIST_NOTE;
+
+  // Below the table (docs/design.md 6.35): the devices of everybody, and the two switches of the device features. They read their own
+  // answers; a change of the accounts does not draw them again.
+  const devices = buildDevicesGroup(body, "admin", {
+    box,
+    say,
+    isOpen: () => dialogOpen,
+    refused: (status, answer) => {
+      if (outcomeOf(status, answer).kind !== "locked") return false;
+      lockOut(ADMIN_ONLY);
+      return true;
+    },
+    fallback: () => (invite.hidden ? close : invite).focus(),
+  });
+  const access = buildAccessGroup(body, {
+    box,
+    say,
+    isOpen: () => dialogOpen,
+    refused: (status, answer) => {
+      if (outcomeOf(status, answer).kind !== "locked") return false;
+      lockOut(ADMIN_ONLY);
+      return true;
+    },
+  });
 
   /** Ends the listeners of the last drawing. */
   let drawn = new AbortController();
@@ -550,6 +576,9 @@ export async function openPeople(): Promise<void> {
     (radios.get("member") ?? create).focus();
   }
 
-  await load();
+  if (await load()) {
+    await devices.load();
+    await access.load();
+  }
   if (!invite.hidden) invite.focus();
 }

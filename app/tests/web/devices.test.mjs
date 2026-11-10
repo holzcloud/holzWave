@@ -1,7 +1,7 @@
 // The device features of the page against the real server: a code in the fragment of the address survives the sign-in and opens the
 // dialog that shows who asks and from where; approving and denying (with a fresh sign-in) reach the app that is waiting; a code
 // that is not valid, a hidden feature and a malformed code say or open nothing more; and the code and the token are kept nowhere.
-import { runTest, signIn, nativeClient, setSwitches, pageHolds, addressesHold, confirmItsYou, check, equal, poll } from "./lib.mjs";
+import { runTest, signIn, nativeClient, setSwitches, pageHolds, addressesHold, confirmItsYou, openPeople, runEntry, check, equal, poll } from "./lib.mjs";
 
 const NOT_VALID = "That code is not valid or has expired.";
 
@@ -113,6 +113,141 @@ await runTest("devices", {}, async ({ harness, open }) => {
     equal(new URL(p.url()).hash, "", "a malformed code is taken out of the address as well");
     await p.close();
   }
+  // ---- the lists: a person sees and ends their own devices only, an administrator everybody's -------------------------------------------
+  const ana = await harness.account({ role: "member", name: "dv-ana" });
+  const ben = await harness.account({ role: "member", name: "dv-ben" });
+  const anaContext = await open();
+  const anaPage = await anaContext.context.newPage();
+  await signIn(anaPage, harness, ana);
+  const HOSTILE = '<img src=x onerror="window.__pwned=1"> <b>phone</b>';
+
+  /** Approve a device of `context`'s person from the address a link would open (`typed`: by the palette entry and a typed code instead). */
+  const approveFor = async (context, name, platform, typed = false) => {
+    const grant = await native.start(name, platform);
+    equal(grant.status, 200, `a grant for ${name}`);
+    const p = await context.context.newPage();
+    if (typed) {
+      await p.goto(`${harness.origin}/`);
+      await p.waitForSelector("canvas#term");
+      await runEntry(p, "Authorize device…");
+      const field = p.getByLabel("Code", { exact: true });
+      await field.fill(grant.userCode.toLowerCase());
+      await p.getByRole("button", { name: "Look up" }).click();
+    } else await p.goto(`${harness.origin}/#device=${grant.userCode}`);
+    const d = p.getByRole("dialog", { name: "Authorize device" });
+    await d.waitFor();
+    await d.getByRole("button", { name: "Approve" }).click();
+    await poll(async () => ((await d.locator(".dev-status").innerText()).includes("Device approved.") ? true : undefined), `${name} is approved`);
+    await p.close();
+    const got = await native.poll(grant.deviceCode);
+    equal(got.state, "approved", `${name} got its token`);
+    return { name, token: got.token, id: got.deviceId };
+  };
+  const laptop = await approveFor(anaContext, "Ana laptop", "macos", true);
+  const phone = await approveFor(anaContext, HOSTILE, "android");
+  const adminLaptop = await approveFor(person, "Admin desktop", "linux");
+
+  const accountDialog = async (page) => {
+    await runEntry(page, "Account…");
+    const d = page.getByRole("dialog", { name: "Account", exact: true });
+    await d.waitFor();
+    await d.locator('[data-group="devices"]').waitFor();
+    await poll(async () => ((await d.locator('[data-group="devices"] .dev-item, [data-group="devices"] .dev-empty').count()) > 0 ? true : undefined), "the Devices group is drawn");
+    return d;
+  };
+  const names = (d) => d.locator('[data-group="devices"] .dev-item .dev-name').allInnerTexts();
+  {
+    const d = await accountDialog(anaPage);
+    const seen = (await names(d)).sort();
+    equal(seen.join(" | "), [HOSTILE, "Ana laptop"].sort().join(" | "), "a person sees exactly the two devices they approved, a hostile name as text");
+    equal(await d.locator("img, b").count(), 0, "no element was made from a name");
+    equal(await anaPage.evaluate(() => window.__pwned), undefined, "no script ran");
+    equal(await d.locator('[data-group="devices"]').innerText().then((t) => t.includes("Admin desktop")), false, "another person's device is not in the list");
+    const meta = await d.locator('[data-group="devices"] .dev-item', { hasText: "Ana laptop" }).locator(".dev-meta").innerText();
+    check(/^macOS · (just now|\d+ min ago)$/.test(meta), `the line of a device says its platform and when it was seen (${meta})`);
+    await d.getByRole("button", { name: "Close" }).click();
+    await d.waitFor({ state: "detached" });
+  }
+  {
+    // A person who has no device sees none of another's.
+    const benContext = await open();
+    const benPage = await benContext.context.newPage();
+    await signIn(benPage, harness, ben);
+    const d = await accountDialog(benPage);
+    equal(await d.locator('[data-group="devices"] .dev-empty').innerText(), "No devices.", "a second person has none");
+    equal(await d.locator('[data-group="devices"] .dev-item').count(), 0, "and sees none of the others");
+    // A member has no People entry and no way to the switches.
+    await d.getByRole("button", { name: "Close" }).click();
+    await d.waitFor({ state: "detached" });
+    const titles = await benPage.evaluate(async () => (await import(new URL("actions.js", location.href).href)).listActions().map((a) => a.title));
+    check(titles.includes("Account…") && titles.includes("Authorize device…"), "the member has the entries of a person");
+    check(!titles.includes("People…"), "a member has no People entry");
+    const refusedAccess = await benContext.context.request.get(`${harness.origin}/api/admin/device-access`);
+    check(refusedAccess.status() === 403 || refusedAccess.status() === 401, `the switches are not a member's (${refusedAccess.status()})`);
+    equal((await benContext.context.request.get(`${harness.origin}/api/admin/devices`)).status() === 200, false, "nor is the list of everybody's devices");
+    benContext.expectClean("the second person's context");
+  }
+
+  // The administrator sees every device with its owner; a revoke after an old sign-in asks who the person is.
+  await harness.backdate(admin.username);
+  await adminPage.reload();
+  await adminPage.waitForSelector("canvas#term");
+  {
+    const dialog = await openPeople(adminPage);
+    await dialog.locator('[data-group="devices"] .dev-row').first().waitFor();
+    const rows = await dialog.locator('[data-group="devices"] .dev-row').evaluateAll((trs) => trs.map((tr) => Array.from(tr.children).slice(0, 3).map((c) => c.textContent).join(" | ")));
+    equal(rows.length, 4, "an administrator sees the devices of everybody (the first one of this file was approved by the administrator)");
+    check(rows.includes("Test laptop | dv-admin | macOS") && rows.includes("Ana laptop | dv-ana | macOS") && rows.includes(`${HOSTILE} | dv-ana | Android`) && rows.includes("Admin desktop | dv-admin | Linux"), `each row names its owner (${rows.join("; ")})`);
+    equal(await dialog.locator("img, b").count(), 0, "a hostile name is text in the administrator's list as well");
+    // The person revokes their own laptop first, with a second press: its token is refused on the very next request.
+    equal((await native.me(laptop.token)).status, 200, "the token works before the revoke");
+    const own = anaPage;
+    const anaDialog = await accountDialog(own);
+    const row = anaDialog.locator('[data-group="devices"] .dev-item', { hasText: "Ana laptop" });
+    const button = row.getByRole("button");
+    await button.click();
+    equal((await button.innerText()).trim().toLowerCase(), "click again to revoke", "the first press asks");
+    equal((await native.me(laptop.token)).status, 200, "and revokes nothing");
+    await button.click();
+    await poll(async () => ((await anaDialog.locator('[data-group="devices"] .dev-item').count()) === 1 ? true : undefined), "the list shows one device left");
+    equal((await native.me(laptop.token)).status, 401, "the revoked token is refused on the very next request");
+    equal((await native.me(phone.token)).status, 200, "the other device still works");
+    equal((await native.me(adminLaptop.token)).status, 200, "so does another person's");
+    await anaDialog.getByRole("button", { name: "Close" }).click();
+    // The administrator ends the other one of that person; the page of the administrator needs a fresh sign-in for it.
+    await poll(async () => ((await dialog.locator('[data-group="devices"] .dev-row').count()) === 4 ? true : undefined), "the list is the one of the server");
+    await dialog.getByRole("button", { name: "Close" }).click();
+    const again = await openPeople(adminPage);
+    await poll(async () => ((await again.locator('[data-group="devices"] .dev-row').count()) === 3 ? true : undefined), "the list of the administrator no longer has the revoked device");
+    const target = again.locator('[data-group="devices"] .dev-row', { hasText: "dv-ana" });
+    equal(await target.count(), 1, "one device of that person is left");
+    await target.getByRole("button").click();
+    await target.getByRole("button").click();
+    await confirmItsYou(adminPage, admin.password);
+    await poll(async () => ((await again.locator('[data-group="devices"] .dev-row').count()) === 2 ? true : undefined), "the list shows only the administrator's own devices");
+    equal((await native.me(phone.token)).status, 401, "a device that the administrator revoked is refused on the next request");
+    equal((await native.me(adminLaptop.token)).status, 200, "the administrator's own device is untouched");
+
+    // ---- the switches: both are drawn as the server holds them, and turning one on or off reaches the routes it guards ------------------
+    const switches = async () => again.locator('[data-group="device-access"] .dev-switch').evaluateAll((bs) => bs.map((b) => `${b.getAttribute("aria-labelledby") ? document.getElementById(b.getAttribute("aria-labelledby")).textContent : "?"}=${b.textContent}`));
+    equal((await switches()).join(", "), "Sync target=OFF, Remote sessions=ON", "the switches show what the server holds (remote was turned on above)");
+    await again.getByRole("switch", { name: "Sync target" }).click();
+    await poll(async () => ((await switches()).join(", ") === "Sync target=ON, Remote sessions=ON" ? true : undefined), "Sync target is on");
+    await again.getByRole("switch", { name: "Remote sessions" }).click();
+    await poll(async () => ((await switches()).join(", ") === "Sync target=ON, Remote sessions=OFF" ? true : undefined), "Remote sessions is off");
+    // The grant routes serve either feature, so they stay while one switch is on; the stored devices are never touched by a switch.
+    equal((await native.start("Second try", "linux")).status, 200, "the grant routes are there while one of the switches is on");
+    await again.getByRole("switch", { name: "Sync target" }).click();
+    await poll(async () => ((await switches()).join(", ") === "Sync target=OFF, Remote sessions=OFF" ? true : undefined), "both switches are off");
+    equal((await native.start()).status, 404, "with both switches off a native client cannot start a grant");
+    equal((await native.me(adminLaptop.token)).status, 404, "nor can a device ask who it is: the feature is hidden, not refused");
+    await again.getByRole("button", { name: "Close" }).click();
+    const last = await openPeople(adminPage);
+    await poll(async () => ((await last.locator('[data-group="devices"] .dev-row').count()) === 2 ? true : undefined), "turning the switches off ended no stored device");
+    equal((await last.locator('[data-group="device-access"] .dev-switch').evaluateAll((bs) => bs.map((b) => b.textContent).join(","))), "OFF,OFF", "both off is the state the server holds");
+    await last.getByRole("button", { name: "Close" }).click();
+  }
+  anaContext.expectClean("the context of the person whose devices were listed");
   person.expectClean("the context of the person who signed devices in");
   adminContext.expectClean("the administrator's context");
   console.log(
