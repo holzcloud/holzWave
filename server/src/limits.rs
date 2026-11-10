@@ -82,6 +82,22 @@ pub const REMOTE_SNAPSHOT_MAX_BYTES: u32 = 4 * 1024 * 1024;
 /// How long the writer of a session may give no sign of life before the right to write is free.
 pub const REMOTE_WRITER_TIMEOUT: Duration = secs(30);
 
+/// The most MiB of encrypted files one person keeps on the server as a sync target.
+pub const SYNC_QUOTA_MIB: u32 = 64;
+
+/// The most files (the metadata file and the backups included) one person keeps on the server as a sync target.
+pub const SYNC_MAX_FILES: u32 = 512;
+
+/// How many of the newest backups of a person stay on the server after a write of one.
+pub const SYNC_BACKUPS_KEEP: u32 = 20;
+
+/// The most bytes one encrypted file may have: the largest the format allows, so a smaller value only narrows it.
+pub const SYNC_MAX_BLOB_BYTES: u32 = 8 * 1024 * 1024;
+
+/// How long the body of one write to the sync target may take to arrive, from the first byte to the last. A sender that is
+/// slower holds nothing for longer. Fixed by the design, not a configuration key.
+pub const SYNC_BODY_TIMEOUT: Duration = secs(120);
+
 /// The `RLIMIT_NPROC` of a worker: the most processes one person may have.
 pub const WORKER_NPROC: u64 = 1024;
 
@@ -250,6 +266,14 @@ pub const SNAPSHOT_MAX_SPEC: Spec<u32> =
     Spec::new("remote.snapshot_max_bytes", REMOTE_SNAPSHOT_MAX_BYTES, 64 * 1024, 16 * 1024 * 1024);
 /// The silence after which the writer of a session loses the right to write.
 pub const WRITER_TIMEOUT_SPEC: Spec<Duration> = Spec::new("remote.writer_timeout", REMOTE_WRITER_TIMEOUT, secs(5), minutes(10));
+/// The space of one person on the sync target, in whole MiB.
+pub const SYNC_QUOTA_SPEC: Spec<u32> = Spec::new("sync.quota_mib", SYNC_QUOTA_MIB, 1, 65_536);
+/// The number of files of one person on the sync target.
+pub const SYNC_FILES_SPEC: Spec<u32> = Spec::new("sync.max_files", SYNC_MAX_FILES, 8, 4096);
+/// The backups of one person that stay.
+pub const SYNC_BACKUPS_SPEC: Spec<u32> = Spec::new("sync.backups_keep", SYNC_BACKUPS_KEEP, 1, 1000);
+/// The largest encrypted file, in bytes.
+pub const SYNC_BLOB_SPEC: Spec<u32> = Spec::new("sync.max_blob_bytes", SYNC_MAX_BLOB_BYTES, 64 * 1024, SYNC_MAX_BLOB_BYTES);
 /// The upload cap.
 pub const UPLOAD_SPEC: Spec<u64> = Spec::new("upload.max_bytes", UPLOAD_BYTES, KIB, 16 * GIB);
 
@@ -511,6 +535,10 @@ pub fn all_rows() -> Vec<Row> {
         HISTORY_MAX_SPEC.row(),
         SNAPSHOT_MAX_SPEC.row(),
         WRITER_TIMEOUT_SPEC.row(),
+        SYNC_QUOTA_SPEC.row(),
+        SYNC_FILES_SPEC.row(),
+        SYNC_BACKUPS_SPEC.row(),
+        SYNC_BLOB_SPEC.row(),
         UPLOAD_SPEC.row(),
     ]);
     rows

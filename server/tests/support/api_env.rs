@@ -18,6 +18,8 @@ use holzwave_server::http::router;
 use holzwave_server::http::routes_admin::{self, AdminServices};
 use holzwave_server::http::routes_auth::{self, AuthServices};
 use holzwave_server::http::routes_device;
+use holzwave_server::http::routes_sync;
+use holzwave_server::sync_target::Bounds;
 use holzwave_server::http::routes_enrol::{self, Enrol, EnrolServices};
 use holzwave_server::http::routes_me::{self, MeServices, SecretsAdmin, SecretsError};
 use holzwave_server::http::routes_unlock::{self, GateError, GateFuture, Material, ProvisionKey, UnlockGate, UnlockSecret};
@@ -260,6 +262,15 @@ impl ApiEnv {
 
     /// An environment whose account routes keep at most `max_pending` half-finished steps.
     pub fn build_with(methods: Methods, tuning: Tuning, max_pending: usize) -> ApiEnv {
+        ApiEnv::build_with_sync(methods, tuning, max_pending, Bounds::DEFAULT)
+    }
+
+    /// An environment whose sync target holds a person to `bounds`.
+    pub fn with_sync(bounds: Bounds) -> ApiEnv {
+        ApiEnv::build_with_sync(Methods { passkey: true, password: true, oidc: false }, Tuning::default(), routes_me::MAX_PENDING, bounds)
+    }
+
+    fn build_with_sync(methods: Methods, tuning: Tuning, max_pending: usize, bounds: Bounds) -> ApiEnv {
         let auth = AuthEnv::build(methods, tuning);
         let clock: Arc<dyn Clock> = auth.clock.clone();
         let observer = Arc::new(RecordingObserver::default());
@@ -310,6 +321,7 @@ impl ApiEnv {
         parts.extend(routes_enrol::parts(&enrol));
         parts.extend(routes_admin::parts(admin));
         parts.extend(routes_device::parts());
+        parts.extend(routes_sync::parts(bounds));
         parts.extend(routes_me::parts(me.clone()));
         let router = router::build(auth.app.clone(), parts);
         ApiEnv { auth, secrets, observer, accounts, enrol, me, router }

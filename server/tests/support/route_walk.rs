@@ -138,6 +138,12 @@ pub fn table() -> Vec<Row> {
         row!("POST", "/api/device/approve", Fresh, true, INVALID, 204, Some("device.approve")),
         row!("POST", "/api/device/deny", Fresh, true, INVALID, 204, Some("device.deny")),
         row!("DELETE", "/api/device/me", Device, true, INVALID, 204, Some("device.revoke")),
+        // The server as a sync target: four routes of a device, under the gate of the sync switch. The blob path is one wildcard:
+        // the handler reads it raw and holds it to three shapes. A correct write is 201 (a new file) or 200 (a replaced one).
+        row!("POST", "/sync/v1/ensure/{dir}", Device, true, INVALID, 204, None),
+        row!("GET", "/sync/v1/list/{dir}", Device, false, INVALID, 200, None),
+        row!("GET", "/sync/v1/blob/{path}", Device, false, INVALID, 200, None),
+        row!("PUT", "/sync/v1/blob/{path}", Device, true, INVALID, 201, None),
         // The socket of a device: a bearer token, an upgrade, and the gate of the remote switch in front of it.
         row!("GET", "/ws/device", Device, false, INVALID, 101, None),
         row!("GET", "/api/me/devices", Fresh, false, INVALID, 200, None),

@@ -47,7 +47,9 @@ use crate::http::router::{self, Part};
 use crate::http::transport;
 use crate::http::ws::{self, WsState};
 use crate::http::ws_device;
-use crate::http::{embed, routes_admin, routes_auth, routes_device, routes_enrol, routes_files, routes_me, routes_unlock};
+use crate::http::{
+    embed, routes_admin, routes_auth, routes_device, routes_enrol, routes_files, routes_me, routes_sync, routes_unlock,
+};
 use crate::log::{self, Level};
 use crate::proxy::{Admission, Mode, TrustedProxies};
 use crate::sealed::Sealer;
@@ -149,6 +151,8 @@ pub struct Services {
     pub ws: Arc<WsState>,
     /// The upload settings, for the file routes.
     pub upload: Upload,
+    /// What a person may keep on the server as a sync target.
+    pub sync: crate::sync_target::Bounds,
 }
 
 /// The login page: the one the build embedded.
@@ -199,6 +203,7 @@ pub fn router_parts(services: &Services) -> Vec<Part> {
     parts.extend(routes_me::parts(me));
     parts.extend(routes_admin::parts(admin));
     parts.extend(routes_device::parts());
+    parts.extend(routes_sync::parts(services.sync));
     parts.extend(ws::parts(services.ws.clone()));
     parts.extend(ws_device::parts(services.ws.clone()));
     parts.extend(routes_files::parts(services));
@@ -463,6 +468,7 @@ pub async fn assemble(prepared: Prepared, overrides: Overrides) -> Result<Runnin
         sealer,
         ws,
         upload: prepared.upload.clone(),
+        sync: prepared.sync.bounds(),
     };
     let router = router::build(app.clone(), router_parts(&services));
 

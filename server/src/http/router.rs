@@ -100,6 +100,10 @@ pub enum ApiError {
     },
     /// 410 `gone`: a token that is unknown, expired or used.
     Gone,
+    /// 412 `precondition_failed`: a conditional write found the blob in another state than the caller expected.
+    PreconditionFailed,
+    /// 413 `too_large`: a body is larger than the route takes.
+    TooLarge,
     /// 423 `locked`: the secret store is locked.
     Locked,
     /// 429 `throttled`, with the seconds to wait.
@@ -107,6 +111,8 @@ pub enum ApiError {
         /// Seconds until a new try is allowed.
         retry_seconds: u64,
     },
+    /// 507 `quota`: a write would take the person over their space or their number of files.
+    Quota,
     /// 503 `busy`.
     Busy,
 }
@@ -123,6 +129,9 @@ impl ApiError {
             ApiError::Misdirected => StatusCode::MISDIRECTED_REQUEST,
             ApiError::Conflict { .. } => StatusCode::CONFLICT,
             ApiError::Gone => StatusCode::GONE,
+            ApiError::PreconditionFailed => StatusCode::PRECONDITION_FAILED,
+            ApiError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            ApiError::Quota => StatusCode::INSUFFICIENT_STORAGE,
             ApiError::Locked => StatusCode::from_u16(423).unwrap_or(StatusCode::FORBIDDEN),
             ApiError::Throttled { .. } => StatusCode::TOO_MANY_REQUESTS,
             ApiError::Busy => StatusCode::SERVICE_UNAVAILABLE,
@@ -138,6 +147,9 @@ impl ApiError {
             ApiError::NotFound => "not_found",
             ApiError::Conflict { .. } => "conflict",
             ApiError::Gone => "gone",
+            ApiError::PreconditionFailed => "precondition_failed",
+            ApiError::TooLarge => "too_large",
+            ApiError::Quota => "quota",
             ApiError::Locked => "locked",
             ApiError::Throttled { .. } => "throttled",
             ApiError::Busy => "busy",

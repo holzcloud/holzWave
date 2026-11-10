@@ -910,6 +910,13 @@ impl Rig {
         )
     }
 
+    /// Turns the sync switch on with a fresh sign-in of the administrator. A switch that is on stays on.
+    async fn sync_on(&self) {
+        let admin = self.admin_now().await;
+        let reply = self.send(&self.page(Some(&admin), "POST", "/api/admin/device-access", Some(&json!({"sync": true})))).await;
+        assert_eq!(reply.status, 200, "the sync switch is turned on: {}", reply.text());
+    }
+
     /// A new member with one device, through the whole grant: the person, the session that approved it, the device's id and its
     /// token.
     async fn device_of_a_member(&self) -> (User, Signed, i64, String) {
@@ -1101,6 +1108,26 @@ impl Rig {
                 let mut parts = self.page(None, "DELETE", row.path, None);
                 parts.set("authorization", &format!("Bearer {token}"));
                 plain(parts, 204, Watch { person: Some((user, signed)), ..Watch::default() })
+            }
+            // ---- the server as a sync target: a device with the sync switch on ----
+            ("POST", "/sync/v1/ensure/{dir}") => {
+                self.sync_on().await;
+                let (user, signed, _, token) = self.device_of_a_member().await;
+                let mut parts = self.page(None, "POST", &route_walk::concrete(row.path, "files"), None);
+                parts.set("authorization", &format!("Bearer {token}"));
+                plain(parts, 204, Watch { person: Some((user, signed)), ..Watch::default() })
+            }
+            ("PUT", "/sync/v1/blob/{path}") => {
+                self.sync_on().await;
+                let (user, signed, _, token) = self.device_of_a_member().await;
+                let mut parts = self.page(None, "PUT", &route_walk::concrete(row.path, "files/matrix.hwx"), None);
+                parts.set("authorization", &format!("Bearer {token}"));
+                parts.set("content-type", "application/octet-stream");
+                parts.set("if-none-match", "*");
+                // The header of the sealed format (magic, format, stamp, device) and the bytes of a nonce and a tag: the one
+                // thing the server asks of a body.
+                parts.body = [&b"HWX\x01"[..], &[0u8; 8 + 8 + 16 + 24 + 16][..]].concat();
+                plain(parts, 201, Watch { person: Some((user, signed)), ..Watch::default() })
             }
             ("DELETE", "/api/me/devices/{id}") => {
                 let (user, signed, id, _) = self.device_of_a_member().await;

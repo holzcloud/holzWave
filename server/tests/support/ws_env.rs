@@ -197,6 +197,7 @@ impl WsEnv {
                 sealer,
                 ws: state.clone(),
                 upload: options.upload.clone().unwrap_or_default(),
+                sync: Default::default(),
             };
             (app, state, router_parts(&services), Some(gate))
         } else {

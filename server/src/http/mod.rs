@@ -14,6 +14,7 @@ pub mod routes_device;
 pub mod routes_enrol;
 pub mod routes_files;
 pub mod routes_me;
+pub mod routes_sync;
 pub mod routes_unlock;
 pub mod transport;
 pub mod ws;

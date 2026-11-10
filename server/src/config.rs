@@ -429,6 +429,9 @@ pub struct Config {
     /// The devices that sign in to the server.
     #[serde(default)]
     pub devices: Devices,
+    /// What a person may keep on the server as a sync target.
+    #[serde(default)]
+    pub sync: SyncTarget,
     /// The sessions that live on the server for devices to attach to.
     #[serde(default)]
     pub remote: Remote,
@@ -671,6 +674,45 @@ impl Default for Devices {
     }
 }
 
+/// The `sync` section: what one person may keep on the server when it is a sync target. The target itself is off until an
+/// administrator turns it on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SyncTarget {
+    /// The most MiB of encrypted files one person keeps.
+    pub quota_mib: u32,
+    /// The most files one person keeps, the metadata file and the backups included.
+    pub max_files: u32,
+    /// How many of the newest backups stay.
+    pub backups_keep: u32,
+    /// The most bytes one encrypted file may have.
+    pub max_blob_bytes: u32,
+}
+
+impl Default for SyncTarget {
+    fn default() -> SyncTarget {
+        SyncTarget {
+            quota_mib: limits::SYNC_QUOTA_MIB,
+            max_files: limits::SYNC_MAX_FILES,
+            backups_keep: limits::SYNC_BACKUPS_KEEP,
+            max_blob_bytes: limits::SYNC_MAX_BLOB_BYTES,
+        }
+    }
+}
+
+impl SyncTarget {
+    /// The bounds the sync routes hold a person to.
+    pub fn bounds(&self) -> crate::sync_target::Bounds {
+        let to_usize = |n: u32| usize::try_from(n).unwrap_or(usize::MAX);
+        crate::sync_target::Bounds {
+            quota_bytes: u64::from(self.quota_mib) * 1024 * 1024,
+            max_files: to_usize(self.max_files),
+            backups_keep: to_usize(self.backups_keep),
+            max_blob_bytes: to_usize(self.max_blob_bytes),
+        }
+    }
+}
+
 /// The `remote` section: what a device may ask of a session that lives on the server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -819,6 +861,8 @@ pub struct Prepared {
     pub devices: Devices,
     /// The remote sessions.
     pub remote: Remote,
+    /// What a person may keep on the server as a sync target.
+    pub sync: SyncTarget,
     /// The server key.
     pub key: ServerKey,
 }
@@ -877,6 +921,7 @@ pub fn prepare(env: &Env, probe: &dyn Probe) -> Result<Prepared, Refusal> {
     let upload = check_upload(&config.upload)?;
     let devices = check_devices(&config.devices)?;
     let remote = check_remote(&config.remote)?;
+    let sync = check_sync(&config.sync)?;
     crate::http::transport::check(config.transport.compression).map_err(Refusal::new)?;
 
     let key = probe.load_key(&key_path)?;
@@ -897,6 +942,7 @@ pub fn prepare(env: &Env, probe: &dyn Probe) -> Result<Prepared, Refusal> {
         device_access: config.device_access,
         devices,
         remote,
+        sync,
         key,
     })
 }
@@ -1089,6 +1135,15 @@ fn check_sessions(sessions: &Sessions) -> Result<Sessions, Refusal> {
 fn check_devices(devices: &Devices) -> Result<Devices, Refusal> {
     limits::DEVICE_IDLE_SPEC.check(devices.idle)?;
     Ok(*devices)
+}
+
+/// The four numbers of the sync target, each inside its bounds.
+fn check_sync(sync: &SyncTarget) -> Result<SyncTarget, Refusal> {
+    limits::SYNC_QUOTA_SPEC.check(sync.quota_mib)?;
+    limits::SYNC_FILES_SPEC.check(sync.max_files)?;
+    limits::SYNC_BACKUPS_SPEC.check(sync.backups_keep)?;
+    limits::SYNC_BLOB_SPEC.check(sync.max_blob_bytes)?;
+    Ok(*sync)
 }
 
 /// The four numbers of the remote sessions, each inside its bounds, and a tail that is not larger than the history cap.

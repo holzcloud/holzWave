@@ -17,6 +17,7 @@ pub mod proxy;
 pub mod sealed;
 pub mod store;
 pub mod supervisor;
+pub mod sync_target;
 pub mod tls;
 pub mod unlock;
 pub mod wire;
