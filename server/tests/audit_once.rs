@@ -77,6 +77,7 @@ fn table() -> Vec<Case> {
         case("secrets.reset", "POST /api/admin/accounts/{id}/reset-secrets", "ok", "account", "account", &[]),
         case("secrets.unlock", "POST /auth/unlock with the passphrase of a locked store", "ok", "account", "account", &[]),
         case("secrets.lock", "the end of the last session of a person whose store is open", "ok", "account", "account", &["signout"]),
+        case("device_access.change", "POST /api/admin/device-access that turns a switch on", "ok", "account", "none", &[]),
     ]
 }
 
@@ -419,6 +420,12 @@ async fn trigger(action: &str) -> (Vec<Row>, Vec<String>) {
             } else {
                 env.unlock_recovery(&w.bob_session, &w.bob.recovery).await
             };
+            assert_eq!(r.status, 200, "{}", r.text());
+        }
+        "device_access.change" => {
+            let admin = fresh_admin(&w).await;
+            watch.new_rows();
+            let r = env.api(&admin, "POST", "/api/admin/device-access", Some(&json!({"sync": true}))).await;
             assert_eq!(r.status, 200, "{}", r.text());
         }
         "secrets.lock" => {
