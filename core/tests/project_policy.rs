@@ -494,6 +494,39 @@ const PERMITTED_HITS: &[(&str, &str, &str)] = &[
          loopback address), without redirects and with bounded answers",
     ),
     (
+        "core/src/server_signin.rs",
+        "ureq",
+        "the client of the device sign-in to the holzWave server the person entered, a named exception of the closure guard \
+         (see EXCEPTIONS): it connects only when the person starts a sign-in, asks who this device is or signs it out, over \
+         https (a plain connection only to a loopback address), without redirects and cookies and with bounded answers; it \
+         shares the agent of the sync transport",
+    ),
+    (
+        "host/src/server.rs",
+        "std::net",
+        "the in-memory stand-in for a server in the test module of the host's link (compiled for tests only, never in a build of the app): it listens on a loopback port the test chose and speaks the routes of the server to the runtimes under test",
+    ),
+    (
+        "host/src/server.rs",
+        "TcpStream",
+        "the in-memory stand-in for a server in the test module of the host's link (compiled for tests only, never in a build of the app): it listens on a loopback port the test chose and speaks the routes of the server to the runtimes under test",
+    ),
+    (
+        "host/src/server.rs",
+        "TcpListener",
+        "the in-memory stand-in for a server in the test module of the host's link (compiled for tests only, never in a build of the app): it listens on a loopback port the test chose and speaks the routes of the server to the runtimes under test",
+    ),
+    (
+        "host/src/server.rs",
+        "http://",
+        "the in-memory stand-in for a server in the test module of the host's link (compiled for tests only, never in a build of the app): it listens on a loopback port the test chose and speaks the routes of the server to the runtimes under test",
+    ),
+    (
+        "host/src/server.rs",
+        "https://",
+        "the in-memory stand-in for a server in the test module of the host's link (compiled for tests only, never in a build of the app): it listens on a loopback port the test chose and speaks the routes of the server to the runtimes under test",
+    ),
+    (
         "core/src/ai/http.rs",
         "reqwest",
         "the one HTTP chokepoint of the AI client: it builds the client and opens no socket by itself (building a client \

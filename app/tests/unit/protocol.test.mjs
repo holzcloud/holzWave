@@ -189,6 +189,28 @@ test("the app info and the pointer commands are pinned", () => {
   assert.deepEqual([...new Set(applying.map((v) => v.buttons))].sort(), ["auto", "flat", "round"]);
   assert.deepEqual([...new Set(frames.map((v) => v.pending))].sort(), [false, true]);
   assert.equal(frames.filter((v) => !v.applies).length, 1, "exactly one sample is the view where the group does not apply");
+  // The link to a server (desktop only): the page asks for the state, starts a sign-in with an address, polls, cancels and signs
+  // out, and may switch the sync to the server with the passphrase. No answer has a member for the token.
+  assert.deepEqual(golden.commands.server_status, []);
+  assert.deepEqual(golden.commands.server_refresh, []);
+  assert.deepEqual(golden.commands.server_sign_in_start, ["address"]);
+  assert.deepEqual(golden.commands.server_sign_in_poll, []);
+  assert.deepEqual(golden.commands.server_sign_in_cancel, []);
+  assert.deepEqual(golden.commands.server_sign_out, []);
+  assert.deepEqual(golden.commands.sync_use_server, ["passphrase"]);
+  for (const view of golden.answers.server) {
+    assert.deepEqual(keys(view), ["error", "locked", "name", "remote_on", "state", "sync_on", "url"]);
+    assert.equal(typeof view.locked, "boolean");
+    assert.ok(view.error === null || typeof view.error === "string");
+  }
+  assert.deepEqual([...new Set(golden.answers.server.map((v) => v.state))].sort(), ["signed_in", "signed_out", "signing_in", "unreachable"]);
+  for (const view of golden.answers.sign_in) {
+    assert.deepEqual(keys(view), ["code", "expires_in", "interval", "url"]);
+    assert.match(view.code, /^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/);
+  }
+  for (const poll of golden.answers.sign_in_poll) assert.deepEqual(keys(poll), ["interval", "state"]);
+  assert.deepEqual(golden.answers.sign_in_poll.map((p) => p.state), ["pending", "approved", "denied", "expired", "too_many", "off", "unreachable"]);
+  assert.ok(!JSON.stringify([golden.answers.server, golden.answers.sign_in, golden.answers.sign_in_poll]).includes("hwd_"), "no sample holds a device token");
   assert.deepEqual(golden.commands.mouse, ["pane", "action", "button", "x", "y", "mods"]);
   assert.deepEqual(golden.commands.wheel, ["pane", "rows", "x", "y", "mods"]);
   for (const name of ["note_window", "placement"]) {
@@ -1034,6 +1056,7 @@ test("the two image commands are pinned: a pixel read by pane, image, generation
   assert.deepEqual(golden.commands.set_image_animation, ["enabled"]);
   assert.ok(!golden.commands.set_image_animation.includes("pane"));
   // The golden has every command once: 124, the six that drive the vault of a phone make 130, the two that hand a file
-  // over on a phone make 132, and the two that carry the window frame choices make 134.
-  assert.equal(Object.keys(golden.commands).length, 134);
+  // over on a phone make 132, the two that carry the window frame choices make 134, and the seven of the link to a server
+  // make 141.
+  assert.equal(Object.keys(golden.commands).length, 141);
 });

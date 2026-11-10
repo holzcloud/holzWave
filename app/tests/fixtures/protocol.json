@@ -1003,6 +1003,82 @@
         "total": 0
       }
     ],
+    "server": [
+      {
+        "error": null,
+        "locked": false,
+        "name": "holzWave on Linux",
+        "remote_on": false,
+        "state": "signed_out",
+        "sync_on": false,
+        "url": ""
+      },
+      {
+        "error": null,
+        "locked": false,
+        "name": "Laptop",
+        "remote_on": false,
+        "state": "signing_in",
+        "sync_on": false,
+        "url": "https://sync.example.test"
+      },
+      {
+        "error": null,
+        "locked": false,
+        "name": "Laptop",
+        "remote_on": true,
+        "state": "signed_in",
+        "sync_on": true,
+        "url": "https://sync.example.test"
+      },
+      {
+        "error": "The server cannot be reached.",
+        "locked": true,
+        "name": "Laptop",
+        "remote_on": false,
+        "state": "unreachable",
+        "sync_on": false,
+        "url": "https://sync.example.test"
+      }
+    ],
+    "sign_in": [
+      {
+        "code": "BCDF-GHJK",
+        "expires_in": 600,
+        "interval": 5,
+        "url": "https://sync.example.test/#device=hwg_x"
+      }
+    ],
+    "sign_in_poll": [
+      {
+        "interval": 5,
+        "state": "pending"
+      },
+      {
+        "interval": 5,
+        "state": "approved"
+      },
+      {
+        "interval": 5,
+        "state": "denied"
+      },
+      {
+        "interval": 5,
+        "state": "expired"
+      },
+      {
+        "interval": 5,
+        "state": "too_many"
+      },
+      {
+        "interval": 5,
+        "state": "off"
+      },
+      {
+        "interval": 10,
+        "state": "unreachable"
+      }
+    ],
     "window_frame": [
       {
         "applies": false,
@@ -1423,6 +1499,14 @@
       "pane",
       "action"
     ],
+    "server_refresh": [],
+    "server_sign_in_cancel": [],
+    "server_sign_in_poll": [],
+    "server_sign_in_start": [
+      "address"
+    ],
+    "server_sign_out": [],
+    "server_status": [],
     "set_image_animation": [
       "enabled"
     ],
@@ -1453,6 +1537,9 @@
       "passphrase"
     ],
     "sync_status": [],
+    "sync_use_server": [
+      "passphrase"
+    ],
     "tear_off_pane": [
       "pane",
       "at_cursor"

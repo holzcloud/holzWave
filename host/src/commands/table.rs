@@ -596,6 +596,48 @@ macro_rules! host_commands {
                 run: history_sync::window_frame_set, web: unavailable
             }
             {
+                name: server_status, shell: generated, group: server, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: holzwave_host::server::ServerView,
+                run: server::server_status, web: unavailable
+            }
+            {
+                name: server_refresh, shell: generated, group: server, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: holzwave_host::server::ServerView,
+                run: server::server_refresh, web: unavailable
+            }
+            {
+                name: server_sign_in_start, shell: generated, group: server, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [address: String],
+                answers: holzwave_host::server::SignInView, fails: String,
+                run: server::server_sign_in_start, web: unavailable
+            }
+            {
+                name: server_sign_in_poll, shell: generated, group: server, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: holzwave_host::server::SignInPoll, fails: String,
+                run: server::server_sign_in_poll, web: unavailable
+            }
+            {
+                name: server_sign_in_cancel, shell: generated, group: server, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: holzwave_host::server::ServerView,
+                run: server::server_sign_in_cancel, web: unavailable
+            }
+            {
+                name: server_sign_out, shell: generated, group: server, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: holzwave_host::server::ServerView, fails: String,
+                run: server::server_sign_out, web: unavailable
+            }
+            {
+                name: sync_use_server, shell: generated, group: server, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [passphrase: String],
+                answers: holzwave_host::sync::SyncView, fails: String,
+                run: server::sync_use_server, web: unavailable
+            }
+            {
                 name: ai_turn_snapshot, shell: generated, group: ai, scope: none, mode: async, cap: CAP_DEFAULT,
                 args: [conversation: String],
                 answers: ChatState, fails: AiFault,

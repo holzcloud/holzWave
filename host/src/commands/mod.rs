@@ -3,7 +3,7 @@
 //! [`table`] is the one list of every command the page can call. The desktop shell expands it into the window system's
 //! command wrappers and the server expands it into [`registry`], so a command cannot exist for one way only. The plain
 //! functions that do the work are in one module for each theme ([`terminal`], [`layout`], [`settings`], [`connections`],
-//! [`blocks`], [`files`], [`history_sync`], [`ai`], [`integrations`], [`vault`], [`handover`]); the wire types of their arguments and answers are
+//! [`blocks`], [`files`], [`history_sync`], [`server`], [`ai`], [`integrations`], [`vault`], [`handover`]); the wire types of their arguments and answers are
 //! in [`wire`] or in the module that owns them. Nothing here knows a window shell: a plain function takes the core by
 //! reference, the label of the calling window where the command works on a layout, and the arguments the page sends.
 
@@ -16,6 +16,7 @@ pub mod history_sync;
 pub mod integrations;
 pub mod layout;
 pub mod registry;
+pub mod server;
 pub mod settings;
 pub mod table;
 pub mod terminal;
@@ -36,6 +37,7 @@ pub mod prelude {
     pub use super::integrations;
     pub use super::layout;
     pub use super::registry::{CAP_DEFAULT, CAP_INPUT, CAP_LARGE, CAP_PASTE};
+    pub use super::server;
     pub use super::settings;
     pub use super::terminal;
     pub use super::vault;

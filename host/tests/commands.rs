@@ -1565,8 +1565,8 @@ fn the_commands_that_need_the_desktop_answer_one_sentence_and_run_nothing() {
 #[test]
 fn the_unavailable_rows_of_this_group_are_exactly_these_nine() {
     let rows: BTreeSet<&str> =
-        COMMANDS.iter().filter(|row| row.web == Web::Unavailable && !FIRST_GROUPS.contains(&row.group) && row.group != "vault" && row.group != "handover").map(|row| row.name).collect();
-    // The group `vault` has its six unavailable rows pinned in `vault_commands.rs`, and `handover` its two in `handover.rs`.
+        COMMANDS.iter().filter(|row| row.web == Web::Unavailable && !FIRST_GROUPS.contains(&row.group) && row.group != "vault" && row.group != "handover" && row.group != "server").map(|row| row.name).collect();
+    // The group `vault` has its six unavailable rows pinned in `vault_commands.rs`, `handover` its two in `handover.rs` and `server` its seven below.
     let named: BTreeSet<&str> = UNAVAILABLE_BROWSER.iter().map(|(name, _)| *name).collect();
     assert_eq!(rows, named);
 }
@@ -1620,6 +1620,53 @@ fn the_window_frame_rows_are_desktop_only_and_take_two_words() {
     assert_eq!(set.error, Some("String"));
     assert_eq!(status.answer.split_whitespace().collect::<String>(), "holzwave_host::window_frame::WindowFrameView");
     assert_eq!(set.answer.split_whitespace().collect::<String>(), "holzwave_host::window_frame::WindowFrameView");
+}
+
+/// The seven commands of the link to a server and the argument each takes.
+const SERVER_ROWS: [(&str, &[(&str, &str)], &str, bool); 7] = [
+    ("server_status", &[], "holzwave_host::server::ServerView", false),
+    ("server_refresh", &[], "holzwave_host::server::ServerView", false),
+    ("server_sign_in_start", &[("address", "String")], "holzwave_host::server::SignInView", true),
+    ("server_sign_in_poll", &[], "holzwave_host::server::SignInPoll", true),
+    ("server_sign_in_cancel", &[], "holzwave_host::server::ServerView", false),
+    ("server_sign_out", &[], "holzwave_host::server::ServerView", true),
+    ("sync_use_server", &[("passphrase", "String")], "holzwave_host::sync::SyncView", true),
+];
+
+#[test]
+fn the_server_rows_are_desktop_only_and_take_one_text_at_most() {
+    for (name, args, answer, can_fail) in SERVER_ROWS {
+        let row = lookup(name).expect("a row");
+        assert_eq!((row.group, row.scope, row.mode, row.web), ("server", Scope::None, Mode::Async, Web::Unavailable), "{name}");
+        assert_eq!(row.args.iter().map(|arg| (arg.name, arg.ty)).collect::<Vec<_>>(), args, "{name}: only the named text and nothing else");
+        assert_eq!(row.answer.split_whitespace().collect::<String>(), answer, "{name}");
+        assert_eq!(row.error, can_fail.then_some("String"), "{name}");
+        assert_eq!(row.cap, CAP_DEFAULT, "{name}");
+    }
+    assert_eq!(COMMANDS.iter().filter(|row| row.group == "server").count(), SERVER_ROWS.len(), "no other row of the group");
+}
+
+#[test]
+fn a_new_core_is_signed_out_and_the_server_commands_refuse_without_a_request_or_a_file() {
+    let world = World::new("server-rows");
+    let view = holzwave_host::commands::server::server_status(&world.core);
+    assert_eq!((view.state, view.url.as_str(), view.sync_on, view.remote_on), ("signed_out", "", false, false));
+    // An address that is not https is refused before anything is asked or stored.
+    for address in ["", "http://example.test", "ftp://example.test", "https://", "https://user:pw@example.test"] {
+        let refused = holzwave_host::commands::server::server_sign_in_start(&world.core, address.to_owned()).expect_err("refused");
+        assert!(!refused.is_empty() && !refused.contains("pw"), "{address}: {refused}");
+    }
+    // With no sign-in in progress a poll answers that the code is gone, a cancel and a refresh answer the state, a sign-out of
+    // nothing is the same state.
+    let polled = holzwave_host::commands::server::server_sign_in_poll(&world.core).expect("an answer");
+    assert_eq!((polled.state, polled.interval), ("expired", 0));
+    assert_eq!(holzwave_host::commands::server::server_sign_in_cancel(&world.core).state, "signed_out");
+    assert_eq!(holzwave_host::commands::server::server_refresh(&world.core).state, "signed_out");
+    assert_eq!(holzwave_host::commands::server::server_sign_out(&world.core).expect("nothing to forget is not a failure").state, "signed_out");
+    // The sync cannot use a server this device is not signed in to; nothing is written.
+    assert!(holzwave_host::commands::server::sync_use_server(&world.core, "a long enough passphrase".to_owned()).is_err());
+    assert!(!world.dir.join("sync.json").exists(), "no sync set-up was stored");
+    assert!(!world.dir.join("server_link.json").exists(), "no link was stored");
 }
 
 #[test]
@@ -1986,10 +2033,10 @@ fn rows_expected() -> usize {
     golden_commands().len()
 }
 
-/// The 25 commands the browser build does not have: eight of the first table plan, nine of the second (the two that
-/// carry the window frame choices among them), the six that drive the vault of a phone and the two that hand a file over on
-/// a phone.
-const THE_UNAVAILABLE: [&str; 25] = [
+/// The 32 commands the browser build does not have: eight of the first table plan, nine of the second (the two that
+/// carry the window frame choices among them), the six that drive the vault of a phone, the two that hand a file over on
+/// a phone and the seven of the link to a server (the browser is that server's own page).
+const THE_UNAVAILABLE: [&str; 32] = [
     "attach_pane",
     "attach_tab",
     "clipboard_text",
@@ -2005,6 +2052,13 @@ const THE_UNAVAILABLE: [&str; 25] = [
     "open_url",
     "release_outside",
     "reveal_path",
+    "server_refresh",
+    "server_sign_in_cancel",
+    "server_sign_in_poll",
+    "server_sign_in_start",
+    "server_sign_out",
+    "server_status",
+    "sync_use_server",
     "tear_off_pane",
     "tear_off_tab",
     "vault_hidden",
@@ -2249,12 +2303,12 @@ fn total_cover_the_table_is_the_golden_and_the_recorded_surface_and_nothing_else
 }
 
 #[test]
-fn the_groups_of_the_table_are_exactly_the_eleven_the_table_plans_made() {
+fn the_groups_of_the_table_are_exactly_the_twelve_the_table_plans_made() {
     let groups: BTreeSet<&str> = COMMANDS.iter().map(|row| row.group).collect();
 
     assert_eq!(
         groups.into_iter().collect::<Vec<_>>(),
-        ["ai", "blocks", "connections", "files", "handover", "history_sync", "integrations", "layout", "settings", "terminal", "vault"]
+        ["ai", "blocks", "connections", "files", "handover", "history_sync", "integrations", "layout", "server", "settings", "terminal", "vault"]
     );
 }
 
@@ -2294,7 +2348,7 @@ fn surface_file_lists_every_golden_command() {
     let lines = surface_lines();
     let surface_names: BTreeSet<&str> = lines.iter().map(|(name, _)| *name).collect();
 
-    assert_eq!(lines.len(), 134, "one line for each command that was declared");
+    assert_eq!(lines.len(), 141, "one line for each command that was declared");
     assert_eq!(surface_names.len(), lines.len(), "no command twice");
     assert_eq!(surface_names, golden_names);
     for (_, line) in &lines {

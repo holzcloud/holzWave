@@ -345,7 +345,7 @@ async fn an_address_that_is_not_a_server_origin_is_refused_before_a_request_is_m
     open(&env);
     let lb = serve_loopback(&env).await;
     let port = lb.origin.rsplit(':').next().expect("a port").to_owned();
-    let bad = vec![
+    let bad = [
         format!("http://localhost.example:{port}"),
         format!("http://127.0.0.1.example:{port}"),
         format!("http://127.0.0.1:{port}/path"),

@@ -70,6 +70,18 @@
 //                      setFails(null) stops it. Without it the command validates both words as the host does (a word outside the
 //                      tables rejects with a fixed string and changes nothing), stores them, and answers the new view
 //       reset()        back to the default
+//     serverLink       the link of the desktop to a server: the seven commands `server_status`, `server_refresh`,
+//                      `server_sign_in_start`, `server_sign_in_poll`, `server_sign_in_cancel`, `server_sign_out` and
+//                      `sync_use_server`, answered from this hook. No answer holds a token
+//       view           a copy of the answer of the state commands: `{ state, url, name, locked, sync_on, remote_on, error }`, by
+//                      default signed out with no address
+//       set(partial)   change members of `view`
+//       polls          the list of the states the next polls answer, oldest first (default none: `pending`); each is a word or
+//                      `{ state, interval }`; the last one stays when the list runs out
+//       startFails(text)  `server_sign_in_start` rejects with `text`; startFails(null) stops it. Without it the address must start
+//                      with `https://`, and the answer is `{ code: "BCDF-GHJK", url, expires_in: 600, interval: 5 }`
+//       calls          every call of the seven commands as `[command, args]`, oldest first
+//       reset()        back to the default
 //     ai               the AI chat of the core, played from the shapes of app/tests/fixtures/ai_stream.json:
 //       profiles       the `profiles` member of the answer of `ai_profiles` (default none). A profile view carries the
 //                      members of the core's `ProfileView` and the mock-only member `locality` (`on_device`,
@@ -1770,6 +1782,76 @@
     },
   };
 
+  // The link to a server: one view, the polls to answer, the calls, and the knobs of the header comment. An approved poll makes
+  // the view signed in; Sign out keeps the address.
+  const linkStart = () => ({
+    view: { state: "signed_out", url: "", name: "holzWave on Linux", locked: false, sync_on: false, remote_on: false, error: null },
+    polls: [], calls: [], startError: null,
+  });
+  let linkState = linkStart();
+  const linkCommands = {
+    async server_status(args) {
+      linkState.calls.push(["server_status", args]);
+      return structuredClone(linkState.view);
+    },
+    async server_refresh(args) {
+      linkState.calls.push(["server_refresh", args]);
+      return structuredClone(linkState.view);
+    },
+    async server_sign_in_start(args) {
+      linkState.calls.push(["server_sign_in_start", args]);
+      if (linkState.startError !== null) throw linkState.startError;
+      if (typeof args.address !== "string" || !args.address.startsWith("https://")) throw "The address must start with https://.";
+      linkState.view.state = "signing_in";
+      linkState.view.url = args.address;
+      return { code: "BCDF-GHJK", url: `${args.address}/#device=hwg_mock`, expires_in: 600, interval: 5 };
+    },
+    async server_sign_in_poll(args) {
+      linkState.calls.push(["server_sign_in_poll", args]);
+      const next = linkState.polls.length > 1 ? linkState.polls.shift() : (linkState.polls[0] ?? "pending");
+      const poll = typeof next === "string" ? { state: next, interval: 5 } : { interval: 5, ...next };
+      if (poll.state === "approved") linkState.view.state = "signed_in";
+      return poll;
+    },
+    async server_sign_in_cancel(args) {
+      linkState.calls.push(["server_sign_in_cancel", args]);
+      if (linkState.view.state === "signing_in") linkState.view.state = "signed_out";
+      return structuredClone(linkState.view);
+    },
+    async server_sign_out(args) {
+      linkState.calls.push(["server_sign_out", args]);
+      linkState.view.state = "signed_out";
+      linkState.view.sync_on = false;
+      linkState.view.remote_on = false;
+      return structuredClone(linkState.view);
+    },
+    async sync_use_server(args) {
+      linkState.calls.push(["sync_use_server", args]);
+      if (linkState.view.state !== "signed_in") throw "Sign in to the server first.";
+      return { configured: true, transport: "server", endpoint: linkState.view.url, user: "", state: "idle", last: null, files: 0, conflicts: 0, error: null, restart: false, removed: 0 };
+    },
+  };
+  const serverLink = {
+    get view() {
+      return structuredClone(linkState.view);
+    },
+    set(partial) {
+      Object.assign(linkState.view, structuredClone(partial));
+    },
+    set polls(list) {
+      linkState.polls = structuredClone(list);
+    },
+    get calls() {
+      return structuredClone(linkState.calls);
+    },
+    startFails(text) {
+      linkState.startError = text ?? null;
+    },
+    reset() {
+      linkState = linkStart();
+    },
+  };
+
   // The integration commands of the core. Without a script (`on`) each answers what a machine without the tools would: empty
   // lists and nothing, so a test that does not use an integration block sees no difference.
   const integrationDefaults = {
@@ -1798,6 +1880,7 @@
     if (Object.hasOwn(netCommands, cmd)) return netCommands[cmd](args ?? {});
     if (Object.hasOwn(shellCommands, cmd)) return shellCommands[cmd](args ?? {});
     if (Object.hasOwn(frameCommands, cmd)) return frameCommands[cmd](args ?? {});
+    if (Object.hasOwn(linkCommands, cmd)) return linkCommands[cmd](args ?? {});
     if (Object.hasOwn(integrationDefaults, cmd)) return integrationDefaults[cmd](args ?? {});
     if (LAYOUT_COMMANDS.has(cmd) && layoutError !== null) throw layoutError; // Tauri rejects with the error text
     if (cmd === "set_ratio") setRatio(args);
@@ -1843,6 +1926,7 @@
       localNetwork.reset();
       hostShell.reset();
       windowFrame.reset();
+      serverLink.reset();
     },
     get ai() {
       return mockAi;
@@ -1855,6 +1939,9 @@
     },
     get windowFrame() {
       return windowFrame;
+    },
+    get serverLink() {
+      return serverLink;
     },
   };
 

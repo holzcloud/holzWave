@@ -214,7 +214,7 @@ impl SyncRuntime {
     }
 
     /// A change of the account ended well: the record of the old target is not needed any more.
-    fn settle(&self, before: &Before) {
+    fn conclude(&self, before: &Before) {
         if before.parked {
             let _ = std::fs::remove_file(self.dir.join(STATE_PARKED));
         }
@@ -295,7 +295,7 @@ impl SyncRuntime {
         });
         match self.run() {
             Ok(view) => {
-                self.settle(&before);
+                self.conclude(&before);
                 Ok(view)
             }
             Err(e) => {
@@ -353,7 +353,7 @@ impl SyncRuntime {
                 if matches!(before.account, Some(Account { transport: Transport::Webdav, .. })) {
                     let _ = self.secrets.delete(PASSWORD);
                 }
-                self.settle(&before);
+                self.conclude(&before);
                 Ok(view)
             }
             Err(e) => {

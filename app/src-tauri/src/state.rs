@@ -38,6 +38,7 @@ mod protocol {
     use holzwave_host::ai_device::{DeviceState, DeviceView};
     use holzwave_host::host_shell::HostShellView;
     use holzwave_host::window_frame::WindowFrameView;
+    use holzwave_host::server::{ServerView, SignInPoll, SignInView};
     use holzwave_host::local_network::LocalNetworkView;
     use holzwave_core::local_network::State as LnState;
     use holzwave_host::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, RemovalView, TicketView};
@@ -716,6 +717,22 @@ mod protocol {
                     to_value(&WindowFrameView { applies: true, frame: "auto".into(), buttons: "auto".into(), pending: false }),
                     to_value(&WindowFrameView { applies: true, frame: "system".into(), buttons: "round".into(), pending: true }),
                     to_value(&WindowFrameView { applies: true, frame: "own".into(), buttons: "flat".into(), pending: false }),
+                ],
+                "server": [
+                    to_value(&ServerView { state: "signed_out", url: String::new(), name: "holzWave on Linux".into(), locked: false, sync_on: false, remote_on: false, error: None }),
+                    to_value(&ServerView { state: "signing_in", url: "https://sync.example.test".into(), name: "Laptop".into(), locked: false, sync_on: false, remote_on: false, error: None }),
+                    to_value(&ServerView { state: "signed_in", url: "https://sync.example.test".into(), name: "Laptop".into(), locked: false, sync_on: true, remote_on: true, error: None }),
+                    to_value(&ServerView { state: "unreachable", url: "https://sync.example.test".into(), name: "Laptop".into(), locked: true, sync_on: false, remote_on: false, error: Some("The server cannot be reached.".into()) }),
+                ],
+                "sign_in": [to_value(&SignInView { code: "BCDF-GHJK".into(), url: "https://sync.example.test/#device=hwg_x".into(), expires_in: 600, interval: 5 })],
+                "sign_in_poll": [
+                    to_value(&SignInPoll { state: "pending", interval: 5 }),
+                    to_value(&SignInPoll { state: "approved", interval: 5 }),
+                    to_value(&SignInPoll { state: "denied", interval: 5 }),
+                    to_value(&SignInPoll { state: "expired", interval: 5 }),
+                    to_value(&SignInPoll { state: "too_many", interval: 5 }),
+                    to_value(&SignInPoll { state: "off", interval: 5 }),
+                    to_value(&SignInPoll { state: "unreachable", interval: 10 }),
                 ],
                 "integration": integration_samples(),
                 "ai": {

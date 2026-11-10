@@ -80,6 +80,13 @@ host_shell_status|none|async||holzwave_host::host_shell::HostShellView|-
 host_shell_set|none|async|enabled|holzwave_host::host_shell::HostShellView|String
 window_frame_status|none|async||holzwave_host::window_frame::WindowFrameView|-
 window_frame_set|none|async|frame,buttons|holzwave_host::window_frame::WindowFrameView|String
+server_status|none|async||holzwave_host::server::ServerView|-
+server_refresh|none|async||holzwave_host::server::ServerView|-
+server_sign_in_start|none|async|address|holzwave_host::server::SignInView|String
+server_sign_in_poll|none|async||holzwave_host::server::SignInPoll|String
+server_sign_in_cancel|none|async||holzwave_host::server::ServerView|-
+server_sign_out|none|async||holzwave_host::server::ServerView|String
+sync_use_server|none|async|passphrase|holzwave_host::sync::SyncView|String
 monitor_sample|none|async|pane|holzwave_core::monitor::Reading|String
 wsh_install|none|async|pane|String|String
 history_search|window|async|query,limit|Vec<holzwave_core::history::Hit>|-
