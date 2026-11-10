@@ -174,8 +174,10 @@ impl Device {
             Got::Message(Incoming::Text(text)) => {
                 match Reply::parse(&text) {
                     Ok(Reply::Answer { id, result }) => {
-                        let reply = Reply::Answer { id, result };
-                        self.answers.insert(id, reply);
+                        // An answer comes once: a second one for the same number is something to report.
+                        if self.answers.insert(id, Reply::Answer { id, result }).is_some() {
+                            self.strange.push(format!("a second answer to request {id}"));
+                        }
                     }
                     Ok(Reply::Event(event)) => self.events.push(event),
                     Err(_) => self.strange.push(text),
@@ -238,6 +240,11 @@ impl Device {
         self.next += 1;
         self.ws.send_text(&Call { id, op }.encode()).await;
         id
+    }
+
+    /// How many answers wait that no test has asked for.
+    pub fn unclaimed(&self) -> usize {
+        self.answers.len()
     }
 
     /// The answer to request `id`.
