@@ -1,0 +1,49 @@
+/* The dialog that signs the app in to a server (serversignin.ts, docs/design.md 6.35). Loaded after dialogs.css, settings.css and
+   websession.css, whose box, field and buttons it uses. Every colour is a `--hw-*` token and every size is in rem, so the UI scale
+   moves it; a pixel value appears only for the 28 px desktop and the 44 px touch floor of a target and for the 2 px focus ring. Flat and
+   hairline: the dialog is a floating layer and carries the one shadow of the box, nothing here has another. A state is never colour
+   alone: a dotted ring, a filled dot or the mark `!` with an underline, and always its words. Rose marks focus and the one action only.
+   Nothing moves, so there is nothing for reduced motion to remove. `contrast-high` reaches the hairlines and the dim text through
+   their tokens. */
+.dlg.settings.server-signin { width: min(24rem, calc(100vw - 4rem)); }
+.dlg.server-signin [hidden] { display: none !important; }
+.dlg.server-signin .set-title { outline: none; }
+.dlg.settings.server-signin :is(button, .web-input) { min-height: max(28px, calc(28rem / 12)); }
+.dlg.server-signin .ss-help { margin: 0 0 .5rem; color: var(--hw-dim); overflow-wrap: anywhere; }
+
+/* The read-only rows: the name of this device, and the server the request goes to. */
+.dlg.server-signin .ss-kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .333rem 1rem; margin: 0 0 .667rem; }
+.dlg.server-signin .ss-k { color: var(--hw-dim); }
+.dlg.server-signin .ss-v { min-width: 0; color: var(--hw-ink); overflow-wrap: anywhere; }
+
+/* The code is real text in a bordered block, to compare with the page of the server. */
+.dlg.server-signin .ss-code { box-sizing: border-box; margin: 0 0 .667rem; padding: .667rem; text-align: center; font-size: calc(24rem / 12);
+                              font-weight: 700; letter-spacing: .15em; color: var(--hw-ink); background: var(--hw-ground);
+                              border: 1px solid var(--hw-line); border-radius: .333rem; user-select: all; }
+.dlg.server-signin .ss-note { margin: 0 0 .5rem; color: var(--hw-ink-2); overflow-wrap: anywhere; }
+.dlg.server-signin .ss-note[data-bad="true"] { color: var(--hw-warn); text-decoration: underline; }
+
+/* The state of the wait: a shape and a word. A failure has the mark `!` and an underline. */
+.dlg.server-signin .ss-state { display: flex; align-items: flex-start; gap: .5rem; margin: .5rem 0 0; color: var(--hw-ink); overflow-wrap: anywhere; }
+.dlg.server-signin .ss-state[data-bad="true"] { color: var(--hw-warn); }
+.dlg.server-signin .ss-state[data-bad="true"] .ss-word { text-decoration: underline; }
+.dlg.server-signin .ss-dot { box-sizing: border-box; flex: none; min-width: .667rem; height: .667rem; margin-top: .25rem; }
+.dlg.server-signin .ss-ring { width: .667rem; border: 2px dotted currentColor; border-radius: 50%; }
+.dlg.server-signin .ss-filled { width: .667rem; background: currentColor; border-radius: 50%; }
+.dlg.server-signin .ss-mark { height: auto; margin-top: 0; font-weight: 700; }
+
+.dlg.server-signin .dlg-actions { align-items: center; margin-top: .833rem; }
+.dlg.server-signin .ss-locked { margin: 0 auto 0 0; color: var(--hw-dim); overflow-wrap: anywhere; }
+.dlg.server-signin .web-err { margin: 0 0 .5rem; }
+
+@media (pointer: coarse) {
+  .dlg.settings.server-signin :is(button, .web-input) { min-height: max(44px, calc(44rem / 12)); }
+}
+
+@media (forced-colors: active) {
+  .dlg.server-signin .ss-code { border-color: CanvasText; }
+  .dlg.server-signin .ss-ring { border-color: CanvasText; }
+  .dlg.server-signin .ss-filled { background: CanvasText; }
+  .dlg.server-signin .ss-state[data-bad="true"], .dlg.server-signin .ss-note[data-bad="true"] { color: CanvasText; }
+  .dlg.server-signin :is(.web-btn, .web-input):focus-visible { outline-color: Highlight; }
+}

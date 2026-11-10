@@ -80,6 +80,7 @@
 //                      `{ state, interval }`; the last one stays when the list runs out
 //       startFails(text)  `server_sign_in_start` rejects with `text`; startFails(null) stops it. Without it the address must start
 //                      with `https://`, and the answer is `{ code: "BCDF-GHJK", url, expires_in: 600, interval: 5 }`
+//       setInterval(n)  the seconds of the interval the start and the polls state (default 5; a test that waits for a poll sets 1)
 //       calls          every call of the seven commands as `[command, args]`, oldest first
 //       reset()        back to the default
 //     ai               the AI chat of the core, played from the shapes of app/tests/fixtures/ai_stream.json:
@@ -1786,7 +1787,7 @@
   // the view signed in; Sign out keeps the address.
   const linkStart = () => ({
     view: { state: "signed_out", url: "", name: "holzWave on Linux", locked: false, sync_on: false, remote_on: false, error: null },
-    polls: [], calls: [], startError: null,
+    polls: [], calls: [], startError: null, interval: 5,
   });
   let linkState = linkStart();
   const linkCommands = {
@@ -1804,12 +1805,12 @@
       if (typeof args.address !== "string" || !args.address.startsWith("https://")) throw "The address must start with https://.";
       linkState.view.state = "signing_in";
       linkState.view.url = args.address;
-      return { code: "BCDF-GHJK", url: `${args.address}/#device=hwg_mock`, expires_in: 600, interval: 5 };
+      return { code: "BCDF-GHJK", url: `${args.address}/#device=hwg_mock`, expires_in: 600, interval: linkState.interval };
     },
     async server_sign_in_poll(args) {
       linkState.calls.push(["server_sign_in_poll", args]);
       const next = linkState.polls.length > 1 ? linkState.polls.shift() : (linkState.polls[0] ?? "pending");
-      const poll = typeof next === "string" ? { state: next, interval: 5 } : { interval: 5, ...next };
+      const poll = typeof next === "string" ? { state: next, interval: linkState.interval } : { interval: linkState.interval, ...next };
       if (poll.state === "approved") linkState.view.state = "signed_in";
       return poll;
     },
@@ -1846,6 +1847,9 @@
     },
     startFails(text) {
       linkState.startError = text ?? null;
+    },
+    setInterval(seconds) {
+      linkState.interval = seconds;
     },
     reset() {
       linkState = linkStart();

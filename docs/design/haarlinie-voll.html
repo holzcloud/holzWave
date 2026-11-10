@@ -811,7 +811,7 @@ td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
 .dv-kv .k{color:var(--ink3)}.dv-kv .v{color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dv-kv .v.mo{font-family:var(--mono)}
 .dv-note{margin:0 0 .4rem;color:var(--ink2)}
-.dv-states{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
+.dv-states{display:grid;grid-template-columns:repeat(7,1fr);gap:8px}
 .dv-res{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .dv-st{display:flex;flex-direction:column;gap:3px;padding:6px 10px 7px;border:1px solid var(--edge);border-radius:6px;background:var(--ground2);min-height:56px}
 .dv-st .w{display:flex;align-items:flex-start;gap:7px;line-height:1.35}
@@ -1799,6 +1799,7 @@ const dvStep1=dvBox('Sign in to the server',`<div class="wb-title">Sign in to th
  <div class="wb-acts"><span class="btn">Cancel</span><span class="btn p">Continue</span></div>`);
 const dvStep2=dvBox('Sign in to the server',`<div class="wb-title">Sign in to the server</div>
  <div class="dv-code" aria-label="Code">BCDF-GHJK</div>
+ ${dvKv([['Server','holz.example.net',1]])}
  <p class="dv-note">Opening your browser…</p><p class="dv-note">Enter this code only if you started this here.</p>
  <div class="sy-state" role="status">${svDot('wait')}<span>Waiting for approval…</span></div>
  <div class="wb-acts"><span class="btn">Open again</span><span class="btn">Cancel</span></div>`);
@@ -1814,7 +1815,7 @@ const dvAuthorize=()=>`<div class="dv-page"><div class="dv-top">
  ${svCell('The browser: the page that approves a device',dvPage)}
  </div><div class="cap" style="margin-top:2px">The states of step 2 in the app</div><div class="dv-states">
  ${svCell('Waiting',dvSt('wait','Waiting for approval…'))}${svCell('Approved',dvSt('in','Signed in'))}${svCell('Denied',dvSt('','The request was denied.',1))}
- ${svCell('Expired',dvSt('','The code expired. Start again.',1))}${svCell('Unreachable',dvSt('','The server cannot be reached.',1))}${svCell('Off on the server',dvSt('','Device sign-in is off on this server.',1))}
+ ${svCell('Expired',dvSt('','The code expired. Start again.',1))}${svCell('Too many',dvSt('','Too many devices or requests. Try again later.',1))}${svCell('Unreachable',dvSt('','The server cannot be reached.',1))}${svCell('Off on the server',dvSt('','Device sign-in is off on this server.',1))}
  </div><div class="cap" style="margin-top:2px">What the page of the browser says after Approve, Deny, and a code that is not known</div><div class="dv-res">
  ${svCell('Approve',dvSt('in','Device approved.',0,1))}${svCell('Deny',dvSt('out','Request denied.',0,1))}${svCell('A code that is not valid',dvSt('','That code is not valid or has expired.',1,1))}
  </div></div>`;

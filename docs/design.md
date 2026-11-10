@@ -2990,6 +2990,7 @@ An app (desktop or phone) signs in to the server with the person's own login in 
 | 1: read-only row | `Device`, and the name of the computer (shown, never asked) |
 | 1: buttons | `Continue`, `Cancel` |
 | 2: the code | the user code in mono in large type (`BCDF-GHJK`) |
+| 2: read-only row | `Server`, and the address the request goes to, in mono |
 | 2: lines | `Opening your browser…` while the page opens, then `Enter this code only if you started this here.` |
 | 2: buttons | `Open again`, `Cancel`; after a failure `Start again`, `Cancel`; after success `Close` |
 
@@ -3001,8 +3002,11 @@ The states of the second screen are a dot shape and words; the failures also car
 | approved | filled | `Signed in` |
 | denied | `!` and an underline | `The request was denied.` |
 | expired | `!` and an underline | `The code expired. Start again.` |
+| too many | `!` and an underline | `Too many devices or requests. Try again later.` |
 | unreachable | `!` and an underline | `The server cannot be reached.` |
 | off | `!` and an underline | `Device sign-in is off on this server.` |
+
+A failure that the first screen meets (the app could not start the request) is said in place of the refusal line of the field, in the same words (`The server cannot be reached.`, `Device sign-in is off on this server.`), and the field keeps what was typed. A refusal of the app itself that has no word in this table (for example a keychain that cannot be written) shows the app's own fixed sentence in the style of a failure, never a text that came from the server. While the saved secrets are locked on Android, the buttons that need them (`Continue`, `Open again`, `Start again`) give way to the dim line `Locked: unlock to connect`; `Cancel` stays, and the buttons return by themselves after the unlock. After a failure the second screen offers `Start again` and `Cancel`, and the polling has stopped.
 
 **The page `Authorize device`.** A dialog of the web page in the box of the sign-in page (6.28), 24 rem wide. It opens from the fragment `#device=<code>` of the address the app opens (the server's own root), after a sign-in no older than five minutes: the sign-in page keeps the fragment, and the layer `Confirm it is you` of 6.29 shows once when the sign-in is older. It also opens from the palette entry `Authorize device…`, which first asks for a typed code (browser only): the field `Code`, the buttons `Look up` and `Cancel`. The dialog has the title `Authorize device`, the rows `Device`, `Platform`, `Address` (the network address the request came from, in mono) and `Requested` (`just now`, `3 min ago`), the code in mono to compare with the app, the sentence `Approve only if you started this on your own device.` and the buttons `Deny` and `Approve`. The result is said in the status line of the dialog, and the two buttons then give way to `Close` (nothing is left to decide):
 
@@ -3026,8 +3030,8 @@ The states of the second screen are a dot shape and words; the failures also car
 |---|---|
 | `Sign in to the server`, `Server address`, `Device`, `Continue`, `Cancel` | the first screen of the step |
 | `Use an address that starts with https://.` | the refusal of an address |
-| `Opening your browser…`, `Enter this code only if you started this here.`, `Open again`, `Start again`, `Close` | the second screen |
-| `Waiting for approval…`, `Signed in`, `The request was denied.`, `The code expired. Start again.`, `The server cannot be reached.`, `Device sign-in is off on this server.` | the states of the second screen |
+| `Opening your browser…`, `Enter this code only if you started this here.`, `Open again`, `Start again`, `Close`, `Server` | the second screen |
+| `Waiting for approval…`, `Signed in`, `The request was denied.`, `The code expired. Start again.`, `Too many devices or requests. Try again later.`, `The server cannot be reached.`, `Device sign-in is off on this server.` | the states of the second screen |
 | `Authorize device`, `Authorize device…`, `Platform`, `Address`, `Requested`, `Code`, `Look up` | the page and its palette entry |
 | `Approve only if you started this on your own device.`, `Approve`, `Deny` | the page |
 | `Device approved.`, `Request denied.`, `That code is not valid or has expired.` | the results of the page |
