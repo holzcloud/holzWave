@@ -265,3 +265,91 @@ pub fn absent() -> Req {
 
 /// The origin tests expect in an address the server builds.
 pub const SERVER_ORIGIN: &str = ORIGIN;
+
+// ---- a real socket ----------------------------------------------------------------------------------------------------------------
+
+/// The router of an environment served on `127.0.0.1` over plain http, for a client that is the real one (the core's, which
+/// opens a connection of its own). The public host of the test application is not the loopback address, so each request's
+/// `Host` is set to the public one before the router sees it; everything else of a request reaches the router as it came.
+///
+/// Dropping the value stops the listener and every connection it accepted, so a later request is refused by the system.
+pub struct Loopback {
+    /// `http://127.0.0.1:<port>`: the address a client is pointed at.
+    pub origin: String,
+    task: tokio::task::JoinHandle<()>,
+    requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Loopback {
+    /// Stops the listener and every connection, and returns once they are gone.
+    pub async fn stop(mut self) {
+        self.task.abort();
+        let _ = (&mut self.task).await;
+    }
+
+    /// How many requests reached the router.
+    pub fn requests(&self) -> usize {
+        self.requests.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Drop for Loopback {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// Serves the router of `env` on a free loopback port.
+pub async fn serve_loopback(env: &ApiEnv) -> Loopback {
+    use hyper::body::Incoming;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use tower::ServiceExt as _;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("the address").port();
+    let router = env.router();
+    let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = requests.clone();
+    let task = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            let Ok((stream, peer)) = listener.accept().await else {
+                break;
+            };
+            let router = router.clone();
+            let counted = counted.clone();
+            connections.spawn(async move {
+                let service = service_fn(move |request: hyper::Request<Incoming>| {
+                    let router = router.clone();
+                    let counted = counted.clone();
+                    async move {
+                        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let (mut parts, body) = request.into_parts();
+                        parts.headers.insert(
+                            axum::http::header::HOST,
+                            axum::http::HeaderValue::from_static(HOST),
+                        );
+                        parts.extensions.insert(
+                            holzwave_server::http::router::PeerAddr(peer.ip()),
+                        );
+                        let request =
+                            axum::http::Request::from_parts(parts, axum::body::Body::new(body));
+                        router.oneshot(request).await
+                    }
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await;
+            });
+            while connections.try_join_next().is_some() {}
+        }
+    });
+    Loopback {
+        origin: format!("http://127.0.0.1:{port}"),
+        task,
+        requests,
+    }
+}

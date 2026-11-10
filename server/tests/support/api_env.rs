@@ -315,6 +315,11 @@ impl ApiEnv {
         ApiEnv { auth, secrets, observer, accounts, enrol, me, router }
     }
 
+    /// The router that holds every part, for a test that serves it on a socket of its own.
+    pub fn router(&self) -> Router {
+        self.router.clone()
+    }
+
     /// Sends a request to the router that holds every part.
     pub async fn send(&self, req: Req) -> Resp {
         let response = self.router.clone().oneshot(req.build()).await.expect("the router never fails");

@@ -104,21 +104,28 @@ struct Answer {
     body: Vec<u8>,
 }
 
+/// The HTTP agent every request to a holzWave server goes through: the platform's certificate verifier, `https` only unless
+/// the address is a loopback one (`secure` is false), no redirect followed (so a token is never sent to another host), no
+/// cookie jar, and `timeout` as the longest one request may take altogether.
+pub(crate) fn agent(secure: bool, timeout: Duration) -> Agent {
+    let config: Config = Config::builder()
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .https_only(secure)
+        .timeout_global(Some(timeout))
+        .tls_config(TlsConfig::builder().root_certs(RootCerts::PlatformVerifier).build())
+        .user_agent("holzWave-sync")
+        .build();
+    config.into()
+}
+
 impl ServerBackend {
     /// `origin` is the server's address, `https://host[:port]` (a plain `http` address only for a loopback host, which a test
     /// or a server on this computer uses). Anything with a user name, a path, a query or a fragment is refused.
     pub fn new(origin: &str, token: &Token) -> Result<Self> {
         let origin = Origin::parse(origin)?;
-        let config: Config = Config::builder()
-            .http_status_as_error(false)
-            .max_redirects(0)
-            .https_only(origin.secure())
-            .timeout_global(Some(REQUEST_TIMEOUT))
-            .tls_config(TlsConfig::builder().root_certs(RootCerts::PlatformVerifier).build())
-            .user_agent("holzWave-sync")
-            .build();
         Ok(Self {
-            agent: config.into(),
+            agent: agent(origin.secure(), REQUEST_TIMEOUT),
             base: origin.to_text(),
             host: origin.host().to_owned(),
             port: origin.port(),

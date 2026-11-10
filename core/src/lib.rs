@@ -39,6 +39,7 @@
 //! - [`wshinstall`]: the one explicit act that puts the bundled `wsh` on a Linux host reached over SSH, and verifies it.
 //! - [`remote`]: the client side of the byte bridge to a holzWave server (a WebSocket client over TLS).
 //! - [`server_link`]: the device token and the faults of the link to a server.
+//! - [`server_signin`]: the client of the device grant that ends in that token.
 //! - `platform_tls` (Android only): the one-time set-up of the certificate verifier both network clients use.
 
 pub mod ai;
@@ -72,6 +73,7 @@ pub mod reach;
 pub mod remote;
 pub mod secrets;
 pub mod server_link;
+pub mod server_signin;
 pub mod session;
 pub mod settings;
 pub mod ssh;
