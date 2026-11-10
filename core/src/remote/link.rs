@@ -413,15 +413,13 @@ impl Write for ServerWriter {
                     self.shared.dropped.fetch_add(buf.len() as u64, Ordering::Relaxed);
                 }
             }
-            ConnState::Failed => {
-                // Enter tries once more; everything else typed is dropped.
-                if buf.iter().any(|b| *b == b'\r' || *b == b'\n') {
-                    self.shared.state.set(ConnState::Connecting);
-                    if self.shared.signed_out.load(Ordering::SeqCst) {
-                        self.shared.again.store(true, Ordering::SeqCst);
-                    } else {
-                        let _ = self.shared.handle().retry();
-                    }
+            // Enter tries once more; everything else typed is dropped.
+            ConnState::Failed if buf.iter().any(|b| *b == b'\r' || *b == b'\n') => {
+                self.shared.state.set(ConnState::Connecting);
+                if self.shared.signed_out.load(Ordering::SeqCst) {
+                    self.shared.again.store(true, Ordering::SeqCst);
+                } else {
+                    let _ = self.shared.handle().retry();
                 }
             }
             // While the connection is down nothing typed is sent and none of it is kept: the session may have another writer

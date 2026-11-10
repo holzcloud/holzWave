@@ -620,7 +620,7 @@ fn a_signed_out_endpoint_is_a_final_fault_without_any_connection() {
 fn nothing_that_a_hub_prints_or_says_holds_a_token() {
     let device = FakeDevice::start();
     let hub = plain_hub(&device);
-    let (sub, mut conn) = attach_plain(&device, &hub, 3, b"");
+    let (sub, conn) = attach_plain(&device, &hub, 3, b"");
     let token = device.endpoint.handed()[0].clone();
     conn.cut();
     let mut everything = format!("{hub:?} {:?}", sub.handle());

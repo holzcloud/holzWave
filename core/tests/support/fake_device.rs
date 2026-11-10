@@ -4,7 +4,7 @@
 //! requests of the client, answers or does not, and sends events and chunks, or hostile bytes, in the order it chooses.
 //!
 //! Tests pull it in with `#[path = "support/fake_device.rs"] mod fake_device;`.
-#![allow(dead_code)]
+#![allow(dead_code, clippy::result_large_err, clippy::too_many_arguments)]
 
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};

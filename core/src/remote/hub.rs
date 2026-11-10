@@ -1118,10 +1118,8 @@ impl Core {
                 Some((Pending::Call(reply), _)) => {
                     let _ = reply.send(Err(HubError::Timeout));
                 }
-                Some((Pending::Attach { id: sub, session }, _)) => {
-                    if self.owns(sub, session) {
-                        self.end_sub(session, HubError::Timeout);
-                    }
+                Some((Pending::Attach { id: sub, session }, _)) if self.owns(sub, session) => {
+                    self.end_sub(session, HubError::Timeout);
                 }
                 _ => {}
             }
