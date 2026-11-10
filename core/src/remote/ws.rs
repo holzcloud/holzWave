@@ -376,6 +376,9 @@ fn map_error(e: tungstenite::Error) -> WsError {
     use tungstenite::Error as E;
     match e {
         E::ConnectionClosed | E::AlreadyClosed => WsError::Closed,
+        E::Protocol(tungstenite::error::ProtocolError::ResetWithoutClosingHandshake) => WsError::Closed,
+        // The connection ended before the answer to the upgrade was complete: nothing was answered, so the server is not there.
+        E::Protocol(tungstenite::error::ProtocolError::HandshakeIncomplete) => WsError::Fault(Fault::Unreachable),
         E::Io(e) => {
             if e.get_ref().is_some_and(|inner| inner.is::<rustls::Error>()) {
                 WsError::Tls
@@ -525,6 +528,11 @@ impl WsClient {
                 }
                 Err(tungstenite::Error::Io(e)) if is_timeout(&e) => return Ok(Recv::Timeout),
                 Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                    self.closed = Some(1006);
+                    return Ok(Recv::Closed(1006));
+                }
+                // The peer's side of the connection ended with no close frame: a network that failed, not a rule that was broken.
+                Err(tungstenite::Error::Protocol(tungstenite::error::ProtocolError::ResetWithoutClosingHandshake)) => {
                     self.closed = Some(1006);
                     return Ok(Recv::Closed(1006));
                 }

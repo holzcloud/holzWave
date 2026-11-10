@@ -9,6 +9,7 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::Result;
+use crate::remote::proto::WriterView;
 
 /// The state of a connection as the user sees it (pane header, sidebar, status line).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -46,6 +47,56 @@ impl SharedState {
     }
 }
 
+/// What a pane that runs on a session of a server shows besides its screen, apart from the state of its connection
+/// ([`ConnState`]): who writes, the grid of the session, whether older lines exist and what the pane is busy with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteView {
+    /// The session on the server.
+    pub session: u32,
+    /// This pane's own view of the right to write: `writing`, `watching` or `free`. `free` until the server has said.
+    pub writer: WriterView,
+    /// The grid of the session in cells, as the server last said it (the grid of the pane's spec until then).
+    pub cols: u16,
+    pub rows: u16,
+    /// Whether the server holds lines older than the ones this pane has.
+    pub more: bool,
+    /// What the pane is busy with, in the words of the design record.
+    pub state: RemoteState,
+    /// How many bytes of typed input were dropped before they were sent, because this pane did not hold the right to write.
+    pub dropped_input: u64,
+}
+
+/// The transient state of a remote pane, the part of the design record's table that is not a state of the connection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RemoteState {
+    /// Nothing: the pane shows the session.
+    #[default]
+    None,
+    /// The first attach has not been answered.
+    Attaching,
+    /// An attach with a longer tail is on its way.
+    LoadingOlder,
+    /// The server asked for a fresh start, or this pane fell behind.
+    Resyncing,
+}
+
+/// What a link to a session on a server lets the rest of the program do. Every method returns at once.
+pub trait RemoteControl: Send + Sync {
+    /// The view now.
+    fn view(&self) -> RemoteView;
+
+    /// Take the right to write. The server tells every pane of the session; this pane's view changes when it has.
+    fn takeover(&self) -> Result<()>;
+
+    /// Ask the server for older lines (a longer tail) and keep the screen where it is. Does nothing while the server has no
+    /// older lines or a request is on its way.
+    fn load_older(&self) -> Result<()>;
+
+    /// Record the size of the pane's tile in cells. It reaches the session only while this pane writes, and once when it
+    /// takes over.
+    fn tile(&self, cols: u16, rows: u16);
+}
+
 /// The far side of a pane.
 pub trait Link: Send {
     /// The read end, taken once to move it to the pane's reader thread. `None` after that.
@@ -73,6 +124,11 @@ pub trait Link: Send {
 
     /// A handle on the state that outlives the link. `None` for a link that has no state of its own.
     fn shared_state(&self) -> Option<SharedState> {
+        None
+    }
+
+    /// The control surface of a link to a session on a server. `None` for every other link.
+    fn remote_control(&self) -> Option<Arc<dyn RemoteControl>> {
         None
     }
 }

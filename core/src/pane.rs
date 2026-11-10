@@ -59,7 +59,8 @@ use crate::engine::{
 };
 use crate::layout::PaneId;
 use crate::platform::{self, Os, ShellLaunch};
-use crate::conn::{ConnState, Link, SharedState};
+use crate::conn::{ConnState, Link, RemoteControl, RemoteView, SharedState};
+use crate::remote::proto::WriterView;
 use crate::pty::{Pty, SpawnOptions, process_cwd};
 use crate::pool::Connection;
 use crate::ssh::{SshLink, SshTarget, Tunnel};
@@ -206,6 +207,90 @@ pub struct PaneSpec {
     /// through taps ([`PaneHandle::attach_tap`]); the only pane that accepts raw input bytes ([`PaneHandle::write_raw`]).
     /// `false` by default.
     pub headless: bool,
+    /// Show a session that lives on a holzWave server instead of running a program: the pane's own engine draws what the
+    /// server sends ([`RemoteTarget`]). `program`, `args`, `cwd`, `ssh` and `host_spawn` are then not used, as for SSH.
+    /// `None` by default.
+    pub remote: Option<RemoteTarget>,
+}
+
+/// What builds the link of a pane that shows a session on a server. The hub of a device ([`crate::remote::hub::Hub`]) is the
+/// one implementation of this crate; nothing in the pane names a socket.
+pub trait RemoteAttach: Send + Sync {
+    /// The link of a pane for `session`: the screen and `tail` rows of scrollback (the server's default when `None`), then live
+    /// bytes. `size` is the grid of the pane, in cells; `sink` is how the link reaches the pane's engine thread. Returns at
+    /// once: connecting happens on a thread of the implementation and its progress is the link's state.
+    fn link(&self, session: u32, tail: Option<u32>, size: (u16, u16), sink: PaneSink) -> Result<Box<dyn Link>>;
+
+    /// The name of the server, for a debug print. Never a token and never more than the host.
+    fn host(&self) -> String;
+}
+
+/// A session on a server, as a pane's spec names it.
+#[derive(Clone)]
+pub struct RemoteTarget {
+    /// The number of the session on the server.
+    pub session: u32,
+    /// How many rows of scrollback come with the screen; `None` is the server's default.
+    pub tail: Option<u32>,
+    /// What builds the link.
+    pub attach: Arc<dyn RemoteAttach>,
+}
+
+impl std::fmt::Debug for RemoteTarget {
+    // A spec derives `Debug`: a debug print shows the session and the host of the server and nothing that could be used to reach
+    // it as someone else.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteTarget").field("session", &self.session).field("host", &self.attach.host()).finish()
+    }
+}
+
+/// How a link to a session on a server reaches the engine thread of its pane: what the pane does not learn from the bytes.
+/// It is made by [`PaneHandle::spawn`], which owns the pane's queue, and handed to the link when the pane starts, so the code
+/// that starts a pane wires nothing.
+#[derive(Clone)]
+pub struct PaneSink {
+    queue: Arc<PaneQueue<Control>>,
+}
+
+impl std::fmt::Debug for PaneSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PaneSink")
+    }
+}
+
+/// How long [`PaneSink::settle`] waits for the engine thread to catch up with the output before it gives up.
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
+
+impl PaneSink {
+    /// The grid of the session is `cols` by `rows`: the engine takes that size (clamped), without telling the link, so that a
+    /// watcher follows the session and a writer's own resize is not sent back. Handled before output that is still queued,
+    /// which is what a size that comes before the snapshot needs.
+    pub fn grid(&self, cols: u16, rows: u16) {
+        self.queue.push_control(Control::Grid { cols: cols.clamp(MIN_COLS, MAX_DIM), rows: rows.clamp(MIN_ROWS, MAX_DIM) });
+    }
+
+    /// Remember how far the viewport is from the bottom of the screen, once every byte queued so far has been fed.
+    pub fn mark_scroll(&self) {
+        self.settle();
+        self.queue.push_control(Control::MarkScroll);
+    }
+
+    /// Put the viewport back where [`PaneSink::mark_scroll`] saw it, measured from the bottom, once every byte queued so far
+    /// has been fed.
+    pub fn restore_scroll(&self) {
+        self.settle();
+        self.queue.push_control(Control::RestoreScroll);
+    }
+
+    /// Waits until the engine thread has taken all the output that is queued, or the pane is gone, at most
+    /// [`SETTLE_TIMEOUT`]. A control that is pushed after this is handled after that output, because the engine thread does
+    /// one thing at a time.
+    fn settle(&self) {
+        let deadline = Instant::now() + SETTLE_TIMEOUT;
+        while self.queue.queued_bytes() > 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
 }
 
 impl PaneSpec {
@@ -236,6 +321,7 @@ impl PaneSpec {
             linger: None,
             env_remove: Vec::new(),
             headless: false,
+            remote: None,
         }
     }
 
@@ -538,6 +624,12 @@ enum Control {
     DetachTap(TapId),
     /// Bytes for the program, verbatim; honoured by a headless pane only.
     WriteRaw(Vec<u8>),
+    /// The grid of the session a remote pane shows: the engine follows it, the link is not told.
+    Grid { cols: u16, rows: u16 },
+    /// Remember the distance of the viewport from the bottom.
+    MarkScroll,
+    /// Put the viewport back at the remembered distance from the bottom.
+    RestoreScroll,
     Close,
 }
 
@@ -548,6 +640,8 @@ struct Shared {
     thread: Mutex<Option<JoinHandle<()>>>,
     /// The state of the pane's connection; empty for a local shell.
     conn: Arc<Mutex<Option<SharedState>>>,
+    /// The control surface of a pane that shows a session on a server; empty for every other pane.
+    remote: Arc<Mutex<Option<Arc<dyn RemoteControl>>>>,
     /// [`PaneSpec::headless`]: the only kind of pane that takes [`PaneHandle::write_raw`].
     headless: bool,
     /// How many times a timer woke the engine thread, see [`PaneHandle::timer_wakes`].
@@ -611,18 +705,20 @@ impl PaneHandle {
         let (started_tx, started_rx) = mpsc::channel::<Result<Option<u32>>>();
         let conn: Arc<Mutex<Option<SharedState>>> = Arc::new(Mutex::new(None));
         let engine_conn = conn.clone();
+        let remote: Arc<Mutex<Option<Arc<dyn RemoteControl>>>> = Arc::new(Mutex::new(None));
+        let engine_remote = remote.clone();
         let engine_queue = queue.clone();
         let headless = spec.headless;
         let timer_wakes = Arc::new(AtomicU64::new(0));
         let engine_timer_wakes = timer_wakes.clone();
         let join = thread::Builder::new()
             .name(format!("hw-pane-{pane}-engine"))
-            .spawn(move || engine_main::<E, F, S>(pane, spec, make_engine, sink, engine_queue, started_tx, wrap, engine_conn, engine_timer_wakes))
+            .spawn(move || engine_main::<E, F, S>(pane, spec, make_engine, sink, engine_queue, started_tx, wrap, engine_conn, engine_remote, engine_timer_wakes))
             .map_err(Error::Io)?;
 
         match started_rx.recv_timeout(START_TIMEOUT) {
             Ok(Ok(pid)) => Ok(PaneHandle {
-                shared: Arc::new(Shared { queue, pid, thread: Mutex::new(Some(join)), conn, headless, timer_wakes }),
+                shared: Arc::new(Shared { queue, pid, thread: Mutex::new(Some(join)), conn, remote, headless, timer_wakes }),
             }),
             Ok(Err(e)) => {
                 // The thread reported its failure and is on its way out.
@@ -654,6 +750,29 @@ impl PaneHandle {
     pub fn conn_state(&self) -> ConnState {
         let slot = self.shared.conn.lock().unwrap_or_else(PoisonError::into_inner);
         slot.as_ref().map_or(ConnState::Local, SharedState::get)
+    }
+
+    fn remote(&self) -> Option<Arc<dyn RemoteControl>> {
+        self.shared.remote.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    /// What a pane that shows a session on a server shows besides its screen: who writes, the grid of the session, whether
+    /// older lines exist and what it is busy with. `None` for every other pane.
+    pub fn remote_view(&self) -> Option<RemoteView> {
+        self.remote().map(|remote| remote.view())
+    }
+
+    /// Take the right to write in the session this pane shows. The server tells every pane of the session; the view of this
+    /// one changes when it has. An error for a pane that does not show a session on a server.
+    pub fn takeover(&self) -> Result<()> {
+        self.remote().ok_or_else(|| Error::Pty("this pane does not show a session on a server".into()))?.takeover()
+    }
+
+    /// Ask the server for older lines than the pane has, and keep the screen where it is (the position is measured from the
+    /// bottom). Does nothing when the server has no older lines or a request is on its way. An error for a pane that does not
+    /// show a session on a server.
+    pub fn load_older(&self) -> Result<()> {
+        self.remote().ok_or_else(|| Error::Pty("this pane does not show a session on a server".into()))?.load_older()
     }
 
     /// The operating system's id of the shell.
@@ -753,12 +872,19 @@ impl PaneHandle {
 
     /// Change the grid. The size is clamped to a sane range first; the PTY is resized with pixel dimensions and the
     /// next frame is a full one.
+    ///
+    /// On a pane that shows a session on a server the size is the pane's tile: it is recorded, and it changes the engine and the
+    /// session only while the pane holds the right to write (a watcher follows the size of the session, never the other way
+    /// round). When the pane takes over, the recorded size is sent once.
     pub fn resize(&self, cols: u16, rows: u16, cell_px: (u32, u32)) -> Result<()> {
-        self.send(Control::Resize {
-            cols: cols.clamp(MIN_COLS, MAX_DIM),
-            rows: rows.clamp(MIN_ROWS, MAX_DIM),
-            cell_px: (cell_px.0.min(MAX_CELL_PX), cell_px.1.min(MAX_CELL_PX)),
-        })
+        let (cols, rows) = (cols.clamp(MIN_COLS, MAX_DIM), rows.clamp(MIN_ROWS, MAX_DIM));
+        if let Some(remote) = self.remote() {
+            remote.tile(cols, rows);
+            if remote.view().writer != WriterView::Writing {
+                return Ok(());
+            }
+        }
+        self.send(Control::Resize { cols, rows, cell_px: (cell_px.0.min(MAX_CELL_PX), cell_px.1.min(MAX_CELL_PX)) })
     }
 
     /// Scroll the viewport by `rows`; negative is towards older output.
@@ -1066,6 +1192,12 @@ struct Actor<E: TerminalEngine, S: FnMut(PaneEvent)> {
     taps: Vec<TapSink>,
     /// Timer wake-ups of the main loop, for [`PaneHandle::timer_wakes`].
     timer_wakes: Arc<AtomicU64>,
+    /// The size of one cell in pixels as the pane last learned it, for a size that comes from the session ([`PaneSink::grid`]).
+    cell_px: (u32, u32),
+    /// Where the viewport was in the scrollable area at the last frame, for [`PaneSink::mark_scroll`].
+    last_bar: crate::engine::Scrollbar,
+    /// The distance of the viewport from the bottom that [`PaneSink::mark_scroll`] remembered, in rows.
+    anchor: Option<u64>,
 }
 
 impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
@@ -1394,6 +1526,20 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
                     self.taps.remove(at).close(true);
                 }
             }
+            Control::Grid { cols, rows } => self.follow_grid(cols, rows),
+            Control::MarkScroll => {
+                // The viewport is read from the last frame: bring it up to date first.
+                self.emit_frame();
+                let bar = self.last_bar;
+                self.anchor = Some(bar.total.saturating_sub(bar.offset.saturating_add(bar.len)));
+            }
+            Control::RestoreScroll => {
+                if let Some(rows) = self.anchor.take().filter(|rows| *rows > 0) {
+                    self.engine.scroll_to_bottom();
+                    self.engine.scroll(-isize::try_from(rows).unwrap_or(isize::MAX));
+                    self.dirty = true;
+                }
+            }
             // `run` ends the loop on Close before it gets here.
             Control::Close => {}
         }
@@ -1480,7 +1626,24 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
         }
     }
 
+    /// The grid of a session on a server: the engine takes that size and nothing else changes. The link is not told: a
+    /// watcher follows the session, and the size the writer sent is the one that came back.
+    fn follow_grid(&mut self, cols: u16, rows: u16) {
+        let before = self.engine.size().ok();
+        if before == Some((cols, rows)) {
+            return;
+        }
+        if self.engine.resize(cols, rows, self.cell_px).is_err() {
+            return;
+        }
+        if self.engine.size().ok() != before {
+            self.encoder.request_full();
+        }
+        self.dirty = true;
+    }
+
     fn resize(&mut self, cols: u16, rows: u16, cell_px: (u32, u32)) {
+        self.cell_px = cell_px;
         let before = self.engine.size().ok();
         if self.engine.resize(cols, rows, cell_px).is_err() {
             return;
@@ -1542,6 +1705,7 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
         self.image_due = if self.holding { None } else { self.engine.tick_images(self.now_ms()) };
         match self.engine.update() {
             Ok(update) => {
+                self.last_bar = update.scrollbar;
                 if let Some(frame) = self.encoder.encode(update) {
                     (self.sink)(PaneEvent::Frame(frame));
                     self.last_emit = Some(Instant::now());
@@ -1588,7 +1752,7 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Drop for Actor<E, S> {
 }
 
 /// Build the engine and the shell. Nothing is started when the engine cannot be built.
-fn start<E, F>(spec: &PaneSpec, make_engine: F) -> Result<(E, Box<dyn Link>)>
+fn start<E, F>(spec: &PaneSpec, make_engine: F, sink: PaneSink) -> Result<(E, Box<dyn Link>)>
 where
     E: TerminalEngine,
     F: FnOnce(&PaneSpec) -> Result<E>,
@@ -1618,6 +1782,12 @@ where
     }
     if spec.blank {
         return Ok((engine, Box::new(crate::conn::NullLink::new())));
+    }
+    if let Some(target) = &spec.remote {
+        // A session on a server: the link is built by what the spec names and returns at once (it connects on a thread of
+        // its own), so starting the pane never waits for the network.
+        let link = target.attach.link(target.session, target.tail, (spec.cols, spec.rows), sink)?;
+        return Ok((engine, link));
     }
     if let Some(connection) = &spec.ssh_connection {
         let link = SshLink::attach_with(connection.clone(), spec.cols, spec.rows, spec.tunnel.clone())?;
@@ -1670,6 +1840,7 @@ fn engine_main<E, F, S>(
     started: Sender<Result<Option<u32>>>,
     wrap: Option<ReaderWrap>,
     conn: Arc<Mutex<Option<SharedState>>>,
+    remote: Arc<Mutex<Option<Arc<dyn RemoteControl>>>>,
     timer_wakes: Arc<AtomicU64>,
 ) where
     E: TerminalEngine,
@@ -1683,12 +1854,13 @@ fn engine_main<E, F, S>(
         let _ = started.send(Err(error));
     };
 
-    let (engine, mut pty) = match start(&spec, make_engine) {
+    let (engine, mut pty) = match start(&spec, make_engine, PaneSink { queue: queue.clone() }) {
         Ok(started) => started,
         Err(e) => return fail(&mut sink, &queue, e),
     };
     let pid = pty.process_id();
     *conn.lock().unwrap_or_else(PoisonError::into_inner) = pty.shared_state();
+    *remote.lock().unwrap_or_else(PoisonError::into_inner) = pty.remote_control();
     let (Some(reader), Some(writer)) = (pty.take_reader(), pty.take_writer()) else {
         let _ = pty.close();
         return fail(&mut sink, &queue, Error::Pty("the PTY has no reader or writer".into()));
@@ -1752,6 +1924,9 @@ fn engine_main<E, F, S>(
         headless: spec.headless,
         taps: Vec::new(),
         timer_wakes,
+        cell_px: spec.cell_px,
+        last_bar: crate::engine::Scrollbar::default(),
+        anchor: None,
     };
     let _ = started.send(Ok(pid));
     actor.run();
@@ -1858,6 +2033,63 @@ mod tests {
     use super::*;
 
     const MS: Duration = Duration::from_millis(1);
+
+    // ---- the remote slot and its sink ----
+
+    struct Host;
+
+    impl RemoteAttach for Host {
+        fn link(&self, _: u32, _: Option<u32>, _: (u16, u16), _: PaneSink) -> Result<Box<dyn Link>> {
+            unreachable!("not started in these tests")
+        }
+
+        fn host(&self) -> String {
+            "hw.example.test".into()
+        }
+    }
+
+    #[test]
+    fn a_spec_has_no_remote_target_and_a_debug_print_of_one_shows_the_session_and_the_host_only() {
+        assert!(PaneSpec::new("/bin/sh", 80, 24).remote.is_none());
+        let target = RemoteTarget { session: 7, tail: Some(500), attach: Arc::new(Host) };
+        let printed = format!("{target:?}");
+        assert!(printed.contains("session: 7") && printed.contains("hw.example.test"), "{printed}");
+        assert!(!printed.contains("500"), "the tail is not part of what a print shows: {printed}");
+    }
+
+    #[test]
+    fn the_sink_hands_the_engine_the_grid_clamped_and_the_scroll_marks_in_the_order_they_were_given() {
+        let queue: Arc<PaneQueue<Control>> = Arc::new(PaneQueue::new());
+        let sink = PaneSink { queue: queue.clone() };
+        sink.grid(0, 65_535);
+        sink.mark_scroll();
+        sink.restore_scroll();
+        let mut got = Vec::new();
+        while let Popped::Control(control) = queue.pop(MS) {
+            got.push(control);
+        }
+        assert!(matches!(got[0], Control::Grid { cols: MIN_COLS, rows: MAX_DIM }), "the first control is not the clamped grid");
+        assert!(matches!(got[1], Control::MarkScroll) && matches!(got[2], Control::RestoreScroll), "{} controls", got.len());
+    }
+
+    #[test]
+    fn a_mark_waits_until_the_bytes_before_it_have_been_taken_by_the_engine() {
+        let queue: Arc<PaneQueue<Control>> = Arc::new(PaneQueue::new());
+        let sink = PaneSink { queue: queue.clone() };
+        assert!(queue.push_output(vec![0; 100]));
+        let taker = {
+            let queue = queue.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(50));
+                assert!(matches!(queue.pop(Duration::from_secs(1)), Popped::Output(_)));
+            })
+        };
+        let started = Instant::now();
+        sink.mark_scroll();
+        assert!(started.elapsed() >= Duration::from_millis(40), "the mark did not wait for the output");
+        taker.join().unwrap();
+        assert!(matches!(queue.pop(Duration::from_secs(1)), Popped::Control(Control::MarkScroll)));
+    }
 
     // ---- spawn_command: what the child is started with ----
 
