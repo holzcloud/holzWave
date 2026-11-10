@@ -551,6 +551,40 @@ fn the_secrets_are_never_staged_copied_or_noticed() {
 }
 
 #[test]
+fn the_secrets_file_cannot_carry_the_device_token_of_a_server() {
+    use crate::server_link::TOKEN_ACCOUNT;
+    let token = "hwd_canaryCANARY-0123456789_abcdefghijklmnopqrs";
+    let d = device("a18t");
+    let source = ConfigSource::new(&d.dir, d.secrets.clone());
+    // The account of the token is no connection and no integration variable: refused, as any account that is not one of
+    // the two shapes, and nothing is written for it.
+    let alone = serde_json::json!({ TOKEN_ACCOUNT: token }).to_string();
+    assert!(source.write(SECRETS, alone.as_bytes()).is_err());
+    assert_eq!(d.secrets.get(TOKEN_ACCOUNT).unwrap(), None);
+    // Mixed with a good account it refuses the whole payload: neither is applied.
+    let mixed = serde_json::json!({ "ssh:ok": "hunter2hunter2", TOKEN_ACCOUNT: token }).to_string();
+    assert!(source.write(SECRETS, mixed.as_bytes()).is_err());
+    assert_eq!(d.secrets.get(TOKEN_ACCOUNT).unwrap(), None);
+    assert_eq!(d.secrets.get("ssh:ok").unwrap(), None, "a refused payload applies nothing");
+    // Spellings that look like it are no better; the receiver knows exactly two shapes.
+    for account in ["server:token", "server:token2", "Server:token", "ssh:server:token", "int:server:token"] {
+        let payload = serde_json::json!({ account: token }).to_string();
+        let accepted = source.write(SECRETS, payload.as_bytes()).is_ok();
+        assert_eq!(accepted, false, "{account}");
+    }
+    assert_eq!(d.secrets.get(TOKEN_ACCOUNT).unwrap(), None);
+    // An integration variable of a profile that is called `server` and a variable called `TOKEN` is a different account
+    // (`int:server:TOKEN`), accepted by the rule as it always was, and it cannot reach the account of the device token.
+    assert!(source.write(SECRETS, br#"{"int:server:TOKEN":"a-value"}"#).is_ok());
+    assert_eq!(d.secrets.get("int:server:TOKEN").unwrap().as_deref(), Some("a-value"));
+    assert_eq!(d.secrets.get(TOKEN_ACCOUNT).unwrap(), None);
+    // The rule is unchanged: a good payload is still accepted.
+    assert!(source.write(SECRETS, br#"{"ssh:ok":"hunter2hunter2"}"#).is_ok());
+    assert_eq!(d.secrets.get("ssh:ok").unwrap().as_deref(), Some("hunter2hunter2"));
+    assert_eq!(d.secrets.get(TOKEN_ACCOUNT).unwrap(), None);
+}
+
+#[test]
 fn a_damaged_or_oversized_sidecar_and_notice_are_ignored() {
     let srv = server();
     let (a, b) = (device("a19"), device("b19"));
