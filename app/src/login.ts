@@ -8,6 +8,11 @@
 // removed from the address at once and kept in a variable of this module's closure until the step ends: it is never in a
 // field's attribute, the title, a status line, Web Storage or a later address. A password is cleared from its field as
 // soon as the request is sent.
+//
+// A device code (`#device=...`, docs/design.md 6.35) is kept the same way, in one variable of this module, so that it survives the
+// sign-in: the one place that leaves this page puts it back into the address of the main page, which opens the approval dialog and
+// removes it again at once. Single sign-on leaves the page for the provider and back, so a code does not survive that way: the app
+// offers `Open again`.
 import { http, HttpError } from "./bridge.js";
 import {
   CODE_MISMATCH,
@@ -60,7 +65,15 @@ async function post(path: string, body: unknown): Promise<Reply> {
 /** The text of a failed reply. */
 const failure = (r: Reply & { ok: false }): string => messageFor(r.status, r.body);
 
-const goHome = (): void => location.replace("/");
+/** The device code the address carried, until the page leaves: it is a request for approval, not a credential, and it is kept nowhere else. */
+let pendingDevice: string | null = null;
+
+const goHome = (): void => {
+  if (pendingDevice === null) return location.replace("/");
+  // The sign-in page is at `/` too, so an address that differs in its fragment only is not a navigation: the document is loaded again.
+  location.replace(`/#device=${pendingDevice}`);
+  location.reload();
+};
 
 /** A person who closed the passkey prompt: not a failure. */
 const cancelled = (e: unknown): boolean => typeof e === "object" && e !== null && (e as { name?: unknown }).name === "NotAllowedError";
@@ -612,6 +625,7 @@ function readAddress(): { fragment: ReturnType<typeof parseFragment>; oidcFailed
 async function start(): Promise<void> {
   if (mount === null) return;
   const { fragment, oidcFailed, ended } = readAddress();
+  if (fragment?.kind === "device") pendingDevice = fragment.token;
 
   let session: SessionView = { state: "anonymous", host: location.host, bootstrap: false, passkey: false, password: true, providers: [] };
   let unreachable: string | undefined;

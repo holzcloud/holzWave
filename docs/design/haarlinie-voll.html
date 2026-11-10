@@ -1807,7 +1807,7 @@ const dvPage=dvBox('Authorize device',`<div class="wb-title">Authorize device</d
  <div class="dv-code" aria-label="Code">BCDF-GHJK</div>
  <p class="dv-note">Approve only if you started this on your own device.</p>
  <div class="wb-acts"><span class="btn">Deny</span><span class="btn p">Approve</span></div>`);
-const dvSt=(dot,text,bad)=>`<div class="dv-st"><div class="w${bad?' bad':''}">${bad?'':svDot(dot)}<span>${text}</span></div></div>`;
+const dvSt=(dot,text,bad,close)=>`<div class="dv-st"><div class="w${bad?' bad':''}">${bad?'':svDot(dot)}<span>${text}</span></div>${close?'<div class="wb-acts"><span class="btn">Close</span></div>':''}</div>`;
 const dvAuthorize=()=>`<div class="dv-page"><div class="dv-top">
  ${svCell('The app, step 1: the address, and an address that is refused',dvStep1)}
  ${svCell('The app, step 2: the code, while the browser page is open',dvStep2)}
@@ -1816,7 +1816,7 @@ const dvAuthorize=()=>`<div class="dv-page"><div class="dv-top">
  ${svCell('Waiting',dvSt('wait','Waiting for approval…'))}${svCell('Approved',dvSt('in','Signed in'))}${svCell('Denied',dvSt('','The request was denied.',1))}
  ${svCell('Expired',dvSt('','The code expired. Start again.',1))}${svCell('Unreachable',dvSt('','The server cannot be reached.',1))}${svCell('Off on the server',dvSt('','Device sign-in is off on this server.',1))}
  </div><div class="cap" style="margin-top:2px">What the page of the browser says after Approve, Deny, and a code that is not known</div><div class="dv-res">
- ${svCell('Approve',dvSt('in','Device approved.'))}${svCell('Deny',dvSt('out','Request denied.'))}${svCell('A code that is not valid',dvSt('','That code is not valid or has expired.',1))}
+ ${svCell('Approve',dvSt('in','Device approved.',0,1))}${svCell('Deny',dvSt('out','Request denied.',0,1))}${svCell('A code that is not valid',dvSt('','That code is not valid or has expired.',1,1))}
  </div></div>`;
 /* The Devices group of the Account dialog, the Devices group of the People dialog (with the owner) and the Device access group (6.35). */
 const dvRow=(name,meta,armed)=>`<div class="wb-r"><span class="nm">${name}</span><span class="mt">${meta}</span><span class="st"></span><span class="btn${armed?' arm':''}">${armed?'Click again to revoke':'Revoke'}</span></div>`;

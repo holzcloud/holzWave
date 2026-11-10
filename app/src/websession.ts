@@ -9,6 +9,7 @@
 import { registerAction, unregisterAction } from "./actions.js";
 import { backend, http, onConnection, onSession } from "./bridge.js";
 import { el, loadStyles } from "./dom.js";
+import { parseFragment } from "./loginstate.js";
 import { connection, fromInfo, marks, newModel, nextChange, readSessionInfo, reduce, setOffline } from "./websessionstate.js";
 import type { Account, Mark, Model } from "./websessionstate.js";
 import { openLayer } from "./weblayer.js";
@@ -30,6 +31,11 @@ let unlockActionOn = false;
 let endedShown = false;
 let timer: ReturnType<typeof setTimeout> | undefined;
 let unlockApi: typeof import("./unlock.js") | null = null;
+/**
+ * The device code the address carried (`#device=...`, docs/design.md 6.35), until the dialog that decides it is open. It is read once,
+ * removed from the address at once and kept nowhere else: not in storage, not in a cookie, not in a log line.
+ */
+let deviceCode: string | null = null;
 /** True once the first lookup was an answer: from then on the `web` segment is part of the strip, empty or not, so that it is a live region before it speaks. */
 let known = false;
 
@@ -104,6 +110,15 @@ async function signOut(): Promise<void> {
 async function openAccountDialog(): Promise<void> {
   const { openAccount } = await import("./account.js");
   await openAccount();
+}
+
+/** Open the dialog for the code the address carried; the code is forgotten once it is handed over. */
+async function openDeviceCode(): Promise<void> {
+  const code = deviceCode;
+  deviceCode = null;
+  if (code === null) return;
+  const { openAuthorize } = await import("./devices.js");
+  await openAuthorize(code);
 }
 
 /** The text button of a mark was pressed. */
@@ -183,6 +198,11 @@ export function initWebSession(onChange: () => void): Promise<void> {
   if (backend !== "web" || started) return Promise.resolve();
   started = true;
   changed = onChange;
+  // An app asked to sign in and its address carries the code: take it out of the address now, whatever it holds.
+  if (location.hash.startsWith("#device=")) {
+    deviceCode = parseFragment(location.hash)?.token ?? null;
+    history.replaceState(null, "", location.pathname + location.search);
+  }
   // The palette entries of the account: the dialog and the end of this session.
   registerAction({ id: "account.open", title: "Account…", run: () => void openAccountDialog() });
   registerAction({ id: "account.signout", title: "Sign out", run: () => void signOut() });
@@ -207,6 +227,8 @@ export function initWebSession(onChange: () => void): Promise<void> {
       known = true;
       const next = fromInfo(model, info, Date.now());
       setModel(storeFromEvent ? { ...next, store: model.store } : next);
+      // The person is here and the page knows it: the request that came with the address is theirs to decide.
+      if (deviceCode !== null && info.state === "signed_in") void openDeviceCode();
     },
     () => {
       // A failed lookup leaves the page as it is.

@@ -5,6 +5,7 @@
 //
 // The page tests import the engines and the launcher from ../browser/lib.mjs; nothing in that library is changed, and the
 // certificate exception lives in `openContext` of this file only.
+import https from "node:https";
 import { launch, loadPlaywright, ENGINES } from "../browser/lib.mjs";
 import { startHarness } from "./harness.mjs";
 
@@ -317,9 +318,9 @@ export async function runTest(name, harnessOptions, body, { chromiumArgs = [] } 
 
 // ---- the sign-in screens -------------------------------------------------------------------------------------------------
 
-/** Sign a person (from `harness.account`) in through the sign-in page: password, then the code. Ends on the application. */
-export async function signIn(page, harness, person) {
-  await page.goto(`${harness.origin}/`);
+/** Sign a person (from `harness.account`) in through the sign-in page: password, then the code. Ends on the application. `at` is the address to open first (a path with a fragment, for a link that must survive the sign-in). */
+export async function signIn(page, harness, person, at = "/") {
+  await page.goto(`${harness.origin}${at}`);
   await page.waitForSelector(".lg-box");
   await page.getByLabel("Username").fill(person.username);
   await page.getByLabel("Password", { exact: true }).fill(person.password);
@@ -703,3 +704,73 @@ export const osc8 = (uri, text) => `printf '\\033]8;;${uri}\\033\\\\${text}\\033
 
 /** Several shell texts as one line for the shell, run with Enter. */
 export const line = (...parts) => `${parts.join("; ")}\r`;
+
+// ---- the device features -------------------------------------------------------------------------------------------------------
+
+const PEM = (der) => `-----BEGIN CERTIFICATE-----\n${der.match(/.{1,64}/g).join("\n")}\n-----END CERTIFICATE-----\n`;
+
+/**
+ * A native client of the server, as an app is: no cookie, no page, JSON over the harness's own certificate (trusted for these
+ * requests only). `call(method, path, { body, token })` resolves with `{ status, body }`; `start` asks for a grant and gives back the
+ * codes; `poll` asks once whether it was decided; `me` asks as the device with its token.
+ */
+export function nativeClient(harness) {
+  const agent = new https.Agent({ ca: PEM(harness.certificate), keepAlive: false });
+  const call = (method, path, { body, token } = {}) =>
+    new Promise((resolve, reject) => {
+      const payload = body === undefined ? undefined : JSON.stringify(body);
+      const headers = { accept: "application/json" };
+      if (payload !== undefined) {
+        headers["content-type"] = "application/json";
+        headers["content-length"] = String(Buffer.byteLength(payload));
+      }
+      if (token !== undefined) headers.authorization = `Bearer ${token}`;
+      const request = https.request(`${harness.origin}${path}`, { method, agent, headers, servername: harness.hostname }, (response) => {
+        const chunks = [];
+        response.on("data", (c) => chunks.push(c));
+        response.on("end", () => {
+          const text = Buffer.concat(chunks).toString("utf8");
+          let parsed;
+          try {
+            parsed = text === "" ? undefined : JSON.parse(text);
+          } catch {
+            parsed = undefined;
+          }
+          resolve({ status: response.statusCode, body: parsed });
+        });
+      });
+      request.on("error", reject);
+      request.end(payload);
+    });
+  return {
+    call,
+    /** The start of a grant: `{ status, userCode, deviceCode, uri }`; the codes are undefined when the server did not make one. */
+    async start(name = "Test laptop", platform = "macos") {
+      const r = await call("POST", "/api/device/code", { body: { name, platform } });
+      return { status: r.status, userCode: r.body?.user_code, deviceCode: r.body?.device_code, uri: r.body?.verification_uri_complete, body: r.body };
+    },
+    /** One poll: `{ status, state, token, deviceId }`. */
+    async poll(deviceCode) {
+      const r = await call("POST", "/api/device/token", { body: { device_code: deviceCode } });
+      return { status: r.status, state: r.body?.state, token: r.body?.token, deviceId: r.body?.device_id, body: r.body };
+    },
+    /** `GET /api/device/me` with the token of a device. */
+    me: (token) => call("GET", "/api/device/me", { token }),
+  };
+}
+
+/** Turn the two device switches from the page of a signed-in administrator, as its own requests would (the page's request function adds the token). */
+export function setSwitches(page, change) {
+  return page.evaluate(async (body) => {
+    const { http } = await import(new URL("bridge.js", location.href).href);
+    return http("POST", "/api/admin/device-access", body);
+  }, change);
+}
+
+/** Whether the page keeps `text` in its address, its storage, its cookies or its title. The text is never shown. */
+export function pageHolds(page, text) {
+  return page.evaluate((needle) => {
+    const where = { address: location.href, title: document.title, cookie: document.cookie, storage: JSON.stringify([Object.entries(localStorage), Object.entries(sessionStorage)]) };
+    return Object.entries(where).filter(([, v]) => v.includes(needle)).map(([k]) => k);
+  }, text);
+}

@@ -1,0 +1,36 @@
+/* The device features of the web page (devices.ts, docs/design.md 6.35). Loaded after dialogs.css, settings.css and websession.css,
+   whose box, fields and buttons it uses. Every colour is a `--hw-*` token and every size is in rem, so the UI scale moves it; the one
+   fixed pixel size is the 44 px floor of a touch target. Flat and hairline: the dialogs are floating layers and carry the one shadow
+   of the box, nothing here has another. A state is never colour alone: a result has a glyph (`●` approved, `○` denied, `!` and an
+   underline for a code that is not valid), and a switch has its word inside the knob. Rose marks focus only. Nothing moves, so
+   there is nothing for reduced motion to remove. `contrast-high` reaches the hairlines and the dim text through their tokens. */
+.dlg.settings.device-authorize, .dlg.settings.device-code { width: min(24rem, calc(100vw - 4rem)); }
+.dlg.device-authorize [hidden], .dlg.device-code [hidden] { display: none !important; }
+.dlg.device-authorize .dev-title { outline: none; }
+.dlg.device-authorize button, .dlg.device-code button { min-height: calc(28rem / 12); }
+
+/* The rows: who asks, and from where. The code is real text in a bordered block to compare with the app. */
+.dlg.device-authorize .dev-kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .333rem 1rem; margin: 0 0 .833rem; }
+.dlg.device-authorize .dev-k { margin: 0; color: var(--hw-dim); }
+.dlg.device-authorize .dev-v { min-width: 0; margin: 0; color: var(--hw-ink); overflow-wrap: anywhere; }
+.dlg.device-authorize .dev-code { box-sizing: border-box; margin: 0 0 .667rem; padding: .667rem; text-align: center; font-size: calc(24rem / 12); font-weight: 700;
+                                  letter-spacing: .15em; color: var(--hw-ink); background: var(--hw-ground); border: 1px solid var(--hw-line); border-radius: .333rem;
+                                  user-select: all; }
+.dlg.device-authorize .dev-sentence { margin: 0 0 .833rem; color: var(--hw-ink-2); overflow-wrap: anywhere; }
+
+/* The result, in the status line of the dialog. */
+.dlg.device-authorize .dev-status { margin: 0 0 .5rem; color: var(--hw-ink); overflow-wrap: anywhere; }
+.dlg.device-authorize .dev-status:empty { margin: 0; min-height: 0; }
+.dlg.device-authorize .dev-glyph { display: inline-block; min-width: 1rem; }
+.dlg.device-authorize .dev-status[data-tone="bad"] { color: var(--hw-warn); }
+.dlg.device-authorize .dev-status[data-tone="bad"] .dev-word { text-decoration: underline; }
+.dlg.device-code .dev-input { text-transform: uppercase; letter-spacing: .1em; }
+.dlg.device-code .web-err { margin: 0 0 .5rem; }
+
+@media (pointer: coarse) {
+  .dlg.device-authorize button, .dlg.device-code button, .dlg.device-code .dev-input { min-height: max(44px, calc(44rem / 12)); }
+}
+
+@media (forced-colors: active) {
+  .dlg.device-authorize .dev-code { border-color: CanvasText; }
+}

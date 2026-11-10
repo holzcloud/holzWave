@@ -10,9 +10,11 @@ import {
   FAILED,
   SECRET_RULE,
   UNREACHABLE,
+  DEVICE_CODE_ALPHABET,
   groupRecovery,
   groupsOfFour,
   messageFor,
+  normaliseDeviceCode,
   parseFragment,
   readPeek,
   readRecovery,
@@ -97,6 +99,44 @@ test("parseFragment_accepts_only_one_well_formed_token", () => {
   for (const hash of none) assert.equal(parseFragment(hash), null, JSON.stringify(hash));
   assert.equal(parseFragment(undefined), null);
   assert.equal(parseFragment(null), null);
+});
+
+test("parseFragment_reads_a_device_code_in_any_case_with_or_without_the_dash", () => {
+  const want = { kind: "device", token: "BCDF-GHJK" };
+  for (const hash of ["#device=BCDF-GHJK", "#device=bcdf-ghjk", "#device=BCDFGHJK", "#device=bcdfGHJK", "#device=BcDf-gHjK"]) {
+    assert.deepEqual(parseFragment(hash), want, hash);
+  }
+  const none = [
+    "#device=",
+    "#device",
+    "#device=BCDF-GHJ",
+    "#device=BCDF-GHJKL",
+    "#device=BCDF--GHJK",
+    "#device=BCDF GHJK",
+    "#device=BCDF-GHJA", // a vowel is not in the alphabet
+    "#device=BCDF-GHJ1",
+    "#device=BCDF-GHJK&x=1",
+    "#device=BCDF-GHJK&device=BCDF-GHJK",
+    "#device=%42CDF-GHJK",
+    "#device=BCDF-GHJK ",
+    "#Device=BCDF-GHJK",
+    `#device=hwi_${T43}`,
+    `#invite=BCDF-GHJK`,
+  ];
+  for (const hash of none) assert.equal(parseFragment(hash), null, JSON.stringify(hash));
+});
+
+test("normaliseDeviceCode_is_strict_and_the_alphabet_is_the_one_of_the_record", () => {
+  assert.equal(normaliseDeviceCode("bcdfghjk"), "BCDF-GHJK");
+  assert.equal(normaliseDeviceCode("BCDF-GHJK"), "BCDF-GHJK");
+  for (const bad of ["", " bcdfghjk", "bcdf ghjk", "bcdf-ghjkl", "bcdfghj", "aeiouaei", null, undefined, 12345678, {}]) {
+    assert.equal(normaliseDeviceCode(bad), null, String(bad));
+  }
+  // The alphabet is the one the server makes codes from: twenty consonants, no vowel.
+  assert.equal(DEVICE_CODE_ALPHABET.length, 20);
+  assert.doesNotMatch(DEVICE_CODE_ALPHABET, /[AEIOUY]/);
+  const server = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "server", "src", "device.rs"), "utf8");
+  assert.ok(server.includes(`b"${DEVICE_CODE_ALPHABET}"`), "the server makes its user codes from the same letters");
 });
 
 test("groupsOfFour_never_changes_the_characters", () => {

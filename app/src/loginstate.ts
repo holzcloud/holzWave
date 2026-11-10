@@ -107,15 +107,34 @@ export function readSession(raw: unknown): SessionView | null {
   };
 }
 
-/** Which kind of link the address fragment carried. */
-export type FragmentKind = "invite" | "setup";
+/** The letters a user code of a device is made of: no vowel, so no word, and none that look alike (the record of the device sign-in lists them). */
+export const DEVICE_CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ";
 
-const TOKENS: Record<FragmentKind, RegExp> = {
+const DEVICE_CODE = new RegExp(`^([${DEVICE_CODE_ALPHABET}]{4})-?([${DEVICE_CODE_ALPHABET}]{4})$`, "i");
+
+/**
+ * A user code as a person types it or a link carries it (`bcdfghjk`, `BCDF-GHJK`, any case, the dash optional) as the form the app
+ * shows (`BCDF-GHJK`), or null for anything that is not eight letters of the alphabet. Spaces and other separators are not
+ * forgiven: the one place that reads a code is strict, so a malformed one is never sent.
+ */
+export function normaliseDeviceCode(text: unknown): string | null {
+  if (typeof text !== "string" || text.length > 9) return null;
+  const m = DEVICE_CODE.exec(text);
+  return m === null ? null : `${m[1]}-${m[2]}`.toUpperCase();
+}
+
+/** Which kind of link the address fragment carried. */
+export type FragmentKind = "invite" | "setup" | "device";
+
+const TOKENS: Record<"invite" | "setup", RegExp> = {
   invite: /^hwi_[A-Za-z0-9_-]{43}$/,
   setup: /^hwb_[A-Za-z0-9_-]{43}$/,
 };
 
-/** Read `#invite=hwi_...` or `#setup=hwb_...`; anything else (another key, a second parameter, a token of the wrong shape) is null. */
+/**
+ * Read `#invite=hwi_...`, `#setup=hwb_...` or `#device=XXXX-XXXX`; anything else (another key, a second parameter, a token of
+ * the wrong shape) is null. A device code comes back in its normal form, whatever case and dash it had.
+ */
 export function parseFragment(hash: string): { kind: FragmentKind; token: string } | null {
   if (typeof hash !== "string" || hash[0] !== "#") return null;
   const body = hash.slice(1);
@@ -124,6 +143,10 @@ export function parseFragment(hash: string): { kind: FragmentKind; token: string
   if (eq < 0) return null;
   const key = body.slice(0, eq);
   const value = body.slice(eq + 1);
+  if (key === "device") {
+    const code = normaliseDeviceCode(value);
+    return code === null ? null : { kind: "device", token: code };
+  }
   if (key !== "invite" && key !== "setup") return null;
   return TOKENS[key].test(value) ? { kind: key, token: value } : null;
 }
