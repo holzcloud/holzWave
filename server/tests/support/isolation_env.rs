@@ -107,6 +107,7 @@ fn record(recorder: &Recorder, message: &Outbound) {
         Outbound::Text(text) => text.clone(),
         Outbound::Binary(bytes) => String::from_utf8_lossy(bytes).into_owned(),
         Outbound::Close { code, reason } => format!("close {code} {reason}"),
+        Outbound::Ses(ses) => format!("ses {ses:?}"),
     };
     recorder.lock().unwrap_or_else(PoisonError::into_inner).push(text);
 }

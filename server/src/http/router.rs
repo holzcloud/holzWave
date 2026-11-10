@@ -258,6 +258,8 @@ pub struct DeviceAuthed {
     pub account: Account,
     /// The client address after the proxy rule.
     pub client: IpAddr,
+    /// The SHA-256 of the token the request carried, which a long-lived socket looks the device up by again. Not the token.
+    pub token_hash: TokenHash,
 }
 
 impl fmt::Debug for DeviceAuthed {
@@ -575,7 +577,7 @@ async fn device_guard(app: &Arc<App>, mut request: Request, next: Next) -> Respo
         DeviceOutcome::Busy => ApiError::Busy.into_response(),
         DeviceOutcome::Live(found) => {
             let (device, account) = *found;
-            request.extensions_mut().insert(DeviceAuthed { device, account, client });
+            request.extensions_mut().insert(DeviceAuthed { device, account, client, token_hash: hash });
             next.run(request).await
         }
     }

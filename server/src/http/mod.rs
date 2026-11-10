@@ -17,3 +17,4 @@ pub mod routes_me;
 pub mod routes_unlock;
 pub mod transport;
 pub mod ws;
+pub mod ws_device;

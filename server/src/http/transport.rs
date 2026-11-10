@@ -26,6 +26,8 @@ pub enum Inbound {
     Text(String),
     /// A binary message; only its size is kept, because the endpoint takes none.
     Binary(usize),
+    /// A binary message whose bytes are kept, for an endpoint that takes some ([`SocketLimits::keep_binary`]).
+    Bytes(Vec<u8>),
     /// A pong, or a ping of the peer's own (the implementation answers it): the sign that the peer is there.
     Pong,
 }
@@ -74,12 +76,26 @@ pub struct SocketLimits {
     pub write_buffer_bytes: usize,
     /// The bytes that may wait to be written; the largest message the endpoint writes must fit.
     pub max_write_buffer_bytes: usize,
+    /// Whether a binary message is handed on with its bytes ([`Inbound::Bytes`]) and not only its size ([`Inbound::Binary`]).
+    pub keep_binary: bool,
 }
 
 impl SocketLimits {
     /// The limits of a message cap: the write buffer holds the largest answer the supervisor passes on.
     pub fn for_message_bytes(message_bytes: usize) -> SocketLimits {
-        SocketLimits { message_bytes, write_buffer_bytes: 128 * 1024, max_write_buffer_bytes: 32 * 1024 * 1024 }
+        SocketLimits {
+            message_bytes,
+            write_buffer_bytes: 128 * 1024,
+            max_write_buffer_bytes: 32 * 1024 * 1024,
+            keep_binary: false,
+        }
+    }
+
+    /// The same limits for an endpoint that takes binary messages and reads their bytes.
+    #[must_use]
+    pub fn keeping_binary(mut self) -> SocketLimits {
+        self.keep_binary = true;
+        self
     }
 }
 
@@ -114,7 +130,7 @@ impl Upgrade {
             .max_frame_size(limits.message_bytes)
             .write_buffer_size(limits.write_buffer_bytes)
             .max_write_buffer_size(limits.max_write_buffer_bytes)
-            .on_upgrade(move |socket| serve(AxumTransport { socket }))
+            .on_upgrade(move |socket| serve(AxumTransport { socket, keep_binary: limits.keep_binary }))
             .into_response()
     }
 }
@@ -123,6 +139,7 @@ impl Upgrade {
 #[derive(Debug)]
 pub struct AxumTransport {
     socket: WebSocket,
+    keep_binary: bool,
 }
 
 /// The kind of an error of the library, from the start of its text and nothing else: the rest of the text may hold bytes of the
@@ -151,6 +168,7 @@ impl Transport for AxumTransport {
             }
             Some(Err(error)) => Err(classify(&error)),
             Some(Ok(Message::Text(text))) => Ok(Inbound::Text(text.as_str().to_owned())),
+            Some(Ok(Message::Binary(bytes))) if self.keep_binary => Ok(Inbound::Bytes(bytes.to_vec())),
             Some(Ok(Message::Binary(bytes))) => Ok(Inbound::Binary(bytes.len())),
             Some(Ok(Message::Ping(_) | Message::Pong(_))) => Ok(Inbound::Pong),
         }

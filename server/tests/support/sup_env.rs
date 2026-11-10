@@ -165,6 +165,7 @@ pub fn describe(message: &Outbound) -> String {
         }
         Outbound::Binary(bytes) => format!("Binary ({} bytes)", bytes.len()),
         Outbound::Close { code, .. } => format!("Close {code}"),
+        Outbound::Ses(_) => "Ses frame".to_owned(),
     }
 }
 

@@ -46,6 +46,7 @@ use crate::http::routes_admin::AdminServices;
 use crate::http::router::{self, Part};
 use crate::http::transport;
 use crate::http::ws::{self, WsState};
+use crate::http::ws_device;
 use crate::http::{embed, routes_admin, routes_auth, routes_device, routes_enrol, routes_files, routes_me, routes_unlock};
 use crate::log::{self, Level};
 use crate::proxy::{Admission, Mode, TrustedProxies};
@@ -199,6 +200,7 @@ pub fn router_parts(services: &Services) -> Vec<Part> {
     parts.extend(routes_admin::parts(admin));
     parts.extend(routes_device::parts());
     parts.extend(ws::parts(services.ws.clone()));
+    parts.extend(ws_device::parts(services.ws.clone()));
     parts.extend(routes_files::parts(services));
     parts
 }

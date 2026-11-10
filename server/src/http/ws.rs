@@ -758,7 +758,7 @@ async fn drive<T: Transport, P: SessionPort>(
                 last_inbound = Instant::now();
                 match frame {
                     Ok(Inbound::Text(text)) => m.command(transport, text).await,
-                    Ok(Inbound::Binary(_)) => Err(Exit::Close(1003, reason::TYPE)),
+                    Ok(Inbound::Binary(_) | Inbound::Bytes(_)) => Err(Exit::Close(1003, reason::TYPE)),
                     Ok(Inbound::Pong) => Ok(()),
                     Err(TransportError::TooLarge) => Err(Exit::Close(1009, reason::SIZE)),
                     Err(TransportError::Encoding) => Err(Exit::Close(1007, reason::ENCODING)),
@@ -770,6 +770,8 @@ async fn drive<T: Transport, P: SessionPort>(
                 Some(Outbound::Text(text)) => m.text(transport, text).await,
                 Some(Outbound::Binary(bytes)) => m.write(transport, Outgoing::Binary(bytes)).await,
                 Some(Outbound::Close { code, .. }) => Err(Exit::Close(code, word_for(code))),
+                // A page's socket is never given a frame about a session: the supervisor delivers those to device sockets only.
+                Some(Outbound::Ses(_)) => Err(Exit::Close(1001, reason::GOING_AWAY)),
                 None => Err(Exit::Close(1001, reason::GOING_AWAY)),
             },
             _ = ping.tick() => {

@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Deserialize;
 
 use crate::limits;
-use crate::supervisor::socket::{Outbound, Push, SocketCore};
-use crate::wire::{Evt, FILE_SOCKET, Res, ResBody};
+use crate::supervisor::socket::{Outbound, Push, SocketCore, StreamPush};
+use crate::wire::{Evt, FILE_SOCKET, Res, ResBody, Ses};
 
 /// The event whose loss the page repairs by asking for a full frame.
 pub const FRAME_EVENT: &str = "frame";
@@ -31,6 +31,7 @@ pub(super) struct Counters {
     pub(super) dropped_ctl_done: AtomicU64,
     pub(super) file_calls: AtomicU64,
     pub(super) dropped_file_answers: AtomicU64,
+    pub(super) lost_streams: AtomicU64,
 }
 
 impl Counters {
@@ -179,7 +180,10 @@ pub(super) fn deliver_res(res: Res, sockets: &HashMap<u32, Arc<SocketCore>>, cou
         return Vec::new();
     }
     match sockets.get(&res.socket) {
-        Some(socket) if counters.pushed(socket.queue.push(answer(res.request, res.body), false)) => vec![socket.id],
+        // A device socket speaks sessions, not commands: no answer to a command is for it.
+        Some(socket) if !socket.device && counters.pushed(socket.queue.push(answer(res.request, res.body), false)) => {
+            vec![socket.id]
+        }
         Some(_) => Vec::new(),
         None => {
             Counters::bump(&counters.dropped_unknown_socket);
@@ -210,7 +214,8 @@ pub(super) fn deliver_evt(evt: Evt, sockets: &HashMap<u32, Arc<SocketCore>>, cou
     let mut overflowed = Vec::new();
     if evt.target == 0 {
         let mut text = event_text(&evt.name, &evt.text);
-        let mut targets = sockets.values().peekable();
+        // The events of the window are for the pages; a device socket has none of them.
+        let mut targets = sockets.values().filter(|socket| !socket.device).peekable();
         while let Some(socket) = targets.next() {
             // The last socket takes the text itself; the others get a copy.
             let message = if targets.peek().is_some() { text.clone() } else { std::mem::take(&mut text) };
@@ -221,14 +226,61 @@ pub(super) fn deliver_evt(evt: Evt, sockets: &HashMap<u32, Arc<SocketCore>>, cou
         return overflowed;
     }
     match sockets.get(&evt.target) {
-        Some(socket) => {
+        Some(socket) if !socket.device => {
             if counters.pushed(socket.queue.push(Outbound::Text(event_text(&evt.name, &evt.text)), droppable)) {
                 overflowed.push(socket.id);
             }
         }
-        None => Counters::bump(&counters.dropped_unknown_socket),
+        _ => Counters::bump(&counters.dropped_unknown_socket),
     }
     overflowed
+}
+
+/// What came of a frame about sessions that a worker wrote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Delivery {
+    /// Queued, or dropped on purpose and counted.
+    Done,
+    /// The queue of this socket overflowed and was closed: the socket leaves its worker.
+    Overflow(u32),
+    /// The stream of this session ended for this socket for lack of room: the worker is to let the socket go from the session.
+    Lost { socket: u32, session: u32 },
+}
+
+/// Gives an answer, an event or a chunk of a session to the device socket it names. An answer to a request the supervisor made
+/// up itself is dropped. A frame for a socket that is not there, or that is not a device's, is counted and dropped. A chunk that
+/// does not fit ends that stream only (see [`SocketCore`]'s queue); an answer or an event that does not fit closes that socket.
+pub(super) fn deliver_ses(ses: Ses, sockets: &HashMap<u32, Arc<SocketCore>>, counters: &Counters) -> Delivery {
+    let (socket, session, droppable_stream) = match &ses {
+        Ses::Answer { request, .. } if *request >= limits::SYNTHETIC_REQUEST_BASE => {
+            Counters::bump(&counters.dropped_synthetic);
+            return Delivery::Done;
+        }
+        Ses::Answer { socket, .. } => (*socket, 0, false),
+        Ses::Event { socket, session, .. } => (*socket, *session, false),
+        Ses::Snapshot { socket, session, .. } | Ses::Live { socket, session, .. } => (*socket, *session, true),
+        // A request is the supervisor's to send; the caller has refused it already.
+        _ => return Delivery::Done,
+    };
+    let Some(target) = sockets.get(&socket).filter(|s| s.device) else {
+        Counters::bump(&counters.dropped_unknown_socket);
+        return Delivery::Done;
+    };
+    let message = Outbound::Ses(Box::new(ses));
+    if droppable_stream {
+        return match target.queue.push_stream(socket, session, message) {
+            StreamPush::Queued | StreamPush::Gone => Delivery::Done,
+            StreamPush::Dropped => {
+                Counters::bump(&counters.dropped_frames);
+                Delivery::Done
+            }
+            StreamPush::Lost => {
+                Counters::bump(&counters.lost_streams);
+                Delivery::Lost { socket, session }
+            }
+        };
+    }
+    if counters.pushed(target.queue.push(message, false)) { Delivery::Overflow(socket) } else { Delivery::Done }
 }
 
 // ---- the owner of the size of a pane ---------------------------------------------------------------------------------

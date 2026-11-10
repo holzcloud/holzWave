@@ -138,6 +138,8 @@ pub fn table() -> Vec<Row> {
         row!("POST", "/api/device/approve", Fresh, true, INVALID, 204, Some("device.approve")),
         row!("POST", "/api/device/deny", Fresh, true, INVALID, 204, Some("device.deny")),
         row!("DELETE", "/api/device/me", Device, true, INVALID, 204, Some("device.revoke")),
+        // The socket of a device: a bearer token, an upgrade, and the gate of the remote switch in front of it.
+        row!("GET", "/ws/device", Device, false, INVALID, 101, None),
         row!("GET", "/api/me/devices", Fresh, false, INVALID, 200, None),
         row!("DELETE", "/api/me/devices/{id}", Fresh, true, INVALID, 204, Some("device.revoke")),
         row!("GET", "/api/admin/devices", Admin, false, INVALID, 200, None),

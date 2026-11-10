@@ -25,12 +25,12 @@ use crate::clock::Clock;
 use crate::limits;
 use crate::log::{self, Level};
 use crate::store::AccountId;
-use crate::supervisor::fanout::{self, Counters, Fault, Owners, Synthetic};
+use crate::supervisor::fanout::{self, Counters, Delivery, Fault, Owners, Synthetic};
 use crate::supervisor::idle;
 use crate::supervisor::launcher::{LaunchRequest, LaunchedWorker, WorkerLauncher};
 use crate::accounts::{AccountObserver, Ending};
 use crate::supervisor::socket::{self, Attached, SocketCore, SocketHandle, SocketRx, SubmitError};
-use crate::wire::{self, CmdFrame, Ctl, CtlOutcome, Frame, Note, PROTOCOL_VERSION, ResBody, StoreState};
+use crate::wire::{self, CmdFrame, Ctl, CtlOutcome, Frame, Note, PROTOCOL_VERSION, ResBody, Ses, StoreState};
 use crate::worker::runtime::WorkerMode;
 use crate::worker::sessions::SessionLimits;
 
@@ -225,6 +225,8 @@ pub struct Stats {
     pub file_calls: u64,
     /// Answers to file controls that nobody waited for.
     pub dropped_file_answers: u64,
+    /// Streams of a session that ended for a device socket because its queue had no room (the socket and the session went on).
+    pub lost_streams: u64,
     /// Whether the spawn helper (or whatever starts the workers) can be reached.
     pub helper_alive: bool,
 }
@@ -564,8 +566,9 @@ impl Worker {
         self.done.send_replace(true);
     }
 
-    /// Joins a new socket to this worker.
-    fn add_socket(self: &Arc<Self>) -> Result<(SocketHandle, SocketRx), AttachError> {
+    /// Joins a new socket to this worker: the socket of a page, which the worker replays its window to, or the socket of a device,
+    /// which speaks sessions only and is never told of the window.
+    fn add_socket(self: &Arc<Self>, device: bool) -> Result<(SocketHandle, SocketRx), AttachError> {
         let mut state = self.lock();
         if self.is_dead() || self.is_ending() {
             return Err(AttachError::Launch("the worker ended while the socket attached".into()));
@@ -575,10 +578,11 @@ impl Worker {
         }
         state.next_socket += 1;
         let id = state.next_socket;
-        let core = Arc::new(SocketCore::new(id, self.shared.settings.socket_queue_bytes));
+        let core = Arc::new(SocketCore::new(id, self.shared.settings.socket_queue_bytes, device));
         state.sockets.insert(id, core.clone());
         state.idle_since = None;
-        if self.push_control(Ctl::Attach { socket: id }).is_err() {
+        // A device socket sends no `Attach`: the worker counts the pages that are attached, and a device is not one.
+        if !device && self.push_control(Ctl::Attach { socket: id }).is_err() {
             state.sockets.remove(&id);
             return Err(AttachError::Launch("the worker is not taking frames".into()));
         }
@@ -591,11 +595,16 @@ impl Worker {
     /// table (it left already) is skipped.
     fn drop_sockets(&self, state: &mut WorkerState, sockets: &[u32]) {
         for &socket in sockets {
-            if state.sockets.remove(&socket).is_none() {
-                continue;
-            }
+            let Some(removed) = state.sockets.remove(&socket) else { continue };
             if state.sockets.is_empty() {
                 state.idle_since = Some(self.shared.clock.unix());
+            }
+            if removed.device {
+                // The socket of a device leaves every session it was in; the worker's pages know nothing of it.
+                if let Ok(frame) = encode(&Frame::Ses(Ses::Gone { socket })) {
+                    let _ = self.out.push_control(frame);
+                }
+                continue;
             }
             let _ = self.push_control(Ctl::Detach { socket });
             // The panes the socket owned go to the socket with the latest size, and that size is applied.
@@ -647,9 +656,24 @@ impl Worker {
                 None => Counters::bump(&self.shared.counters.dropped_ctl_done),
             },
             Frame::Note(Note::PaneCount(_)) => {}
-            // The supervisor sends no session request yet, so a worker has nothing to answer; the frames that a worker writes
-            // for a device socket are dropped here until the device socket takes them over.
-            Frame::Ses(_) => {}
+            // A request about sessions is the supervisor's to send, never a worker's.
+            Frame::Ses(ses) if ses.is_request() => return Err(Fault::WrongDirection),
+            // The answers, the events and the bytes of a session go to the device socket they name.
+            Frame::Ses(ses) => {
+                let mut state = self.lock();
+                match fanout::deliver_ses(ses, &state.sockets, &self.shared.counters) {
+                    Delivery::Done => {}
+                    Delivery::Overflow(socket) => self.drop_sockets(&mut state, &[socket]),
+                    Delivery::Lost { socket, session } => {
+                        // The worker lets the socket go from the session, so that it stops writing a stream nobody takes.
+                        state.synthetic += 1;
+                        let request = limits::SYNTHETIC_REQUEST_BASE + state.synthetic;
+                        if let Ok(frame) = encode(&Frame::Ses(Ses::Detach { socket, request, session })) {
+                            let _ = self.out.push_control(frame);
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -680,6 +704,9 @@ impl Attached for Worker {
         }
         let mut state = self.lock();
         let Some(origin) = state.sockets.get(&socket).cloned() else { return Err(SubmitError::Closed) };
+        if origin.device {
+            return Err(SubmitError::BadCommand);
+        }
         let plan = state.owners.assess(socket, command, args);
         if plan.answer {
             // A resize from a socket that does not own the pane is answered here and goes no further.
@@ -701,6 +728,19 @@ impl Attached for Worker {
         self.out.push_commands(frames)?;
         state.owners.commit(socket, &plan);
         Ok(())
+    }
+
+    fn ses(&self, socket: u32, ses: Ses) -> Result<(), SubmitError> {
+        let state = self.lock();
+        match state.sockets.get(&socket) {
+            Some(origin) if origin.device => {}
+            Some(_) => return Err(SubmitError::BadCommand),
+            None => return Err(SubmitError::Closed),
+        }
+        drop(state);
+        let frame = encode(&Frame::Ses(ses))?;
+        // Input is a stream and never answered: a worker that is behind drops it rather than queueing more.
+        self.out.push_commands(vec![frame])
     }
 
     fn detach(&self, socket: u32) {
@@ -939,10 +979,21 @@ impl Supervisor {
 
     /// Attaches a new browser socket of `account`, starting the person's worker if there is none.
     pub async fn attach(&self, account: AccountKey) -> Result<(SocketHandle, SocketRx), AttachError> {
+        self.attach_kind(account, false).await
+    }
+
+    /// Attaches a new socket of a device of `account`, starting the person's worker if there is none. It counts as one of the
+    /// person's sockets (the cap is shared with the pages) and keeps the worker from going idle, but it is told nothing of the
+    /// window: it speaks sessions through [`SocketHandle::ses`] and hears [`crate::supervisor::Outbound::Ses`].
+    pub async fn attach_device(&self, account: AccountKey) -> Result<(SocketHandle, SocketRx), AttachError> {
+        self.attach_kind(account, true).await
+    }
+
+    async fn attach_kind(&self, account: AccountKey, device: bool) -> Result<(SocketHandle, SocketRx), AttachError> {
         let mut last = AttachError::Launch("the worker ended while the socket attached".into());
         for _ in 0..3 {
             let worker = self.ensure_worker(account).await?;
-            match worker.add_socket() {
+            match worker.add_socket(device) {
                 Ok(halves) => return Ok(halves),
                 Err(AttachError::TooManySockets) => return Err(AttachError::TooManySockets),
                 Err(other) => last = other,
@@ -981,6 +1032,7 @@ impl Supervisor {
             dropped_ctl_done: Counters::get(&counters.dropped_ctl_done),
             file_calls: Counters::get(&counters.file_calls),
             dropped_file_answers: Counters::get(&counters.dropped_file_answers),
+            lost_streams: Counters::get(&counters.lost_streams),
             helper_alive: self.shared.launcher.helper_alive(),
             ..Stats::default()
         };
