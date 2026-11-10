@@ -346,6 +346,27 @@ fn a_read_timeout_returns_and_the_connection_is_usable_afterwards() {
 }
 
 #[test]
+fn a_timeout_in_the_middle_of_a_frame_keeps_what_was_read_and_the_rest_completes_the_message() {
+    let (go, wait_for_go) = mpsc::channel::<()>();
+    let peer = plain_peer(move |mut ws| {
+        let whole = frame(true, 2, &[9u8; 3000]);
+        // The header and a part of the payload now, the rest only when the test says so.
+        write_raw(&mut ws, &whole[..1000]);
+        wait_for_go.recv().expect("the test says go");
+        write_raw(&mut ws, &whole[1000..]);
+        wait_for_the_client(&mut ws);
+    });
+    let mut client = WsClient::connect(&peer.url(), &token(), None, &WsLimits::default()).expect("the connection opens");
+    assert_eq!(client.recv(Duration::from_millis(150)), Ok(Recv::Timeout), "a part of a frame is not a message");
+    assert_eq!(client.recv(Duration::from_millis(50)), Ok(Recv::Timeout));
+    assert!(!client.is_closed());
+    go.send(()).expect("go");
+    assert_eq!(client.recv(WAIT), Ok(Recv::Binary(vec![9u8; 3000])), "the part that was read before the timeout is not lost");
+    drop(client);
+    peer.finish();
+}
+
+#[test]
 fn a_ping_is_answered_and_does_not_end_a_wait_early() {
     let peer = plain_peer(|mut ws| {
         ws.send(Message::Ping(tungstenite::Bytes::new())).expect("ping");

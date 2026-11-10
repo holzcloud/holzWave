@@ -483,7 +483,7 @@ mod tests {
             // No server-provided text: the sentence is a constant, and the display and the crate error say exactly it.
             assert_eq!(fault.to_string(), fault.sentence());
             assert_eq!(Error::from(fault).to_string(), fault.sentence());
-            assert_eq!(format!("{fault:?}").to_lowercase().contains("canary"), false);
+            assert!(!format!("{fault:?}").to_lowercase().contains("canary"));
         }
         assert_eq!((Fault::of_status(401), Fault::of_status(404), Fault::of_status(403), Fault::of_status(500)), (Fault::SignedOut, Fault::Off, Fault::Refused, Fault::Refused));
     }

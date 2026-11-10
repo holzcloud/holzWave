@@ -569,8 +569,7 @@ fn the_secrets_file_cannot_carry_the_device_token_of_a_server() {
     // Spellings that look like it are no better; the receiver knows exactly two shapes.
     for account in ["server:token", "server:token2", "Server:token", "ssh:server:token", "int:server:token"] {
         let payload = serde_json::json!({ account: token }).to_string();
-        let accepted = source.write(SECRETS, payload.as_bytes()).is_ok();
-        assert_eq!(accepted, false, "{account}");
+        assert!(source.write(SECRETS, payload.as_bytes()).is_err(), "{account}");
     }
     assert_eq!(d.secrets.get(TOKEN_ACCOUNT).unwrap(), None);
     // An integration variable of a profile that is called `server` and a variable called `TOKEN` is a different account
