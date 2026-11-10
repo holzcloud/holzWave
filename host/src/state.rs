@@ -966,6 +966,8 @@ pub struct AppCore {
     remote_monitors: holzwave_core::monitor::RemoteMonitors,
     /// The encrypted sync: its account, its runs and what the page shows of them.
     sync: crate::sync::SyncRuntime,
+    /// The link of this device to a holzWave server: its address, its token in the keychain and the sign-in that gets one.
+    server: Arc<crate::server::ServerRuntime>,
     /// The AI chat service and the calls the commands make on it. It owns its threads and takes no lock of the core.
     ai: AiHost,
     /// The Local Network permission of macOS: the person's stored choice and the probe of the system. Inert elsewhere.
@@ -1233,7 +1235,8 @@ impl AppCore {
             eprintln!("holzwave: no history file ({e}); the history is kept in memory");
             holzwave_core::history::History::in_memory().expect("in-memory history")
         });
-        let sync = crate::sync::SyncRuntime::new(dir.clone(), secrets.clone());
+        let server = Arc::new(crate::server::ServerRuntime::new(dir.clone(), secrets.clone()));
+        let sync = crate::sync::SyncRuntime::new(dir.clone(), secrets.clone(), server.clone());
         let ai_host = AiHost::new(&dir, sink.clone(), ai);
         let local_network = crate::local_network::LocalNetworkHost::new(&dir, Some(host.local_network()));
         let host_shell = crate::host_shell::HostShellHost::new(&dir);
@@ -1289,6 +1292,7 @@ impl AppCore {
                 launch_marks: Mutex::new(launch_marks),
                 held: Mutex::new(BTreeMap::new()),
                 sync,
+                server,
                 ai: ai_host,
                 host,
                 local_network,
@@ -1918,6 +1922,42 @@ impl AppCore {
 
     pub fn sync_off(&self) -> crate::sync::SyncView {
         self.sync.off()
+    }
+
+    /// Use the server this device is signed in to as the sync's transport, with the person's passphrase, and run it once.
+    /// Blocks on the network: not on the main thread.
+    pub fn sync_use_server(&self, passphrase: &str) -> Result<crate::sync::SyncView, String> {
+        self.sync.use_server(passphrase)
+    }
+
+    /// The link to the server as the page reads it: no request is made.
+    pub fn server_status(&self) -> crate::server::ServerView {
+        self.server.view()
+    }
+
+    /// Ask the server who this device is. Blocks on the network: not on the main thread.
+    pub fn server_refresh(&self) -> crate::server::ServerView {
+        self.server.refresh()
+    }
+
+    /// Start a sign-in at a server address. Blocks on the network: not on the main thread.
+    pub fn server_sign_in_start(&self, address: &str) -> Result<crate::server::SignInView, String> {
+        self.server.sign_in_start(address)
+    }
+
+    /// One poll of the sign-in in progress. Blocks on the network: not on the main thread.
+    pub fn server_sign_in_poll(&self) -> Result<crate::server::SignInPoll, String> {
+        self.server.sign_in_poll()
+    }
+
+    /// Drop the sign-in in progress.
+    pub fn server_sign_in_cancel(&self) -> crate::server::ServerView {
+        self.server.sign_in_cancel()
+    }
+
+    /// Sign this device out of the server. Blocks on the network: not on the main thread.
+    pub fn server_sign_out(&self) -> Result<crate::server::ServerView, String> {
+        self.server.sign_out()
     }
 
     /// The scheduled run.
@@ -4479,6 +4519,12 @@ fn hostname_from(
             .unwrap_or_default(),
         _ => String::new(),
     }
+}
+
+/// The name of this computer from what the platform offers without starting a program (the link to a server names the device
+/// with it). Empty on macOS and wherever the platform gives none.
+pub(crate) fn computer_name(os: &str) -> String {
+    hostname_from(os, &process_env, &|file| persist::read_limited(Path::new(file), 1024).ok().flatten())
 }
 
 /// The name of the machine. macOS asks `/bin/hostname` by absolute path; the other platforms read what

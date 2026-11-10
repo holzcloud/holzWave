@@ -22,6 +22,7 @@ pub mod login_prompt;
 pub mod picker_wire;
 pub mod ranges;
 pub mod seams;
+pub mod server;
 pub mod state;
 pub mod sync;
 pub mod tls_ready;

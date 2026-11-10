@@ -304,7 +304,14 @@ impl ServerLinkFile {
     /// A link to the server at `url` (an `https` origin, no path) as the device `device_id` called `name`. The address is
     /// kept in its canonical form.
     pub fn new(url: &str, device_id: &str, name: &str) -> Result<ServerLinkFile, LinkFileError> {
-        let origin = Origin::parse_https(url).map_err(|_| LinkFileError::Url)?;
+        ServerLinkFile::new_with(url, device_id, name, false)
+    }
+
+    /// [`ServerLinkFile::new`], and with `loopback_http` an `http` origin of a loopback host is accepted too. That is a server
+    /// on this computer, which no product configuration has (a server's own address is `https`); it exists for the tests that
+    /// run a real server on the loopback address, and the app never asks for it.
+    pub fn new_with(url: &str, device_id: &str, name: &str, loopback_http: bool) -> Result<ServerLinkFile, LinkFileError> {
+        let origin = if loopback_http { Origin::parse(url) } else { Origin::parse_https(url) }.map_err(|_| LinkFileError::Url)?;
         let id_ok = !device_id.is_empty()
             && device_id.len() <= MAX_DEVICE_ID
             && device_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
@@ -330,7 +337,8 @@ impl ServerLinkFile {
 
     /// The server's address as an [`Origin`].
     pub fn origin(&self) -> Result<Origin, UrlError> {
-        Origin::parse_https(&self.url)
+        // The address was checked when the link was made (`https`, or a loopback `http` where that was asked for).
+        Origin::parse(&self.url)
     }
 
     pub fn device_id(&self) -> &str {
@@ -344,6 +352,11 @@ impl ServerLinkFile {
     /// Reads the document: strict, so a file that is not exactly what this build writes is refused. A version other than the
     /// current one is [`LinkFileError::Version`] whatever else the file holds.
     pub fn from_json(text: &str) -> Result<ServerLinkFile, LinkFileError> {
+        ServerLinkFile::from_json_with(text, false)
+    }
+
+    /// [`ServerLinkFile::from_json`] with the choice of [`ServerLinkFile::new_with`].
+    pub fn from_json_with(text: &str, loopback_http: bool) -> Result<ServerLinkFile, LinkFileError> {
         let value: serde_json::Value = serde_json::from_str(text).map_err(|_| LinkFileError::Damaged)?;
         let serde_json::Value::Object(object) = &value else { return Err(LinkFileError::Damaged) };
         if object.get("version").and_then(serde_json::Value::as_u64) != Some(u64::from(VERSION)) {
@@ -354,7 +367,7 @@ impl ServerLinkFile {
             RawId::Text(text) => text,
             RawId::Number(number) => number.to_string(),
         };
-        ServerLinkFile::new(&raw.url, &id, &raw.name)
+        ServerLinkFile::new_with(&raw.url, &id, &raw.name, loopback_http)
     }
 
     /// The document as pretty printed JSON with a trailing newline.
@@ -368,6 +381,11 @@ impl ServerLinkFile {
     /// Reads `<dir>/server_link.json`. A missing file is no link (`Ok(None)`). A file that cannot be used is refused with the
     /// sentence of its fault and is left exactly as it is: the person's next sign-in replaces it.
     pub fn load(dir: &Path) -> Result<Option<ServerLinkFile>, LinkFileError> {
+        ServerLinkFile::load_with(dir, false)
+    }
+
+    /// [`ServerLinkFile::load`] with the choice of [`ServerLinkFile::new_with`].
+    pub fn load_with(dir: &Path, loopback_http: bool) -> Result<Option<ServerLinkFile>, LinkFileError> {
         let bytes = match read_limited(&dir.join(FILE), MAX_BYTES) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return Ok(None),
@@ -375,7 +393,7 @@ impl ServerLinkFile {
             Err(_) => return Err(LinkFileError::Unreadable),
         };
         let text = String::from_utf8(bytes).map_err(|_| LinkFileError::Damaged)?;
-        ServerLinkFile::from_json(&text).map(Some)
+        ServerLinkFile::from_json_with(&text, loopback_http).map(Some)
     }
 
     /// Writes `<dir>/server_link.json` atomically (the parent directory is created): the old file or the new one, never a
@@ -738,6 +756,22 @@ mod tests {
         seen.sort();
         assert_eq!(seen, ["server_link.json"], "no other file, no temporary file");
         assert_eq!(store.get("server:token").unwrap(), None, "and signing out left nothing in the keychain stand-in");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_loopback_http_address_is_a_link_only_where_it_is_asked_for() {
+        let dir = scratch("loopback");
+        assert_eq!(ServerLinkFile::new("http://127.0.0.1:8080", "1", "n"), Err(LinkFileError::Url));
+        let link = ServerLinkFile::new_with("http://127.0.0.1:8080", "1", "n", true).unwrap();
+        assert_eq!((link.url(), link.origin().unwrap().secure()), ("http://127.0.0.1:8080", false));
+        link.save(&dir).unwrap();
+        assert_eq!(ServerLinkFile::load(&dir), Err(LinkFileError::Url), "the product reads https alone");
+        assert_eq!(ServerLinkFile::load_with(&dir, true).unwrap().unwrap(), link);
+        // Even where it is asked for, a plain address of another host is refused, and so is a path.
+        assert_eq!(ServerLinkFile::new_with("http://sync.example", "1", "n", true), Err(LinkFileError::Url));
+        assert_eq!(ServerLinkFile::new_with("http://127.0.0.1:8080/x", "1", "n", true), Err(LinkFileError::Url));
+        assert!(ServerLinkFile::new_with("https://sync.example", "1", "n", true).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

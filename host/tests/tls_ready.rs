@@ -1,8 +1,9 @@
-//! The readiness flag of the platform certificate verifier, and the two places that ask it.
+//! The readiness flag of the platform certificate verifier, and the places that ask it.
 //!
 //! The type is proved on the desktop. The hooks exist in Android builds only, so what a desktop test can show about them is
-//! their text: each is one line behind a `cfg(target_os = "android")` attribute, there are exactly three (one in the sync run,
-//! two in the AI send), and no other file of the crate asks the flag, so on every other platform the clients are untouched.
+//! their text: each is one line behind a `cfg(target_os = "android")` attribute, there are exactly four (one in the sync run,
+//! one in the link to a server, two in the AI send), and no other file of the crate asks the flag, so on every other platform
+//! the clients are untouched.
 //!
 //! Not run here: the hooks themselves (they are compiled for Android only; the emulator run shows `tls_not_ready` is absent
 //! when the set-up worked and the clients then reach the network).
@@ -61,6 +62,23 @@ fn the_sync_run_asks_the_flag_in_one_android_only_line() {
 }
 
 #[test]
+fn the_link_to_a_server_asks_the_flag_in_one_android_only_line() {
+    let text = source("src/server.rs");
+    let found = hooks(&text);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, "#[cfg(target_os = \"android\")]", "the hook is gated to Android: {found:?}");
+    assert!(found[0].1.contains("map_err(|_| Fault::Unreachable.sentence().to_owned())?;"), "a refusal is a server that cannot be reached: {found:?}");
+    // It is the one function every request of the link goes through, and each request asks it before it is made.
+    let ready = text.find("fn network_ready()").expect("fn network_ready");
+    assert!(text.find("tls_ready::require()").expect("the hook") > ready);
+    for request in ["signin::me(", "signin::poll(", "client.start(", "signin::revoke_self("] {
+        let at = text.find(request).unwrap_or_else(|| panic!("{request} is called"));
+        let check = text[..at].rfind("network_ready()").unwrap_or_else(|| panic!("no check before {request}"));
+        assert!(at - check < 600, "{request} follows its own check of the flag closely");
+    }
+}
+
+#[test]
 fn the_ai_send_asks_the_flag_in_one_android_only_line_each() {
     let found = hooks(&source("src/ai_host.rs"));
     assert_eq!(found.len(), 2, "the send and the send with an offer: {found:?}");
@@ -85,11 +103,11 @@ fn no_other_file_of_the_crate_asks_the_flag() {
     }
     for path in files.into_iter().filter(|p| p.extension().is_some_and(|e| e == "rs")) {
         let name = path.file_name().expect("name").to_string_lossy().into_owned();
-        if matches!(name.as_str(), "sync.rs" | "ai_host.rs" | "tls_ready.rs") {
+        if matches!(name.as_str(), "sync.rs" | "server.rs" | "ai_host.rs" | "tls_ready.rs") {
             continue;
         }
         let text = fs::read_to_string(&path).expect("read");
-        // The module declaration of lib.rs is the one mention a file may have besides the three.
-        assert!(!text.replace("pub mod tls_ready;", "").contains("tls_ready"), "{name} mentions the flag: the clients ask it in two places only");
+        // The module declaration of lib.rs is the one mention a file may have besides the four.
+        assert!(!text.replace("pub mod tls_ready;", "").contains("tls_ready"), "{name} mentions the flag: the clients ask it in three places only");
     }
 }
