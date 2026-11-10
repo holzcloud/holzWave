@@ -1312,6 +1312,10 @@ Rules for the whole file:
 | `remote.attach_tail_lines` | 1000 | 0 to 1000000 | The rows of scrollback that come with the screen when an app attaches to a session on the server and does not say how many it wants. `0` sends the screen alone. May not be larger than `remote.history_max_lines`. |
 | `remote.history_max_lines` | 10000 | 0 to 1000000 | The most rows of scrollback any attach brings, however many the app asks for. The scrollback of the session itself (`workers.max_scrollback_lines`, or the person's own smaller `scrollback_lines`) is the other limit, and the smaller of the two holds. An app that scrolls up to older lines attaches again with a larger tail; it can never get more than this. |
 | `remote.snapshot_max_bytes` | 4194304 | 65536 to 16777216 | The most bytes of one snapshot, the screen with its tail as an app is sent them. A snapshot over it is refused whole, never cut; the session runs on, and the app may ask again for a shorter tail. |
+| `sync.quota_mib` | 64 | 1 to 65536 | The space one person may use on the server as a sync target, in MiB: every encrypted file and every backup counts. A write that would take the person over it is refused with `507` and the code `quota`, and stores nothing; a write that replaces a file counts only the difference, so a person who is over a limit that was lowered can still make their data smaller. |
+| `sync.max_files` | 512 | 8 to 4096 | The most files one person keeps on the server as a sync target, the small metadata file and the backups included. A write that would make a new file past it is refused like one past the space. The sync engine's own client reads a listing of at most 4096 files, which is why the key stops there. |
+| `sync.backups_keep` | 20 | 1 to 1000 | How many of the newest backups of a person stay. A backup is the version that lost a conflict; after each write of one, the oldest beyond this number are deleted. There is no value that keeps them all. |
+| `sync.max_blob_bytes` | 8388608 | 65536 to 8388608 | The largest encrypted file the server takes, in bytes. A larger body is refused with `413` and the code `too_large` before it is read past the limit. The format itself has no file larger than 8 MiB, so the key can only narrow it; a file of the person's settings that is larger than this cannot be synced. |
 | `remote.writer_timeout` | 30s | 5s to 10m | A session has one writer and any number of watchers. A writer that gave no sign of life for this long loses the right to write: everyone attached sees `free`, and nobody gets the right by itself, a watcher takes it with an explicit action. An attached app sends a sign of life every 10 seconds. |
 
 The two device features, the server as a sync target and sessions that live on the server for the app, are off. An administrator
@@ -1319,6 +1323,12 @@ turns each on in the People dialog (it asks for a recent sign-in, and every chan
 audit log that names the switch and the new value). While a feature is off, every path that belongs to it answers exactly as a
 path that was never there, before any credential is read, so a probe learns nothing. `device_access` is the ceiling that the
 operator keeps over the switches; it can only forbid.
+
+The server as a sync target stores what the sync engine of each device already produces: encrypted files it has no key for, and one
+small metadata file with the salt and the key check. It checks only the structure of a file (the header of the format) and the
+four `sync` bounds above, per person; it never opens a file, learns no name of a setting, and writes no path, name or byte of a
+file to its log or its audit log. A person's files are rows in the server's database and are deleted with the account. The
+bounds apply to the next write; the server reads them when it starts.
 
 A session that lives on the server is a shell in the person's own worker, outside every window. It keeps running while no app is
 attached, and the output made meanwhile is in the screen and the scrollback of the next attach. It ends when its program ends, when
@@ -1481,6 +1491,30 @@ right to write is free:
     "history_max_lines": 5000,
     "snapshot_max_bytes": 2097152,
     "writer_timeout": "1m"
+  }
+}
+```
+
+A server that keeps at most 5 MiB and 40 files per person for the sync, with 3 backups, and takes no file larger than 1 MiB:
+
+<!-- example: server/sync.json -->
+```json
+{
+  "public_url": "https://holzwave.example.net",
+  "tls": {
+    "mode": "files",
+    "cert_file": "/etc/holzwave/tls/tls.crt",
+    "key_file": "/etc/holzwave/tls/tls.key"
+  },
+  "auth": {
+    "passkey": true,
+    "password_totp": true
+  },
+  "sync": {
+    "quota_mib": 5,
+    "max_files": 40,
+    "backups_keep": 3,
+    "max_blob_bytes": 1048576
   }
 }
 ```

@@ -179,6 +179,15 @@ fn example_problems(config_md: &str) -> Vec<String> {
         }
         Err(e) => problems.push(format!("server/remote.json is refused: {}", e.sentence())),
     }
+    match judge(&documented_example(config_md, "server/sync.json")) {
+        Ok(p) => {
+            let bounds = p.sync.bounds();
+            if (bounds.quota_bytes, bounds.max_files, bounds.backups_keep, bounds.max_blob_bytes) != (5 << 20, 40, 3, 1 << 20) {
+                problems.push("server/sync.json does not set 5 MiB, 40 files, 3 backups and a 1 MiB file".to_owned());
+            }
+        }
+        Err(e) => problems.push(format!("server/sync.json is refused: {}", e.sentence())),
+    }
     match judge(&proxy) {
         Ok(p) => {
             if !matches!(&p.tls, TlsSetup::Proxy { trusted_proxies } if trusted_proxies.len() == 2) {
@@ -259,6 +268,7 @@ fn the_example_check_rejects_a_mutated_example() {
         mutate("\"mode\": \"files\"", "\"mode\": \"none\""),
         mutate("\"idle\": \"30d\"", "\"idle\": \"400d\""),
         mutate("\"writer_timeout\": \"1m\"", "\"writer_timeout\": \"1s\""),
+        mutate("\"max_files\": 40", "\"max_files\": 4"),
         mutate(&oidc.lines().nth(3).expect("a line").to_owned(), "  \"issuer\": \"http://login.example.net\","),
         mutate(&proxy, &proxy.replacen("[\"10.0.0.0/8\", \"fd00::/8\"]", "[]", 1)),
         mutate(&acme, &acme.replacen("\"terms_agreed\": false", "\"terms_agreed\": true", 1)),
@@ -350,7 +360,7 @@ fn loader_keys() -> BTreeSet<String> {
         "tls": {"mode": "files", "cert_file": "/certs/cert.pem", "key_file": "/certs/key.pem"},
         "auth": {"passkey": true}
     });
-    let sections = ["tls", "auth", "sessions", "limits", "workers", "upload", "transport", "device_access", "devices", "remote"];
+    let sections = ["tls", "auth", "sessions", "limits", "workers", "upload", "transport", "device_access", "devices", "remote", "sync"];
     let mut keys = BTreeSet::new();
     for key in accepted_keys_at(&base, "") {
         if !sections.contains(&key.as_str()) {
@@ -370,7 +380,7 @@ fn loader_keys() -> BTreeSet<String> {
             keys.insert(format!("tls.{name}"));
         }
     }
-    for section in ["auth", "sessions", "limits", "workers", "upload", "transport", "device_access", "devices", "remote"] {
+    for section in ["auth", "sessions", "limits", "workers", "upload", "transport", "device_access", "devices", "remote", "sync"] {
         for key in accepted_keys_at(&base, section) {
             // `workers.mode` exists only in a build with the in-process workers; it is not a key of the image.
             if section == "workers" && key == "mode" {
@@ -437,7 +447,7 @@ fn default_problems(config_md: &str) -> Vec<String> {
     for row in section_from(config_md, "## The server configuration").lines().filter_map(cells) {
         let (Some(key), Some(default)) = (row.first().and_then(|c| code_span(c)), row.get(1)) else { continue };
         let scoped = ["listen", "data_dir", "runtime_dir"].contains(&key.as_str())
-            || ["sessions.", "limits.", "workers.", "upload.", "transport.", "devices.", "remote."].iter().any(|p| key.starts_with(p));
+            || ["sessions.", "limits.", "workers.", "upload.", "transport.", "devices.", "remote.", "sync."].iter().any(|p| key.starts_with(p));
         let default = default.trim_matches('`');
         if !scoped || default.starts_with("none") || default.is_empty() {
             continue;

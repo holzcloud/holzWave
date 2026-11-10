@@ -667,6 +667,80 @@ fn config_the_remote_keys_have_their_rows_in_the_list_of_limits() {
 }
 
 #[test]
+fn config_the_four_sync_keys_have_their_defaults_and_are_read_from_the_file() {
+    let s = setup();
+    let p = prepare_json(&s, &base()).expect("minimal file");
+    assert_eq!((p.sync.quota_mib, p.sync.max_files, p.sync.backups_keep, p.sync.max_blob_bytes), (64, 512, 20, 8 * 1024 * 1024));
+    assert_eq!(p.sync.bounds(), holzwave_server::sync_target::Bounds::DEFAULT);
+
+    let mut file = base();
+    set(&mut file, "sync", json!({ "quota_mib": 5, "max_files": 40, "backups_keep": 3, "max_blob_bytes": 1048576 }));
+    let p = prepare_json(&s, &file).expect("a file with the four keys");
+    let bounds = p.sync.bounds();
+    assert_eq!((bounds.quota_bytes, bounds.max_files, bounds.backups_keep, bounds.max_blob_bytes), (5 << 20, 40, 3, 1 << 20));
+}
+
+#[test]
+fn config_each_sync_key_is_refused_outside_its_bounds_at_both_ends_with_its_key_and_the_bounds() {
+    let s = setup();
+    for (key, low, high, sentence_low, sentence_high) in [
+        ("sync.quota_mib", 0u64, 65_537u64, "sync.quota_mib is 0 but must be between 1 and 65536", "sync.quota_mib is 65537 but must be between 1 and 65536"),
+        ("sync.max_files", 7, 4097, "sync.max_files is 7 but must be between 8 and 4096", "sync.max_files is 4097 but must be between 8 and 4096"),
+        // Zero would keep every backup for ever: a limit that is off is not a limit, so it is outside.
+        ("sync.backups_keep", 0, 1001, "sync.backups_keep is 0 but must be between 1 and 1000", "sync.backups_keep is 1001 but must be between 1 and 1000"),
+        (
+            "sync.max_blob_bytes",
+            65_535,
+            8_388_609,
+            "sync.max_blob_bytes is 65535 but must be between 65536 and 8388608",
+            "sync.max_blob_bytes is 8388609 but must be between 65536 and 8388608",
+        ),
+    ] {
+        for (value, sentence) in [(low, sentence_low), (high, sentence_high)] {
+            let mut file = base();
+            set(&mut file, key, json!(value));
+            let error = prepare_json(&s, &file).expect_err(key);
+            assert_eq!(error.sentence(), sentence, "{key} = {value}");
+        }
+    }
+    // The ends themselves are inside, and the largest file never exceeds the 8 MiB of the sync format.
+    for (key, value) in [
+        ("sync.quota_mib", 1),
+        ("sync.quota_mib", 65_536),
+        ("sync.max_files", 8),
+        ("sync.max_files", 4096),
+        ("sync.backups_keep", 1),
+        ("sync.backups_keep", 1000),
+        ("sync.max_blob_bytes", 65_536),
+        ("sync.max_blob_bytes", 8_388_608),
+    ] {
+        let mut file = base();
+        set(&mut file, key, json!(value));
+        prepare_json(&s, &file).unwrap_or_else(|e| panic!("{key} = {value} is inside: {e}"));
+    }
+    assert_eq!(usize::try_from(limits::SYNC_MAX_BLOB_BYTES).ok(), Some(holzwave_core::sync::crypto::MAX_BLOB));
+    for (key, value) in [("sync.quota_mib", json!("64")), ("sync.max_files", json!(-1)), ("sync.max_files", json!(1.5)), ("sync.unlimited", json!(true))] {
+        let mut file = base();
+        set(&mut file, key, value.clone());
+        assert!(prepare_json(&s, &file).is_err(), "{key} = {value} must not be accepted");
+    }
+}
+
+#[test]
+fn config_the_sync_keys_have_their_rows_in_the_list_of_limits() {
+    let rows = limits::all_rows();
+    for (key, default, min, max) in [
+        ("sync.quota_mib", "64", "1", "65536"),
+        ("sync.max_files", "512", "8", "4096"),
+        ("sync.backups_keep", "20", "1", "1000"),
+        ("sync.max_blob_bytes", "8388608", "65536", "8388608"),
+    ] {
+        let row = rows.iter().find(|r| r.key == key).unwrap_or_else(|| panic!("a row for {key}"));
+        assert_eq!((row.default.as_str(), row.min.as_str(), row.max.as_str()), (default, min, max), "{key}");
+    }
+}
+
+#[test]
 fn config_an_unknown_key_is_refused_at_every_level() {
     let s = setup();
     let mut full = base();
@@ -674,7 +748,7 @@ fn config_an_unknown_key_is_refused_at_every_level() {
         "id": "corp", "name": "Corp", "issuer": "https://login.example.test", "client_id": "abc",
         "client_secret_file": "/secrets/oidc"
     }]));
-    for level in ["", "tls", "auth", "auth.oidc.0", "sessions", "limits", "workers", "upload", "transport"] {
+    for level in ["", "tls", "auth", "auth.oidc.0", "sessions", "limits", "workers", "upload", "transport", "sync"] {
         let mut edited = full.clone();
         if level.is_empty() {
             edited["zzz"] = json!(1);
