@@ -27,11 +27,31 @@ pub enum Kind {
     Socket,
     /// As `Session`, with an octet-stream body.
     Upload,
+    /// A bearer token of a device; no cookie is read, no Origin and no anti-forgery rule applies, and the body is the
+    /// handler's.
+    Device,
+    /// No credential, JSON only: the start of the sign-in of a native client. No cookie, no Origin rule.
+    DeviceOpen,
 }
 
 impl Kind {
     pub fn needs_session(self) -> bool {
-        !matches!(self, Kind::Public | Kind::Socket)
+        !matches!(self, Kind::Public | Kind::Socket | Kind::Device | Kind::DeviceOpen)
+    }
+
+    /// Whether the router checks the Origin of a change on this kind.
+    pub fn has_origin_rule(self) -> bool {
+        !matches!(self, Kind::Socket | Kind::Device | Kind::DeviceOpen)
+    }
+
+    /// Whether the router checks the content type of a change on this kind (the type each kind takes is its own).
+    pub fn checks_content_type(self) -> bool {
+        !matches!(self, Kind::Socket | Kind::Device)
+    }
+
+    /// Whether the router reads the JSON body of a change here and refuses one over the cap.
+    pub fn reads_json_body(self) -> bool {
+        !matches!(self, Kind::Socket | Kind::Upload | Kind::Device)
     }
 }
 
@@ -102,7 +122,110 @@ pub fn table() -> Vec<Row> {
         row!("POST", "/api/admin/accounts/{id}/enable", Admin, true, INVALID, 204, Some("account.enable")),
         row!("POST", "/api/admin/accounts/{id}/reset-secrets", Admin, true, INVALID, 204, Some("secrets.reset")),
         row!("POST", "/api/admin/accounts/{id}/unlock-signin", Admin, true, INVALID, 204, Some("account.unlock")),
+        // The device features. These rows are written by hand like every row above and are not generated from the router. The
+        // device route answers a caller with no token 401 while its feature is on; while it is off the path answers 404 (see
+        // `GATED_PREFIXES`). The two switch routes are not under a gate: they are how a switch is turned on.
+        row!("GET", "/api/device/me", Device, false, INVALID, 200, None),
+        row!("GET", "/api/admin/device-access", Admin, false, INVALID, 200, None),
+        row!("POST", "/api/admin/device-access", Admin, true, INVALID, 200, Some("device_access.change")),
     ]
+}
+
+// ---- the gates of the device features ---------------------------------------------------------------------------------------
+
+/// The prefixes of the paths that belong to a device feature, as whole path segments. They are copied here by hand and never
+/// read from the code: a path under one of them answers exactly as a path that is not there (404 `not_found`) for a caller
+/// with no credential while its feature is off, and the kind's usual refusal while it is on.
+pub const GATED_PREFIXES: &[&str] = &["/api/device/", "/sync/v1/", "/ws/device"];
+
+/// Whether a path of the table lies under one of [`GATED_PREFIXES`].
+pub fn is_gated(path: &str) -> bool {
+    GATED_PREFIXES.iter().any(|prefix| {
+        let bare = prefix.trim_end_matches('/');
+        path == bare || path.strip_prefix(bare).is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
+/// What a kind refuses a caller with no credential with, when the kind has one answer for every route (a device route: no
+/// token, 401 `invalid`).
+fn kind_refusal(kind: Kind) -> Option<(u16, &'static str)> {
+    match kind {
+        Kind::Device => Some((401, "invalid")),
+        _ => None,
+    }
+}
+
+/// The answers a call without a cookie may get from a row. A gated row answers 404 `not_found` while its feature is off and
+/// the kind's usual refusal while it is on; every other row answers what the table lists.
+pub fn unauth_expectation(row: &Row, feature_on: bool) -> Vec<(u16, &'static str)> {
+    if is_gated(row.path) && !feature_on {
+        vec![(404, "not_found")]
+    } else if is_gated(row.path) {
+        kind_refusal(row.kind).map_or_else(|| row.unauth.to_vec(), |refusal| vec![refusal])
+    } else {
+        row.unauth.to_vec()
+    }
+}
+
+/// The answer to a method the row does not have, from a caller with no credential. A route that needs a session or a token
+/// refuses the caller before the method is looked at; a public route answers 405; a gated path whose feature is off answers 404.
+pub fn wrong_method_expectation(row: &Row, feature_on: bool) -> (u16, &'static str) {
+    if is_gated(row.path) && !feature_on {
+        (404, "not_found")
+    } else if row.kind.needs_session() {
+        (401, "invalid")
+    } else if let Some(refusal) = kind_refusal(row.kind) {
+        refusal
+    } else {
+        (405, "bad_request")
+    }
+}
+
+/// Reads the parts of the router modules that are mounted as `Access::Device` or `Access::DeviceOpen` and answers one line for
+/// every route of them whose path is not under a gated prefix, and for every such part whose routes cannot be read. A route of
+/// a device kind that no gate covers would be reachable while its feature is off.
+pub fn device_route_problems(files: &[(&str, &str)]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (name, text) in files {
+        let text = text.split("#[cfg(test)]").next().unwrap_or_default();
+        let mut from = 0;
+        while let Some(at) = text[from..].find("access: Access::Device") {
+            let start = from + at + "access: Access::Device".len();
+            from = start;
+            let kind: String = std::iter::once("Device").chain(text[start..].starts_with("Open").then_some("Open")).collect();
+            let Some(router_at) = text[start..].find("router:") else {
+                problems.push(format!("{name}: a part mounted as {kind} has no router member"));
+                continue;
+            };
+            let after = text[start + router_at + "router:".len()..].trim_start();
+            let expression = if after.starts_with("Router::new()") {
+                after.split('}').next().unwrap_or_default().to_owned()
+            } else {
+                let ident: String = after.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                let binding = [format!("let {ident} = Router::new()"), format!("let mut {ident} = Router::new()")]
+                    .iter()
+                    .find_map(|pattern| text.find(pattern.as_str()));
+                match binding {
+                    Some(at) => text[at..].split(';').next().unwrap_or_default().to_owned(),
+                    None => {
+                        problems.push(format!("{name}: the router `{ident}` of a part mounted as {kind} is not built in the same file"));
+                        continue;
+                    }
+                }
+            };
+            let found = source_routes(&[(name, &expression)]);
+            if found.literal.is_empty() || found.dynamic > 0 {
+                problems.push(format!("{name}: the routes of a part mounted as {kind} cannot be read (literal paths are required)"));
+            }
+            for route in &found.literal {
+                let path = route.split_once(' ').map_or(route.as_str(), |(_, path)| path);
+                if !is_gated(path) {
+                    problems.push(format!("{name}: {route} is mounted as {kind} and is not under a gated prefix"));
+                }
+            }
+        }
+    }
+    problems
 }
 
 /// The pages of the application: what a request for a file of the build gets. A file of the sign-in page needs no session, any
@@ -567,8 +690,19 @@ pub struct Variation {
 
 const FOREIGN: &str = "https://evil.example.test";
 
-fn changes_only(kind: Kind, status: u16, code: &'static str) -> Expect {
-    if kind == Kind::Socket { Expect::NotApplicable } else { Expect::Status(status, code) }
+/// A refusal of a change that every kind with an Origin rule gives.
+fn origin_only(kind: Kind, status: u16, code: &'static str) -> Expect {
+    if kind.has_origin_rule() { Expect::Status(status, code) } else { Expect::NotApplicable }
+}
+
+/// A refusal of a change that every kind that reads a JSON body gives.
+fn json_only(kind: Kind, status: u16, code: &'static str) -> Expect {
+    if kind.reads_json_body() { Expect::Status(status, code) } else { Expect::NotApplicable }
+}
+
+/// A refusal of a change that every kind that checks the content type gives.
+fn type_only(kind: Kind, status: u16, code: &'static str) -> Expect {
+    if kind.checks_content_type() { Expect::Status(status, code) } else { Expect::NotApplicable }
 }
 
 fn session_only(kind: Kind, status: u16, code: &'static str) -> Expect {
@@ -595,36 +729,36 @@ pub fn variations() -> Vec<Variation> {
             alter: |p| p.set("x-csrf-token", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
             expect: |k| session_only(k, 403, "forbidden"),
         },
-        Variation { name: "a foreign Origin", alter: |p| p.set("origin", FOREIGN), expect: |k| changes_only(k, 403, "forbidden") },
+        Variation { name: "a foreign Origin", alter: |p| p.set("origin", FOREIGN), expect: |k| origin_only(k, 403, "forbidden") },
         Variation {
             name: "no Origin and Sec-Fetch-Site cross-site",
             alter: |p| {
                 p.remove("origin");
                 p.set("sec-fetch-site", "cross-site");
             },
-            expect: |k| changes_only(k, 403, "forbidden"),
+            expect: |k| origin_only(k, 403, "forbidden"),
         },
-        Variation { name: "Origin null", alter: |p| p.set("origin", "null"), expect: |k| changes_only(k, 403, "forbidden") },
+        Variation { name: "Origin null", alter: |p| p.set("origin", "null"), expect: |k| origin_only(k, 403, "forbidden") },
         Variation {
             name: "content type text/plain",
             alter: |p| p.set("content-type", "text/plain"),
-            expect: |k| changes_only(k, 400, "bad_request"),
+            expect: |k| type_only(k, 400, "bad_request"),
         },
         Variation {
             name: "content type application/x-www-form-urlencoded",
             alter: |p| p.set("content-type", "application/x-www-form-urlencoded"),
-            expect: |k| changes_only(k, 400, "bad_request"),
+            expect: |k| type_only(k, 400, "bad_request"),
         },
         Variation {
             name: "content type multipart/form-data",
             alter: |p| p.set("content-type", "multipart/form-data; boundary=x"),
-            expect: |k| changes_only(k, 400, "bad_request"),
+            expect: |k| type_only(k, 400, "bad_request"),
         },
-        Variation { name: "no content type", alter: |p| p.remove("content-type"), expect: |k| changes_only(k, 400, "bad_request") },
+        Variation { name: "no content type", alter: |p| p.remove("content-type"), expect: |k| type_only(k, 400, "bad_request") },
         Variation {
             name: "a body one byte over 64 KiB",
             alter: |p| p.body = oversize_body(&p.body),
-            expect: |k| if matches!(k, Kind::Socket | Kind::Upload) { Expect::NotApplicable } else { Expect::Status(400, "bad_request") },
+            expect: |k| json_only(k, 400, "bad_request"),
         },
     ]
 }

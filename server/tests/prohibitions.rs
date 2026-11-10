@@ -271,7 +271,7 @@ fn routes_the_table_equals_the_routes_of_the_router_modules() {
     assert_eq!(source.dynamic, 2, "the only routes with a computed path are the two groups of page files");
     let by_kind = |kind: Kind| table.iter().filter(|r| r.kind == kind).count();
     println!(
-        "Routes: the contract's table has {} rows ({} public, {} session, {} account, {} administrator, {} upload, {} socket); the source has {} literal routes and {} computed",
+        "Routes: the contract's table has {} rows ({} public, {} session, {} account, {} administrator, {} upload, {} socket, {} device, {} device open); the source has {} literal routes and {} computed",
         table.len(),
         by_kind(Kind::Public),
         by_kind(Kind::Session),
@@ -279,6 +279,8 @@ fn routes_the_table_equals_the_routes_of_the_router_modules() {
         by_kind(Kind::Admin),
         by_kind(Kind::Upload),
         by_kind(Kind::Socket),
+        by_kind(Kind::Device),
+        by_kind(Kind::DeviceOpen),
         source.literal.len(),
         source.dynamic
     );
@@ -368,14 +370,18 @@ fn undeclared_paths() -> Vec<(String, String)> {
     paths
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn routes_a_call_without_a_cookie_gets_only_what_its_kind_allows_and_every_answer_carries_the_headers() {
-    let server = Site::new(Some("not-a-secret-just-a-file")).start();
-    let mut client = server.client();
-    let ledger = Ledger::default();
-    let table = route_walk::table();
-    let mut seen: BTreeMap<String, (usize, BTreeSet<u16>)> = BTreeMap::new();
-    for row in &table {
+/// Calls every row of `rows` as a client with no cookie and no token, and checks what comes back: what the row's kind allows
+/// (and for a path of a device feature, what its switch allows: 404 `not_found` while it is off), on every row the same body
+/// of an error, no cookie, no `Allow` list, and the answers to the methods the row does not have.
+async fn walk_rows(
+    client: &mut Client,
+    ledger: &Ledger,
+    table: &[Row],
+    rows: &[&Row],
+    feature_on: bool,
+    seen: &mut BTreeMap<String, (usize, BTreeSet<u16>)>,
+) {
+    for row in rows.iter().copied() {
         // `nope` names no provider, so the single sign-on start answers like any unknown name.
         let id = match row.path {
             p if p.contains("oidc") => "nope",
@@ -383,17 +389,21 @@ async fn routes_a_call_without_a_cookie_gets_only_what_its_kind_allows_and_every
             p if p.contains("{handle}") => "AAAAAAAAAAAAAAAA",
             _ => "1",
         };
-        let request = probe(&client, row, id);
+        let request = probe(client, row, id);
         let reply = client.send(request).await;
         ledger.note(&reply);
         let label = format!("{} {}", row.method, row.path);
         let code = code_of(&reply);
-        let allowed = row.unauth.iter().any(|(status, wanted)| *status == reply.status && (wanted.is_empty() || *wanted == code));
-        assert!(allowed, "{label} without a cookie answered {} {code:?}; the contract allows {:?}", reply.status, row.unauth);
+        let wanted = route_walk::unauth_expectation(row, feature_on);
+        let allowed = wanted.iter().any(|(status, wanted)| *status == reply.status && (wanted.is_empty() || *wanted == code));
+        assert!(allowed, "{label} without a cookie (feature on: {feature_on}) answered {} {code:?}; the contract allows {wanted:?}", reply.status);
         if row.kind.needs_session() {
             assert!(reply.all("set-cookie").is_empty() || reply.all("set-cookie").iter().all(|l| l.contains("Max-Age=0")), "{label}: no cookie is set");
             assert_eq!(reply.status, 401, "{label}: a session-bound route without a session is 401");
             assert_eq!(code, "invalid", "{label}");
+        }
+        if route_walk::is_gated(row.path) {
+            assert!(reply.all("set-cookie").is_empty(), "{label}: a route of a device feature never sets a cookie");
         }
         assert_eq!(refusal_body_problems(&reply), Vec::<String>::new(), "{label}");
         // Only the explicit public list answers 200.
@@ -404,7 +414,7 @@ async fn routes_a_call_without_a_cookie_gets_only_what_its_kind_allows_and_every
         entry.0 += 1;
         entry.1.insert(reply.status);
         // A wrong method on the same path.
-        let methods = route_walk::methods_of(&table, row.path);
+        let methods = route_walk::methods_of(table, row.path);
         for other in route_walk::OTHER_METHODS.iter().filter(|m| !methods.contains(*m)) {
             let path = route_walk::concrete(row.path, id);
             let request = if row.kind == Kind::Upload {
@@ -416,15 +426,27 @@ async fn routes_a_call_without_a_cookie_gets_only_what_its_kind_allows_and_every
             };
             let reply = client.send(request).await;
             ledger.note(&reply);
-            // On a route that needs a session the session check comes first, so a caller without one learns nothing about the
-            // methods the path has; on a public route the router answers 405.
-            let (status, code) = if row.kind.needs_session() { (401, "invalid") } else { (405, "bad_request") };
-            assert_eq!((reply.status, code_of(&reply).as_str()), (status, code), "{other} on {} without a cookie", row.path);
+            // On a route that needs a session or a token the credential check comes first, so a caller without one learns
+            // nothing about the methods the path has; on a public route the router answers 405; on the path of a feature that
+            // is off the answer is the one of a path that is not there.
+            let (status, code) = route_walk::wrong_method_expectation(row, feature_on);
+            assert_eq!((reply.status, code_of(&reply).as_str()), (status, code), "{other} on {} without a cookie (feature on: {feature_on})", row.path);
             assert!(reply.header("allow").is_none(), "{other} on {}: the router does not describe itself", row.path);
             assert!(reply.all("set-cookie").is_empty());
             assert_eq!(refusal_body_problems(&reply), Vec::<String>::new());
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn routes_a_call_without_a_cookie_gets_only_what_its_kind_allows_and_every_answer_carries_the_headers() {
+    let server = Site::new(Some("not-a-secret-just-a-file")).start();
+    let mut client = server.client();
+    let ledger = Ledger::default();
+    let table = route_walk::table();
+    let mut seen: BTreeMap<String, (usize, BTreeSet<u16>)> = BTreeMap::new();
+    let all: Vec<&Row> = table.iter().collect();
+    walk_rows(&mut client, &ledger, &table, &all, false, &mut seen).await;
     // OPTIONS on every path: no success body, no sharing header.
     for row in &table {
         let reply = client.send(client.page_request("OPTIONS", &route_walk::concrete(row.path, "1"), None)).await;
@@ -591,6 +613,124 @@ async fn assets_every_served_file_is_fetched_over_tls_and_none_names_an_address_
     assert!(route_walk::check_headers(&Seen { status: 200, path: "/", headers: &anonymous.send(anonymous.page_request("GET", "/", None)).await.headers }, HOST).is_empty());
 }
 
+/// A site whose two device switches are on from its first moment: the store is written before the process starts.
+fn site_with_the_device_features_on() -> Site {
+    let site = Site::new(Some("not-a-secret-just-a-file"));
+    {
+        let store = holzwave_server::store::Store::open(&site.data_dir()).expect("the store of the site opens");
+        store
+            .write(|tx| {
+                tx.setting_set("sync", true)?;
+                tx.setting_set("remote", true)
+            })
+            .expect("the switches are written");
+    }
+    site
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn routes_a_row_under_a_gated_prefix_answers_its_kinds_refusal_while_the_feature_is_on() {
+    let server = site_with_the_device_features_on().start();
+    let mut client = server.client();
+    let ledger = Ledger::default();
+    let table = route_walk::table();
+    let gated: Vec<&Row> = table.iter().filter(|r| route_walk::is_gated(r.path)).collect();
+    assert!(!gated.is_empty(), "the table has rows under a gated prefix");
+    let mut seen: BTreeMap<String, (usize, BTreeSet<u16>)> = BTreeMap::new();
+    walk_rows(&mut client, &ledger, &table, &gated, true, &mut seen).await;
+    // The same rows are not 404 now: the gate is open and the credential is what refuses.
+    for row in &gated {
+        let (statuses, label) = (&seen[&format!("{} {}", row.method, row.path)].1, format!("{} {}", row.method, row.path));
+        assert!(!statuses.contains(&404), "{label}: with the feature on the path exists: {statuses:?}");
+    }
+    let problems: Vec<String> = server
+        .recorder
+        .exchanges()
+        .iter()
+        .flat_map(|e| route_walk::check_headers(&Seen { status: e.status, path: e.target.split('?').next().unwrap_or_default(), headers: &e.headers }, HOST))
+        .collect();
+    assert!(problems.is_empty(), "headers missing on some answers:\n{}", problems.join("\n"));
+    let cookie_problems = ledger.problems.lock().expect("lock").clone();
+    assert!(cookie_problems.is_empty(), "cookies with a wrong flag:\n{}", cookie_problems.join("\n"));
+    println!("Routes (real process, features on): {} rows under a gated prefix walked, statuses {:?}", gated.len(), seen.values().flat_map(|(_, s)| s.iter().copied()).collect::<BTreeSet<_>>());
+}
+
+#[test]
+fn routes_every_row_of_a_device_kind_is_under_a_gated_prefix_and_the_oracle_lists_the_prefixes_itself() {
+    let table = route_walk::table();
+    for row in table.iter().filter(|r| matches!(r.kind, Kind::Device | Kind::DeviceOpen)) {
+        assert!(route_walk::is_gated(row.path), "{} {} has the kind of a device route and no gated prefix", row.method, row.path);
+    }
+    // The three rows of the device mounts, with the kinds the contract gives them.
+    let kind_of = |method: &str, path: &str| table.iter().find(|r| (r.method, r.path) == (method, path)).map(|r| r.kind);
+    assert_eq!(kind_of("GET", "/api/device/me"), Some(Kind::Device));
+    assert_eq!(kind_of("GET", "/api/admin/device-access"), Some(Kind::Admin));
+    assert_eq!(kind_of("POST", "/api/admin/device-access"), Some(Kind::Admin));
+    assert!(!route_walk::is_gated("/api/admin/device-access"), "the switch routes are not behind the gate they control");
+    // The oracle's prefixes are written in its own file, not read from the code under test.
+    assert_eq!(route_walk::GATED_PREFIXES, ["/api/device/", "/sync/v1/", "/ws/device"]);
+    // The source of the router modules mounts only gated paths as a device kind.
+    let files = router_files();
+    let refs: Vec<(&str, &str)> = files.iter().map(|(n, t)| (n.as_str(), t.as_str())).collect();
+    assert_eq!(route_walk::device_route_problems(&refs), Vec::<String>::new());
+    assert!(
+        files.iter().any(|(_, text)| text.contains("access: Access::Device")),
+        "the check has a device mount to look at, so a green run is not an empty one"
+    );
+}
+
+#[test]
+fn negative_control_routes_a_device_route_without_a_gated_prefix_is_named() {
+    let ungated = r#"
+        pub fn parts() -> Vec<Part> {
+            let device = Router::new().route("/api/other/me", get(me));
+            vec![Part { access: Access::Device, router: device }]
+        }
+    "#;
+    let problems = route_walk::device_route_problems(&[("a.rs", ungated)]);
+    assert!(problems.iter().any(|p| p.contains("GET /api/other/me") && p.contains("not under a gated prefix")), "{problems:?}");
+    // The kind that has no credential is checked too, with the router written inside the part.
+    let open = r#"vec![Part { access: Access::DeviceOpen, router: Router::new().route("/api/other/code", post(code)) }]"#;
+    let problems = route_walk::device_route_problems(&[("b.rs", open)]);
+    assert!(problems.iter().any(|p| p.contains("POST /api/other/code") && p.contains("DeviceOpen")), "{problems:?}");
+    // A prefix is whole segments: a path that only starts with the same letters is not gated.
+    let near = r#"let d = Router::new().route("/api/devices/me", get(me)); vec![Part { access: Access::Device, router: d }]"#;
+    assert!(!route_walk::device_route_problems(&[("c.rs", near)]).is_empty());
+    // A router the check cannot read is a complaint, not a pass.
+    let hidden = "vec![Part { access: Access::Device, router: built_elsewhere() }]";
+    assert!(!route_walk::device_route_problems(&[("d.rs", hidden)]).is_empty());
+    // The shapes that are right pass: every gated prefix, and a part of another kind is not looked at.
+    let good = r#"
+        let device = Router::new().route("/api/device/me", get(me)).route("/sync/v1/list/{dir}", get(l)).route("/ws/device", get(w));
+        vec![Part { access: Access::Device, router: device }, Part { access: Access::Public, router: Router::new().route("/x", get(x)) }]
+    "#;
+    assert_eq!(route_walk::device_route_problems(&[("e.rs", good)]), Vec::<String>::new());
+    // A route in the test module is not read.
+    let tests_only = "#[cfg(test)]\nmod t { fn f() { Part { access: Access::Device, router: Router::new().route(\"/x\", get(x)) }; } }";
+    assert_eq!(route_walk::device_route_problems(&[("f.rs", tests_only)]), Vec::<String>::new());
+}
+
+#[test]
+fn negative_control_routes_a_gated_row_is_expected_to_be_404_while_off_and_the_kinds_refusal_while_on() {
+    let table = route_walk::table();
+    let device = table.iter().find(|r| r.path == "/api/device/me").expect("the device row");
+    assert_eq!(route_walk::unauth_expectation(device, false), [(404, "not_found")]);
+    assert_eq!(route_walk::unauth_expectation(device, true), [(401, "invalid")]);
+    assert_eq!(route_walk::wrong_method_expectation(device, false), (404, "not_found"));
+    assert_eq!(route_walk::wrong_method_expectation(device, true), (401, "invalid"));
+    // A row outside the gates keeps what the table says, whatever the switch.
+    let admin = table.iter().find(|r| r.path == "/api/admin/device-access" && r.method == "POST").expect("the admin row");
+    assert_eq!(route_walk::unauth_expectation(admin, false), route_walk::unauth_expectation(admin, true));
+    assert_eq!(route_walk::unauth_expectation(admin, false), [(401, "invalid")]);
+    let session = table.iter().find(|r| r.path == "/api/session").expect("a public row");
+    assert_eq!(route_walk::unauth_expectation(session, false), [(200, "")]);
+    assert_eq!(route_walk::wrong_method_expectation(session, false), (405, "bad_request"));
+    // The prefix is a whole segment.
+    for (path, gated) in [("/api/device/me", true), ("/api/device", true), ("/api/devices", false), ("/sync/v1/blob/files/x", true), ("/sync/v2", false), ("/ws/device", true), ("/ws", false)] {
+        assert_eq!(route_walk::is_gated(path), gated, "{path}");
+    }
+}
+
 // =============================================================================================================================
 // The in-process assembly: sessions of a given age, many throwaway people, the cross-site matrix
 // =============================================================================================================================
@@ -631,6 +771,8 @@ struct Watch {
     admin: Option<Signed>,
     person: Option<(User, Signed)>,
     uploads: Option<PathBuf>,
+    /// Whether the state of the two device switches is watched (it is read with the administrator's session).
+    switches: bool,
 }
 
 impl Rig {
@@ -715,6 +857,9 @@ impl Rig {
         let mut text = self.env.audit_text();
         if let Some(admin) = &watch.admin {
             text.push_str(&self.send(&self.page(Some(admin), "GET", "/api/admin/accounts", None)).await.text());
+            if watch.switches {
+                text.push_str(&self.send(&self.page(Some(admin), "GET", "/api/admin/device-access", None)).await.text());
+            }
         }
         if let Some((user, signed)) = &watch.person {
             text.push_str(&self.send(&self.page(Some(signed), "GET", "/api/me", None)).await.text());
@@ -874,6 +1019,14 @@ impl Rig {
             ("POST", "/api/admin/invitations") => {
                 let admin = self.admin_now().await;
                 plain(self.page(Some(&admin), "POST", row.path, Some(&json!({"role": "member", "days": 1}))), 200, Watch { admin: Some(admin), ..Watch::default() })
+            }
+            ("POST", "/api/admin/device-access") => {
+                let admin = self.admin_now().await;
+                plain(
+                    self.page(Some(&admin), "POST", row.path, Some(&json!({"remote": true}))),
+                    200,
+                    Watch { admin: Some(admin), switches: true, ..Watch::default() },
+                )
             }
             (method, path) if path.starts_with("/api/admin/accounts/{id}") => {
                 let (target, target_session) = self.member().await;
@@ -1359,9 +1512,12 @@ async fn admin_sweep_body() {
             if *method == "DELETE" {
                 continue; // carol is deleted last, below
             }
-            let body = row.changes.then(|| match row.path {
+            // A path with a read and a change (the switches) is visited once per row: the body follows the method.
+            let body = (*method != "GET").then(|| match row.path {
                 p if p.ends_with("/role") => json!({"role": "member"}),
                 "/api/admin/invitations" => json!({"role": "member", "days": 1}),
+                // Turning a switch off that is already off changes nothing: the call is made, and no state moves.
+                "/api/admin/device-access" => json!({"sync": false}),
                 _ => json!({}),
             });
             let reply = alice.client.call(method, &target, body.as_ref()).await;
