@@ -17,6 +17,7 @@ use holzwave_server::http::app::{StoreState, StoreView};
 use holzwave_server::http::router;
 use holzwave_server::http::routes_admin::{self, AdminServices};
 use holzwave_server::http::routes_auth::{self, AuthServices};
+use holzwave_server::http::routes_device;
 use holzwave_server::http::routes_enrol::{self, Enrol, EnrolServices};
 use holzwave_server::http::routes_me::{self, MeServices, SecretsAdmin, SecretsError};
 use holzwave_server::http::routes_unlock::{self, GateError, GateFuture, Material, ProvisionKey, UnlockGate, UnlockSecret};
@@ -32,6 +33,7 @@ use crate::auth_env::{
 use crate::edge::{HOST, ORIGIN, Req, Resp, Signed, UID_RANGE, server_key};
 
 /// The public address links are built on.
+#[allow(unused_imports)]
 pub use crate::auth_env::PUBLIC_URL;
 
 /// A sign-in older than the step-up time (300 seconds), in seconds.
@@ -307,6 +309,7 @@ impl ApiEnv {
         parts.extend(routes_unlock::parts(services));
         parts.extend(routes_enrol::parts(&enrol));
         parts.extend(routes_admin::parts(admin));
+        parts.extend(routes_device::parts());
         parts.extend(routes_me::parts(me.clone()));
         let router = router::build(auth.app.clone(), parts);
         ApiEnv { auth, secrets, observer, accounts, enrol, me, router }

@@ -159,6 +159,7 @@ impl WsEnv {
                     audit: test.app.audit.clone(),
                     clock: dyn_clock.clone(),
                     view: gate.clone(),
+                    devices: Default::default(),
                 },
                 &edge::server_key(),
             );

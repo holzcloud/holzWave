@@ -37,6 +37,7 @@ use crate::auth::signin::SignIn;
 use crate::clock::{Clock, SystemClock};
 use crate::config::{Auth, Prepared, Refusal, TlsSetup, Upload};
 use crate::http::app::{App, AppInit, Edge, PublicOrigin, Shutdown, Timing};
+use crate::http::features::DeviceSettings;
 use crate::http::health::{self, Readiness};
 use crate::http::routes_auth::{AuthServices, LandingPage, OidcFlow};
 use crate::http::routes_enrol::{Enrol, EnrolServices};
@@ -45,7 +46,7 @@ use crate::http::routes_admin::AdminServices;
 use crate::http::router::{self, Part};
 use crate::http::transport;
 use crate::http::ws::{self, WsState};
-use crate::http::{embed, routes_admin, routes_auth, routes_enrol, routes_files, routes_me, routes_unlock};
+use crate::http::{embed, routes_admin, routes_auth, routes_device, routes_enrol, routes_files, routes_me, routes_unlock};
 use crate::log::{self, Level};
 use crate::proxy::{Admission, Mode, TrustedProxies};
 use crate::sealed::Sealer;
@@ -196,6 +197,7 @@ pub fn router_parts(services: &Services) -> Vec<Part> {
     parts.extend(routes_enrol::parts(&enrol));
     parts.extend(routes_me::parts(me));
     parts.extend(routes_admin::parts(admin));
+    parts.extend(routes_device::parts());
     parts.extend(ws::parts(services.ws.clone()));
     parts.extend(routes_files::parts(services));
     parts
@@ -437,6 +439,7 @@ pub async fn assemble(prepared: Prepared, overrides: Overrides) -> Result<Runnin
             audit: audit.clone(),
             clock: clock.clone(),
             view: gate.clone(),
+            devices: DeviceSettings::default(),
         },
         &prepared.key,
     );

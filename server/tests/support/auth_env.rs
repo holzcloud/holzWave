@@ -118,6 +118,8 @@ pub struct Tuning {
     pub max_pending: usize,
     /// A pause at the start of every derivation, to make a derivation take a known time.
     pub derive_pause: Option<Duration>,
+    /// The operator's ceiling over the device features and the idle time of a device token.
+    pub devices: holzwave_server::http::features::DeviceSettings,
 }
 
 impl Default for Tuning {
@@ -128,6 +130,7 @@ impl Default for Tuning {
             kdf: Kdf::lower_bound(),
             max_pending: holzwave_server::auth::signin::MAX_PENDING,
             derive_pause: None,
+            devices: holzwave_server::http::features::DeviceSettings::default(),
         }
     }
 }
@@ -331,6 +334,7 @@ impl AuthEnv {
                 audit,
                 clock: dyn_clock,
                 view: gate.clone(),
+                devices: tuning.devices,
             },
             &server_key(),
         );

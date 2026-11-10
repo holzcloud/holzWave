@@ -124,6 +124,7 @@ pub async fn start_with(opts: Opts) -> Started {
             audit: test.app.audit.clone(),
             clock: test.app.clock.clone(),
             view: test.app.view.clone(),
+            devices: Default::default(),
         },
         &edge::server_key(),
     );

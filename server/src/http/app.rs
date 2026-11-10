@@ -35,6 +35,7 @@ use crate::store::{AccountId, Session, Store};
 use crate::tls;
 
 use super::csrf;
+use super::features::{DeviceSettings, Features};
 use super::router::PeerAddr;
 
 /// The address people type in the browser, as the HTTP side compares it: the exact `Origin` text, the authority a `Host`
@@ -125,6 +126,8 @@ pub struct AppInit {
     pub clock: Arc<dyn Clock>,
     /// The state of the secret stores.
     pub view: Arc<dyn StoreView>,
+    /// What the configuration says about the device features: the operator's ceiling and the idle time of a device token.
+    pub devices: DeviceSettings,
 }
 
 /// The application state of the HTTP side.
@@ -151,6 +154,10 @@ pub struct App {
     pub clock: Arc<dyn Clock>,
     /// The state of the secret stores.
     pub view: Arc<dyn StoreView>,
+    /// The two switches of the device features, with the operator's ceiling.
+    pub features: Features,
+    /// What the configuration says about the device features.
+    pub devices: DeviceSettings,
     csrf_key: Zeroizing<[u8; KEY_BYTES]>,
 }
 
@@ -163,6 +170,7 @@ impl fmt::Debug for App {
 impl App {
     /// Builds the application state. The anti-forgery key is the `csrf` purpose key of the server key.
     pub fn new(init: AppInit, key: &ServerKey) -> Arc<App> {
+        let features = Features::load_or_off(init.store.clone(), init.devices.ceiling);
         Arc::new(App {
             origin: init.origin,
             auth: init.auth,
@@ -175,6 +183,8 @@ impl App {
             audit: init.audit,
             clock: init.clock,
             view: init.view,
+            features,
+            devices: init.devices,
             csrf_key: key.derive(Purpose::Csrf),
         })
     }

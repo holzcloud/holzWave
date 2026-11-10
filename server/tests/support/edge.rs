@@ -176,6 +176,7 @@ impl TestApp {
                 audit,
                 clock: dyn_clock,
                 view: view.clone(),
+                devices: Default::default(),
             },
             &server_key(),
         );

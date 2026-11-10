@@ -23,7 +23,8 @@ use serde_json::json;
 use crate::auth::session::SessionError;
 use crate::config::Sessions;
 use crate::proxy::Mode;
-use crate::store::{Account, Role, Session};
+use crate::device::{DEVICE_IDLE_DEFAULT, DeviceToken, TOUCH_INTERVAL};
+use crate::store::{Account, Device, Role, Session, TokenHash};
 
 use super::app::{App, StoreState};
 use super::cookies;
@@ -52,6 +53,13 @@ pub enum Access {
     Socket,
     /// As [`Access::Session`], with a raw `application/octet-stream` body.
     Upload,
+    /// A device of a person: one `Authorization: Bearer` header with an unexpired token of an active account. No cookie is read,
+    /// no Origin rule and no anti-forgery token apply (a bearer token is not ambient authority), and the body is left to the
+    /// handler, which reads it with its own cap.
+    Device,
+    /// A native client that has no credential yet (the start of its sign-in): no cookie, no Origin rule, JSON only, with the
+    /// body read here up to the cap.
+    DeviceOpen,
 }
 
 /// A group of routes with the access they share.
@@ -241,6 +249,31 @@ impl<S: Send + Sync> FromRequestParts<S> for Fresh {
     }
 }
 
+/// A request of a device, as the device guard found it. `Debug` prints a fixed marker.
+#[derive(Clone)]
+pub struct DeviceAuthed {
+    /// The device row, as touched by this request.
+    pub device: Device,
+    /// The account the device belongs to.
+    pub account: Account,
+    /// The client address after the proxy rule.
+    pub client: IpAddr,
+}
+
+impl fmt::Debug for DeviceAuthed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("DeviceAuthed(..)")
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for DeviceAuthed {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<DeviceAuthed, ApiError> {
+        parts.extensions.get::<DeviceAuthed>().cloned().ok_or(ApiError::Invalid)
+    }
+}
+
 /// What the router found out about a request on a [`Access::Socket`] part. The router refuses nothing there; the handler
 /// turns the verdict into the close code the page understands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -360,6 +393,13 @@ async fn guard(State(guard): State<Guard>, mut request: Request, next: Next) -> 
     let changing = csrf::is_state_changing(request.method());
     let cap = body_cap(app);
 
+    // The two kinds of a native client never look at a cookie, so they are handled before anything of the session path.
+    match access {
+        Access::Device => return device_guard(app, request, next).await,
+        Access::DeviceOpen => return open_guard(changing, cap, request, next).await,
+        _ => {}
+    }
+
     if changing && access != Access::Socket {
         if !csrf::change_origin_ok(&app.origin, request.headers()) {
             return ApiError::Forbidden { step_up: false }.into_response();
@@ -425,19 +465,119 @@ async fn guard(State(guard): State<Guard>, mut request: Request, next: Next) -> 
     }
 
     if changing && access != Access::Socket && access != Access::Upload {
-        // The whole body is read here, up to the cap, so that a streamed body over the cap is refused whether or not the
-        // handler would have read it, and a declared length that lies is refused too.
-        let declared = csrf::declared_length(request.headers()).ok().flatten();
-        let (parts, body) = request.into_parts();
-        let Ok(bytes) = axum::body::to_bytes(body, cap).await else {
-            return ApiError::BadRequest { field: None }.into_response();
+        request = match buffer_body(request, cap).await {
+            Ok(request) => request,
+            Err(response) => return response,
         };
-        if declared.is_some_and(|length| length != bytes.len() as u64) {
-            return ApiError::BadRequest { field: None }.into_response();
-        }
-        request = Request::from_parts(parts, Body::from(bytes));
     }
     next.run(request).await
+}
+
+/// Reads the whole body, up to the cap, so that a streamed body over the cap is refused whether or not the handler would have
+/// read it, and a declared length that lies is refused too. The request goes on with the bytes as its body.
+async fn buffer_body(request: Request, cap: usize) -> Result<Request, Response> {
+    let declared = csrf::declared_length(request.headers()).ok().flatten();
+    let (parts, body) = request.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, cap).await else {
+        return Err(ApiError::BadRequest { field: None }.into_response());
+    };
+    if declared.is_some_and(|length| length != bytes.len() as u64) {
+        return Err(ApiError::BadRequest { field: None }.into_response());
+    }
+    Ok(Request::from_parts(parts, Body::from(bytes)))
+}
+
+/// The checks of [`Access::DeviceOpen`]: a change is JSON with a declared length inside the cap, and its body is read here. No
+/// cookie is looked at and no Origin rule applies, because the caller is a native client.
+async fn open_guard(changing: bool, cap: usize, request: Request, next: Next) -> Response {
+    if !changing {
+        return next.run(request).await;
+    }
+    if !csrf::content_type_ok(request.headers(), BodyKind::Json) {
+        return ApiError::BadRequest { field: None }.into_response();
+    }
+    match csrf::declared_length(request.headers()) {
+        Ok(Some(length)) if length > cap as u64 => return ApiError::BadRequest { field: None }.into_response(),
+        Err(_) => return ApiError::BadRequest { field: None }.into_response(),
+        _ => {}
+    }
+    match buffer_body(request, cap).await {
+        Ok(request) => next.run(request).await,
+        Err(response) => response,
+    }
+}
+
+/// The token of the one `Authorization: Bearer <token>` header of a request. Two headers, another scheme or anything but the
+/// token after the scheme is no token.
+fn bearer_token(headers: &axum::http::HeaderMap) -> Option<&str> {
+    let mut all = headers.get_all(header::AUTHORIZATION).iter();
+    let one = all.next()?;
+    if all.next().is_some() {
+        return None;
+    }
+    let (scheme, token) = one.to_str().ok()?.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("bearer").then_some(token)
+}
+
+/// What the token of a device amounted to.
+enum DeviceOutcome {
+    /// No such token, or one that ended, or an account that is not active.
+    Unknown,
+    /// A device of an active account.
+    Live(Box<(Device, Account)>),
+    /// The store failed.
+    Busy,
+}
+
+/// Looks the token up and, at most once a minute, writes that the device was seen. It blocks on the database, so it runs on the
+/// blocking pool.
+fn resolve_device(app: &App, hash: &TokenHash) -> DeviceOutcome {
+    let now = app.clock.unix();
+    let found = app.store.read(|tx| match tx.device_lookup(hash, now)? {
+        None => Ok(None),
+        Some(device) => Ok(tx.account_get(device.account_id)?.map(|account| (device, account))),
+    });
+    let (mut device, account) = match found {
+        Ok(Some(found)) => found,
+        Ok(None) => return DeviceOutcome::Unknown,
+        Err(_) => return DeviceOutcome::Busy,
+    };
+    if now.saturating_sub(device.last_seen) >= TOUCH_INTERVAL {
+        match app.store.write(|tx| tx.device_touch(device.id, now, DEVICE_IDLE_DEFAULT)) {
+            Ok(true) => {
+                device.last_seen = now;
+                device.expires_at = now.saturating_add(DEVICE_IDLE_DEFAULT);
+            }
+            Ok(false) => {}
+            Err(_) => return DeviceOutcome::Busy,
+        }
+    }
+    DeviceOutcome::Live(Box::new((device, account)))
+}
+
+/// The checks of [`Access::Device`]. The cookie header is never read here: a session cookie cannot stand in for the token, and
+/// the answer never sets or deletes one. No Origin and no anti-forgery check, because a bearer token is not sent by the
+/// browser on its own.
+async fn device_guard(app: &Arc<App>, mut request: Request, next: Next) -> Response {
+    let Some(text) = bearer_token(request.headers()) else { return ApiError::Invalid.into_response() };
+    let Ok(token) = DeviceToken::parse(text) else { return ApiError::Invalid.into_response() };
+    let hash = token.hash();
+    drop(token);
+    let client = request.extensions().get::<ClientAddr>().map_or(IpAddr::from([0u8; 4]), |c| c.0);
+    let worker = app.clone();
+    let outcome = match tokio::task::spawn_blocking(move || resolve_device(&worker, &hash)).await {
+        Ok(outcome) => outcome,
+        Err(_) => DeviceOutcome::Busy,
+    };
+    match outcome {
+        DeviceOutcome::Unknown => ApiError::Invalid.into_response(),
+        DeviceOutcome::Busy => ApiError::Busy.into_response(),
+        DeviceOutcome::Live(found) => {
+            let (device, account) = *found;
+            request.extensions_mut().insert(DeviceAuthed { device, account, client });
+            next.run(request).await
+        }
+    }
 }
 
 /// What a request has to pass before any part sees it, in every mode: the proxy rule, the Host, the method.
@@ -452,6 +592,11 @@ async fn edge(State(app): State<Arc<App>>, mut request: Request, next: Next) -> 
     }
     if matches!(*request.method(), Method::OPTIONS | Method::TRACE | Method::CONNECT) {
         return ApiError::MethodNotAllowed.into_response();
+    }
+    // A path of a feature that is off is answered by the function that answers a path that does not exist, before any part,
+    // and so before any credential is read: a probe cannot tell the two apart.
+    if app.features.is_closed(request.uri().path()) {
+        return not_found().await.into_response();
     }
     request.extensions_mut().insert(ClientAddr(client));
     next.run(request).await
