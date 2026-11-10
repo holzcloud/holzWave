@@ -124,8 +124,11 @@ pub enum Ended {
         /// The first bytes of the hash.
         prefix: [u8; HANDLE_BYTES],
     },
-    /// Every session of the account.
+    /// Every session of the account, and every device of it (an account that is disabled or deleted loses both).
     Account(AccountId),
+    /// One device, by the id of its row. A device is not a session: the announcement ends the sockets of the device and
+    /// nothing else.
+    Device(i64),
 }
 
 impl Ended {
@@ -137,6 +140,17 @@ impl Ended {
                 *account == session.account_id && session.id_hash[..HANDLE_BYTES] == prefix[..]
             }
             Ended::Account(account) => *account == session.account_id,
+            Ended::Device(_) => false,
+        }
+    }
+
+    /// Whether this announcement ends the device `device` of `account`: the announcement of that device, and the one of its
+    /// account. No announcement of a session ends a device.
+    pub fn ends_device(&self, device: i64, account: AccountId) -> bool {
+        match self {
+            Ended::Device(id) => *id == device,
+            Ended::Account(owner) => *owner == account,
+            Ended::Session(_) | Ended::Handle { .. } => false,
         }
     }
 }
@@ -188,6 +202,12 @@ impl SessionManager {
     fn announce(&self, ended: Ended) {
         // No listener is not a failure.
         let _ = self.ended.send(ended);
+    }
+
+    /// Tells the open sockets that the device `device` was revoked, so that they end at once. The row is the caller's to delete
+    /// first; the announcement names the device by its row id and carries nothing secret.
+    pub fn announce_device(&self, device: i64) {
+        self.announce(Ended::Device(device));
     }
 
     /// The time of the manager's clock in unix seconds.

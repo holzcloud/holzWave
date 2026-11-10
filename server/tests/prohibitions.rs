@@ -395,10 +395,19 @@ async fn walk_rows(
         let label = format!("{} {}", row.method, row.path);
         let code = code_of(&reply);
         let wanted = route_walk::unauth_expectation(row, feature_on);
-        let allowed = wanted.iter().any(|(status, wanted)| *status == reply.status && (wanted.is_empty() || *wanted == code));
-        assert!(allowed, "{label} without a cookie (feature on: {feature_on}) answered {} {code:?}; the contract allows {wanted:?}", reply.status);
-        if row.kind.needs_session() {
-            assert!(reply.all("set-cookie").is_empty() || reply.all("set-cookie").iter().all(|l| l.contains("Max-Age=0")), "{label}: no cookie is set");
+        let allowed =
+            wanted.iter().any(|(status, wanted)| *status == reply.status && (wanted.is_empty() || *wanted == code));
+        assert!(
+            allowed,
+            "{label} without a cookie (feature on: {feature_on}) answered {} {code:?}; the contract allows {wanted:?}",
+            reply.status
+        );
+        // A session route under a gate whose feature is off is answered as a path that is not there, before any session is read.
+        if row.kind.needs_session() && (feature_on || !route_walk::is_gated(row.path)) {
+            assert!(
+                reply.all("set-cookie").is_empty() || reply.all("set-cookie").iter().all(|l| l.contains("Max-Age=0")),
+                "{label}: no cookie is set"
+            );
             assert_eq!(reply.status, 401, "{label}: a session-bound route without a session is 401");
             assert_eq!(code, "invalid", "{label}");
         }
@@ -886,6 +895,42 @@ impl Rig {
         (id, authenticator)
     }
 
+    /// A grant an app started, as the user code and the device code. Open grants are counted per address and all the requests of
+    /// the rig come from one, so the clock first moves past the end of the grants the earlier rows left (a grant lives ten
+    /// minutes); the caller makes its own session after this call, because the move also ages every sign-in.
+    async fn grant(&self) -> (String, String) {
+        self.env.advance(holzwave_server::device::GRANT_TTL + 1);
+        let body = json!({"name": "Matrix laptop", "platform": "linux"});
+        let reply = self.send(&self.page(None, "POST", "/api/device/code", Some(&body))).await;
+        assert_eq!(reply.status, 200, "a grant is started: {}", reply.text());
+        let made = reply.json();
+        (
+            made["user_code"].as_str().expect("a user code").to_owned(),
+            made["device_code"].as_str().expect("a device code").to_owned(),
+        )
+    }
+
+    /// A new member with one device, through the whole grant: the person, the session that approved it, the device's id and its
+    /// token.
+    async fn device_of_a_member(&self) -> (User, Signed, i64, String) {
+        let (user_code, device_code) = self.grant().await;
+        let (user, signed) = self.member().await;
+        let approved = self
+            .send(&self.page(Some(&signed), "POST", "/api/device/approve", Some(&json!({"code": user_code}))))
+            .await;
+        assert_eq!(approved.status, 204, "the grant is approved: {}", approved.text());
+        let polled =
+            self.send(&self.page(None, "POST", "/api/device/token", Some(&json!({"device_code": device_code})))).await;
+        let body = polled.json();
+        assert_eq!(body["state"], "approved", "the device is made: {}", polled.text());
+        (
+            user,
+            signed,
+            body["device_id"].as_i64().expect("a device id"),
+            body["token"].as_str().expect("a token").to_owned(),
+        )
+    }
+
     /// A correct request for a row on a new target, with what to watch. `None` for a row the rig cannot make a case for.
     async fn case_for(&self, row: &Row) -> Case {
         let env = &self.env;
@@ -1026,6 +1071,54 @@ impl Rig {
                     self.page(Some(&admin), "POST", row.path, Some(&json!({"remote": true}))),
                     200,
                     Watch { admin: Some(admin), switches: true, ..Watch::default() },
+                )
+            }
+            // ---- the sign-in of an app, and the revocation of a device (the remote switch is on from the row above) ----
+            ("POST", "/api/device/code") => {
+                let body = json!({"name": "Matrix laptop", "platform": "linux"});
+                plain(self.page(None, "POST", row.path, Some(&body)), 200, Watch::default())
+            }
+            ("POST", "/api/device/token") => {
+                let (_, device_code) = self.grant().await;
+                plain(
+                    self.page(None, "POST", row.path, Some(&json!({"device_code": device_code}))),
+                    200,
+                    Watch::default(),
+                )
+            }
+            ("POST", "/api/device/lookup" | "/api/device/approve" | "/api/device/deny") => {
+                let (user_code, _) = self.grant().await;
+                let (user, signed) = self.member().await;
+                let success = if row.path.ends_with("/lookup") { 200 } else { 204 };
+                plain(
+                    self.page(Some(&signed), "POST", row.path, Some(&json!({"code": user_code}))),
+                    success,
+                    Watch { person: Some((user, signed)), ..Watch::default() },
+                )
+            }
+            ("DELETE", "/api/device/me") => {
+                let (user, signed, _, token) = self.device_of_a_member().await;
+                let mut parts = self.page(None, "DELETE", row.path, None);
+                parts.set("authorization", &format!("Bearer {token}"));
+                plain(parts, 204, Watch { person: Some((user, signed)), ..Watch::default() })
+            }
+            ("DELETE", "/api/me/devices/{id}") => {
+                let (user, signed, id, _) = self.device_of_a_member().await;
+                let target = route_walk::concrete(row.path, &id.to_string());
+                plain(
+                    self.page(Some(&signed), "DELETE", &target, None),
+                    204,
+                    Watch { person: Some((user, signed)), ..Watch::default() },
+                )
+            }
+            ("DELETE", "/api/admin/devices/{id}") => {
+                let (user, signed, id, _) = self.device_of_a_member().await;
+                let admin = self.admin_now().await;
+                let target = route_walk::concrete(row.path, &id.to_string());
+                plain(
+                    self.page(Some(&admin), "DELETE", &target, None),
+                    204,
+                    Watch { admin: Some(admin), person: Some((user, signed)), ..Watch::default() },
                 )
             }
             (method, path) if path.starts_with("/api/admin/accounts/{id}") => {
@@ -1329,6 +1422,13 @@ fn routes_a_member_is_refused_on_every_administrator_row_and_a_stale_sign_in_is_
         assert_eq!(listed.status, 200, "{}", listed.text());
         let members: BTreeSet<String> = listed.json()["accounts"][0].as_object().expect("an account").keys().cloned().collect();
         assert_eq!(members.len(), 7, "the list has the seven members of the contract: {members:?}");
+
+        // The rows under the gate of the device features answer as absent while both switches are off, so a switch is turned on
+        // (with the fresh sign-in the administrator has now) for the rows of the person's grant to be asked for a recent sign-in.
+        let on = rig
+            .send(&rig.page(Some(&rig.admin_first), "POST", "/api/admin/device-access", Some(&json!({"remote": true}))))
+            .await;
+        assert_eq!(on.status, 200, "{}", on.text());
 
         // Six minutes later every sign-in is older than the step-up time.
         rig.env.advance(STALE_AFTER);

@@ -16,7 +16,7 @@ use std::fmt;
 use zeroize::Zeroizing;
 
 use crate::auth::session::{generate_token, parse_token};
-use crate::store::{Grant, TokenHash, hash_token};
+use crate::store::{Grant, ThrottleRule, TokenHash, hash_token};
 use crate::unlock::random;
 
 /// What a device token starts with.
@@ -57,6 +57,18 @@ pub const DEVICE_IDLE_DEFAULT: i64 = 90 * 24 * 3_600;
 
 /// The most devices a list of the administrator holds.
 pub const MAX_LISTED_DEVICES: usize = 1_000;
+
+/// How many wrong codes one account, and one address, may try within the window before every further try is refused: a wrong code
+/// is an unknown, an expired or a malformed one. The same numbers count the lookups and decisions of a signed-in person and the
+/// polls of an anonymous device, each under its own key. Five tries in ten minutes against 20^8 possible codes that live ten
+/// minutes; the lock lasts as long as the window.
+pub const GRANT_FAILURES: ThrottleRule = ThrottleRule { window_secs: 600, limit: 5, lock_secs: 600 };
+
+/// The seconds a client is told to wait when a cap on open grants refuses a new one.
+pub const GRANT_CAP_RETRY: u64 = 60;
+
+/// The platform words a device may give. The list is closed; anything else is refused.
+pub const PLATFORMS: [&str; 5] = ["macos", "windows", "linux", "android", "other"];
 
 /// The letters of a user code: twenty consonants without the look-alikes of a vowel or a digit.
 pub const USER_CODE_ALPHABET: &[u8; 20] = b"BCDFGHJKLMNPQRSTVWXZ";

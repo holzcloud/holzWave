@@ -58,11 +58,14 @@ pub enum Action {
     SecretsUnlock,
     SecretsLock,
     DeviceAccessChange,
+    DeviceApprove,
+    DeviceDeny,
+    DeviceRevoke,
 }
 
 impl Action {
     /// Every action, in the order of the vocabulary.
-    pub const ALL: [Action; 27] = [
+    pub const ALL: [Action; 30] = [
         Action::BootstrapRedeem,
         Action::SigninOk,
         Action::SigninFail,
@@ -90,6 +93,9 @@ impl Action {
         Action::SecretsUnlock,
         Action::SecretsLock,
         Action::DeviceAccessChange,
+        Action::DeviceApprove,
+        Action::DeviceDeny,
+        Action::DeviceRevoke,
     ];
 
     /// The identifier written to the file.
@@ -122,6 +128,9 @@ impl Action {
             Action::SecretsUnlock => "secrets.unlock",
             Action::SecretsLock => "secrets.lock",
             Action::DeviceAccessChange => "device_access.change",
+            Action::DeviceApprove => "device.approve",
+            Action::DeviceDeny => "device.deny",
+            Action::DeviceRevoke => "device.revoke",
         }
     }
 }
@@ -176,11 +185,15 @@ pub enum DetailKey {
     Slot,
     /// The name of a feature switch, as a static string: `sync` or `remote`.
     Switch,
+    /// The row id of a device, as a number.
+    Device,
+    /// The row id of a device grant, as a number.
+    Grant,
 }
 
 impl DetailKey {
     /// Every key.
-    pub const ALL: [DetailKey; 10] = [
+    pub const ALL: [DetailKey; 12] = [
         DetailKey::Method,
         DetailKey::Step,
         DetailKey::Reason,
@@ -191,6 +204,8 @@ impl DetailKey {
         DetailKey::Days,
         DetailKey::Slot,
         DetailKey::Switch,
+        DetailKey::Device,
+        DetailKey::Grant,
     ];
 
     /// The key as written to the file.
@@ -206,6 +221,8 @@ impl DetailKey {
             DetailKey::Days => "days",
             DetailKey::Slot => "slot",
             DetailKey::Switch => "switch",
+            DetailKey::Device => "device",
+            DetailKey::Grant => "grant",
         }
     }
 }

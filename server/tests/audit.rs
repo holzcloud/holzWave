@@ -65,7 +65,7 @@ fn plain(action: Action) -> Event {
 }
 
 /// The actions of the audit vocabulary, as a literal: a new action must change this list.
-const ACTIONS: [&str; 27] = [
+const ACTIONS: [&str; 30] = [
     "bootstrap.redeem",
     "signin.ok",
     "signin.fail",
@@ -93,6 +93,9 @@ const ACTIONS: [&str; 27] = [
     "secrets.unlock",
     "secrets.lock",
     "device_access.change",
+    "device.approve",
+    "device.deny",
+    "device.revoke",
 ];
 
 #[test]
@@ -117,7 +120,10 @@ fn the_action_vocabulary_is_the_literal_list() {
 #[test]
 fn the_detail_keys_are_a_closed_list_and_values_are_typed() {
     let keys: Vec<&str> = DetailKey::ALL.iter().map(|k| k.as_str()).collect();
-    assert_eq!(keys, ["method", "step", "reason", "role", "state", "provider", "count", "days", "slot", "switch"]);
+    assert_eq!(
+        keys,
+        ["method", "step", "reason", "role", "state", "provider", "count", "days", "slot", "switch", "device", "grant"]
+    );
     let scratch = Scratch::new("audit-detail");
     let (_clock, audit) = audit_in(&scratch, NOW);
     let event = plain(Action::SigninFail)

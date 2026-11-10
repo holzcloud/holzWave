@@ -75,9 +75,54 @@ fn table() -> Vec<Case> {
         case("recovery.use", "POST /auth/unlock with the recovery code of a locked store", "ok", "account", "account", &[]),
         case("recovery.replace", "POST /api/me/recovery", "ok", "account", "account", &[]),
         case("secrets.reset", "POST /api/admin/accounts/{id}/reset-secrets", "ok", "account", "account", &[]),
-        case("secrets.unlock", "POST /auth/unlock with the passphrase of a locked store", "ok", "account", "account", &[]),
-        case("secrets.lock", "the end of the last session of a person whose store is open", "ok", "account", "account", &["signout"]),
-        case("device_access.change", "POST /api/admin/device-access that turns a switch on", "ok", "account", "none", &[]),
+        case(
+            "secrets.unlock",
+            "POST /auth/unlock with the passphrase of a locked store",
+            "ok",
+            "account",
+            "account",
+            &[],
+        ),
+        case(
+            "secrets.lock",
+            "the end of the last session of a person whose store is open",
+            "ok",
+            "account",
+            "account",
+            &["signout"],
+        ),
+        case(
+            "device_access.change",
+            "POST /api/admin/device-access that turns a switch on",
+            "ok",
+            "account",
+            "none",
+            &[],
+        ),
+        case(
+            "device.approve",
+            "POST /api/device/approve with the code of a grant an app started",
+            "ok",
+            "account",
+            "none",
+            &[],
+        ),
+        case(
+            "device.deny",
+            "POST /api/device/deny with the code of a grant an app started",
+            "ok",
+            "account",
+            "none",
+            &[],
+        ),
+        case(
+            "device.revoke",
+            "DELETE /api/me/devices/{id} for a device that a grant made",
+            "ok",
+            "account",
+            "account",
+            &[],
+        ),
     ]
 }
 
@@ -157,8 +202,16 @@ impl<'a> Watch<'a> {
 
     /// The rows written since the last call; the arithmetic of the text and of the rows must agree.
     fn new_rows(&mut self) -> Vec<Row> {
-        let rows = self.env.audit_since(self.seen);
-        let text = self.env.audit_text();
+        // The rows and the text are two reads of a file that a worker of its own may append to between them (a lock line of a
+        // store arrives on its own task), so the rows are read once more after the text: when both reads of the rows agree, no
+        // line came in while the text was read.
+        let (rows, text) = loop {
+            let rows = self.env.audit_since(self.seen);
+            let text = self.env.audit_text();
+            if self.env.audit_since(self.seen).len() == rows.len() {
+                break (rows, text);
+            }
+        };
         assert_eq!(rows.len(), count_new_lines(&self.text, &text), "the rows and the text count the same new lines");
         self.seen += rows.len();
         self.text = text;
@@ -282,7 +335,7 @@ async fn trigger(action: &str) -> (Vec<Row>, Vec<String>) {
     let w = World::start().await;
     let env = &w.env;
     let mut watch = Watch::new(env);
-    let keep = secrets_of(&[&w.alice, &w.bob]);
+    let mut keep = secrets_of(&[&w.alice, &w.bob]);
     match action {
         "signin.ok" => {
             env.sign_in(&w.bob).await;
@@ -427,6 +480,32 @@ async fn trigger(action: &str) -> (Vec<Row>, Vec<String>) {
             watch.new_rows();
             let r = env.api(&admin, "POST", "/api/admin/device-access", Some(&json!({"sync": true}))).await;
             assert_eq!(r.status, 200, "{}", r.text());
+        }
+        "device.approve" | "device.deny" | "device.revoke" => {
+            let admin = fresh_admin(&w).await;
+            let on = env.api(&admin, "POST", "/api/admin/device-access", Some(&json!({"remote": true}))).await;
+            assert_eq!(on.status, 200, "{}", on.text());
+            let started =
+                env.post("/api/device/code", &json!({"name": "Bob's laptop", "platform": "linux"}), None).await;
+            assert_eq!(started.status, 200, "{}", started.text());
+            let (user_code, device_code) = (
+                started.json()["user_code"].as_str().expect("a user code").to_owned(),
+                started.json()["device_code"].as_str().expect("a device code").to_owned(),
+            );
+            keep.extend([user_code.clone(), user_code.replace('-', ""), device_code.clone()]);
+            watch.new_rows();
+            let path = if action == "device.deny" { "/api/device/deny" } else { "/api/device/approve" };
+            let r = env.api(&w.bob_session, "POST", path, Some(&json!({"code": user_code}))).await;
+            assert_eq!(r.status, 204, "{}", r.text());
+            if action == "device.revoke" {
+                let polled = env.post("/api/device/token", &json!({"device_code": device_code}), None).await;
+                assert_eq!(polled.json()["state"], "approved", "{}", polled.text());
+                keep.push(polled.json()["token"].as_str().expect("a token").to_owned());
+                let id = polled.json()["device_id"].as_i64().expect("a device id");
+                watch.new_rows();
+                let r = env.act(&w.bob_session, "DELETE", &format!("/api/me/devices/{id}")).await;
+                assert_eq!(r.status, 204, "{}", r.text());
+            }
         }
         "secrets.lock" => {
             let r = env.sign_out(&w.bob_session).await;

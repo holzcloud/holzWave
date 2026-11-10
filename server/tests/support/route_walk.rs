@@ -128,6 +128,20 @@ pub fn table() -> Vec<Row> {
         row!("GET", "/api/device/me", Device, false, INVALID, 200, None),
         row!("GET", "/api/admin/device-access", Admin, false, INVALID, 200, None),
         row!("POST", "/api/admin/device-access", Admin, true, INVALID, 200, Some("device_access.change")),
+        // The sign-in of an app, and the lists and the revocation of devices. The start and the poll of a grant have no credential:
+        // an empty body is the one refusal they give while their feature is on. The person's routes are in the group of the
+        // gate, the lists and the two revocations of a person and an administrator are not (a device must be revocable whatever
+        // the switches say), and the device's own sign-out is under the gate with the other device routes.
+        row!("POST", "/api/device/code", DeviceOpen, true, BAD, 200, None),
+        row!("POST", "/api/device/token", DeviceOpen, true, BAD, 200, None),
+        row!("POST", "/api/device/lookup", Fresh, true, INVALID, 200, None),
+        row!("POST", "/api/device/approve", Fresh, true, INVALID, 204, Some("device.approve")),
+        row!("POST", "/api/device/deny", Fresh, true, INVALID, 204, Some("device.deny")),
+        row!("DELETE", "/api/device/me", Device, true, INVALID, 204, Some("device.revoke")),
+        row!("GET", "/api/me/devices", Fresh, false, INVALID, 200, None),
+        row!("DELETE", "/api/me/devices/{id}", Fresh, true, INVALID, 204, Some("device.revoke")),
+        row!("GET", "/api/admin/devices", Admin, false, INVALID, 200, None),
+        row!("DELETE", "/api/admin/devices/{id}", Admin, true, INVALID, 204, Some("device.revoke")),
     ]
 }
 

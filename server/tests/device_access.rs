@@ -634,5 +634,5 @@ async fn a_change_is_announced_to_a_subscriber_only_when_a_feature_really_change
 #[test]
 fn the_action_vocabulary_lists_the_switch_change() {
     assert!(Action::ALL.iter().any(|a| a.as_str() == "device_access.change"));
-    assert_eq!(Action::ALL.len(), 27);
+    assert_eq!(Action::ALL.len(), 30);
 }
