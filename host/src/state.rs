@@ -1000,7 +1000,24 @@ pub struct AppCore {
     /// The `rev` of the last view built. Counted under the windows lock, so the order of the revs is the order of the
     /// states of the layouts.
     view_rev: AtomicU64,
+    /// The panes that run outside the layout and count against the same cap ([`AppCore::take_outside_pane`]): the sessions of
+    /// a server, which no window shows. A place is taken with the layouts locked, so a layout and a session cannot both take
+    /// the last place.
+    outside_panes: AtomicUsize,
     me: Weak<AppCore>,
+}
+
+/// A place under the pane cap for a pane that is in no window ([`AppCore::take_outside_pane`]). The place is given back
+/// when this is dropped.
+pub struct OutsidePane {
+    core: Arc<AppCore>,
+}
+
+impl Drop for OutsidePane {
+    fn drop(&mut self) {
+        // Giving a place back needs no lock: a check that still sees it taken only refuses a little early.
+        self.core.outside_panes.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// What the single-answer path says to `wsh ai`: the request is answered as a stream (see `ai_ask`), never as one line.
@@ -1292,6 +1309,7 @@ impl AppCore {
                 stopping: AtomicUsize::new(0),
                 image_animation: AtomicBool::new(true),
                 view_rev: AtomicU64::new(0),
+                outside_panes: AtomicUsize::new(0),
                 me: me.clone(),
             }
         });
@@ -2128,11 +2146,43 @@ impl AppCore {
     /// Without a cap the layout's own limits decide, as they always did.
     fn room_for_a_pane(&self, set: &WindowSet) -> Result<(), String> {
         match self.host.limits().max_panes {
-            Some(cap) if set.pane_count() >= cap => {
+            Some(cap) if set.pane_count() + self.outside_panes.load(Ordering::SeqCst) >= cap => {
                 Err(format!("this server allows {cap} panes per person; close one to open another"))
             }
             _ => Ok(()),
         }
+    }
+
+    /// A place under the pane cap for a pane that no window shows (a session of a server). The cap counts the layout's panes
+    /// and these together, so the two kinds cannot together pass it; `None` when the cap is reached. Without a cap of the
+    /// host there is no limit here and the caller's own bound holds. The place is given back when the guard is dropped.
+    pub fn take_outside_pane(&self) -> Option<OutsidePane> {
+        let core = self.me.upgrade()?;
+        let set = lock(&self.windows);
+        if let Some(cap) = self.host.limits().max_panes
+            && set.pane_count() + self.outside_panes.load(Ordering::SeqCst) >= cap
+        {
+            return None;
+        }
+        self.outside_panes.fetch_add(1, Ordering::SeqCst);
+        drop(set);
+        Some(OutsidePane { core })
+    }
+
+    /// How many panes run outside the layout ([`AppCore::take_outside_pane`]).
+    pub fn outside_pane_count(&self) -> usize {
+        self.outside_panes.load(Ordering::SeqCst)
+    }
+
+    /// How a session of a server starts: the person's shell, environment and setting of the scrollback and the pictures,
+    /// as any pane of the window starts, but a pane that draws for no page ([`PaneSpec::headless`]) in the person's home
+    /// directory, and with none of the variables `wsh` finds the app by (no socket, no token, no `wsh` folder in `PATH`:
+    /// a session is a shell, and the server holds no `wsh` socket for it).
+    pub fn session_pane_spec(&self, cols: u16, rows: u16) -> PaneSpec {
+        let mut spec = self.pane_spec(cols, rows, (0, 0));
+        spec.headless = true;
+        spec.cwd = shell_home(&*self.host).filter(|home| home.is_dir());
+        spec
     }
 
     /// Split the focused pane; the new pane gets the focus and starts where the focused pane is. At the pane limits
@@ -8616,6 +8666,39 @@ mod tests {
         println!("cap 1 | panes before: 1 | split | {outcome:?}");
         assert_eq!(outcome.expect_err("refused"), "this server allows 1 panes per person; close one to open another");
         assert_eq!(cap_state(&core), before);
+    }
+
+    #[test]
+    fn cap_a_pane_outside_the_layout_counts_with_the_layout_and_gives_its_place_back() {
+        let dir = Scratch::new("cap-outside");
+        let (core, _host) = core_capped(&dir, cap_of(3));
+        // One pane in the layout and room for two more, which a session of a server may take.
+        let first = core.take_outside_pane().expect("a place");
+        let second = core.take_outside_pane().expect("a place");
+        assert_eq!(core.outside_pane_count(), 2);
+        assert!(core.take_outside_pane().is_none(), "the cap is reached: 1 pane and 2 sessions");
+        // The window cannot take the place a session holds, and a refused request changes nothing.
+        let before = cap_state(&core);
+        assert_eq!(core.split_in(MAIN_WINDOW, true).expect_err("refused"), cap_sentence(3));
+        assert_eq!(cap_state(&core), before);
+        // A place that is given back is a place again, for either kind.
+        drop(first);
+        assert_eq!(core.outside_pane_count(), 1);
+        assert!(core.split_in(MAIN_WINDOW, true).is_ok());
+        assert!(core.take_outside_pane().is_none(), "the window took it");
+        drop(second);
+        assert!(core.take_outside_pane().is_some());
+    }
+
+    #[test]
+    fn a_session_spec_is_headless_in_the_home_and_carries_no_wsh_variable() {
+        let dir = Scratch::new("session-spec");
+        let (core, _host) = core_capped(&dir, crate::seams::HostLimits::default());
+        let spec = core.session_pane_spec(100, 30);
+        assert!(spec.headless);
+        assert_eq!((spec.cols, spec.rows), (100, 30));
+        assert!(spec.env.is_empty(), "no socket, no token and no pane number: {:?}", spec.env);
+        assert!(!spec.blank && spec.ssh.is_none());
     }
 
     #[test]

@@ -550,6 +550,20 @@ mod taps {
     }
 
     #[test]
+    fn a_tap_says_how_many_rows_of_scrollback_exist_so_a_client_can_tell_that_older_lines_were_left_out() {
+        let probe = Probe::default();
+        let pane = start(headless("i=0; while [ $i -lt 100 ]; do echo \"n $i\"; i=$((i+1)); done; echo done; sleep 60"), &probe);
+        wait_for_pane(&pane, "done");
+        // 101 lines on a screen of 24 rows: 77 rows have scrolled off (the prompt-less shell leaves no blank row).
+        let all = pane.attach_tap(10_000, SNAPSHOT, QUEUE).expect("attach");
+        let history = all.history_rows;
+        assert!((75..=80).contains(&history), "about 77 rows of scrollback, got {history}");
+        let none = pane.attach_tap(0, SNAPSHOT, QUEUE).expect("attach");
+        assert_eq!(none.history_rows, history, "the count does not depend on the tail that was asked for");
+        close(pane);
+    }
+
+    #[test]
     fn a_tap_that_reads_slowly_but_within_its_queue_loses_nothing() {
         let probe = Probe::default();
         let pane = start(headless(&paced_numbers(1200)), &probe);

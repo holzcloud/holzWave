@@ -572,6 +572,101 @@ fn config_the_picture_cap_has_its_row_in_the_list_of_limits_with_the_default_and
 }
 
 #[test]
+fn config_the_four_remote_keys_have_their_defaults_and_are_read_from_the_file() {
+    let s = setup();
+    let p = prepare_json(&s, &base()).expect("minimal file");
+    assert_eq!((p.remote.attach_tail_lines, p.remote.history_max_lines), (1000, 10_000));
+    assert_eq!((p.remote.snapshot_max_bytes, p.remote.writer_timeout), (4 * 1024 * 1024, Duration::from_secs(30)));
+    assert_eq!(p.remote.session_limits(), holzwave_server::worker::sessions::SessionLimits::DEFAULT);
+
+    let mut file = base();
+    set(&mut file, "remote", json!({
+        "attach_tail_lines": 200, "history_max_lines": 5000, "snapshot_max_bytes": 1048576, "writer_timeout": "45s"
+    }));
+    let p = prepare_json(&s, &file).expect("a file with the four keys");
+    let limits = p.remote.session_limits();
+    assert_eq!((limits.attach_tail_lines, limits.history_max_lines), (200, 5000));
+    assert_eq!((limits.snapshot_max_bytes, limits.writer_timeout_ms), (1_048_576, 45_000));
+}
+
+#[test]
+fn config_each_remote_key_is_refused_outside_its_bounds_at_both_ends_with_its_key_and_the_bounds() {
+    let s = setup();
+    for (key, low, high, sentence_low, sentence_high) in [
+        ("remote.attach_tail_lines", None, Some(json!(1_000_001)), "", "remote.attach_tail_lines is 1000001 but must be between 0 and 1000000"),
+        ("remote.history_max_lines", None, Some(json!(1_000_001)), "", "remote.history_max_lines is 1000001 but must be between 0 and 1000000"),
+        (
+            "remote.snapshot_max_bytes",
+            Some(json!(65_535)),
+            Some(json!(16_777_217)),
+            "remote.snapshot_max_bytes is 65535 but must be between 65536 and 16777216",
+            "remote.snapshot_max_bytes is 16777217 but must be between 65536 and 16777216",
+        ),
+        (
+            "remote.writer_timeout",
+            Some(json!("4s")),
+            Some(json!("11m")),
+            "remote.writer_timeout is 4s but must be between 5s and 10m",
+            "remote.writer_timeout is 11m but must be between 5s and 10m",
+        ),
+    ] {
+        for (value, sentence) in [low.map(|v| (v, sentence_low)), high.map(|v| (v, sentence_high))].into_iter().flatten() {
+            let mut file = base();
+            set(&mut file, key, value.clone());
+            let error = prepare_json(&s, &file).expect_err(key);
+            assert_eq!(error.sentence(), sentence, "{key} = {value}");
+        }
+    }
+    // The ends themselves are inside.
+    for (key, value) in [
+        ("remote.snapshot_max_bytes", json!(65_536)),
+        ("remote.snapshot_max_bytes", json!(16_777_216)),
+        ("remote.writer_timeout", json!("5s")),
+        ("remote.writer_timeout", json!("10m")),
+        ("remote.attach_tail_lines", json!(0)),
+    ] {
+        let mut file = base();
+        set(&mut file, key, value.clone());
+        prepare_json(&s, &file).unwrap_or_else(|e| panic!("{key} = {value} is inside: {e}"));
+    }
+}
+
+#[test]
+fn config_a_default_tail_above_the_history_cap_is_a_contradiction_and_a_remote_key_must_have_the_right_type() {
+    let s = setup();
+    let mut file = base();
+    set(&mut file, "remote.attach_tail_lines", json!(2000));
+    set(&mut file, "remote.history_max_lines", json!(1000));
+    let error = prepare_json(&s, &file).expect_err("a tail larger than its cap");
+    assert!(error.sentence().contains("remote.attach_tail_lines 2000 is larger than remote.history_max_lines 1000"), "{error}");
+    for (key, value) in [
+        ("remote.writer_timeout", json!(30)),
+        ("remote.writer_timeout", json!("30")),
+        ("remote.attach_tail_lines", json!("many")),
+        ("remote.snapshot_max_bytes", json!(-1)),
+        ("remote.unlimited", json!(true)),
+    ] {
+        let mut file = base();
+        set(&mut file, key, value.clone());
+        assert!(prepare_json(&s, &file).is_err(), "{key} = {value} must not be accepted");
+    }
+}
+
+#[test]
+fn config_the_remote_keys_have_their_rows_in_the_list_of_limits() {
+    let rows = limits::all_rows();
+    for (key, default, min, max) in [
+        ("remote.attach_tail_lines", "1000", "0", "1000000"),
+        ("remote.history_max_lines", "10000", "0", "1000000"),
+        ("remote.snapshot_max_bytes", "4194304", "65536", "16777216"),
+        ("remote.writer_timeout", "30s", "5s", "10m"),
+    ] {
+        let row = rows.iter().find(|r| r.key == key).unwrap_or_else(|| panic!("a row for {key}"));
+        assert_eq!((row.default.as_str(), row.min.as_str(), row.max.as_str()), (default, min, max), "{key}");
+    }
+}
+
+#[test]
 fn config_an_unknown_key_is_refused_at_every_level() {
     let s = setup();
     let mut full = base();

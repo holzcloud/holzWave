@@ -167,6 +167,18 @@ fn example_problems(config_md: &str) -> Vec<String> {
         }
         Err(e) => problems.push(format!("server/ceiling.json is refused: {}", e.sentence())),
     }
+    match judge(&documented_example(config_md, "server/remote.json")) {
+        Ok(p) => {
+            let limits = p.remote.session_limits();
+            if (limits.attach_tail_lines, limits.history_max_lines) != (500, 5000) {
+                problems.push("server/remote.json does not set the tail of an attach to 500 and the history cap to 5000".to_owned());
+            }
+            if (limits.snapshot_max_bytes, limits.writer_timeout_ms) != (2 * 1024 * 1024, 60_000) {
+                problems.push("server/remote.json does not set the snapshot cap to 2 MiB and the writer timeout to a minute".to_owned());
+            }
+        }
+        Err(e) => problems.push(format!("server/remote.json is refused: {}", e.sentence())),
+    }
     match judge(&proxy) {
         Ok(p) => {
             if !matches!(&p.tls, TlsSetup::Proxy { trusted_proxies } if trusted_proxies.len() == 2) {
@@ -246,6 +258,7 @@ fn the_example_check_rejects_a_mutated_example() {
         text.replacen(&first, &format!("<!-- example: server/files.json -->\n```json\n{broken}\n```"), 1),
         mutate("\"mode\": \"files\"", "\"mode\": \"none\""),
         mutate("\"idle\": \"30d\"", "\"idle\": \"400d\""),
+        mutate("\"writer_timeout\": \"1m\"", "\"writer_timeout\": \"1s\""),
         mutate(&oidc.lines().nth(3).expect("a line").to_owned(), "  \"issuer\": \"http://login.example.net\","),
         mutate(&proxy, &proxy.replacen("[\"10.0.0.0/8\", \"fd00::/8\"]", "[]", 1)),
         mutate(&acme, &acme.replacen("\"terms_agreed\": false", "\"terms_agreed\": true", 1)),
@@ -337,7 +350,7 @@ fn loader_keys() -> BTreeSet<String> {
         "tls": {"mode": "files", "cert_file": "/certs/cert.pem", "key_file": "/certs/key.pem"},
         "auth": {"passkey": true}
     });
-    let sections = ["tls", "auth", "sessions", "limits", "workers", "upload", "transport", "device_access", "devices"];
+    let sections = ["tls", "auth", "sessions", "limits", "workers", "upload", "transport", "device_access", "devices", "remote"];
     let mut keys = BTreeSet::new();
     for key in accepted_keys_at(&base, "") {
         if !sections.contains(&key.as_str()) {
@@ -357,7 +370,7 @@ fn loader_keys() -> BTreeSet<String> {
             keys.insert(format!("tls.{name}"));
         }
     }
-    for section in ["auth", "sessions", "limits", "workers", "upload", "transport", "device_access", "devices"] {
+    for section in ["auth", "sessions", "limits", "workers", "upload", "transport", "device_access", "devices", "remote"] {
         for key in accepted_keys_at(&base, section) {
             // `workers.mode` exists only in a build with the in-process workers; it is not a key of the image.
             if section == "workers" && key == "mode" {
@@ -424,7 +437,7 @@ fn default_problems(config_md: &str) -> Vec<String> {
     for row in section_from(config_md, "## The server configuration").lines().filter_map(cells) {
         let (Some(key), Some(default)) = (row.first().and_then(|c| code_span(c)), row.get(1)) else { continue };
         let scoped = ["listen", "data_dir", "runtime_dir"].contains(&key.as_str())
-            || ["sessions.", "limits.", "workers.", "upload.", "transport.", "devices."].iter().any(|p| key.starts_with(p));
+            || ["sessions.", "limits.", "workers.", "upload.", "transport.", "devices.", "remote."].iter().any(|p| key.starts_with(p));
         let default = default.trim_matches('`');
         if !scoped || default.starts_with("none") || default.is_empty() {
             continue;

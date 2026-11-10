@@ -68,6 +68,20 @@ pub const MAX_SCROLLBACK_LINES: u32 = 10_000;
 /// The most MiB of pictures one pane of a worker keeps (0 turns pictures off).
 pub const MAX_IMAGE_MIB: u32 = 64;
 
+/// The rows of scrollback that come with the screen when a client attaches to a session on the server and does not say how
+/// many it wants.
+pub const REMOTE_ATTACH_TAIL_LINES: u32 = 1000;
+
+/// The most rows of scrollback any attach to a session brings, whatever the client asks. The session's own scrollback
+/// (`workers.max_scrollback_lines`) is the other limit, and the smaller holds.
+pub const REMOTE_HISTORY_MAX_LINES: u32 = 10_000;
+
+/// The most bytes a snapshot of a session may have. A larger one is refused, never cut.
+pub const REMOTE_SNAPSHOT_MAX_BYTES: u32 = 4 * 1024 * 1024;
+
+/// How long the writer of a session may give no sign of life before the right to write is free.
+pub const REMOTE_WRITER_TIMEOUT: Duration = secs(30);
+
 /// The `RLIMIT_NPROC` of a worker: the most processes one person may have.
 pub const WORKER_NPROC: u64 = 1024;
 
@@ -227,6 +241,15 @@ pub const IMAGE_SPEC: Spec<u32> = Spec::new("workers.max_image_mib", MAX_IMAGE_M
 pub const NPROC_SPEC: Spec<u64> = Spec::new("workers.nproc", WORKER_NPROC, 8, 4_194_304);
 /// The open-file cap of a worker.
 pub const NOFILE_SPEC: Spec<u64> = Spec::new("workers.nofile", WORKER_NOFILE, 16, 1_048_576);
+/// The rows of scrollback an attach brings by default.
+pub const ATTACH_TAIL_SPEC: Spec<u32> = Spec::new("remote.attach_tail_lines", REMOTE_ATTACH_TAIL_LINES, 0, 1_000_000);
+/// The most rows of scrollback an attach may bring.
+pub const HISTORY_MAX_SPEC: Spec<u32> = Spec::new("remote.history_max_lines", REMOTE_HISTORY_MAX_LINES, 0, 1_000_000);
+/// The largest snapshot, in bytes.
+pub const SNAPSHOT_MAX_SPEC: Spec<u32> =
+    Spec::new("remote.snapshot_max_bytes", REMOTE_SNAPSHOT_MAX_BYTES, 64 * 1024, 16 * 1024 * 1024);
+/// The silence after which the writer of a session loses the right to write.
+pub const WRITER_TIMEOUT_SPEC: Spec<Duration> = Spec::new("remote.writer_timeout", REMOTE_WRITER_TIMEOUT, secs(5), minutes(10));
 /// The upload cap.
 pub const UPLOAD_SPEC: Spec<u64> = Spec::new("upload.max_bytes", UPLOAD_BYTES, KIB, 16 * GIB);
 
@@ -484,6 +507,10 @@ pub fn all_rows() -> Vec<Row> {
         IMAGE_SPEC.row(),
         NPROC_SPEC.row(),
         NOFILE_SPEC.row(),
+        ATTACH_TAIL_SPEC.row(),
+        HISTORY_MAX_SPEC.row(),
+        SNAPSHOT_MAX_SPEC.row(),
+        WRITER_TIMEOUT_SPEC.row(),
         UPLOAD_SPEC.row(),
     ]);
     rows
@@ -534,6 +561,10 @@ mod tests {
         IMAGE_SPEC.check(MAX_IMAGE_MIB).expect("pictures");
         NPROC_SPEC.check(WORKER_NPROC).expect("nproc");
         NOFILE_SPEC.check(WORKER_NOFILE).expect("nofile");
+        ATTACH_TAIL_SPEC.check(REMOTE_ATTACH_TAIL_LINES).expect("attach tail");
+        HISTORY_MAX_SPEC.check(REMOTE_HISTORY_MAX_LINES).expect("history");
+        SNAPSHOT_MAX_SPEC.check(REMOTE_SNAPSHOT_MAX_BYTES).expect("snapshot");
+        WRITER_TIMEOUT_SPEC.check(REMOTE_WRITER_TIMEOUT).expect("writer timeout");
         UPLOAD_SPEC.check(UPLOAD_BYTES).expect("upload");
         for row in all_rows() {
             assert!(!row.default.is_empty() && !row.min.is_empty() && !row.max.is_empty(), "{row:?}");

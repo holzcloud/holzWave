@@ -1309,12 +1309,22 @@ Rules for the whole file:
 | `devices.idle` | 90d | 1d to 365d | A device token (the sign-in of the app on a phone or a desktop) ends when its device has not been seen for this long. Every request renews it, written at most once a minute. A person or an administrator can end one at once. |
 | `device_access.sync` | none, open | `true` or `false` | The operator's ceiling over the sync target. Not written, or `true`: an administrator may turn the switch on in the People dialog. `false`: the sync target cannot be turned on, and its paths answer as paths that do not exist. The key never turns the feature on: the switch is off until an administrator turns it on. |
 | `device_access.remote` | none, open | `true` or `false` | The same ceiling for sessions that live on the server and that the app attaches to. |
+| `remote.attach_tail_lines` | 1000 | 0 to 1000000 | The rows of scrollback that come with the screen when an app attaches to a session on the server and does not say how many it wants. `0` sends the screen alone. May not be larger than `remote.history_max_lines`. |
+| `remote.history_max_lines` | 10000 | 0 to 1000000 | The most rows of scrollback any attach brings, however many the app asks for. The scrollback of the session itself (`workers.max_scrollback_lines`, or the person's own smaller `scrollback_lines`) is the other limit, and the smaller of the two holds. An app that scrolls up to older lines attaches again with a larger tail; it can never get more than this. |
+| `remote.snapshot_max_bytes` | 4194304 | 65536 to 16777216 | The most bytes of one snapshot, the screen with its tail as an app is sent them. A snapshot over it is refused whole, never cut; the session runs on, and the app may ask again for a shorter tail. |
+| `remote.writer_timeout` | 30s | 5s to 10m | A session has one writer and any number of watchers. A writer that gave no sign of life for this long loses the right to write: everyone attached sees `free`, and nobody gets the right by itself, a watcher takes it with an explicit action. An attached app sends a sign of life every 10 seconds. |
 
 The two device features, the server as a sync target and sessions that live on the server for the app, are off. An administrator
 turns each on in the People dialog (it asks for a recent sign-in, and every change writes one line `device_access.change` to the
 audit log that names the switch and the new value). While a feature is off, every path that belongs to it answers exactly as a
 path that was never there, before any credential is read, so a probe learns nothing. `device_access` is the ceiling that the
 operator keeps over the switches; it can only forbid.
+
+A session that lives on the server is a shell in the person's own worker, outside every window. It keeps running while no app is
+attached, and the output made meanwhile is in the screen and the scrollback of the next attach. It ends when its program ends, when
+a person ends it, and when its worker ends: after `workers.idle_timeout`, and when the server stops or restarts. A session counts
+against `workers.max_panes` together with the panes of the person's browser window. The four `remote` keys bound what an app may
+ask of a session; they apply to the next attach and the next session, and the server reads them when it starts.
 
 The `limits` section overrides any of these; every key is optional and has a default and a bound, and a pair that
 contradicts itself is refused (`max_connections_per_address` above `max_connections`, `ws_small_command_bytes` above
@@ -1446,6 +1456,31 @@ the People dialog, whatever an administrator says, and a device token that is un
   },
   "devices": {
     "idle": "30d"
+  }
+}
+```
+
+A server that lets an app attach with a shorter default tail, caps one snapshot at 2 MiB and gives the writer a minute before the
+right to write is free:
+
+<!-- example: server/remote.json -->
+```json
+{
+  "public_url": "https://holzwave.example.net",
+  "tls": {
+    "mode": "files",
+    "cert_file": "/etc/holzwave/tls/tls.crt",
+    "key_file": "/etc/holzwave/tls/tls.key"
+  },
+  "auth": {
+    "passkey": true,
+    "password_totp": true
+  },
+  "remote": {
+    "attach_tail_lines": 500,
+    "history_max_lines": 5000,
+    "snapshot_max_bytes": 2097152,
+    "writer_timeout": "1m"
   }
 }
 ```

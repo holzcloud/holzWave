@@ -916,6 +916,13 @@ pub trait TerminalEngine {
     fn snapshot_vt(&mut self, _tail_rows: usize, _max_bytes: usize) -> Result<Vec<u8>> {
         Err(Error::Unsupported("snapshot_vt".into()))
     }
+
+    /// How many rows of scrollback exist now, above the screen: the most `tail_rows` of [`TerminalEngine::snapshot_vt`]
+    /// can bring. The session host of a server asks it to tell a client whether older lines exist beyond the tail it was
+    /// sent. An engine that does not know says `0`.
+    fn scrollback_rows(&mut self) -> usize {
+        0
+    }
 }
 
 #[cfg(test)]

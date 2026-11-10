@@ -5,3 +5,4 @@ pub mod files;
 pub mod lease;
 pub mod runtime;
 pub mod secretstore;
+pub mod sessions;

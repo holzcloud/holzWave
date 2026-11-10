@@ -2284,6 +2284,10 @@ impl TerminalEngine for GhosttyEngine {
         self.snapshot_vt_range(tail_rows, max_bytes)
     }
 
+    fn scrollback_rows(&mut self) -> usize {
+        self.terminal.scrollback_rows().unwrap_or(0)
+    }
+
     fn set_image_animation(&mut self, enabled: bool) {
         self.animation = enabled;
     }

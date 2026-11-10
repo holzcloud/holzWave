@@ -429,6 +429,9 @@ pub struct Config {
     /// The devices that sign in to the server.
     #[serde(default)]
     pub devices: Devices,
+    /// The sessions that live on the server for devices to attach to.
+    #[serde(default)]
+    pub remote: Remote,
 }
 
 fn default_listen() -> String {
@@ -668,6 +671,45 @@ impl Default for Devices {
     }
 }
 
+/// The `remote` section: what a device may ask of a session that lives on the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Remote {
+    /// The rows of scrollback that come with the screen when a device attaches and does not say how many it wants.
+    pub attach_tail_lines: u32,
+    /// The most rows of scrollback any attach brings; the session's own scrollback is the other limit.
+    pub history_max_lines: u32,
+    /// The largest snapshot a session sends, in bytes; a larger one is refused.
+    pub snapshot_max_bytes: u32,
+    /// How long the writer of a session may be silent before the right to write is free.
+    #[serde(deserialize_with = "duration")]
+    pub writer_timeout: Duration,
+}
+
+impl Default for Remote {
+    fn default() -> Remote {
+        Remote {
+            attach_tail_lines: limits::REMOTE_ATTACH_TAIL_LINES,
+            history_max_lines: limits::REMOTE_HISTORY_MAX_LINES,
+            snapshot_max_bytes: limits::REMOTE_SNAPSHOT_MAX_BYTES,
+            writer_timeout: limits::REMOTE_WRITER_TIMEOUT,
+        }
+    }
+}
+
+impl Remote {
+    /// The numbers a worker's session host runs with. The writer timeout is bounded by the key's own range, which is far
+    /// below what a `u32` of milliseconds holds.
+    pub fn session_limits(&self) -> crate::worker::sessions::SessionLimits {
+        crate::worker::sessions::SessionLimits {
+            attach_tail_lines: self.attach_tail_lines,
+            history_max_lines: self.history_max_lines,
+            snapshot_max_bytes: self.snapshot_max_bytes,
+            writer_timeout_ms: u32::try_from(self.writer_timeout.as_millis()).unwrap_or(u32::MAX),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The file system, as far as `prepare` needs it
 // ---------------------------------------------------------------------------------------------------------------------
@@ -775,6 +817,8 @@ pub struct Prepared {
     pub device_access: DeviceAccess,
     /// The devices.
     pub devices: Devices,
+    /// The remote sessions.
+    pub remote: Remote,
     /// The server key.
     pub key: ServerKey,
 }
@@ -832,6 +876,7 @@ pub fn prepare(env: &Env, probe: &dyn Probe) -> Result<Prepared, Refusal> {
     let limits = Limits::resolve(&config.limits)?;
     let upload = check_upload(&config.upload)?;
     let devices = check_devices(&config.devices)?;
+    let remote = check_remote(&config.remote)?;
     crate::http::transport::check(config.transport.compression).map_err(Refusal::new)?;
 
     let key = probe.load_key(&key_path)?;
@@ -851,6 +896,7 @@ pub fn prepare(env: &Env, probe: &dyn Probe) -> Result<Prepared, Refusal> {
         transport: config.transport,
         device_access: config.device_access,
         devices,
+        remote,
         key,
     })
 }
@@ -1043,6 +1089,21 @@ fn check_sessions(sessions: &Sessions) -> Result<Sessions, Refusal> {
 fn check_devices(devices: &Devices) -> Result<Devices, Refusal> {
     limits::DEVICE_IDLE_SPEC.check(devices.idle)?;
     Ok(*devices)
+}
+
+/// The four numbers of the remote sessions, each inside its bounds, and a tail that is not larger than the history cap.
+fn check_remote(remote: &Remote) -> Result<Remote, Refusal> {
+    limits::ATTACH_TAIL_SPEC.check(remote.attach_tail_lines)?;
+    limits::HISTORY_MAX_SPEC.check(remote.history_max_lines)?;
+    limits::SNAPSHOT_MAX_SPEC.check(remote.snapshot_max_bytes)?;
+    limits::WRITER_TIMEOUT_SPEC.check(remote.writer_timeout)?;
+    if remote.attach_tail_lines > remote.history_max_lines {
+        return Err(Refusal::new(format!(
+            "remote.attach_tail_lines {} is larger than remote.history_max_lines {}; the default tail cannot exceed the cap",
+            remote.attach_tail_lines, remote.history_max_lines
+        )));
+    }
+    Ok(*remote)
 }
 
 /// The upload size, and a directory that stays inside the home.

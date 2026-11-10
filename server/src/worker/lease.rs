@@ -219,6 +219,12 @@ impl Lease {
         Ok(self.settle())
     }
 
+    /// The time at which a holder that stays silent loses the lease, or `None` while nobody holds it. The holder's next
+    /// sign of life moves it later, so it is the earliest time a [`Lease::sweep`] can free anything.
+    pub fn deadline(&self) -> Option<u64> {
+        self.holder.map(|_| self.last_life.saturating_add(self.timeout_ms))
+    }
+
     /// The clock has reached `now`: a holder that was silent for the whole timeout loses the lease and nobody gets it.
     pub fn sweep(&mut self, now: u64) -> Changes {
         if self.holder.is_some() && now.saturating_sub(self.last_life) >= self.timeout_ms {
@@ -442,6 +448,19 @@ mod tests {
         lease.takeover(B, 20_000).expect("takeover");
         assert!(lease.sweep(49_999).is_empty());
         assert_eq!(lease.sweep(50_000).len(), 3);
+    }
+
+    #[test]
+    fn the_deadline_is_the_last_sign_of_life_plus_the_timeout_while_somebody_holds() {
+        let mut lease = Lease::new(100);
+        assert_eq!(lease.deadline(), None);
+        lease.attach(A, true, 40);
+        assert_eq!(lease.deadline(), Some(140));
+        lease.beat(A, 90);
+        assert_eq!(lease.deadline(), Some(190));
+        lease.sweep(190);
+        assert_eq!(lease.deadline(), None);
+        assert_eq!(Lease::new(u64::MAX).deadline(), None, "nobody holds it");
     }
 
     #[test]

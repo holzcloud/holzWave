@@ -109,9 +109,9 @@ const MAX_SEARCH_BYTES: usize = 4096;
 const MAX_KEY_FIELD_BYTES: usize = 256;
 
 /// The grid is clamped to this range before anything is built from it (T-02-41).
-const MIN_COLS: u16 = 2;
-const MIN_ROWS: u16 = 1;
-const MAX_DIM: u16 = 1000;
+pub const MIN_COLS: u16 = 2;
+pub const MIN_ROWS: u16 = 1;
+pub const MAX_DIM: u16 = 1000;
 
 /// How long `spawn` waits for the engine thread to report that the shell started. Starting a PTY takes
 /// milliseconds; this only stops a caller (possibly the main thread) from hanging forever.
@@ -441,6 +441,9 @@ pub struct Tap {
     /// The grid `(cols, rows)` of the pane at the instant of the snapshot: the client sets its own grid to it before it
     /// feeds the snapshot.
     pub size: (u16, u16),
+    /// The rows of scrollback that existed at the instant of the snapshot, above the screen. A snapshot that brought fewer
+    /// rows than this left older ones out: asking again with a larger tail brings them.
+    pub history_rows: usize,
     pub id: TapId,
     pub rx: TapReceiver,
 }
@@ -1424,13 +1427,14 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
         }
         let snapshot = self.engine.snapshot_vt(tail_rows, max_bytes)?;
         let size = self.engine.size()?;
+        let history_rows = self.engine.scrollback_rows();
         let shared = Arc::new(TapShared {
             state: Mutex::new(TapState::default()),
             ready: Condvar::new(),
             receiver_gone: AtomicBool::new(false),
         });
         self.taps.push(TapSink { id, shared: shared.clone(), bound: queue_bytes });
-        Ok(Tap { snapshot, size, id, rx: TapReceiver { shared } })
+        Ok(Tap { snapshot, size, history_rows, id, rx: TapReceiver { shared } })
     }
 
     fn key(&mut self, dom: &DomKey) {
