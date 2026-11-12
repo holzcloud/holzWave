@@ -470,7 +470,7 @@ impl ServerRuntime {
             Ok(Poll::Denied) => Ok(SignInPoll { state: "denied", interval }),
             Ok(Poll::Expired) => Ok(SignInPoll { state: "expired", interval }),
             Ok(Poll::TooMany) => Ok(SignInPoll { state: "too_many", interval }),
-            Ok(Poll::Approved { token, device_id, .. }) => {
+            Ok(Poll::Granted { token, device_id, .. }) => {
                 self.keep_sign_in(&pending, &token, &device_id)?;
                 Ok(SignInPoll { state: "approved", interval })
             }

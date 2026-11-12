@@ -276,7 +276,7 @@ pub enum Poll {
     /// The server refuses more devices (the person has too many, or too many grants are open).
     TooMany,
     /// The person approved. The token is the one credential of this device.
-    Approved { token: Token, device_id: String, expires_at: String },
+    Granted { token: Token, device_id: String, expires_at: String },
 }
 
 /// What the server says about this device and about its own switches.
@@ -451,7 +451,7 @@ impl Client {
                 if !plain_text(&expires_at) {
                     return Err(Fault::Protocol.into());
                 }
-                Poll::Approved { token, device_id, expires_at }
+                Poll::Granted { token, device_id, expires_at }
             }
             _ => return Err(Fault::Protocol.into()),
         })
@@ -919,7 +919,7 @@ mod tests {
         let peer = poll_reply(&approved);
         let (client, mut grant, t0) = a_grant_at(&peer);
         match client.poll_at(&mut grant, t0 + Duration::from_secs(5)).unwrap() {
-            Poll::Approved { token, device_id, expires_at } => {
+            Poll::Granted { token, device_id, expires_at } => {
                 assert_eq!((device_id.as_str(), expires_at.as_str()), ("17", "2027-02-10T12:00:00Z"));
                 assert_eq!(token.bearer().as_str(), format!("Bearer {TOKEN}"));
                 assert_eq!(format!("{token:?}"), "Token(..)");
@@ -929,7 +929,7 @@ mod tests {
         let text_id = approved.replace("17", "\"abc-1\"");
         let peer = poll_reply(&text_id);
         let (client, mut grant, t0) = a_grant_at(&peer);
-        assert!(matches!(client.poll_at(&mut grant, t0 + Duration::from_secs(5)).unwrap(), Poll::Approved { device_id, .. } if device_id == "abc-1"));
+        assert!(matches!(client.poll_at(&mut grant, t0 + Duration::from_secs(5)).unwrap(), Poll::Granted { device_id, .. } if device_id == "abc-1"));
 
         let bad: Vec<(&str, String)> = vec![
             ("a token of the wrong shape", approved.replace(TOKEN, "hwd_short")),

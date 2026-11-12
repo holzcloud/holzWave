@@ -121,7 +121,7 @@ async fn tracer_the_client_signs_in_at_the_real_server_reads_who_it_is_and_signs
 
     // 5. The next poll that is allowed gets the token, once.
     let (grant, answer) = poll_after(&origin, grant, t0, 12).await;
-    let Poll::Approved {
+    let Poll::Granted {
         token,
         device_id,
         expires_at,
@@ -392,7 +392,7 @@ async fn no_file_of_the_server_and_no_error_of_the_client_holds_the_token_or_the
     assert_eq!(approve(&env, &alice, &user_code).await.status, 204);
     env.clock.advance(POLL_INTERVAL);
     let (_grant, answer) = poll_after(&origin, grant, t0, 6).await;
-    let Poll::Approved { token, .. } = answer.expect("a poll") else {
+    let Poll::Granted { token, .. } = answer.expect("a poll") else {
         panic!("approved")
     };
     let token_text = token.bearer().as_str().trim_start_matches("Bearer ").to_owned();
