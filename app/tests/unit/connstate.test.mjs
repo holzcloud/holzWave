@@ -1,9 +1,17 @@
 // The words and the reading of connections on the page (connstate.ts): no DOM is needed.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
-  connDot, connSummary, connText, opensHere, paneConns, readConnections, readPaneConns, setPaneConns,
+  DETACH, PHASES, TAKE_OVER, WRITERS, WRITER_LABELS, connDot, connSummary, connText, opensHere, paneConns, paneOfSession, readConnections,
+  readPaneConns, readRemote, setPaneConns,
 } from "../../dist/connstate.js";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const record = readFileSync(join(ROOT, "docs", "design.md"), "utf8");
+const sessions = record.slice(record.indexOf("### 6.34 Server connection and sessions"), record.indexOf("### 6.35 Devices and signing in to a server"));
 
 const conn = (over = {}) => ({ pane: 1, profile: "talos", name: "Talos", state: "connected", attempt: 0, of: 0, secs: 0, ...over });
 
@@ -106,4 +114,63 @@ test("a WSL connection opens on Windows only and a Docker connection not on Andr
   for (const os of ["windows", "macos", "linux", "web", ""]) assert.equal(opensHere("docker", os), true, os);
   assert.equal(opensHere("docker", "android"), false);
   for (const os of ["windows", "macos", "linux", "android", "web", ""]) assert.equal(opensHere("ssh", os), true, os);
+});
+
+// ---- a pane that shows a session of a server (docs/design.md 6.34) ------------------------------------------------------------------
+
+const REMOTE = { writer: "watching", session: 7, cols: 120, rows: 40, more: true, phase: "" };
+const remoteConn = (over = {}) => ({ pane: 4, profile: "", name: "holz.example.net", state: "connected", attempt: 0, of: 0, secs: 0, remote: { ...REMOTE, ...over } });
+
+test("the remote member is read from its closed sets and within the clamps", () => {
+  const [read] = readPaneConns([remoteConn()]);
+  assert.deepEqual(read.remote, REMOTE);
+  for (const writer of WRITERS) assert.equal(readRemote({ ...REMOTE, writer }).writer, writer);
+  for (const phase of PHASES) assert.equal(readRemote({ ...REMOTE, phase }).phase, phase);
+  assert.equal(readRemote({ ...REMOTE, phase: "exploding" }).phase, "", "a phase the page does not know reads as none");
+  assert.equal(readRemote({ ...REMOTE, phase: 3 }).phase, "");
+  for (const bad of [
+    null, [], "remote", { ...REMOTE, writer: "WRITING" }, { ...REMOTE, writer: "owner" }, { ...REMOTE, session: -1 }, { ...REMOTE, session: 1.5 },
+    { ...REMOTE, cols: 0 }, { ...REMOTE, cols: 1001 }, { ...REMOTE, rows: 501 }, { ...REMOTE, more: "yes" },
+  ]) {
+    assert.equal(readRemote(bad), null, JSON.stringify(bad));
+  }
+  const canary = readRemote({ ...REMOTE, token: "hwd_" + "A".repeat(43) });
+  assert.deepEqual(Object.keys(canary).sort(), ["cols", "more", "phase", "rows", "session", "writer"], "no member the page does not name");
+});
+
+test("a pane without a well formed remote member reads exactly as before", () => {
+  const plain = conn();
+  assert.deepEqual(readPaneConns([plain]), [plain]);
+  assert.equal("remote" in readPaneConns([plain])[0], false);
+  const malformed = readPaneConns([{ ...plain, remote: { writer: "nobody" } }])[0];
+  assert.deepEqual(malformed, plain, "a malformed member is ignored and leaves no key");
+});
+
+test("the header of a remote pane says the server's host, then the session's size when it differs from the tile", () => {
+  const [read] = readPaneConns([remoteConn()]);
+  assert.equal(connText(read, { cols: 80, rows: 24 }), "holz.example.net · 120×40");
+  assert.equal(connText(read, { cols: 120, rows: 40 }), "holz.example.net");
+  assert.equal(connText(read), "holz.example.net", "before the tile is known nothing is said about the size");
+  // The name is the host the core gives (never a text of the server); a title that looks like the label stays a title.
+  const [writing] = readPaneConns([{ ...remoteConn(), name: "WRITING" }]);
+  assert.equal(connText(writing, { cols: 120, rows: 40 }), "WRITING");
+});
+
+test("the words of the writer label, Take over and Detach session are the record's", () => {
+  assert.deepEqual(Object.values(WRITER_LABELS).map((l) => l.word), ["WRITING", "WATCHING", "FREE"]);
+  assert.deepEqual(Object.values(WRITER_LABELS).map((l) => l.shape), ["filled", "hollow", "dashed"]);
+  assert.ok(sessions.includes("`WRITING`, `WATCHING`, `FREE`"));
+  assert.ok(sessions.includes("| `WRITING` | filled square |") && sessions.includes("| `WATCHING` | hollow square |") && sessions.includes("| `FREE` | dashed square"));
+  assert.ok(sessions.includes("`" + TAKE_OVER + "`") && sessions.includes("`" + DETACH + "`"));
+});
+
+test("a session of a server is not counted as an SSH connection, and its pane is found by its session", () => {
+  assert.equal(connSummary(readPaneConns([remoteConn(), conn({ pane: 2 })])), "ssh 1");
+  assert.equal(connSummary(readPaneConns([remoteConn()])), "");
+  paneConns.clear();
+  setPaneConns(readPaneConns([remoteConn(), conn({ pane: 2 })]));
+  assert.equal(paneOfSession(7, [1, 2, 4]), 4);
+  assert.equal(paneOfSession(7, [1, 2]), null, "a pane of another window is not this window's");
+  assert.equal(paneOfSession(8, [4]), null);
+  paneConns.clear();
 });

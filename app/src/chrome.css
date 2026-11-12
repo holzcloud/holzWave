@@ -281,3 +281,41 @@
   :root .ctx-prod, :root .ph-chip-prod { outline: 2px solid Highlight; outline-offset: 2px; }
   :root .ph-chip { border-color: CanvasText; }
 }
+
+/* ---- the writer label of a pane that shows a session of a server (panehead.ts, docs/design.md 6.34) ------------------------------
+   A square `.label` chip with a shape and a word between the title and the context, never a round pill: `WRITING` a filled square in
+   ink, `WATCHING` a hollow square in the secondary ink, `FREE` a dashed square in a dashed border, dim. Rose is not used: it is neither
+   focus nor action. After it on `WATCHING` and `FREE` the hairline button `Take over`, drawn as tall as the strip allows and with a hit
+   box of at least 28 px on the desktop and 44 px with a coarse pointer: the reach above and below the strip is not drawn. The strip of
+   such a pane is clipped by a clip path instead of its overflow, so that reach stays operable while nothing is drawn outside the strip
+   and the chip and the button stay whole while the context is cut. Nothing moves. */
+.panehead.remote { overflow: visible; --ph-hit: max(28px, calc(28rem / 12));
+                   clip-path: inset(min(0px, calc((var(--hw-header) - var(--ph-hit)) / 2)) 0); }
+.ph-writer {
+  flex: none; display: inline-flex; align-items: center; gap: .417rem; box-sizing: border-box; height: calc(16rem / 12); padding: 0 .5rem;
+  border: 1px solid var(--hw-line); border-radius: .25rem; color: var(--hw-ink); white-space: nowrap; pointer-events: none;
+}
+.ph-writer[data-writer="watching"] { color: var(--hw-ink-2); }
+.ph-writer[data-writer="free"] { color: var(--hw-dim); border-style: dashed; }
+.ph-sq { box-sizing: border-box; flex: none; width: .583rem; height: .583rem; border: 1px solid currentColor; }
+.ph-sq[data-shape="filled"] { background: currentColor; }
+.ph-sq[data-shape="dashed"] { border-style: dashed; }
+.ph-take {
+  -webkit-appearance: none; appearance: none; position: relative; flex: none; box-sizing: border-box; height: min(100%, calc(20rem / 12));
+  margin: 0; padding: 0 .667rem; border: 1px solid var(--hw-line); border-radius: .25rem; background: none; color: var(--hw-ink);
+  font: inherit; font-size: calc(11rem / 12); line-height: 1; white-space: nowrap; cursor: pointer; pointer-events: auto;
+}
+/* The hit box: as tall as `--ph-hit`, centred on the drawn button. */
+.ph-take::before { content: ""; position: absolute; left: 0; right: 0; top: calc((100% - var(--ph-hit)) / 2); bottom: calc((100% - var(--ph-hit)) / 2); }
+.ph-take:hover { background: var(--hw-rose-wash); }
+.ph-take:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
+@media (pointer: coarse) {
+  .panehead.remote { --ph-hit: max(44px, calc(44rem / 12)); }
+}
+@media (forced-colors: active) {
+  :root .ph-writer { border-color: CanvasText; color: CanvasText; }
+  :root .ph-sq { border-color: CanvasText; }
+  :root .ph-sq[data-shape="filled"] { background: CanvasText; }
+  :root .ph-take { border-color: ButtonText; color: ButtonText; }
+  :root .ph-take:focus-visible { outline-color: Highlight; }
+}

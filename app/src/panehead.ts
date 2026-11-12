@@ -2,7 +2,8 @@
 // did) and the context, the working directory with the home prefix as `~`, right-aligned. The focused pane's strip
 // has the 1 px rose top line, and only while more than one pane is visible. State is never colour alone: the dot
 // is filled for the focused pane, hollow for the others and hollow with a dash for a pane that exited, which also
-// says "exited" in the context slot. A × at the right end closes the pane after a confirmation (chrome.ts).
+// says "exited" in the context slot. A × at the right end closes the pane after a confirmation (chrome.ts); on a pane that shows a
+// session of a server it is `Detach session` and asks nothing, and the writer label with `Take over` sits before the context.
 //
 // The strips live in the overlay (pointer events none, so the terminal below still gets every click) and are
 // keyed by pane id like the dividers: the same element is moved on every render. Everything is `textContent`.
@@ -12,7 +13,8 @@ import { blockContext, blockTitle, paneBlocks } from "./blockstate.js";
 import { paneChip, paneHeld } from "./integratecontext.js";
 import { heldText, integrationProduction } from "./integratestate.js";
 import type { ChipText } from "./integratestate.js";
-import { connDot, connText, paneConns } from "./connstate.js";
+import { DETACH, TAKE_OVER, WRITER_LABELS, connDot, connText, paneConns } from "./connstate.js";
+import type { PaneConn } from "./connstate.js";
 import { shortenHome } from "./labels.js";
 import { startRename } from "./rename.js";
 import { state } from "./state.js";
@@ -27,6 +29,10 @@ interface Head {
   ctx: HTMLElement;
   /** The chip with the context holzWave set for the pane; made when the core lists one, removed when it does not. */
   chip: HTMLElement | null;
+  /** The writer label of a pane that shows a session of a server, and the `Take over` after it; made and removed like the chip. */
+  writer: HTMLElement | null;
+  take: HTMLButtonElement | null;
+  close: HTMLButtonElement;
 }
 
 const heads = new Map<number, Head>();
@@ -57,7 +63,7 @@ function create(pane: number, parent: HTMLElement): Head {
     e.stopPropagation();
     closeHandler(pane);
   });
-  return { root, dot, title, sub, ctx, chip: null };
+  return { root, dot, title, sub, ctx, chip: null, writer: null, take: null, close };
 }
 
 /** What a confirmed name is sent to; the chrome sets it, so this module does not import it. */
@@ -102,6 +108,62 @@ function automaticTitle(pane: number): string {
 /** The title of a pane's strip: what its program set, else the title of the tab the pane is in. */
 function titleOf(pane: number, tabTitle: string): string {
   return state.titles.get(pane) || tabTitle;
+}
+
+/** What `Take over` is sent to; the chrome sets it, so this module does not import the bridge. */
+let takeoverHandler: (pane: number) => void = () => {};
+
+/** Hand over the function that moves the write right of a session to a pane. */
+export function setTakeoverHandler(handler: (pane: number) => void): void {
+  takeoverHandler = handler;
+}
+
+/**
+ * The writer label of a pane that shows a session (docs/design.md 6.34): a square `.label` chip with a shape and a word, never a round
+ * pill, between the title and the context; it is a `role="status"` region, so a change of the word is announced. On `WATCHING` and
+ * `FREE` the hairline button `Take over` follows it. `writer` null removes both.
+ */
+function drawWriter(head: Head, pane: number, writer: keyof typeof WRITER_LABELS | null): void {
+  if (writer === null) {
+    head.writer?.remove();
+    head.take?.remove();
+    head.writer = null;
+    head.take = null;
+    return;
+  }
+  if (head.writer === null) {
+    head.writer = el("span", "label ph-writer");
+    head.writer.setAttribute("role", "status");
+    const sq = el("span", "ph-sq", head.writer);
+    sq.setAttribute("aria-hidden", "true");
+    el("span", "ph-writer-word", head.writer);
+    head.root.insertBefore(head.writer, head.ctx);
+  }
+  const label = WRITER_LABELS[writer];
+  setAttr(head.writer, "data-writer", writer);
+  setAttr(head.writer.firstElementChild!, "data-shape", label.shape);
+  setText(head.writer.lastElementChild as HTMLElement, label.word);
+  if (writer === "writing") {
+    head.take?.remove();
+    head.take = null;
+  } else if (head.take === null) {
+    const take = el("button", "label ph-take");
+    take.type = "button";
+    take.textContent = TAKE_OVER;
+    take.addEventListener("click", (e) => {
+      e.stopPropagation();
+      takeoverHandler(pane);
+    });
+    head.root.insertBefore(take, head.ctx);
+    head.take = take;
+  }
+}
+
+/** The × of a pane: `Detach session` for a pane that shows a session of a server (it asks for nothing), `Close pane` otherwise. */
+function drawClose(head: Head, conn: PaneConn | undefined): void {
+  const words = conn?.remote ? DETACH : "Close pane";
+  setAttr(head.close, "title", words);
+  setAttr(head.close, "aria-label", words);
 }
 
 /** The chip between the title and the context: the mark and the context the core gave the pane, and `production` when it says so. */
@@ -170,7 +232,7 @@ export function renderPaneHeads(): void {
         : block
           ? blockContext(block)
           : conn
-            ? connText(conn)
+            ? connText(conn, state.sizes.get(id))
             : shortenHome(state.cwds.get(id) ?? "", state.os);
       setText(head.ctx.firstElementChild as HTMLElement, ctx);
       // A production selection is said in the header too: the warn colour, an underline and the mark come from the tone.
@@ -179,6 +241,9 @@ export function renderPaneHeads(): void {
       setAttr(head.ctx, "data-tone", production || held ? "warn" : null);
       setAttr(head.ctx, "title", ctx === "" ? null : production ? `${ctx} · production` : ctx);
       drawChip(head, paneChip(id));
+      head.root.classList.toggle("remote", conn?.remote !== undefined);
+      drawWriter(head, id, conn?.remote && !exited ? conn.remote.writer : null);
+      drawClose(head, conn);
     }
   }
   for (const [id, head] of heads) {

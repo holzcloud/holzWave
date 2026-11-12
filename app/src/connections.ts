@@ -8,6 +8,9 @@ import { focusInput } from "./keyboard.js";
 import { state } from "./state.js";
 import { isLockedFailure, lockedAnswer } from "./vaultstate.js";
 import { connSummary, opensHere, paneConns, readConnections, readPaneConns, setPaneConns } from "./connstate.js";
+import { setTakeoverHandler } from "./panehead.js";
+import { MAX_SENTENCE, plain } from "./serverstate.js";
+import { showNotice } from "./status.js";
 import type { Connection } from "./connstate.js";
 import type { View } from "./types.js";
 
@@ -123,6 +126,14 @@ export async function initConnections(
       if (pane === undefined) return;
       void call<string>("wsh_install", { pane }).catch(() => undefined);
     },
+  });
+  // `Take over` of a pane that shows a session of a server: the host moves the write right and every pane's label changes with the next
+  // poll, which is asked for at once. A refusal is the host's fixed sentence in the status line, bounded and plain.
+  setTakeoverHandler((pane) => {
+    void call<unknown>("pane_takeover", { pane }).then(
+      () => pollConnections(),
+      (failure: unknown) => showNotice(plain(failure instanceof Error ? failure.message : String(failure), MAX_SENTENCE)),
+    );
   });
   await refreshConnections();
   await pollConnections();

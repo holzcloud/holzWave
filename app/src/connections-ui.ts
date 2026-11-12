@@ -5,7 +5,9 @@
 // While it is open it consumes the keys (the key handler stack).
 import { backend, call } from "./bridge.js";
 import { connect, connections, refreshConnections, showOpened } from "./connections.js";
+import { paneOfSession } from "./connstate.js";
 import type { Connection } from "./connstate.js";
+import { state } from "./state.js";
 import { el, loadStyles, setText } from "./dom.js";
 import { pushKeyHandler } from "./keystack.js";
 import { INTERACTIVE_HINT } from "./loginpromptstate.js";
@@ -87,7 +89,9 @@ async function show(): Promise<void> {
     let server: ServerRowHandle | null = null;
     const serverSlot = el("div", "cx-server-slot", box);
     if (backend === "tauri") {
-      server = buildServerRow(serverSlot, desktopSource(call), {
+      // `Attach` on a session that this window already shows moves the keyboard to that pane.
+      const shownIn = (session: number): number | null => paneOfSession(session, (state.view?.panes ?? []).map(([id]) => id));
+      server = buildServerRow(serverSlot, { ...desktopSource(call), shownIn }, {
         say: (text, quiet) => {
           setText(statusLine, text);
           if (quiet) statusLine.dataset["quiet"] = "true";

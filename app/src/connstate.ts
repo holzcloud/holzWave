@@ -13,6 +13,56 @@ export interface PaneConn {
   attempt: number;
   of: number;
   secs: number;
+  /** Only for a pane that shows a session of a holzWave server; absent for every other pane. */
+  remote?: RemoteConn;
+}
+
+/** Who writes, from this pane's own view: it holds the right, another pane holds it, or nobody does. */
+export type Writer = "writing" | "watching" | "free";
+/** What a pane of a session is busy with; the empty text when it shows the session. */
+export type Phase = "" | "attaching" | "loading_older" | "resyncing";
+
+/** What a pane that shows a session of a server adds to its connection. Nothing here is text the server wrote. */
+export interface RemoteConn {
+  writer: Writer;
+  session: number;
+  /** The grid of the session in cells. */
+  cols: number;
+  rows: number;
+  /** The server holds lines older than the ones the pane has. */
+  more: boolean;
+  phase: Phase;
+}
+
+/** The closed sets of the remote member, as the core spells them. */
+export const WRITERS: readonly Writer[] = ["writing", "watching", "free"];
+export const PHASES: readonly Phase[] = ["", "attaching", "loading_older", "resyncing"];
+
+/** The writer label of a pane header (docs/design.md 6.34): the word, written in capitals by the page, and the shape of its square. */
+export const WRITER_LABELS: Readonly<Record<Writer, { word: string; shape: "filled" | "hollow" | "dashed" }>> = {
+  writing: { word: "WRITING", shape: "filled" },
+  watching: { word: "WATCHING", shape: "hollow" },
+  free: { word: "FREE", shape: "dashed" },
+};
+/** The button after `WATCHING` and `FREE`. */
+export const TAKE_OVER = "Take over";
+/** The title and the accessible name of the × of a pane that shows a session. */
+export const DETACH = "Detach session";
+
+/** Read the remote member; null when it is absent or not well formed, so the pane reads as one without it. */
+export function readRemote(raw: unknown): RemoteConn | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  const whole = (v: unknown, min: number, max: number): number | null =>
+    typeof v === "number" && Number.isSafeInteger(v) && v >= min && v <= max ? v : null;
+  const writer = WRITERS.find((w) => w === o.writer);
+  const session = whole(o.session, 0, 0xffff_ffff);
+  const cols = whole(o.cols, 1, 1000);
+  const rows = whole(o.rows, 1, 500);
+  if (writer === undefined || session === null || cols === null || rows === null || typeof o.more !== "boolean") return null;
+  // A phase this page does not know reads as none: the pane then shows the session as it is.
+  const phase = PHASES.find((p) => p === o.phase) ?? "";
+  return { writer, session, cols, rows, more: o.more, phase };
 }
 
 /** A saved connection, as the core lists it. The secret itself never reaches the page, only whether one is saved. */
@@ -58,7 +108,7 @@ export function readPaneConns(raw: unknown): PaneConn[] {
     const o = item as Record<string, unknown>;
     if (typeof o.pane !== "number" || typeof o.profile !== "string" || typeof o.name !== "string") continue;
     if (typeof o.state !== "string" || !STATES.has(o.state)) continue;
-    out.push({
+    const conn: PaneConn = {
       pane: o.pane,
       profile: o.profile.slice(0, 64),
       name: o.name.slice(0, 256),
@@ -66,7 +116,10 @@ export function readPaneConns(raw: unknown): PaneConn[] {
       attempt: count(o.attempt),
       of: count(o.of),
       secs: count(o.secs),
-    });
+    };
+    const remote = readRemote(o.remote);
+    if (remote !== null) conn.remote = remote;
+    out.push(conn);
   }
   return out;
 }
@@ -127,8 +180,17 @@ export function kindLabel(kind: Connection["kind"]): string {
   return kind;
 }
 
-/** What the pane header says in its context slot for a pane with a connection: the name, and the state if it is not fine. */
-export function connText(c: PaneConn): string {
+/**
+ * What the pane header says in its context slot for a pane with a connection: the name, and the state if it is not fine. For a pane
+ * that shows a session of a server: the server's host, then the size of the session when it differs from `tile` (the cells the pane
+ * has), never a text of the server.
+ */
+export function connText(c: PaneConn, tile?: { cols: number; rows: number }): string {
+  if (c.remote) {
+    const r = c.remote;
+    const differs = tile !== undefined && (tile.cols !== r.cols || tile.rows !== r.rows);
+    return differs ? `${c.name} · ${r.cols}×${r.rows}` : c.name;
+  }
   switch (c.state) {
     case "connecting":
       return `${c.name} · connecting`;
@@ -151,11 +213,18 @@ export function connDot(c: PaneConn | undefined): "wait" | "failed" | null {
   return null;
 }
 
-/** The status line's segment: how many panes run a connection, and how many of them are down. Empty without any. */
+/** The pane of this window's layout that shows `session`, or null. */
+export function paneOfSession(session: number, shown: Iterable<number>): number | null {
+  for (const pane of shown) if (paneConns.get(pane)?.remote?.session === session) return pane;
+  return null;
+}
+
+/** The status line's segment: how many panes run an SSH (or WSL, Docker) connection, and how many of them are down. Empty without any. */
 export function connSummary(list: Iterable<PaneConn>): string {
   let all = 0;
   let down = 0;
   for (const c of list) {
+    if (c.remote) continue; // a session of a server is not an SSH connection
     all += 1;
     if (c.state !== "connected") down += 1;
   }

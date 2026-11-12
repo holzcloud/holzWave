@@ -8,6 +8,7 @@ import { type Marking, attention } from "./attentionstate.js";
 import { call } from "./bridge.js";
 import { dirtyPanes, paneBlocks } from "./blockstate.js";
 import { type CloseAsk, confirmClose, paneAsk, tabAsk, workspaceAsk } from "./confirm.js";
+import { paneConns } from "./connstate.js";
 import { el, fitNodes, loadStyles, setAttr, setText } from "./dom.js";
 import { focusInput } from "./keyboard.js";
 import { clockText, tabLabel } from "./labels.js";
@@ -290,6 +291,13 @@ function closePaneAfterAsking(pane: number): void {
   const view = state.view;
   if (!view?.panes.some(([id]) => id === pane)) return;
   const same = (): boolean => state.view?.panes.some(([id]) => id === pane) ?? false;
+  // A pane that shows a session of a server detaches: the session keeps running on the server and stays in the list, so there is
+  // nothing to ask (docs/design.md 6.34). The close path is the one of every pane.
+  if (paneConns.get(pane)?.remote) {
+    send(call("close_pane", { pane }));
+    focusInput();
+    return;
+  }
   const ask = paneAsk(view, paneLabel(pane), dirtyPanes.has(pane));
   // A block (a chat, a file, a preview) has no shell: nothing ends when it closes, so it goes at once, unless it holds
   // unsaved changes or it is everything the window has.
