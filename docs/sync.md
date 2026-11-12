@@ -144,7 +144,8 @@ you typed it, so enter it again on another one). The three AI settings (`ai_loca
   without a tombstone for every command, and a command you forgot must not come back on another computer. That is a
   decision, not a gap, and it can be reopened: syncing the history would be opt-in and would need those per-entry
   deletions first.
-- **Adding a device:** enter the endpoint, user, app password and the same passphrase. A QR code comes with mobile.
+- **Adding a device:** with WebDAV, enter the endpoint, user, app password and the same passphrase; with a holzWave server,
+  sign the app in to the server and enter the same passphrase. A QR code comes with mobile.
 - **Local state:** `sync_state.json` (device id; per file the counter, the ETag, the SHA-256 of the content and the SHA-256
   of the blob that the last run left behind), `sync.json` (endpoint, user and `transport`: `webdav`, which is also what a
   file without the member means, or `server`, with the address of the server as the endpoint and no user), `sync-incoming/` (the downloads of the files the running app owns, which wait for the next start, with a

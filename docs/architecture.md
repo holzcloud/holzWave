@@ -45,7 +45,7 @@ or on Windows and Linux hardware, and the rows of Part 9 are the owner's run.
  │  conn        Link a pane talks to: pty · ssh (russh), one login per saved profile       built          │
  │  secrets     SecretStore trait over the OS keychain                                     built          │
  │  store       SQLite: settings, history, profiles                                        phase 2/7      │
- │  sync        encrypted WebDAV sync, conflict handling                                   built          │
+ │  sync        encrypted sync over WebDAV or a holzWave server, conflict handling         built          │
  │  preview     file browser, markdown, media, editor backends                             built          │
  │  control     socket server for wsh                                                      built          │
  │  ai          Provider trait: HttpProvider on five wires · Apple bridge · scripted       built          │
@@ -139,7 +139,7 @@ Each boundary is a trait in `holzwave-core` with at least one real implementatio
 | `TerminalEngine` ✅ | `feed`, `resize`, `scroll`, `update` (dirty rows), `take_replies`, `encode_key`, `encode_text`, `paste`, `mouse`, `wheel`, `select`, `search`, `copy_mode`, `set_theme` | `GhosttyEngine` ✅, `AlacrittyEngine` | `libghostty-vt` is young and its API moved already between 0.2.2 and master |
 | `Connection` (`core/src/pool.rs`) | `session(open)`, the shell channel (`SshLink::attach`), `sftp()`, exec channels through `SshExec::on`, `lease()` | SSH, through the pool: one login per saved profile. WSL and Docker are local commands that run in a pane (`wsl.exe -d`, `docker exec -it`) and have no file access yet (open) | the terminal, the files and the commands of a saved SSH connection share one login |
 | `SecretStore` | `get`, `set`, `delete` | macOS Keychain, Windows Credential Manager, Secret Service; on Android a vault: one file of ciphertext only, its data key wrapped by a key of the Android Keystore, with the states new, locked, unlocked and lost ([build-android.md](build-android.md#the-secret-store)) | secrets never reach a file in plaintext |
-| `SyncBackend` | `list`, `get`, `put`, `delete` with ETag | WebDAV (`opendal` or `reqwest_dav`) | Nextcloud today, others later |
+| `Backend` (`core/src/sync/webdav.rs`) | `ensure`, `list`, `get`, `put` with a condition on the ETag (absent, match, any) | `WebDav` over `ureq` (Nextcloud and other WebDAV servers) and `ServerBackend` (a holzWave server, `core/src/sync/server.rs`) | the engine and the format do not know which target they talk to |
 | `Provider` ✅ | `id`, `capabilities(model)`, `stream(request, callback, cancel) → completion` (blocking, with a cancel token) | `HttpProvider` ✅ over five wire adapters (local servers, cloud APIs, gateways), `AppleProvider` ✅ (Foundation Models), `ScriptedProvider` (the test double) | consent and context rules live above it: a provider accepts only context the gate approved |
 | `Integration` ✅ | `spec`, `argv`, `view` (section 9) | `Kube`, `Talos`, `Azure`, `Gam`, each built and tested against fake tools and recorded fixtures | one engine and a closed verb catalogue for four tools |
 
