@@ -96,7 +96,9 @@ The modules of `holzwave-core` as built (`core/src/`):
 | `ai` | the AI chat core (`core/src/ai/`, below): the `Provider` trait and `HttpProvider` over five wire adapters in `ai/wire/` (`anthropic.rs`, `gemini.rs`, `ollama.rs`, `openai_chat.rs`, `openai_responses.rs`), the one HTTP chokepoint `ai/http.rs`, the context gate `gate.rs` and `redact.rs`, tools and approval in `tools/`, the agent loop `agent.rs`, the conversation store `store.rs`, profiles and keys `profiles.rs`, the service facade `service.rs` with `service/` | ✅ |
 | `textread` | reads the screen, the selection, the last rows or the last command's output as text, with the cells nobody could read marked | ✅ |
 | `exec` | runs one command in a separate process with a scrubbed environment, a time limit and a kill of everything it started | ✅ |
-| `conn` | the `Link` trait a pane reads and writes (a PTY, an SSH shell, nothing for a block pane) and the connection state the page shows | ✅ |
+| `conn` | the `Link` trait a pane reads and writes (a PTY, an SSH shell, a session of a holzWave server, nothing for a block pane) and the connection state the page shows | ✅ |
+| `remote` | the client of a holzWave server's sessions (section 16): `proto` (the vocabulary and every bound of the device socket, shared with the server), `ws` (a bearer WebSocket over the core's own TLS stream), `hub` (the one socket of a device and the subscriptions on it) and `link` (a session as the `Link` of a pane) | built |
+| `server_link`, `server_signin` | the per-device link to a server (`server_link.json` and the keychain account `server:token`, a token type that prints only a marker) and the client of the device grant | built |
 | `ssh` | the SSH shell on a pooled connection (`SshLink`, with reconnect and a shell backlog capped at 16 MiB), the login itself, host keys, and the exec primitive: one command on a saved connection without a terminal | ✅ |
 | `pool` | one login per saved SSH connection, shared by the pane's shell and the SFTP and exec channels: single-flight logins, a wait after a failed background login, idle close, at most 16 connections | ✅ |
 | `connections` | the saved SSH, WSL and Docker connections, their secrets, and which pane runs which connection | ✅ |
@@ -186,7 +188,21 @@ thread and is driven over a channel (section 5). This shapes the whole concurren
   has no timer: an idle or hidden app starts nothing. A terminal launch is an ordinary pane actor whose program is the tool;
   a failed start is held on screen until Enter.
 - The exec primitive (`SshExec`) runs on one worker runtime of its own, a single worker thread named `hw-exec`, with a cached
-  connection and no terminal; its callers only wait. The local command runner (`exec.rs`) uses plain threads for its two
+  connection and no terminal; its callers only wait.
+- The sessions of a holzWave server in an app go through one thread, `hw-hub`, that owns the device's one socket to its server:
+  it connects (blocking by design, because the platform's check of a certificate can take long, and never on a caller's
+  thread), reads with a short timeout while a subscription exists (2 ms, 8 ms after a second of silence) and a long one
+  otherwise, sends what the panes hand it over a channel, matches answers to requests and routes each binary frame to the
+  subscription of its session. A subscription's queue is counted in bytes (24 MiB by default); one that cannot keep up is
+  attached again from a fresh snapshot, never buffered without bound. Measured on loopback in a debug build: the app adds about
+  3 ms to the median time from a typed byte to the frame that shows it, and a silent attached session costs 0.1 to 0.4 percent
+  of a core (`server/tests/remote_budget.rs`); a release build was not measured.
+- In a worker of the server, the session host has one housekeeping thread, `hw-sessions`, which frees a writer's right at its
+  deadline, notices a program that ended and removes ended sessions, and sleeps until the next deadline (between 5 ms and
+  60 s). Each attachment's stream is read by a thread of its own (`hw-stream-<session>`): the snapshot in chunks, then the
+  bytes of the pane's tap, which the engine thread fills without ever waiting for a reader. The browser window's sessions
+  have one more thread, `hw-local-sessions`, which beats for the window's attached panes while a browser tab is open and
+  attaches a pane that fell behind again from a fresh snapshot. The local command runner (`exec.rs`) uses plain threads for its two
   pipes and is polled, not blocked, for the end, the time limit and the stop.
 
 ## 6. The app protocol
@@ -654,7 +670,7 @@ hosts are covered; another system is shown as not supported.
 |---|---|---|
 | Passwords, keys, tokens | read from disk | OS keychain only; profile files hold references |
 | Terminal output | sent to an AI service unasked | consent is per pane: the terminal's content leaves the device only after the user shares that pane, and every send still shows exactly what goes out; local and on-device providers ask the same way unless the user turns that off in settings; no provider is chosen for the person, and none exists until one is set up |
-| Synced settings | read by the server | end-to-end encryption, the server sees ciphertext and sizes |
+| Synced settings | read by the server | end-to-end encryption, the server sees ciphertext and sizes; a holzWave server as the target checks only the header and the size of a file, holds no key and logs no name or byte of one; neither target can be stopped from serving an older valid file (no rollback protection) |
 | The PTY | input injected by page content | strict CSP, no untrusted HTML in the main page, previews sandboxed |
 | Layout / settings files | corrupt or hostile file crashes the app | validated on load, fall back to a fresh state |
 | Paste | control sequences run commands | bracketed paste; warn on multi-line paste to a shell that does not support it |
@@ -677,6 +693,11 @@ hosts are covered; another system is shown as not supported.
 | Saved passwords on the server | the operator or another person reads a person's secrets | one file per person, XChaCha20-Poly1305 under a random data key that is wrapped by up to four kinds of key slot (password, passphrase, passkey PRF, recovery code); the key is in the worker's memory only while a session of the person is open and leaves it when the last one ends, with one audit line; an administrator can reset a person's secrets and can never read them (`server/tests/secretstore.rs`, `server/tests/unlock.rs`, `server/tests/canary.rs`) |
 | The audit log | a secret or a typed name in a log, a log that can be rewritten | one JSON line per security event in a daily file with mode 0600, opened append-only; the action is a closed list and no member holds text a person typed; the server does not rotate or delete the files (`server/tests/audit.rs`, `server/tests/audit_once.rs`) |
 | Uploads and downloads | a file written outside the home, over another file, or a download of an unlisted file | the person's own worker writes into `<home>/uploads` through a directory descriptor, never overwriting and never following a link; a download is a 32-character token granted by the core for an image, video, audio or PDF file, served with a `sandbox` content security policy (`server/tests/files.rs`) |
+| Device tokens | a token read from a file, a log or the page, guessed, replayed by another person, or kept alive forever | the token is `hwd_` and 256 random bits, only in the OS keychain of the device (account `server:token`) and only as a SHA-256 on the server; its type prints a marker in `Debug` and cannot be cloned or serialised; it travels in one `Authorization` header to the origin it was issued by; it ends after `devices.idle` (90 days by default) without use and a revocation closes its sockets at once (4401); it is not bound to the device and not rotated (section 16), so a stolen token works until it is revoked or runs out (`server/tests/device_tokens.rs`, `server/tests/device_client.rs`, the unit tests of `core/src/server_link.rs`) |
+| The device grant | codes guessed, polls flooded, a person phished into approving another's request | a 256-bit device code and an eight-letter user code, hashes only, ten minutes of life, a poll paced at 5 seconds and slowed by 5 more on each early poll, five wrong codes in ten minutes lock the account and the address for ten minutes, 5 open requests per address and 200 in all, 20 devices per person, approval only with a recent sign-in; the page shows the device, its platform and the address of the request and says to approve only what you started, which is all that stands against phishing (`server/tests/device_grant.rs`) |
+| Cookies and bearer tokens | a cookie used for a device route, or a token for a page route | a route is one of the kinds `Device`, `DeviceOpen` or a session kind, and a device route never reads a cookie while a session route never reads `Authorization`; the independent route list of the prohibitions test walks every route in both switch states (`server/tests/device_access.rs`, `server/tests/prohibitions.rs`) |
+| A device feature that is off | a probe learns that the feature exists, or an old token keeps using it | every path of a feature that is off answers as a path that does not exist, before any credential is read; turning remote sessions off closes every device socket with 1001 (`server/tests/device_access.rs`, `server/tests/remote_sessions.rs`) |
+| Sessions on the server | one person attaches to another's session, a flood fills the worker, terminal bytes reach a log | a session number is the worker's own and another person's answers `not_found` like one that never existed; requests, input and output are bounded and a reader that falls behind gets a fresh snapshot; one writer per session, input of a watcher is dropped; no terminal byte or token reaches a log, the audit files or the database (`server/tests/remote_sessions.rs`, `server/tests/session_host.rs`) |
 | Sealed deployment | an operator weakens the pod and the server then runs without isolation | the server refuses to start when the helper lacks its capabilities, and never runs with a reduced set; `allowPrivilegeEscalation: false` and `no-new-privileges` are absent on purpose because they stop file capabilities; the checker `scripts/web-deploy-check.mjs` judges Compose and the chart (`sh scripts/web-container-test.sh image`) |
 
 ### AI chat
@@ -1112,7 +1133,8 @@ All of it runs locally; GitHub builds only on request.
 14. Whether a binary wire format would pay for itself. **Open.** JSON text frames are used because the page and the desktop
     already speak them; compression is off (section 16). A change needs a measurement on a real network first.
 15. Workers that survive a server restart, so that a restart does not end the panes. **Open, not planned.** A restart ends
-    every pane, and the guide says so.
+    every pane and every remote session, and the guide says so; a session therefore outlives every client but not the
+    server. Whether a real workload behaves as the tests show across a restart was never tried (row SRV-S1).
 16. User namespaces as a stronger boundary than user ids and file capabilities. **Open.** They are off or restricted on many
     clusters, so the design uses the four capabilities (A29).
 
@@ -1158,7 +1180,8 @@ the image checks of `sh scripts/web-container-test.sh image`.
 ### The web wire
 
 Section 6 describes the frames, the session event and the close codes. One socket carries a person's commands and events for
-every tab of the page; the sockets of one person are at most eight, they share a worker, and the socket that last sent input
+every tab of the page; the sockets of one person are at most eight (an app's device socket counts among them), they share a
+worker, and the socket that last sent input
 to a pane owns its size. A frame event that does not fit a slow socket's queue is dropped and the page asks for a full frame; any
 other message that does not fit closes the socket with `1013`. The transport is a trait in one file. The measurement of
 `permessage-deflate` saved 79 to 94 percent of the bytes and refused decompression bombs within the memory bound, but left
@@ -1211,6 +1234,57 @@ a `ReadWriteOnce` claim), an init container that prepares the homes base and a p
 proxy mode only. The security context is fixed, not a value. The proof is the `image` and `multiarch` modes of
 `scripts/web-container-test.sh`, `helm lint --strict` and `helm template` for the three value sets, and the checker
 `scripts/web-deploy-check.mjs` with its self-test. The chart was never applied to a cluster.
+
+### The device features
+
+The apps (desktop and Android) use a server in two more ways, each behind a switch that an administrator turns on and the
+operator can forbid (`device_access` in the configuration): the server as the target of the encrypted sync, and sessions that
+live on the server. The guide is [server.md](server.md); the sync side is in [sync.md](sync.md). Built and tested against the
+real server in one process over the loopback address, against a mock of the app in WebKit and Chromium, and in real browsers
+against the real server, on the author's Mac; never run on a real phone or desktop against a real server over a real network,
+with a real passkey or single sign-on approving a device, behind a real reverse proxy for the device socket, with two real
+people, on Android, or across a server restart under a real workload.
+
+- **Two kinds of device access.** `DeviceOpen` routes take no credential (the start and the poll of the device grant, RFC 8628)
+  and `Device` routes take only a bearer token in the `Authorization` header (the sync routes, `/api/device/me` and the device
+  socket). The person's side of the grant, the lists of devices and the switches are session routes that need a recent sign-in.
+  A route has exactly one kind, so a cookie never authenticates a device route and a token never a session route.
+- **The gate in the edge.** One table (`server/src/http/features.rs`) names the prefix of every route of a feature:
+  `/api/device/` (open while either feature is on), `/sync/v1/` and `/ws/device`. A layer in front of every route answers a path
+  under a closed prefix with the answer of a path that does not exist, before any credential is read, so a probe cannot tell
+  a feature that is off from one that was never built, and no new route is reachable without its gate (the route oracle of the
+  prohibitions test checks both states). While remote sessions are off, the commands of the page's own socket that list,
+  make, open or end a session are answered at the socket's edge with `Remote sessions are off on this server.` and never reach
+  the worker.
+- **The sync target.** Four routes mirror the WebDAV operations the engine uses (`ensure`, `list`, `get`, `put` with the
+  conditions of `If-None-Match: *` and `If-Match`); the condition, the bounds, the pruning of old backups and the bookkeeping
+  are one immediate transaction of the store, the entity tag is the SHA-256 of the stored bytes, and the client is a second
+  implementation of the engine's `Backend` trait (`core/src/sync/server.rs`), so the engine and the format are unchanged.
+- **The device socket.** `GET /ws/device` carries text requests with an id and binary frames for the terminal bytes; the
+  vocabulary, the tags and every bound are in `core/src/remote/proto.rs`, which the server and the app both use. The
+  supervisor authenticates the socket, bounds it, counts it against the person's sockets and forwards frames between it and the
+  worker; a terminal byte goes nowhere else (no log, no audit line, no database row). A revocation or an ended account closes it within a second (4401), and the token is looked at again every
+  `limits.session_recheck` for what nobody announced.
+- **The session host and the lease in the worker.** A session is a headless pane of the core in the person's worker: it draws
+  no frame, and a tap on its engine thread hands every byte to each attachment, with an atomic snapshot of the screen and a
+  bounded tail of the scrollback at the moment of the attach (the engine's own formatter, no hand-written serializer). The
+  writer lease is a pure state machine in the worker (`server/src/worker/lease.rs`): one holder, freed after
+  `remote.writer_timeout` of silence, moved only by `takeover`. The host is the one place that sees every attachment, so the
+  rule holds across every device and the browser window.
+- **The wire.** The supervisor and the worker speak a sixth frame kind, `Ses` (kind 6), for the sessions of the device
+  sockets, and the protocol version is 3; the first frame carries the four `remote` limits of the configuration. The decoder is
+  strict and bounded like every other kind.
+- **The browser window.** A pane of the browser window that shows a session attaches to the session host inside the worker,
+  through the same link a desktop pane runs on, with no socket and no token. All tabs of a person share it, so they are one
+  writer, and the worker beats for it while a browser tab of the person is attached; the lease's own silence rule frees it
+  after the last tab went. The page draws nothing new for it: the worker renders the pane with an engine of its own, beside the
+  session's, whose cost was not measured.
+
+The proof is `server/tests/device_grant.rs`, `server/tests/device_tokens.rs`, `server/tests/device_access.rs`,
+`server/tests/sync_target.rs`, `server/tests/sync_client.rs`, `server/tests/remote_sessions.rs`, `server/tests/session_host.rs`,
+`server/tests/session_local.rs`, `server/tests/session_web.rs`, `server/tests/remote_client.rs`, `server/tests/remote_host.rs`,
+`server/tests/remote_budget.rs`, `core/tests/remote_snapshot.rs`, `core/tests/remote_hub.rs`, `core/tests/remote_pane.rs` and,
+in WebKit and Chromium against the real server, `app/tests/web/devices.test.mjs` and `app/tests/web/sessions.test.mjs`.
 
 ### The tests that prove the build
 

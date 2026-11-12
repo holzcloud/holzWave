@@ -1,4 +1,5 @@
-//! The public texts about distribution agree with each other and say only what is true.
+//! The public texts about distribution agree with each other and say only what is true, and the status page and the README
+//! say plainly what of the server sync and the remote sessions was never run.
 //!
 //! `docs/distribution.md` is the one page that gives every channel a status, in a closed set of words. The README, the
 //! status page and the signing page must not say more than it does. These tests read the files as text (std only, no
@@ -430,6 +431,50 @@ fn the_readme_and_the_signing_page_say_the_same_about_signed_releases() {
     );
     // Whichever way it is, the box names the version it speaks about.
     assert!(flat(&signing).contains("0.0.1-beta"), "the status box does not name the release it speaks about");
+}
+
+/// What a text about the server sync and the remote sessions has to name as never run, in lower case, with the restart limit.
+const NEVER_RUN: [&str; 10] =
+    ["real phone", "real desktop", "real network", "passkey", "single sign-on", "reverse proxy", "two real people", "android", "doze", "restart"];
+
+/// The paragraph (lines between blank lines) of `text` that holds `marker`, made one line.
+fn passage(text: &str, marker: &str) -> Option<String> {
+    text.split("\n\n").find(|block| flat(block).contains(marker)).map(flat)
+}
+
+/// What the passage lacks: the words `never run`, a name of [`NEVER_RUN`], or the sentence that a restart ends every remote
+/// session.
+fn never_run_gaps(passage: &str) -> Vec<&'static str> {
+    let lowered = passage.to_lowercase();
+    let mut gaps: Vec<&'static str> = Vec::new();
+    if !lowered.contains("never run") {
+        gaps.push("never run");
+    }
+    gaps.extend(NEVER_RUN.into_iter().filter(|name| !lowered.contains(name)));
+    if !lowered.contains("restart ends every remote session") {
+        gaps.push("restart ends every remote session");
+    }
+    gaps
+}
+
+#[test]
+fn the_status_page_and_the_readme_say_what_of_the_server_sync_and_the_remote_sessions_was_never_run() {
+    // The matcher first, on strings.
+    let full = "Remote sessions are built. They were never run on a real phone or a real desktop against a real server over a real network, with a real passkey or single sign-on, behind a real reverse proxy, with two real people, on Android under Doze, or across a restart. A server restart ends every remote session.";
+    assert!(never_run_gaps(full).is_empty(), "{:?}", never_run_gaps(full));
+    assert_eq!(never_run_gaps(&full.replace("never run", "run")), ["never run"]);
+    assert_eq!(never_run_gaps(&full.replace(", with two real people", "")), ["two real people"]);
+    assert_eq!(never_run_gaps(&full.replace("A server restart ends every remote session.", "")), ["restart ends every remote session"]);
+    assert_eq!(passage("a\n\nfirst line\nthe marker here\n\nb", "the marker").as_deref(), Some("first line the marker here"));
+    assert_eq!(passage("a\n\nb", "the marker"), None);
+
+    // Then the texts: the paragraph of the status page and the row of the README's table.
+    let status = passage(STATUS_PAGE, "server sync target and remote sessions are built").expect("docs/status.md has the paragraph");
+    let gaps = never_run_gaps(&status);
+    assert!(gaps.is_empty(), "the paragraph of docs/status.md about the server sync and the remote sessions lacks {gaps:?}");
+    let row = README.lines().find(|l| l.starts_with("| **Remote sessions:**")).expect("the README has the row of the remote sessions");
+    let gaps = never_run_gaps(row);
+    assert!(gaps.is_empty(), "the README's row of the remote sessions lacks {gaps:?}");
 }
 
 #[test]

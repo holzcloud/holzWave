@@ -562,6 +562,15 @@ Machines the rows need:
 A failing row becomes a task of its own: the owner writes `fail` and what was seen, and a gap plan fixes it before the
 web build is called done.
 
+The server as a sync target, the sign-in of the apps as devices and the remote sessions have no row of their own. They are tested
+against the real server in one process over the loopback address and in real browsers against the real server
+([server.md](server.md#remote-sessions)). These checks need a real device or a real server and were not run: an app on a real
+phone or desktop signing in to a real server over a real network, the approval with a real passkey or through a real single
+sign-on, the hand-back from the Android system browser to the app with the secret vault locked and unlocked, the device socket
+`/ws/device` through the proxy of SRV-R1, two people of SRV-U1 with a session each, a session open during the restart of SRV-S1
+(it ends with every pane), a phone in Doze or with the app ended in the background while a session runs, and the sync of two real
+computers through the server.
+
 ## Part 11: pictures, hyperlinks, signed releases and the limits of the measurements
 
 Nothing in this part is verified until you run the row and write `pass`, or `fail` with a line of what was seen, in its
@@ -827,6 +836,9 @@ This is every claim of this part that no suite or emulator supports. It is liste
   project's own repository; a build from source of it was not made.
 - The unit and browser tests of the page used a mocked Android platform in desktop Chromium and WebKit with synthetic touch and key
   events; they are not an Android web view and not a finger.
+- The sign-in of the app to a holzWave server, the sync through the server and remote sessions were not run on an emulator or a
+  phone: no hand-back from the system browser, no locked vault holding the token, no Doze and no session while the app is in the
+  background.
 
 ## What to expect
 
@@ -905,7 +917,13 @@ Known limits of this build, so they are not reported as defects:
   (the isolation tests, the file capabilities, the image) ran in a Linux container only; the passkey tests of the real-server
   browser suite run in Chromium and are skipped in WebKit, and two browser tests (`blocks` in Chromium over the socket and
   `aiauto` in WebKit) have failed in full runs and passed alone.
-- A server restart ends every pane. The accounts, the sessions that are still valid, the layout and the settings stay.
+- A server restart ends every pane and every remote session. The accounts, the sessions that are still valid, the layout, the
+  devices, the switches, the sync files and the settings stay.
+- The server as a sync target and the remote sessions are off on every server until an administrator turns them on. They were
+  tested against the real server in one process and never run with real devices against a real server (the list is at the end
+  of Part 10). A device token is not bound to the device and works for whoever holds it until it is revoked or unused for 90
+  days (the default); approving a device can be phished. In the browser window all tabs of a person share the pane of a session and one right
+  to write, and a tab left open keeps that right until somebody presses `Take over`.
 - People share the container's network and process view, and `/tmp` is one directory for all of them. One container serves
   one trust domain: run a second server for a second one. A person's user id has no entry in the container's `passwd`
   file, so a shell may show a placeholder name in its prompt (bash prints `I have no name!`).
@@ -929,6 +947,6 @@ Known limits of this build, so they are not reported as defects:
 - Compression of the WebSocket is not adopted: `transport.compression` accepts only `off` in this build. The measured
   library saved 79 to 94 percent of the bytes and refused decompression bombs within the memory bound, but left 18 cases of
   the Autobahn suite unimplemented, which the rule for adopting it does not allow.
-- The web page has no mobile layout, no shared panes, no installable web app and no long-lived token for scripts; there is
-  no operator for Kubernetes. The tear-off controls, the local network list and self-update are not available in the
+- The web page has no mobile layout, no shared panes, no installable web app and no token for scripts or other programs (the
+  device token an app gets when it signs in is for that app only); there is no operator for Kubernetes. The tear-off controls, the local network list and self-update are not available in the
   browser and say so.

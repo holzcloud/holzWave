@@ -19,8 +19,8 @@
 - **SSH that reconnects.** A pane can run a shell on another machine over SSH (`russh`), with a jump host, host key
   checks, and a reconnect that keeps the pane and what you type. Secrets are in the OS keychain only. WSL and Docker
   connections open as local panes. Tested against an in-process SSH server; not yet tried against real hosts.
-- **Your own sync.** Settings, themes, profiles and layouts over WebDAV/Nextcloud, end-to-end encrypted, no
-  server of ours.
+- **Your own sync.** Settings, themes, profiles and layouts over WebDAV/Nextcloud or through your own holzWave server,
+  end-to-end encrypted: neither server ever sees the passphrase or a file in plain text.
 - **AI with consent, and fully offline on a Mac.** A chat in a pane, in the sidebar, in the palette actions and in
   `wsh ai`, with Anthropic, OpenAI, Gemini, local servers (Ollama, LM Studio, llama.cpp), AI gateways and, on a Mac with
   macOS 26 and Apple Intelligence, the on-device model: the whole AI feature then runs on the Mac itself, offline, with no
@@ -79,7 +79,7 @@ signed with a real key; the rows that will hold the results are in Part 12 of [t
 ## What it aims to do differently
 
 - One Rust core for desktop and mobile, so the same layout and sync work on a phone.
-- Sync without a server of ours: your Nextcloud, encrypted end to end.
+- Sync through a server you run, never one of ours: your Nextcloud or your own holzWave server, encrypted end to end.
 - AI that only sees terminal output after you share that pane.
 - Few dependencies, measured performance, and a documented plan that says what is not built.
 
@@ -114,12 +114,30 @@ invitations and roles, an encrypted store of each person's saved passwords, one 
 from files, ACME or a proxy, and the Compose file and the Helm chart ([server.md](server.md)). Built and tested against a test identity provider, virtual authenticators, the container tests and a Pebble certificate authority on the author's machines; not yet run against a real cluster, a real identity provider, hardware authenticators or real networks. The rows that are
 still open (a cluster at the baseline level and a stricter one, an identity provider, passkeys and PRF keys, a certificate
 authority, a reverse proxy, the four browsers, both architectures, two real people, restart, backup and capacity) are Part 10
-of [test-plan.md](test-plan.md); the suites that need Linux ran in a container only. Android is built too, and tested on three arm64 emulator images (Android 12, the newest Android and an image with 16 KB memory pages), **never on a phone or a tablet**. It has a local shell, SSH, the sync, a secret store behind the Android Keystore with the system prompt, a touch page with a key row, selection and pinch, a tablet layout, one-file hand-over through the system's document dialog, a foreground service that keeps sessions running, and HTTPS through the system's trust store; the cloud AI providers are part of the build. The emulator runs and the checks that ended not run are in [build-android.md](build-android.md), and what only a phone or a person shows is open in Part 13 of [test-plan.md](test-plan.md): keyboards, biometrics, background behaviour, real storage providers and networks, touch feel, real web views, accessibility and the vendors' shells. Only the last full runs of the emulator set were all green, after several runs with a failure (the runs, the one failure that passed when run alone and the one that failed three times and passed alone are in Part 13); a few green runs do not show that the set is stable. Android may end the local shells of an app in the background; SSH connections are not affected. Two defects found on an emulator are fixed and were checked on emulators only: with three-button navigation on Android 12 the page's bottom bar was drawn under the system buttons (its old web view gives the page no safe-area inset; the app now measures the bars and tells the page), and after the system recreated the app's window a shell started after `Stop all` did not bring the foreground service back (the plugin asked the destroyed window; it now asks the one in use). Not built:
+of [test-plan.md](test-plan.md); the suites that need Linux ran in a container only. Android is built too, and tested on three arm64 emulator images (Android 12, the newest Android and an image with 16 KB memory pages), **never on a phone or a tablet**. It has a local shell, SSH, the sync, a secret store behind the Android Keystore with the system prompt, a touch page with a key row, selection and pinch, a tablet layout, one-file hand-over through the system's document dialog, a foreground service that keeps sessions running, and HTTPS through the system's trust store; the cloud AI providers are part of the build. The emulator runs and the checks that ended not run are in [build-android.md](build-android.md), and what only a phone or a person shows is open in Part 13 of [test-plan.md](test-plan.md): keyboards, biometrics, background behaviour, real storage providers and networks, touch feel, real web views, accessibility and the vendors' shells. Only the last full runs of the emulator set were all green, after several runs with a failure (the runs, the one failure that passed when run alone and the one that failed three times and passed alone are in Part 13); a few green runs do not show that the set is stable. Android may end the local shells of an app in the background; SSH connections are not affected. Two defects found on an emulator are fixed and were checked on emulators only: with three-button navigation on Android 12 the page's bottom bar was drawn under the system buttons (its old web view gives the page no safe-area inset; the app now measures the bars and tells the page), and after the system recreated the app's window a shell started after `Stop all` did not bring the foreground service back (the plugin asked the destroyed window; it now asks the one in use).
+
+The server sync target and remote sessions are built too ([server.md](server.md), [sync.md](sync.md)): a holzWave server as the
+second target of the encrypted sync next to WebDAV, apps on a desktop or on Android that sign in to a server as a device through
+the person's browser, the lists of devices and their revocation, the two switches `Sync target` and `Remote sessions` (both off
+until an administrator turns them on), and remote sessions: shells that the server keeps running for a person, which an app
+shows in a pane with one writer at a time and which the browser window shows as well. They are tested against the real server
+in one process over the loopback address, against a mock of the app in WebKit and Chromium, and in real browsers against the
+real server, all on the author's Mac. **They were never run** on a real phone or a real desktop against a real server over a
+real network, with a real passkey or single sign-on approving a device, behind a real reverse proxy for the device socket, with
+two real people, on Android (the hand-back from the system browser, the secret vault, Doze and the end of a background app), or
+across a server restart under a real workload. A server restart ends every remote session, and a session also ends after the
+server's idle limit (`workers.idle_timeout`, a day by default) with no tab and no app of the person attached. Remote sessions
+share the 64 panes and the 8 sockets of a person with the browser window. A device syncs with one target at a time. In the
+browser window all tabs of a person share the pane of a session and one right to write, and a tab left open keeps that right
+until somebody presses `Take over`; on a desktop or a phone each device draws a session itself.
+
+Not built:
 
 | Phase | Planned |
 |---|---|
 | 9 | Android is built (the paragraph above). Not built or not run: widgets on the phone layout (the sidebar that holds them is not drawn on a phone; the tablet layout keeps the desktop's sidebar, whose widgets were not tried on Android), anything on a phone or a tablet, and the rows of Part 13 of [test-plan.md](test-plan.md). The AI chat on Android sends once the secret store is unlocked; a server on a private address needs the local-network permission of Android 17, which the app declares and asks for at the first such connection (run on an Android 17 emulator only, never on a phone or a real network). iOS is out, no Apple developer account |
-| Web build, left out | shared panes between people; an installable web app; a mobile layout of the web page; a long-lived token for scripts; an operator for Kubernetes; compression of the WebSocket (measured, not adopted). As the browser answers them: the two tear-off controls and the local network list say `Not available in the browser.`, the Apple on-device model is not offered, and updating is the operator's job (build and run the new image). Upload takes a file dropped on a shell pane only, and download covers images, video, audio and PDF files |
+| Server sync and remote sessions, left out | a second sync target at once and a way to move the files between targets; sharing a session with another person; a second server; a palette entry for sessions and a key for `Take over`; a device token bound to the device or rotated (the reason is in [server.md](server.md#device-sign-in-and-devices)); workers that survive a restart, so a restart ends every remote session |
+| Web build, left out | shared panes between people; an installable web app; a mobile layout of the web page; a token for scripts or other programs (the device token an app gets when it signs in is for that app only, never shown, revocable, and ends after 90 days without use by default); an operator for Kubernetes; compression of the WebSocket (measured, not adopted). As the browser answers them: the two tear-off controls and the local network list say `Not available in the browser.`, the Apple on-device model is not offered, and updating is the operator's job (build and run the new image). Upload takes a file dropped on a shell pane only, and download covers images, video, audio and PDF files |
 
 Deliberately not included: a web browser block. Kitty graphics, hyperlinks, the baseline and the guard, and the signing of the Linux packages are built and are described in the list at the top, together with what nobody has tried; the rows for those are Part 11 of [test-plan.md](test-plan.md). Phase numbers here follow the project plan summary; the detailed
 breakdown is in [roadmap.md](roadmap.md).

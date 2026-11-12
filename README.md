@@ -13,7 +13,7 @@
 **holzWave** is an open-source terminal emulator written from scratch in Rust, built on Tauri 3 and
 [libghostty](https://github.com/ghostty-org/ghostty). It aims to run on macOS, Windows, Linux, Android and in a browser with one
 look: tiled panes, tabs and workspaces, a WebGL2 renderer, SSH that reconnects, settings that sync through your own
-Nextcloud, and an AI chat that sees your terminal only after you share that pane. On a Mac with Apple Intelligence the AI runs
+Nextcloud or your own holzWave server, and an AI chat that sees your terminal only after you share that pane. On a Mac with Apple Intelligence the AI runs
 **completely offline**, on the device, with no account and no key. Website: [holzcloud.ch/holzwave](https://holzcloud.ch/holzwave).
 
 > [!WARNING]
@@ -67,8 +67,9 @@ crashes in the Mac's emulated container. They were not started on a Linux deskto
 The web build runs holzWave in a browser from one container: people sign in, and each person's terminals run as a user of their
 own on the server. There is no published image; you build it from this repository and run it with Docker Compose or with the
 Helm chart in `packaging/helm/holzwave`. The steps, the three TLS modes, single sign-on, backup and the sentences the server
-prints when it refuses to start are in the [Server guide](docs/server.md). Built and tested against a test identity provider, virtual authenticators, the container tests and a Pebble certificate authority on the author's machines; not yet run against a real cluster, a real identity provider, hardware authenticators or real networks. A restart ends every pane, and the rows that
-still have to be run are in Part 10 of the [test plan](docs/test-plan.md).
+prints when it refuses to start are in the [Server guide](docs/server.md). Built and tested against a test identity provider, virtual authenticators, the container tests and a Pebble certificate authority on the author's machines; not yet run against a real cluster, a real identity provider, hardware authenticators or real networks. A restart ends every pane and every remote session, and the rows that
+still have to be run are in Part 10 of the [test plan](docs/test-plan.md). The server can also be the target of the apps' sync and
+keep terminal sessions for them; both are off until an administrator turns them on.
 
 > [!IMPORTANT]
 > holzWave is inspired by [Wave Terminal](https://github.com/wavetermdev/waveterm), whose idea of the shell as one block
@@ -144,7 +145,7 @@ The own window frame of Windows and Linux (the page's bar is the window bar, wit
 |---|---|
 | ![The window as a browser shows it: no window buttons, status line marks, the upload target and the Download row menu](docs/design/web-window.png) | ![The holzWave window inside a browser tab](docs/design/platforms/web.png) |
 
-Drawings of the design for the server as a sync target and for terminal sessions that live on the server. None of it is built yet, and nothing here was run on a real phone or against a real server.
+Drawings of the design for the server as a sync target and for terminal sessions that live on the server. Both are built and tested against the real server on the author's Mac (the table below); nothing of it was run on a real phone or against a real server over a real network, and these pictures are drawings, not screenshots.
 
 | The server row and its sessions | The writer label and the states of a remote pane | The sessions on a phone |
 |---|---|---|
@@ -175,6 +176,8 @@ Built and tested by the author on macOS and Windows, and on Linux up to `0.0.1-b
 | SSH (reconnect, jump host, keychain), WSL and Docker panes, connection manager | built, tested against a test server, not yet against real hosts |
 | File browser, previews (Markdown, text, image, video, audio, PDF) and code editor, local and over SFTP | built, tested against a test server, not yet against real hosts |
 | Encrypted Nextcloud/WebDAV sync (XChaCha20-Poly1305, Argon2id) | built, tested against a test server, not yet against a real Nextcloud |
+| The same encrypted sync through your own holzWave server, one target at a time; apps that sign in to the server as a device through your browser, and the lists to revoke a device | built, off on every server until an administrator turns it on, tested against the real server in one process on the author's Mac; never run on a real phone or a real desktop against a real server over a real network, with a real passkey or single sign-on approving a device, with two real people, or on Android ([Server guide](docs/server.md), [sync](docs/sync.md)) |
+| **Remote sessions:** shells that your holzWave server keeps running, shown in a pane of the desktop app, the Android app or the browser window, with one writer at a time and `Take over` | built, off on every server until an administrator turns it on, tested against the real server in one process and in real browsers against the real server on the author's Mac; never run on a real phone or a real desktop against a real server over a real network, with a real passkey or single sign-on approving a device, behind a real reverse proxy for the device socket, with two real people, on Android (the hand-back from the system browser, the secret vault, Doze and the end of a background app), or across a server restart under a real workload. A server restart ends every remote session, and so does the server's idle limit (a day by default) with nobody connected; the 64 panes and 8 sockets of a person are shared with the browser window, and in the browser all tabs share a session's pane and its right to write ([Server guide](docs/server.md#remote-sessions)) |
 | `wsh` CLI (`view`, `edit`, `setmeta title`, `ai`, the history hooks) over a private local socket | built; the macOS, Windows and Linux packages made by the release scripts carry it beside the app (not the Flatpak) |
 | `wsh` on a Linux host over SSH (`view`, `edit`, `setmeta title` and `ping`; never the AI or the history) | built, tested against a test server and a real OpenSSH on loopback, not yet on a real Linux host. It needs three things: tick `Use wsh on this host` for the saved connection, choose `Install wsh on this host` in its pane (it uploads the bundled build to `~/.holzwave/bin`), and a server that allows Unix socket forwarding |
 | Sidebar with hosts, history search and widgets (described by a JSON Schema), a `^R` binding for the history | built, tested against test servers |
@@ -231,7 +234,7 @@ and the `wsh` CLI are built and tested against test servers. The system monitor 
 and the sidebar with widgets are built too, and so are the AI chat and the on-device model, whose manual checks wait for
 real accounts and Macs (Part 7 of the [test plan](docs/test-plan.md)). The native integrations (Kubernetes, Talos, Azure
 CLI, GAM7) are built and tested against fake tools and recorded fixtures; their rows for real clusters and accounts and for
-Windows and Linux hardware are open (Part 9 of the test plan). The web build (a server in one container, with the same window in a browser) is built and tested in containers; its rows for a real cluster, identity provider, authenticators, certificate authority, proxy and browsers are open (Part 10 of the test plan). Mobile is Android only: it is built and was run on arm64 emulators, never on a phone or a tablet, and its rows for what only a phone shows are open (Part 13 of the test plan).
+Windows and Linux hardware are open (Part 9 of the test plan). The web build (a server in one container, with the same window in a browser) is built and tested in containers; its rows for a real cluster, identity provider, authenticators, certificate authority, proxy and browsers are open (Part 10 of the test plan). The server as a sync target and remote sessions on it are built and tested against the real server on the author's Mac, and were never run with real devices against a real server. Mobile is Android only: it is built and was run on arm64 emulators, never on a phone or a tablet, and its rows for what only a phone shows are open (Part 13 of the test plan).
 Pictures and hyperlinks in the terminal, a recorded performance baseline with a guard, and the signing of the Linux packages by minisign are built too: the first two are tested against the engine, a real server and two browsers and not against real programs, and no release has been signed yet (Windows and macOS stay unsigned); what nobody has tried is listed in Part 11 of the test plan.
 Versions go `0.0.1-alpha3`, `0.0.1-beta1`, `0.0.1-beta2` (now), `0.0.1`. `0.0.1-beta2` added the native integrations, the web build and
 libghostty on Ghostty 1.4 (Zig 0.17) with a fix for the scrollback limit.

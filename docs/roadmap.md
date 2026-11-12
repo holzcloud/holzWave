@@ -176,13 +176,37 @@ holzWave in a browser from one container, for a person or a small team that runs
   invitations, roles and an audit log, an encrypted store of each person's saved passwords, the same commands and the same page as
   the desktop over one WebSocket, upload by drop and download of the files the core grants, the Docker image, a Compose file and a
   Helm chart, and an operator guide ([server.md](server.md)).
-- Out: shared panes between people, an installable web app, a mobile layout of the page, a long-lived token for scripts, an
-  operator for Kubernetes, tear-off windows, the Apple on-device model, the local network list and self-update.
+- Out: shared panes between people, an installable web app, a mobile layout of the page, a token for scripts or other programs
+  (the device token of an app, below, is for that app only), an operator for Kubernetes, tear-off windows, the Apple on-device
+  model, the local network list and self-update.
 - Deferred: compression of the WebSocket (the measured library saved 79 to 94 percent but left 18 Autobahn cases unimplemented, so
   it is off), workers that survive a restart (a restart ends every pane), user namespaces as a stronger boundary, a binary wire
   format, more than one replica, a drop target on the chat pane and the file browser as well as the shell pane, and a refusal sentence of its own for each reason a download is refused.
 
 Status: built, rows open (test-plan Part 10). Built and tested against a test identity provider, virtual authenticators, the container tests and a Pebble certificate authority on the author's machines; not yet run against a real cluster, a real identity provider, hardware authenticators or real networks. The design is in architecture.md section 16.
+
+## Server sync and remote sessions (after the web build)
+
+The holzWave server for the apps: the target of the encrypted sync, and terminal sessions that keep running on the server.
+
+- In: the sign-in of the desktop and Android apps as a device through the person's browser (the device authorization grant,
+  a token in the OS keychain, only its hash on the server, an end after 90 days without use by default, revocation at once), the lists of
+  devices for a person and an administrator, two switches of the operator (`Sync target` and `Remote sessions`, off by default,
+  with a ceiling in the configuration), the server as a second sync transport for the same encrypted files with per-person
+  bounds, and remote sessions: shells in the person's worker that outlive every client, attached over one bounded socket with
+  the screen and a tail of the scrollback, one writer at a time with `Take over`, shown in a pane of the apps and of the browser
+  window ([server.md](server.md), [sync.md](sync.md)).
+- Out: sharing a session with another person, a second server, two sync targets at once, a palette entry for sessions and a
+  key for `Take over`.
+- Deferred: a device token bound to the device (DPoP or mutual TLS) or rotated (the reason is in [server.md](server.md)),
+  moving the sync files from one target to the other, and workers that survive a restart (a restart ends every remote session).
+
+Status: built; Part 10 of [test-plan.md](test-plan.md) names what needs a real device or server. Built and tested against the
+real server in one process over the loopback address, against a mock of
+the app in WebKit and Chromium, and in real browsers against the real server, on the author's Mac; never run on a real phone or
+a real desktop against a real server over a real network, with a real passkey or single sign-on approving a device, behind a real
+reverse proxy for the device socket, with two real people, on Android, or across a server restart under a real workload. The
+design is in architecture.md section 16.
 
 ## Phase 7 — Mobile
 
