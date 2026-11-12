@@ -3,13 +3,15 @@
 // connection with `connect`. The password or key passphrase is typed into a field that is never filled in again:
 // the form only says whether one is saved, and a new value replaces it. Every string goes in with `textContent`.
 // While it is open it consumes the keys (the key handler stack).
-import { call } from "./bridge.js";
-import { connect, connections, refreshConnections } from "./connections.js";
+import { backend, call } from "./bridge.js";
+import { connect, connections, refreshConnections, showOpened } from "./connections.js";
 import type { Connection } from "./connstate.js";
 import { el, loadStyles, setText } from "./dom.js";
 import { pushKeyHandler } from "./keystack.js";
 import { INTERACTIVE_HINT } from "./loginpromptstate.js";
 import { lockedAnswer } from "./vaultstate.js";
+import { buildServerRow, desktopSource } from "./sessions-ui.js";
+import type { ServerRowHandle } from "./sessions-ui.js";
 
 let opened: Promise<void> | null = null;
 
@@ -79,6 +81,24 @@ async function show(): Promise<void> {
     title.textContent = "Connections";
     const statusLine = el("p", "set-status", box);
     statusLine.setAttribute("role", "status");
+
+    // The server is a source of sessions above the saved connections (docs/design.md 6.34). The browser build has no way to it
+    // here: its commands are the desktop's.
+    let server: ServerRowHandle | null = null;
+    const serverSlot = el("div", "cx-server-slot", box);
+    if (backend === "tauri") {
+      server = buildServerRow(serverSlot, desktopSource(call), {
+        say: (text, quiet) => {
+          setText(statusLine, text);
+          if (quiet) statusLine.dataset["quiet"] = "true";
+          else delete statusLine.dataset["quiet"];
+        },
+        opened: (view) => {
+          finish();
+          showOpened(view);
+        },
+      });
+    } else serverSlot.remove();
 
     const body = el("div", "cx-body", box);
     const list = el("div", "cx-list", body);
@@ -378,6 +398,7 @@ async function show(): Promise<void> {
 
     let pop: () => void = () => {};
     const finish = (): void => {
+      server?.dispose();
       pop();
       backdrop.remove();
       resolve();

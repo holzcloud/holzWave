@@ -93,3 +93,32 @@ export function setRect(node: HTMLElement, r: PxRect): void {
   node.style.width = `${r.w}px`;
   node.style.height = `${r.h}px`;
 }
+
+/**
+ * A button that asks twice: the first press changes its words and its border, the second does the work. It is disarmed as soon as
+ * the focus or the pointer goes anywhere else in `scope`; that is not left to `blur` alone, because a button that a press did not
+ * focus (as in WebKit on a Mac) never blurs.
+ */
+export function armed(button: HTMLButtonElement, label: string, armedLabel: string, scope: HTMLElement, signal: AbortSignal, act: () => Promise<void>): void {
+  button.type = "button";
+  button.textContent = label;
+  button.dataset.armed = "false";
+  const off = (): void => {
+    button.dataset.armed = "false";
+    button.textContent = label;
+  };
+  const away = (e: Event): void => {
+    if (e.target !== button) off();
+  };
+  scope.addEventListener("focusin", away, { signal });
+  scope.addEventListener("pointerdown", away, { signal });
+  button.addEventListener("click", () => {
+    if (button.dataset.armed !== "true") {
+      button.dataset.armed = "true";
+      button.textContent = armedLabel;
+      return;
+    }
+    off();
+    void act();
+  });
+}

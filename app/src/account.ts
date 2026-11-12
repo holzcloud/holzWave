@@ -11,7 +11,7 @@ import { http } from "./bridge.js";
 import { agoText, changeMessage, CHANGE_FAILED, groupStates, readMe, REPLACES_OLD, SAVED, sessionRows, usedText } from "./accountstate.js";
 import type { Group, Me } from "./accountstate.js";
 import { buildDevicesGroup } from "./devices.js";
-import { el } from "./dom.js";
+import { armed, el } from "./dom.js";
 import { decodeCreationOptions, encodeAttestation } from "./loginpasskey.js";
 import { PASSKEY_NOT_SAVED, readRecovery, readTotpSetup, UNREACHABLE } from "./loginstate.js";
 import { showRecovery, showSecret } from "./secretsteps.js";
@@ -501,31 +501,5 @@ export async function openAccount(): Promise<void> {
   (groups.querySelector<HTMLElement>(".acc-main") ?? close).focus();
 }
 
-/**
- * A button that asks twice: the first press changes its words and its border, the second does the work. It is disarmed as soon as
- * the focus or the pointer goes anywhere else in `scope`; that is not left to `blur` alone, because a button that a press did not
- * focus (as in WebKit on a Mac) never blurs.
- */
-export function armed(button: HTMLButtonElement, label: string, armedLabel: string, scope: HTMLElement, signal: AbortSignal, act: () => Promise<void>): void {
-  button.type = "button";
-  button.textContent = label;
-  button.dataset.armed = "false";
-  const off = (): void => {
-    button.dataset.armed = "false";
-    button.textContent = label;
-  };
-  const away = (e: Event): void => {
-    if (e.target !== button) off();
-  };
-  scope.addEventListener("focusin", away, { signal });
-  scope.addEventListener("pointerdown", away, { signal });
-  button.addEventListener("click", () => {
-    if (button.dataset.armed !== "true") {
-      button.dataset.armed = "true";
-      button.textContent = armedLabel;
-      return;
-    }
-    off();
-    void act();
-  });
-}
+// The button that asks twice lives in dom.ts (the Connections dialog uses it too); it is still named here for the modules that import it.
+export { armed };

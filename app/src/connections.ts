@@ -75,6 +75,12 @@ export async function connect(id: string): Promise<string | null> {
   }
 }
 
+/** Show a view the core answered for a pane that was opened elsewhere (a session of the server) and give it the keyboard, as `connect` does. */
+export function showOpened(view: View): void {
+  applyView(view);
+  focusInput();
+}
+
 /** Ask for the state of the panes' connections once. True when it changed. */
 export async function pollConnections(): Promise<boolean> {
   let raw: unknown = null;
