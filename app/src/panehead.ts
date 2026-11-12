@@ -16,6 +16,7 @@ import type { ChipText } from "./integratestate.js";
 import { DETACH, TAKE_OVER, WRITER_LABELS, connDot, connText, paneConns } from "./connstate.js";
 import type { PaneConn } from "./connstate.js";
 import { shortenHome } from "./labels.js";
+import { paneState } from "./sessionstate.js";
 import { startRename } from "./rename.js";
 import { state } from "./state.js";
 
@@ -159,6 +160,24 @@ function drawWriter(head: Head, pane: number, writer: keyof typeof WRITER_LABELS
   }
 }
 
+/**
+ * Where the label and `Take over` of `head` live: in the header, before the context, or on a phone in the place the top strip keeps for
+ * a chip (`#phone-chip`, docs/design.md 6.6 and 6.34), where `Take over` is 44 px and the name of the pane is cut first.
+ */
+function placeWriter(head: Head, phone: boolean): void {
+  const strip = phone ? document.getElementById("phone-chip") : null;
+  for (const node of [head.writer, head.take]) {
+    if (node === null) continue;
+    if (strip) {
+      if (node.parentElement !== strip) strip.insertBefore(node, node === head.take && head.writer ? head.writer.nextSibling : strip.firstChild);
+    } else if (node.parentElement !== head.root) {
+      head.root.insertBefore(node, head.ctx);
+    }
+  }
+  // The take button follows the label wherever they are.
+  if (head.writer && head.take && head.take.previousElementSibling !== head.writer) head.writer.after(head.take);
+}
+
 /** The × of a pane: `Detach session` for a pane that shows a session of a server (it asks for nothing), `Close pane` otherwise. */
 function drawClose(head: Head, conn: PaneConn | undefined): void {
   const words = conn?.remote ? DETACH : "Close pane";
@@ -216,8 +235,11 @@ export function renderPaneHeads(): void {
       head.root.classList.toggle("focus-line", focused && multiple && !exited);
       head.root.classList.toggle("exited", exited);
       const conn = paneConns.get(id);
+      // A pane that shows a session of a server says its state in the record's words (6.34), the dot a shape of its own.
+      const remote = conn?.remote ? paneState(conn as Parameters<typeof paneState>[0], held) : null;
       // A terminal the core holds open after its program ended is an exited pane too: the dot is hollow with a dash.
-      setAttr(head.dot, "data-state", exited || held ? "exited" : (connDot(conn) ?? (focused ? "focused" : "idle")));
+      const dotState = remote?.dot === "wait" ? "wait" : remote?.dot === "failed" ? "failed" : null;
+      setAttr(head.dot, "data-state", dotState ?? (exited || held ? "exited" : (connDot(conn) ?? (focused ? "focused" : "idle"))));
       const name = nameOf(id);
       const program = titleOf(id, tabTitle);
       // A name the user gave comes first; the program's title stays visible after it, lighter.
@@ -225,7 +247,9 @@ export function renderPaneHeads(): void {
       const block = paneBlocks.get(id);
       setText(head.title, name !== "" ? name : block ? blockTitle(block) : program);
       setText(head.sub, name !== "" && program !== name ? program : "");
-      const ctx = held
+      const ctx = remote
+        ? remote.text
+        : held
         ? heldText(held.status)
         : exited
         ? "exited"
@@ -238,16 +262,24 @@ export function renderPaneHeads(): void {
       // A production selection is said in the header too: the warn colour, an underline and the mark come from the tone.
       const production = block?.kind === "integration" && integrationProduction(id);
       // A held terminal says `exited N` in the same tone: the warn colour, an underline and the mark come from it (6.26).
-      setAttr(head.ctx, "data-tone", production || held ? "warn" : null);
-      setAttr(head.ctx, "title", ctx === "" ? null : production ? `${ctx} · production` : ctx);
+      setAttr(head.ctx, "data-tone", production || (remote ? remote.warn : held) ? "warn" : null);
+      // While a session's connection is made again, the title says how far the tries are (the context says the record's word).
+      const tries = remote?.state === "reconnecting" && conn && conn.of > 0 ? ` ${conn.attempt}/${conn.of}${conn.secs > 0 ? ` in ${conn.secs} s` : ""}` : "";
+      setAttr(head.ctx, "title", ctx === "" ? null : production ? `${ctx} · production` : `${ctx}${tries}`);
       drawChip(head, paneChip(id));
       head.root.classList.toggle("remote", conn?.remote !== undefined);
-      drawWriter(head, id, conn?.remote && !exited ? conn.remote.writer : null);
+      // The writer label stays only where the page knows it: not while attaching, reconnecting, unreachable or after the end.
+      drawWriter(head, id, conn?.remote && !exited && (remote === null || remote.label) ? conn.remote.writer : null);
       drawClose(head, conn);
     }
   }
+  // On a phone only the focused pane is shown: its label goes to the top strip.
+  const phone = document.documentElement.classList.contains("layout-phone");
+  for (const [id, head] of heads) placeWriter(head, phone && id === view?.focus);
   for (const [id, head] of heads) {
     if (live.has(id)) continue;
+    head.writer?.remove();
+    head.take?.remove();
     head.root.remove();
     heads.delete(id);
   }

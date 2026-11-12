@@ -319,3 +319,9 @@
   :root .ph-take { border-color: ButtonText; color: ButtonText; }
   :root .ph-take:focus-visible { outline-color: Highlight; }
 }
+/* On a phone the label and `Take over` sit in the place the top strip keeps for a chip (docs/design.md 6.6, 6.34): `Take over` is a
+   44 px target and the name of the pane is cut first. */
+#phone-chip { --ph-hit: var(--phone-target, 44px); gap: .333rem; }
+#phone-chip .ph-writer { margin-left: .333rem; }
+#phone-chip .ph-take { flex: none; height: var(--phone-target, 44px); min-height: var(--phone-target, 44px); padding: 0 .667rem;
+                      border: 1px solid var(--hw-line); border-radius: .25rem; font-size: calc(11rem / 12); }

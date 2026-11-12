@@ -28,6 +28,11 @@ import {
   sizeText,
   startText,
   untitled,
+  OlderLatch,
+  PANE_STATE_WORDS,
+  UNREACHABLE_LINE,
+  endedText,
+  paneState,
 } from "../../dist/sessionstate.js";
 import { LOCKED_LINE, SIGN_IN_LINK, SIGN_OUT, SIGN_OUT_ARMED } from "../../dist/serverstate.js";
 
@@ -147,4 +152,64 @@ test("the name of the server is its host", () => {
   assert.equal(serverName("https://holz.example.net"), "holz.example.net");
   assert.equal(serverName("https://holz.example.net:8443"), "holz.example.net:8443");
   assert.equal(serverName(""), "");
+});
+
+// ---- the states of a pane ----------------------------------------------------------------------------------------------------------
+
+const seen = (state, phase = "") => ({ state, remote: { phase } });
+
+test("each state of a pane says the record's word in the context slot, with a dot shape, and the label only where it is known", () => {
+  const table = section.slice(section.indexOf("**The states of a pane.**"), section.indexOf("On attach the server sends"));
+  const row = (state) => table.split("\n").find((line) => line.startsWith(`| ${state} |`)).split("|").map((c) => c.trim());
+  const cases = [
+    ["attaching", paneState(seen("connected", "attaching"))],
+    ["loading older lines", paneState(seen("connected", "loading_older"))],
+    ["resyncing", paneState(seen("connected", "resyncing"))],
+    ["session ended", paneState(seen("closed"), { status: 3 })],
+    ["reconnecting", paneState(seen("reconnecting"))],
+    ["server unreachable", paneState(seen("failed"))],
+  ];
+  const dots = { "dotted ring": "wait", "as before": null, "hollow with a dash": "failed" };
+  for (const [name, view] of cases) {
+    const [, , dot, context, line, label] = row(name);
+    const word = context.match(/`([^`]+)`/)[1];
+    assert.equal(view.text, word.replace("exit N", "exit 3"), `${name}: the context word`);
+    assert.equal(view.dot, dots[dot], `${name}: the dot`);
+    assert.equal(view.warn, context.includes("warn"), `${name}: the warn tone with its mark and underline`);
+    assert.equal(view.label, label === "shown", `${name}: the writer label`);
+    assert.ok(line.includes("`"), `${name} has a line on the screen`);
+  }
+  for (const word of Object.values(PANE_STATE_WORDS)) assert.ok(section.includes(word), `the record has ${word}`);
+  assert.ok(quoted(UNREACHABLE_LINE));
+  assert.ok(quoted("Session ended · exit N"));
+  assert.equal(endedText(0), "Session ended · exit 0");
+  assert.equal(endedText(null), "Session ended", "no status: the host's own notice");
+  assert.equal(paneState(seen("closed")).text, "Session ended");
+  assert.equal(paneState(seen("connecting")).state, "attaching", "a link that said nothing yet is attaching");
+  assert.equal(paneState(seen("connected")), null, "a pane that shows its session has no state");
+  assert.equal(paneState(seen("connected", "exploding")), null, "an unknown phase reads as none");
+});
+
+// ---- older lines -------------------------------------------------------------------------------------------------------------------
+
+test("the older-lines latch asks once at the top, only for a remote pane with more lines, and opens again after the phase", () => {
+  const latch = new OlderLatch();
+  const remote = (more = true, phase = "") => ({ more, phase });
+  const top = [0, 3000, 40];
+  const at = (pane, r, scrollbar = top, connected = true) => latch.want(pane, { remote: r, connected, scrollbar });
+  assert.equal(at(1, undefined), false, "a pane that is not remote never asks");
+  assert.equal(at(2, remote(false)), false, "no more lines on the server");
+  assert.equal(at(2, remote(true, "resyncing")), false, "a phase runs");
+  assert.equal(at(2, remote(), [5, 3000, 40]), false, "not at the top");
+  assert.equal(at(2, remote(), [0, 40, 40]), false, "no more history than the viewport");
+  assert.equal(at(2, remote(), top, false), false, "the connection is down");
+  assert.equal(at(2, remote()), true, "at the top with more: ask");
+  for (let i = 0; i < 20; i++) assert.equal(at(2, remote()), false, "a held scroll key does not ask twice");
+  assert.equal(at(2, remote(true, "loading_older")), false, "while the older lines load");
+  assert.equal(at(2, remote()), true, "the phase came and went: at the top again it asks again");
+  assert.equal(at(2, remote()), false);
+  assert.equal(at(2, remote(), [12, 3000, 40]), false, "the person left the top");
+  assert.equal(at(2, remote()), true, "and came back");
+  latch.forget(2);
+  assert.equal(at(2, remote(false)), false, "when more turns false the page stops asking");
 });

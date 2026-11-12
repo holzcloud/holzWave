@@ -63,7 +63,8 @@
 .conns .cx-sess { display: grid; grid-template-columns: minmax(6rem, 1.4fr) minmax(6rem, 1.6fr) 4.5rem 5.5rem 6.5rem 4.5rem auto;
                   align-items: center; gap: 0 .667rem; min-height: max(36px, calc(36rem / 12)); padding: 0 .333rem;
                   border-top: 1px solid var(--hw-line); }
-.conns .cx-sess > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conns .cx-sess-meta { display: contents; }
+.conns .cx-sess > span:not(.cx-sess-meta), .conns .cx-sess-meta > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conns .cx-sess-title { color: var(--hw-ink); }
 .conns .cx-sess-dir { color: var(--hw-ink-2); }
 .conns .cx-sess-size, .conns .cx-sess-start, .conns .cx-sess-att { color: var(--hw-dim); }
@@ -89,3 +90,19 @@
   .conns .cx-sq[data-shape="filled"] { background: CanvasText; }
   .conns .cx-server .cx-sv-btn[data-armed="true"] { border-color: Highlight; color: Highlight; }
 }
+
+/* A phone: the dialog is a full-screen sheet, every row and button of the server is at least 44 px high, and a session row says the
+   title and `free` or `held` on its first line and wraps the rest on the lines under it (docs/design.md 6.34). */
+:root.layout-phone .dlg-backdrop:has(> .dlg.conns) { align-items: stretch; justify-content: stretch; }
+:root.layout-phone .dlg.conns { width: 100vw; max-width: 100vw; height: 100%; max-height: 100%; border-radius: 0; border: 0;
+                                padding: calc(var(--hw-inset-top, 0px) + .833rem) .833rem .833rem; }
+:root.layout-phone .conns .cx-server .cx-sv-btn, :root.layout-phone .conns .cx-srv, :root.layout-phone .conns .cx-sess {
+  min-height: var(--phone-target, 44px); }
+:root.layout-phone .conns .cx-sess { grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "title writer acts" "meta meta meta";
+                                     padding: .333rem .333rem; }
+:root.layout-phone .conns .cx-sess-title { grid-area: title; }
+:root.layout-phone .conns .cx-sess-writer { grid-area: writer; }
+:root.layout-phone .conns .cx-sess-acts { grid-area: acts; }
+:root.layout-phone .conns .cx-sess-meta { grid-area: meta; display: flex; flex-wrap: wrap; gap: 0 .5rem; color: var(--hw-dim); }
+:root.layout-phone .conns .cx-sess-meta > span + span::before { content: "· "; }
+:root.layout-phone .conns .cx-body { grid-template-columns: minmax(0, 1fr); }

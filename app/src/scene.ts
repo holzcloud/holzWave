@@ -12,6 +12,8 @@ import type { Frame, PaneFx } from "./frame.js";
 import { RateMeter, applyFrame, decorationSignature, forgetPane, leavePane, toRenderFrame } from "./frames.js";
 import type { FrameMsg, LinkFilter, PaneMirror } from "./frames.js";
 import { Leaving } from "./dropzone.js";
+import { paneConns } from "./connstate.js";
+import { OlderLatch } from "./sessionstate.js";
 import { fitCells, gridRect, headerHeight } from "./geometry.js";
 import { images, onImageReady, wantedOf } from "./images.js";
 import type { PlaceGeometry } from "./images.js";
@@ -298,6 +300,20 @@ export function fit(): void {
 /** Panes whose sequence gap was reported: frames are ignored until the full frame that answers the request. */
 const waiting = new Set<number>();
 
+/** When a pane that shows a session of a server asks for older lines (docs/design.md 6.34): once per arrival at the top. */
+const older = new OlderLatch();
+
+/**
+ * Ask the server for older lines when the person has scrolled a session's pane to the top of what the page holds. It draws no
+ * control and moves nothing: the host attaches again with a longer tail and keeps the pane's distance from the bottom.
+ */
+function askOlder(pane: number, mirror: PaneMirror): void {
+  const conn = paneConns.get(pane);
+  if (older.want(pane, { remote: conn?.remote, connected: conn?.state === "connected", scrollbar: mirror.scrollbar })) {
+    void call("pane_load_older", { pane }).catch(() => {}); // a refusal leaves the pane as it is; the header says nothing new
+  }
+}
+
 /** When frame events arrived; `state.stats.fps` is its rate. */
 const arrivals = new RateMeter(1000);
 
@@ -350,6 +366,7 @@ function onFrame(msg: FrameMsg): void {
     restartBlink(); // output shows the cursor: a cursor does not vanish while the program writes
   }
   for (const hook of [...paneFrameHooks]) hook(pane);
+  askOlder(pane, mirror);
   schedule();
 }
 
@@ -383,6 +400,7 @@ function onCwd(p: { pane: number; cwd: string }): void {
 function onPaneExit(p: { pane: number; code: number | null }): void {
   if (typeof p !== "object" || p === null || !isPane(p.pane)) return;
   forgetPane(state, p.pane);
+  older.forget(p.pane);
   forgetSelection(p.pane);
   attention.forget(p.pane);
   waiting.delete(p.pane);

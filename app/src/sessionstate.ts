@@ -237,3 +237,127 @@ export function serverName(url: string): string {
     return "";
   }
 }
+
+// ---- the states of a pane that shows a session (docs/design.md 6.34, "The states of a pane") ----------------------------------------
+
+/** The transient states of a remote pane. */
+export type PaneState = "attaching" | "loading_older" | "resyncing" | "ended" | "reconnecting" | "unreachable";
+
+/** The words of the header's context slot for each state; `ended` with a status is `Session ended · exit N`. */
+export const PANE_STATE_WORDS: Readonly<Record<PaneState, string>> = {
+  attaching: "Attaching…",
+  loading_older: "Loading older lines…",
+  resyncing: "Resyncing…",
+  ended: "Session ended",
+  reconnecting: "Reconnecting…",
+  unreachable: "Server unreachable",
+};
+
+/** The line the record writes on the screen for a pane whose tries are used. The host writes it; the page holds it for the test. */
+export const UNREACHABLE_LINE = "Server unreachable. Press Enter to try again.";
+
+/** `Session ended · exit N`, or `Session ended` when the status could not be read (the host's own notice says the same). */
+export function endedText(code: number | null): string {
+  return code === null ? PANE_STATE_WORDS.ended : `${PANE_STATE_WORDS.ended} · exit ${code}`;
+}
+
+/** What the header of a remote pane shows for a state: the word, the dot, the warn tone (with its `!` and underline), the label. */
+export interface PaneStateView {
+  state: PaneState;
+  text: string;
+  /** The dot: a dotted ring (`wait`), hollow with a dash (`failed`), or as before (null). */
+  dot: "wait" | "failed" | null;
+  warn: boolean;
+  /** The writer label stays only where the page knows it. */
+  label: boolean;
+}
+
+/** The parts of a pane's connection the state is read from (connstate's `PaneConn`, without importing it). */
+export interface RemoteSeen {
+  state: "connecting" | "connected" | "reconnecting" | "failed" | "closed";
+  remote: { phase: "" | "attaching" | "loading_older" | "resyncing" };
+}
+
+/**
+ * The state of a remote pane, or null when it shows the session as it is. `held` is the status of a pane the host holds on the screen
+ * after its session ended (`undefined` when it does not hold it, `null` inside when the status could not be read).
+ */
+export function paneState(c: RemoteSeen, held?: { status: number | null } | null): PaneStateView | null {
+  const view = (state: PaneState, dot: PaneStateView["dot"], label: boolean, text = PANE_STATE_WORDS[state]): PaneStateView => ({
+    state,
+    text,
+    dot,
+    warn: state === "ended" || state === "unreachable",
+    label,
+  });
+  if (held) return view("ended", "failed", false, endedText(held.status));
+  switch (c.state) {
+    case "closed":
+      return view("ended", "failed", false);
+    case "failed":
+      return view("unreachable", "failed", false);
+    case "reconnecting":
+      return view("reconnecting", "wait", false);
+    case "connecting":
+      return view("attaching", "wait", false);
+    default:
+      break;
+  }
+  switch (c.remote.phase) {
+    case "attaching":
+      return view("attaching", "wait", false);
+    case "loading_older":
+      return view("loading_older", null, true);
+    case "resyncing":
+      return view("resyncing", "wait", true);
+    default:
+      return null;
+  }
+}
+
+// ---- older lines ------------------------------------------------------------------------------------------------------------------
+
+/** What the latch reads of a pane after a frame. */
+export interface OlderSeen {
+  /** The remote member of the pane's connection, or undefined for a pane that does not show a session. */
+  remote?: { more: boolean; phase: string } | undefined;
+  /** The connection is up. */
+  connected: boolean;
+  /** The frame's scrollbar: `[offset, total, len]`; offset 0 is the top of what the page holds. */
+  scrollbar: readonly [number, number, number];
+}
+
+/**
+ * Decides when a pane that shows a session asks the server for older lines (`pane_load_older`): when the person has scrolled to the
+ * top of what the page holds, the pane holds more history than its viewport, the server has more, and nothing runs. After one ask it
+ * stays closed until the phase has come and gone, or the person has left the top, so a held scroll key at the top asks once.
+ */
+export class OlderLatch {
+  /** Panes that asked: `asked` until their phase shows, `seen` while it shows. */
+  private readonly closed = new Map<number, "asked" | "seen">();
+
+  /** True when `pane` should ask now; the latch closes for it. */
+  want(pane: number, seen: OlderSeen): boolean {
+    const r = seen.remote;
+    if (!r) {
+      this.closed.delete(pane);
+      return false;
+    }
+    const [offset, total, len] = seen.scrollbar;
+    const atTop = offset === 0 && total > len;
+    const mark = this.closed.get(pane);
+    if (mark !== undefined) {
+      if (r.phase !== "") this.closed.set(pane, "seen");
+      else if (mark === "seen" || offset > 0) this.closed.delete(pane);
+      if (this.closed.has(pane)) return false;
+    }
+    if (!seen.connected || !r.more || r.phase !== "" || !atTop) return false;
+    this.closed.set(pane, "asked");
+    return true;
+  }
+
+  /** Forget a pane that left. */
+  forget(pane: number): void {
+    this.closed.delete(pane);
+  }
+}

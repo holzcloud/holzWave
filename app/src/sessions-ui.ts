@@ -186,10 +186,12 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
         item.setAttribute("role", "listitem");
         item.dataset.session = String(s.id);
         el("span", "cx-sess-title", item).textContent = words.title;
-        el("span", "cx-sess-dir", item).textContent = words.dir;
-        el("span", "cx-sess-size", item).textContent = words.size;
-        el("span", "cx-sess-start", item).textContent = words.start;
-        el("span", "cx-sess-att", item).textContent = words.attached;
+        // The directory, the size, the start and the attached count: columns of the row on the desktop, one wrapped line on a phone.
+        const meta = el("span", "cx-sess-meta", item);
+        el("span", "cx-sess-dir", meta).textContent = words.dir;
+        el("span", "cx-sess-size", meta).textContent = words.size;
+        el("span", "cx-sess-start", meta).textContent = words.start;
+        el("span", "cx-sess-att", meta).textContent = words.attached;
         const writer = el("span", "cx-sess-writer", item);
         const sq = el("span", "cx-sq", writer);
         sq.setAttribute("aria-hidden", "true");
