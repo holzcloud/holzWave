@@ -39,6 +39,7 @@ mod protocol {
     use holzwave_host::host_shell::HostShellView;
     use holzwave_host::window_frame::WindowFrameView;
     use holzwave_host::server::{ServerView, SignInPoll, SignInView};
+    use holzwave_host::sessions::SessionRow;
     use holzwave_host::local_network::LocalNetworkView;
     use holzwave_core::local_network::State as LnState;
     use holzwave_host::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, RemovalView, TicketView};
@@ -272,6 +273,28 @@ mod protocol {
 
     /// The answers of the integration commands, written by the real types: the recorded output of a fake `kubectl` goes
     /// through the real parser, and the tool entries are the real compiled-in descriptions.
+    /// The answer of `pane_connections`: a pane of a saved connection (no remote member), then panes of server sessions in
+    /// every word of who writes and of what the pane is busy with.
+    fn pane_connection_samples() -> Value {
+        use holzwave_core::conn::{ConnState, RemoteState, RemoteView};
+        use holzwave_core::connections::{ConnView, RemoteConn};
+        use holzwave_core::remote::proto::WriterView;
+        let profile = holzwave_core::profiles::Profile::new("web-1", "Web", "web.example.org");
+        let saved = ConnView::new(4, &profile, &ConnState::Reconnecting { attempt: 2, of: 5, in_secs: 3 }).expect("a connection");
+        let remote = |pane, state: &ConnState, writer, phase| {
+            let view = RemoteView { session: 7, writer, cols: 120, rows: 40, more: true, state: phase, dropped_input: 0 };
+            ConnView::remote(pane, "sync.example.test", state, RemoteConn::of(&view))
+        };
+        to_value(&vec![
+            saved,
+            remote(9, &ConnState::Connected, WriterView::Writing, RemoteState::None),
+            remote(10, &ConnState::Connected, WriterView::Watching, RemoteState::LoadingOlder),
+            remote(11, &ConnState::Connecting, WriterView::Free, RemoteState::Attaching),
+            remote(12, &ConnState::Reconnecting { attempt: 1, of: 5, in_secs: 3 }, WriterView::Free, RemoteState::Resyncing),
+            remote(13, &ConnState::Failed, WriterView::Free, RemoteState::None),
+        ])
+    }
+
     fn integration_samples() -> Value {
         use holzwave_host::integrate_host::{ConfirmAnswer, ConfirmKind, LaunchAnswer, PaneAnswer};
         use holzwave_core::integrate::ticket::{Card, Guard};
@@ -734,6 +757,11 @@ mod protocol {
                     to_value(&SignInPoll { state: "off", interval: 5 }),
                     to_value(&SignInPoll { state: "unreachable", interval: 10 }),
                 ],
+                "sessions": to_value(&vec![
+                    SessionRow { id: 3, title: "vim notes.md".into(), cwd: "/home/alice/notes".into(), cols: 120, rows: 40, started: 1_762_771_200, attached: 2, held: true },
+                    SessionRow { id: 9, title: String::new(), cwd: String::new(), cols: 80, rows: 24, started: 1_762_774_800, attached: 0, held: false },
+                ]),
+                "pane_connections": pane_connection_samples(),
                 "integration": integration_samples(),
                 "ai": {
                     "ticket": to_value(&TicketView { conversation: "chat-1".into(), turn: 5 }),

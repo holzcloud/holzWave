@@ -1643,7 +1643,56 @@ fn the_server_rows_are_desktop_only_and_take_one_text_at_most() {
         assert_eq!(row.error, can_fail.then_some("String"), "{name}");
         assert_eq!(row.cap, CAP_DEFAULT, "{name}");
     }
-    assert_eq!(COMMANDS.iter().filter(|row| row.group == "server").count(), SERVER_ROWS.len(), "no other row of the group");
+    assert_eq!(
+        COMMANDS.iter().filter(|row| row.group == "server").count(),
+        SERVER_ROWS.len() + SESSION_ROWS.len(),
+        "no other row of the group"
+    );
+}
+
+/// The six commands of the sessions of a server: the scope, the arguments and the answer of each.
+const SESSION_ROWS: [(&str, Scope, &[(&str, &str)], &str); 6] = [
+    ("server_sessions", Scope::None, &[], "Vec<SessionRow>"),
+    ("server_session_new", Scope::Window, &[], "View"),
+    ("server_session_open", Scope::Window, &[("session", "u32")], "View"),
+    ("server_session_end", Scope::None, &[("session", "u32")], "()"),
+    ("pane_takeover", Scope::None, &[("pane", "PaneId")], "()"),
+    ("pane_load_older", Scope::None, &[("pane", "PaneId")], "()"),
+];
+
+#[test]
+fn the_session_rows_are_desktop_only_take_a_number_at_most_and_fail_with_a_sentence() {
+    for (name, scope, args, answer) in SESSION_ROWS {
+        let row = lookup(name).expect("a row");
+        assert_eq!((row.group, row.scope, row.mode, row.web), ("server", scope, Mode::Async, Web::Unavailable), "{name}");
+        assert_eq!(row.args.iter().map(|arg| (arg.name, arg.ty)).collect::<Vec<_>>(), args, "{name}: only the named number");
+        assert_eq!(row.answer.split_whitespace().collect::<String>(), answer, "{name}");
+        assert_eq!(row.error, Some("String"), "{name}: a fixed sentence");
+        assert_eq!(row.cap, CAP_DEFAULT, "{name}");
+    }
+}
+
+#[test]
+fn a_core_that_is_not_signed_in_answers_the_session_commands_with_fixed_sentences_and_makes_nothing() {
+    use holzwave_host::commands::server as plain;
+    let world = World::new("session-rows");
+    let not_signed_in = "Sign in to the server first.";
+    let tabs = world.core.view_in("main").expect("the main window").tabs.len();
+    assert_eq!(plain::server_sessions(&world.core), Err(not_signed_in.to_owned()));
+    assert_eq!(plain::server_session_new(&world.core, "main").err().as_deref(), Some(not_signed_in));
+    assert_eq!(plain::server_session_open(&world.core, "main", 7).err().as_deref(), Some(not_signed_in));
+    assert_eq!(plain::server_session_end(&world.core, 7), Err(not_signed_in.to_owned()));
+    assert_eq!(world.core.view_in("main").expect("the main window").tabs.len(), tabs, "no tab was made");
+    // A window that does not exist is said before anything else.
+    assert!(plain::server_session_new(&world.core, "nowhere").is_err());
+    // A pane that shows no session: the one sentence, for a pane of the layout and for an id nobody has.
+    let pane = world.focus();
+    for id in [pane, 9_999] {
+        assert_eq!(plain::pane_takeover(&world.core, id), Err("This pane does not show a session on a server.".to_owned()));
+        assert_eq!(plain::pane_load_older(&world.core, id), Err("This pane does not show a session on a server.".to_owned()));
+    }
+    assert!(!world.dir.join("remote_panes.json").exists(), "nothing was recorded");
+    assert!(!world.dir.join("server_link.json").exists(), "no link was stored");
 }
 
 #[test]
@@ -2033,10 +2082,11 @@ fn rows_expected() -> usize {
     golden_commands().len()
 }
 
-/// The 32 commands the browser build does not have: eight of the first table plan, nine of the second (the two that
+/// The 38 commands the browser build does not have: eight of the first table plan, nine of the second (the two that
 /// carry the window frame choices among them), the six that drive the vault of a phone, the two that hand a file over on
-/// a phone and the seven of the link to a server (the browser is that server's own page).
-const THE_UNAVAILABLE: [&str; 32] = [
+/// a phone, the seven of the link to a server (the browser is that server's own page) and the six that run the sessions
+/// of that server as panes.
+const THE_UNAVAILABLE: [&str; 38] = [
     "attach_pane",
     "attach_tab",
     "clipboard_text",
@@ -2050,9 +2100,15 @@ const THE_UNAVAILABLE: [&str; 32] = [
     "local_network_open_settings",
     "local_network_status",
     "open_url",
+    "pane_load_older",
+    "pane_takeover",
     "release_outside",
     "reveal_path",
     "server_refresh",
+    "server_session_end",
+    "server_session_new",
+    "server_session_open",
+    "server_sessions",
     "server_sign_in_cancel",
     "server_sign_in_poll",
     "server_sign_in_start",
@@ -2348,7 +2404,7 @@ fn surface_file_lists_every_golden_command() {
     let lines = surface_lines();
     let surface_names: BTreeSet<&str> = lines.iter().map(|(name, _)| *name).collect();
 
-    assert_eq!(lines.len(), 141, "one line for each command that was declared");
+    assert_eq!(lines.len(), 147, "one line for each command that was declared");
     assert_eq!(surface_names.len(), lines.len(), "no command twice");
     assert_eq!(surface_names, golden_names);
     for (_, line) in &lines {

@@ -48,6 +48,7 @@ pub mod prelude {
     };
     pub use crate::ai_host::{AiFault, AiProfiles, ConversationList, ProfileInputMsg, RemovalView, TicketView};
     pub use crate::integrate_host::{ConfirmAnswer, ContextAnswer, IntegrationFault, LaunchAnswer};
+    pub use crate::sessions::SessionRow;
     pub use crate::state::{AppInfo, Released, SettingsView, View};
     pub use crate::windows::DropKind;
     pub use holzwave_core::ai::profiles::KeySlot;

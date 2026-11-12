@@ -83,6 +83,29 @@
 //       setInterval(n)  the seconds of the interval the start and the polls state (default 5; a test that waits for a poll sets 1)
 //       calls          every call of the seven commands as `[command, args]`, oldest first
 //       reset()        back to the default
+//     remoteSessions   the sessions of the server the desktop is signed in to: the six commands `server_sessions`,
+//                      `server_session_new`, `server_session_open`, `server_session_end`, `pane_takeover` and
+//                      `pane_load_older`, answered from this hook, and the panes of a session in the answer of `pane_connections`
+//       sessions       a copy of the rows `server_sessions` answers (default none):
+//                      `{ id, title, cwd, cols, rows, started, attached, held }`
+//       set(list)      replace the rows
+//       opened(view)   the view `server_session_new` and `server_session_open` answer (default: the layout view of the mock);
+//                      opened(null) goes back to the default
+//       fails(command, text)  the command rejects with `text` (a fixed sentence, as the host's) and changes nothing;
+//                      fails(command, null) stops it. Without it `server_session_new` adds a row (the next id, 80 by 24, held),
+//                      `server_session_open` and `server_session_end` reject an id that is not a row with the not-found
+//                      sentence, `server_session_end` removes the row and closes the panes that show it, and `pane_takeover`
+//                      and `pane_load_older` reject a pane that shows no session
+//       panes          a copy of the panes of a session as `pane_connections` lists them: the core's `ConnView` with its
+//                      `remote` member `{ writer, session, cols, rows, more, phase }`. While there is none, `pane_connections`
+//                      answers as before (a handler of `on`, or nothing)
+//       setPane(pane, partial)  add the pane of a session or change it; `partial.remote` is merged into the remote member.
+//                      A new pane is `connected`, named `sync.example.test`, watching session 1 at 80 by 24 with nothing older
+//       dropPane(pane) the pane leaves the answer
+//       pane_takeover  makes the pane `writing` and every other pane of its session `watching`; `pane_load_older` sets the
+//                      pane's `more` to false
+//       calls          every call of the six commands as `[command, args]`, oldest first
+//       reset()        back to the default
 //     ai               the AI chat of the core, played from the shapes of app/tests/fixtures/ai_stream.json:
 //       profiles       the `profiles` member of the answer of `ai_profiles` (default none). A profile view carries the
 //                      members of the core's `ProfileView` and the mock-only member `locality` (`on_device`,
@@ -1856,6 +1879,97 @@
     },
   };
 
+  // The sessions of the server: the rows, the panes that show one, the failures to play, and the knobs of the header comment.
+  // The sentences are the host's own fixed sentences.
+  const SESSION_NOT_FOUND = "That session is not on the server any more.";
+  const NOT_A_SESSION_PANE = "This pane does not show a session on a server.";
+  const sessionStart = () => ({ rows: [], panes: new Map(), opened: null, errors: new Map(), calls: [] });
+  let sessionState = sessionStart();
+  const sessionCall = (command, args) => {
+    sessionState.calls.push([command, args]);
+    if (sessionState.errors.has(command)) throw sessionState.errors.get(command);
+  };
+  const sessionPane = (pane) => {
+    const conn = sessionState.panes.get(pane);
+    if (conn === undefined) throw NOT_A_SESSION_PANE;
+    return conn;
+  };
+  const sessionCommands = {
+    async server_sessions(args) {
+      sessionCall("server_sessions", args);
+      return structuredClone(sessionState.rows);
+    },
+    async server_session_new(args) {
+      sessionCall("server_session_new", args);
+      const id = sessionState.rows.reduce((top, row) => Math.max(top, row.id), 0) + 1;
+      sessionState.rows.push({ id, title: "", cwd: "", cols: 80, rows: 24, started: 1_700_000_000 + id, attached: 1, held: true });
+      return structuredClone(sessionState.opened ?? view());
+    },
+    async server_session_open(args) {
+      sessionCall("server_session_open", args);
+      if (!sessionState.rows.some((row) => row.id === args?.session)) throw SESSION_NOT_FOUND;
+      return structuredClone(sessionState.opened ?? view());
+    },
+    async server_session_end(args) {
+      sessionCall("server_session_end", args);
+      const at = sessionState.rows.findIndex((row) => row.id === args?.session);
+      if (at < 0) throw SESSION_NOT_FOUND;
+      sessionState.rows.splice(at, 1);
+      for (const conn of sessionState.panes.values()) if (conn.remote.session === args.session) conn.state = "closed";
+      return null;
+    },
+    async pane_takeover(args) {
+      sessionCall("pane_takeover", args);
+      const conn = sessionPane(args?.pane);
+      for (const other of sessionState.panes.values()) {
+        if (other.remote.session === conn.remote.session) other.remote.writer = other === conn ? "writing" : "watching";
+      }
+      return null;
+    },
+    async pane_load_older(args) {
+      sessionCall("pane_load_older", args);
+      sessionPane(args?.pane).remote.more = false;
+      return null;
+    },
+  };
+  const remoteSessions = {
+    get sessions() {
+      return structuredClone(sessionState.rows);
+    },
+    set(list) {
+      sessionState.rows = structuredClone(list);
+    },
+    opened(v) {
+      sessionState.opened = v === null || v === undefined ? null : structuredClone(v);
+    },
+    fails(command, text) {
+      if (text === null || text === undefined) sessionState.errors.delete(command);
+      else sessionState.errors.set(command, text);
+    },
+    get panes() {
+      return [...sessionState.panes.values()].map((conn) => structuredClone(conn));
+    },
+    setPane(pane, partial = {}) {
+      const conn = sessionState.panes.get(pane) ?? {
+        pane, profile: "", name: "sync.example.test", state: "connected", attempt: 0, of: 0, secs: 0,
+        remote: { writer: "watching", session: 1, cols: 80, rows: 24, more: false, phase: "" },
+      };
+      const { remote, ...rest } = structuredClone(partial);
+      Object.assign(conn, rest, { pane });
+      if (remote) Object.assign(conn.remote, remote);
+      sessionState.panes.set(pane, conn);
+    },
+    dropPane(pane) {
+      sessionState.panes.delete(pane);
+    },
+    get calls() {
+      return structuredClone(sessionState.calls);
+    },
+    reset() {
+      sessionState = sessionStart();
+    },
+  };
+
   // The integration commands of the core. Without a script (`on`) each answers what a machine without the tools would: empty
   // lists and nothing, so a test that does not use an integration block sees no difference.
   const integrationDefaults = {
@@ -1885,6 +1999,8 @@
     if (Object.hasOwn(shellCommands, cmd)) return shellCommands[cmd](args ?? {});
     if (Object.hasOwn(frameCommands, cmd)) return frameCommands[cmd](args ?? {});
     if (Object.hasOwn(linkCommands, cmd)) return linkCommands[cmd](args ?? {});
+    if (Object.hasOwn(sessionCommands, cmd)) return sessionCommands[cmd](args ?? {});
+    if (cmd === "pane_connections" && sessionState.panes.size > 0) return [...sessionState.panes.values()].map((conn) => structuredClone(conn));
     if (Object.hasOwn(integrationDefaults, cmd)) return integrationDefaults[cmd](args ?? {});
     if (LAYOUT_COMMANDS.has(cmd) && layoutError !== null) throw layoutError; // Tauri rejects with the error text
     if (cmd === "set_ratio") setRatio(args);
@@ -1931,6 +2047,7 @@
       hostShell.reset();
       windowFrame.reset();
       serverLink.reset();
+      remoteSessions.reset();
     },
     get ai() {
       return mockAi;
@@ -1946,6 +2063,9 @@
     },
     get serverLink() {
       return serverLink;
+    },
+    get remoteSessions() {
+      return remoteSessions;
     },
   };
 

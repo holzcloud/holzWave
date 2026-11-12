@@ -212,6 +212,30 @@ test("the app info and the pointer commands are pinned", () => {
   assert.deepEqual(golden.answers.sign_in_poll.map((p) => p.state), ["pending", "approved", "denied", "expired", "too_many", "off", "unreachable"]);
   assert.ok(!JSON.stringify([golden.answers.server, golden.answers.sign_in, golden.answers.sign_in_poll]).includes("hwd_"), "no sample holds a device token");
   assert.deepEqual(golden.commands.mouse, ["pane", "action", "button", "x", "y", "mods"]);
+  // The sessions of that server (desktop only): the page lists them, makes one, opens one in a new tab of its window, ends one,
+  // takes the right to write in a pane and asks for older lines. A row holds numbers and the server's two cleaned texts.
+  assert.deepEqual(golden.commands.server_sessions, []);
+  assert.deepEqual(golden.commands.server_session_new, []);
+  assert.deepEqual(golden.commands.server_session_open, ["session"]);
+  assert.deepEqual(golden.commands.server_session_end, ["session"]);
+  assert.deepEqual(golden.commands.pane_takeover, ["pane"]);
+  assert.deepEqual(golden.commands.pane_load_older, ["pane"]);
+  assert.ok(golden.answers.sessions.length > 0);
+  for (const row of golden.answers.sessions) {
+    assert.deepEqual(keys(row), ["attached", "cols", "cwd", "held", "id", "rows", "started", "title"]);
+    assert.equal(typeof row.held, "boolean");
+  }
+  // A pane of a saved connection has no remote member; a pane of a server session names the host and says who writes.
+  const conns = golden.answers.pane_connections;
+  assert.deepEqual(keys(conns[0]), ["attempt", "name", "of", "pane", "profile", "secs", "state"]);
+  for (const conn of conns.slice(1)) {
+    assert.deepEqual(keys(conn), ["attempt", "name", "of", "pane", "profile", "remote", "secs", "state"]);
+    assert.equal(conn.profile, "");
+    assert.deepEqual(keys(conn.remote), ["cols", "more", "phase", "rows", "session", "writer"]);
+  }
+  assert.deepEqual([...new Set(conns.slice(1).map((c) => c.remote.writer))].sort(), ["free", "watching", "writing"]);
+  assert.deepEqual([...new Set(conns.slice(1).map((c) => c.remote.phase))].sort(), ["", "attaching", "loading_older", "resyncing"]);
+  assert.ok(!JSON.stringify([golden.answers.sessions, conns]).includes("hwd_"), "no sample holds a device token");
   assert.deepEqual(golden.commands.wheel, ["pane", "rows", "x", "y", "mods"]);
   for (const name of ["note_window", "placement"]) {
     assert.ok(!(name in golden.commands), `${name} is a method of the core, not a command`);
@@ -1056,7 +1080,7 @@ test("the two image commands are pinned: a pixel read by pane, image, generation
   assert.deepEqual(golden.commands.set_image_animation, ["enabled"]);
   assert.ok(!golden.commands.set_image_animation.includes("pane"));
   // The golden has every command once: 124, the six that drive the vault of a phone make 130, the two that hand a file
-  // over on a phone make 132, the two that carry the window frame choices make 134, and the seven of the link to a server
-  // make 141.
-  assert.equal(Object.keys(golden.commands).length, 141);
+  // over on a phone make 132, the two that carry the window frame choices make 134, the seven of the link to a server
+  // make 141, and the six that run the sessions of that server as panes make 147.
+  assert.equal(Object.keys(golden.commands).length, 147);
 });

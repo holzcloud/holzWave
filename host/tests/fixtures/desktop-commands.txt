@@ -87,6 +87,12 @@ server_sign_in_poll|none|async||holzwave_host::server::SignInPoll|String
 server_sign_in_cancel|none|async||holzwave_host::server::ServerView|-
 server_sign_out|none|async||holzwave_host::server::ServerView|String
 sync_use_server|none|async|passphrase|holzwave_host::sync::SyncView|String
+server_sessions|none|async||Vec<SessionRow>|String
+server_session_new|window|async||View|String
+server_session_open|window|async|session|View|String
+server_session_end|none|async|session|()|String
+pane_takeover|none|async|pane|()|String
+pane_load_older|none|async|pane|()|String
 monitor_sample|none|async|pane|holzwave_core::monitor::Reading|String
 wsh_install|none|async|pane|String|String
 history_search|window|async|query,limit|Vec<holzwave_core::history::Hit>|-

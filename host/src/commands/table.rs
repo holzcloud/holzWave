@@ -638,6 +638,42 @@ macro_rules! host_commands {
                 run: server::sync_use_server, web: unavailable
             }
             {
+                name: server_sessions, shell: generated, group: server, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: Vec<SessionRow>, fails: String,
+                run: server::server_sessions, web: unavailable
+            }
+            {
+                name: server_session_new, shell: generated, group: server, scope: window, mode: async, cap: CAP_DEFAULT,
+                args: [],
+                answers: View, fails: String,
+                run: server::server_session_new, web: unavailable
+            }
+            {
+                name: server_session_open, shell: generated, group: server, scope: window, mode: async, cap: CAP_DEFAULT,
+                args: [session: u32],
+                answers: View, fails: String,
+                run: server::server_session_open, web: unavailable
+            }
+            {
+                name: server_session_end, shell: generated, group: server, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [session: u32],
+                answers: (), fails: String,
+                run: server::server_session_end, web: unavailable
+            }
+            {
+                name: pane_takeover, shell: generated, group: server, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [pane: PaneId],
+                answers: (), fails: String,
+                run: server::pane_takeover, web: unavailable
+            }
+            {
+                name: pane_load_older, shell: generated, group: server, scope: none, mode: async, cap: CAP_DEFAULT,
+                args: [pane: PaneId],
+                answers: (), fails: String,
+                run: server::pane_load_older, web: unavailable
+            }
+            {
                 name: ai_turn_snapshot, shell: generated, group: ai, scope: none, mode: async, cap: CAP_DEFAULT,
                 args: [conversation: String],
                 answers: ChatState, fails: AiFault,

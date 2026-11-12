@@ -980,6 +980,102 @@
         "system": "Darwin"
       }
     ],
+    "pane_connections": [
+      {
+        "attempt": 2,
+        "name": "Web",
+        "of": 5,
+        "pane": 4,
+        "profile": "web-1",
+        "secs": 3,
+        "state": "reconnecting"
+      },
+      {
+        "attempt": 0,
+        "name": "sync.example.test",
+        "of": 0,
+        "pane": 9,
+        "profile": "",
+        "remote": {
+          "cols": 120,
+          "more": true,
+          "phase": "",
+          "rows": 40,
+          "session": 7,
+          "writer": "writing"
+        },
+        "secs": 0,
+        "state": "connected"
+      },
+      {
+        "attempt": 0,
+        "name": "sync.example.test",
+        "of": 0,
+        "pane": 10,
+        "profile": "",
+        "remote": {
+          "cols": 120,
+          "more": true,
+          "phase": "loading_older",
+          "rows": 40,
+          "session": 7,
+          "writer": "watching"
+        },
+        "secs": 0,
+        "state": "connected"
+      },
+      {
+        "attempt": 0,
+        "name": "sync.example.test",
+        "of": 0,
+        "pane": 11,
+        "profile": "",
+        "remote": {
+          "cols": 120,
+          "more": true,
+          "phase": "attaching",
+          "rows": 40,
+          "session": 7,
+          "writer": "free"
+        },
+        "secs": 0,
+        "state": "connecting"
+      },
+      {
+        "attempt": 1,
+        "name": "sync.example.test",
+        "of": 5,
+        "pane": 12,
+        "profile": "",
+        "remote": {
+          "cols": 120,
+          "more": true,
+          "phase": "resyncing",
+          "rows": 40,
+          "session": 7,
+          "writer": "free"
+        },
+        "secs": 3,
+        "state": "reconnecting"
+      },
+      {
+        "attempt": 0,
+        "name": "sync.example.test",
+        "of": 0,
+        "pane": 13,
+        "profile": "",
+        "remote": {
+          "cols": 120,
+          "more": true,
+          "phase": "",
+          "rows": 40,
+          "session": 7,
+          "writer": "free"
+        },
+        "secs": 0,
+        "state": "failed"
+      }
+    ],
     "release_outside": [
       {
         "label": "window-12",
@@ -1039,6 +1135,28 @@
         "state": "unreachable",
         "sync_on": false,
         "url": "https://sync.example.test"
+      }
+    ],
+    "sessions": [
+      {
+        "attached": 2,
+        "cols": 120,
+        "cwd": "/home/alice/notes",
+        "held": true,
+        "id": 3,
+        "rows": 40,
+        "started": 1762771200,
+        "title": "vim notes.md"
+      },
+      {
+        "attached": 0,
+        "cols": 80,
+        "cwd": "",
+        "held": false,
+        "id": 9,
+        "rows": 24,
+        "started": 1762774800,
+        "title": ""
       }
     ],
     "sign_in": [
@@ -1429,6 +1547,12 @@
     "os_text_scale": [],
     "pane_blocks": [],
     "pane_connections": [],
+    "pane_load_older": [
+      "pane"
+    ],
+    "pane_takeover": [
+      "pane"
+    ],
     "paste": [
       "pane",
       "text",
@@ -1500,6 +1624,14 @@
       "action"
     ],
     "server_refresh": [],
+    "server_session_end": [
+      "session"
+    ],
+    "server_session_new": [],
+    "server_session_open": [
+      "session"
+    ],
+    "server_sessions": [],
     "server_sign_in_cancel": [],
     "server_sign_in_poll": [],
     "server_sign_in_start": [
