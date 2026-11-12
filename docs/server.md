@@ -19,6 +19,11 @@ about that thing as written from the code and the tests, not as seen working.
 - [Invitations and roles](#invitations-and-roles)
 - [Recovery and the secret store](#recovery-and-the-secret-store)
 - [Sessions and limits](#sessions-and-limits)
+- [Memory for pictures](#memory-for-pictures)
+- [Device sign-in and devices](#device-sign-in-and-devices)
+- [The two switches](#the-two-switches)
+- [The sync target](#the-sync-target)
+- [Remote sessions](#remote-sessions)
 - [The audit log](#the-audit-log)
 - [The data volume: back up and restore](#the-data-volume-back-up-and-restore)
 - [Updates](#updates)
@@ -32,11 +37,17 @@ People open the address of the server in a browser, sign in, and get the holzWav
 file browser, the AI chat and the rest, with the shells running on the server. The commands are the desktop's commands; a
 person's panes, files and saved passwords live on the server. One browser tab or several show the same window.
 
+The desktop and Android apps can use the server too, once an administrator turns a feature on: as the target of the
+encrypted sync ([The sync target](#the-sync-target)), and to keep terminal sessions running on the server that an app shows in
+a pane ([Remote sessions](#remote-sessions)). Both are off on every server until then ([The two switches](#the-two-switches)).
+An app signs in as a device, through the person's own sign-in in a browser ([Device sign-in and devices](#device-sign-in-and-devices)).
+
 It is not a service for strangers. One container serves one trust domain: people inside it share the network and the process
 view of the container. It is not a cluster: one server runs on one volume. It has no mobile layout of the page, no shared
-panes between people, no installable web app, no long-lived token for scripts and no operator for Kubernetes. It runs in the
-container this guide describes; the binary can run elsewhere, but the isolation of people from each other is the
-container's, and this guide says nothing about running it outside one.
+panes between people, no installable web app, no token for scripts or other programs and no operator for Kubernetes. A device
+token is the sign-in of an app: it is never shown to anyone, it can be revoked at once, it is not bound to anything about the
+device, and it ends after 90 days without use (`devices.idle`). It runs in the container this guide describes; the binary can
+run elsewhere, but the isolation of people from each other is the container's, and this guide says nothing about running it outside one.
 
 ## Requirements
 
@@ -149,7 +160,8 @@ The server speaks TLS 1.3 only, with HTTP/2 for the page and HTTP/1.1 for the We
   was run against a Pebble test authority only; row SRV-T1 is a real one.
 - `proxy`: the server listens for plain HTTP from the addresses in `tls.trusted_proxies` only, and a reverse proxy or ingress
   controller ends TLS. The server believes `X-Forwarded-For` and `X-Forwarded-Proto` from those addresses and from no one else,
-  and the proxy must pass the WebSocket upgrade for `/ws` and keep it open. Row SRV-R1 is a real proxy.
+  and the proxy must pass the WebSocket upgrades for `/ws` (the page) and `/ws/device` (the apps' remote sessions) and keep
+  them open. Row SRV-R1 is a real proxy; the device socket was never run through one.
 
 ## Sign-in methods and single sign-on
 
@@ -209,7 +221,8 @@ A session ends after 30 minutes without input or a day in total, and changing a 
 5 minutes; the keys `sessions.idle`, `sessions.absolute` and `sessions.step_up` change these. Five wrong passwords for a name or
 twenty for an address within 15 minutes lock the password path for 15 minutes; a locked sign-in is refused before anything is
 computed, an unknown name behaves like a known one, passkeys and single sign-on are not throttled, and an administrator can
-lift a lock. A person has at most eight sockets, 64 panes (the default), two uploads and eight downloads at a time. Every size,
+lift a lock. A person has at most eight sockets, 64 panes (the default), two uploads and eight downloads at a time; the socket
+of an app that shows remote sessions counts as one of the eight, and a remote session as one of the 64 panes. Every size,
 rate and time of the server has a name, a default and a bound in the `limits` section of [config.md](config.md#the-server-configuration);
 the server refuses a value outside its bound at start.
 
@@ -245,18 +258,185 @@ under a larger cap is, that the cap wins over the person's setting, and that `0`
 an arm64 host). What did not run: a flood of hostile transmissions through a server, a server under a container memory limit,
 and the engine's memory measurements on Linux or at the default cap.
 
+## Device sign-in and devices
+
+The desktop app (macOS, Windows, Linux) and the Android app sign in to a server as a **device**, with the device authorization
+grant of OAuth (RFC 8628) and the person's own sign-in in a browser; the app never asks for a password, a passkey or a code of
+an authenticator app.
+
+1. In the app the person chooses `Sign in…` (in the Connections view or the sync popover) and types the address of the server
+   once. The app asks the server for a request and shows an eight-letter code, such as `BCDF-GHJK`, made of the twenty
+   consonants `BCDFGHJKLMNPQRSTVWXZ`.
+2. The app opens the system browser at `<public_url>/#device=<code>`. The code is in the fragment, which a browser never sends
+   to a server. The person signs in there the usual way; the page keeps the code through a sign-in with a passkey or a password,
+   and asks to confirm it is the person when the sign-in is older than `sessions.step_up`. A sign-in through single sign-on
+   leaves the page for the provider and loses the code: `Open again` in the app opens it once more. An administrator or a
+   member can also type a code into the palette entry `Authorize device…`.
+3. The page `Authorize device` shows the name of the device, its platform, the network address the request came from, when it
+   was made, and the code to compare with the app, and says to approve only what the person started. `Approve` or `Deny`.
+4. The app asks the server every 5 seconds whether the request was decided. A request lives 10 minutes. After the approval the
+   next answer carries the device token, once; the app puts it into the OS keychain (the account `server:token`) and keeps the
+   address, a device id and the name of the device in `server_link.json`, a file of this computer that is never synced.
+
+The token is `hwd_` and 43 characters (256 random bits); the request's own code is the same length with `hwg_`. The server keeps
+only the SHA-256 of each, never the token, writes neither to a log or an audit line, and no answer except that one delivery holds
+the token. Bounds against guessing and floods: an app that asks too soon is told `slow_down` and must wait 5 seconds longer each
+time, up to 60; five wrong codes typed by a person within ten minutes lock that account and that address out of typing codes for
+ten minutes (a code that was never issued and one that expired give the same answer); five unknown requests asked for by one
+address within ten minutes lock that address for ten minutes; at most 5 open requests come from one address and 200 from
+everywhere, and the next start is refused (429, with a hint to try again in a minute) until older ones run out; a person has
+at most 20 devices, and an approved request past that waits, answered `too_many`, until a device is revoked or the request
+runs out.
+
+A device token ends after `devices.idle` (90 days by default) without a request; every request renews it, and the time it was last
+seen is written at most once a minute. In the browser, the Account dialog lists the person's devices (name, platform, last seen)
+with `Revoke`, and the People dialog lists the devices of everybody with their owner for an administrator. A revocation asks
+for a second click and a recent sign-in, deletes the device and closes its open sockets at once (code 4401); the app learns
+at its next request that it is no longer signed in. `Sign out` in the app asks the server to end that device's sign-in, removes
+the token from the keychain and keeps the address. The devices of a disabled account are refused, and those of a deleted
+account are deleted with it. The lists and the revocation work while both switches are off, so a device can always be
+ended.
+
+No binding to the device and no rotation, on purpose. The token is the credential of one self-hosted server for its own app:
+it travels only to the server that issued it, in one `Authorization` header over TLS, and lives in the OS keychain. Binding it
+to a key of the device (DPoP or mutual TLS) needs a key pair on every platform, a signed proof on every request and a store of
+nonces on the server; rotating it adds a second credential and a path on which a lost answer signs a device out. Both were
+considered and left out of this build. The controls are the hash at rest, the revocation that takes effect at once and the
+idle expiry (90 days by default). A token that is stolen from a device works for whoever holds it until it is revoked or
+unused for `devices.idle`.
+
+Approving a device can be phished: a person can be led to approve a code that somebody else started. The page shows the device,
+its platform and the address of the request, and says to approve only what you started; nothing else stops it.
+
+On the author's Mac the system's certificate check took 40 to 80 seconds to refuse a server with a certificate the Mac does
+not trust, so an app pointed at such a server waits that long before its sign-in fails.
+
+Tested against the real server in one process: the whole grant, its refusals and bounds, the lists, the revocation and the
+idle expiry (`server/tests/device_grant.rs`, `server/tests/device_tokens.rs`), the app's client of the grant
+(`server/tests/device_client.rs`), and the page in WebKit and Chromium against the real server (`app/tests/web/devices.test.mjs`).
+Not run: a real phone or desktop against a real server over a real network, a real passkey or single sign-on approving a
+device, the hand-back from the Android system browser to the app, and two real people.
+
+## The two switches
+
+Two features of the server are for the apps: `Sync target` and `Remote sessions`. Both are **off** on every server, a new one
+and an upgraded one, until an administrator turns one on in the People dialog, in the group `Device access`. A change asks
+for a sign-in within `sessions.step_up` and writes one audit line, `device_access.change`, with the switch and its new value.
+The switches are kept in the server's database and survive a restart.
+
+The operator keeps a ceiling in the configuration: `device_access.sync` and `device_access.remote`
+([config.md](config.md#the-server-configuration)). Unset, or `true`, the administrator decides; `false` keeps the feature off
+whatever the switch says, and the People dialog draws that switch `OFF` with a dashed outline and the line
+`Turned off in the server configuration.` The ceiling never turns a feature on.
+
+While a feature is off, every path of it answers exactly as a path that does not exist (404, the code `not_found`), before any
+credential is read, so a probe learns nothing: `/sync/v1/` for the sync target, `/ws/device` for the remote sessions, and the
+sign-in of devices under `/api/device/` while both are off. Turning a feature off takes effect with the next request: the next
+run of an app's sync fails with `This feature is off on the server.` (and the set-up of the popover says `Sync is off on this
+server.`), and every open device socket closes with code 1001. The devices stay signed in, their tokens stay valid, and the
+sessions keep running in the workers until the idle limit or a restart ends them; turning the feature on again lets the apps attach to them. In the browser window the commands that list,
+make, open or end a session are answered `Remote sessions are off on this server.` and never reach the worker; a pane of the
+browser window that already shows a session stays until it is closed, and `Take over` and the loading of older lines still
+work in it.
+
+## The sync target
+
+With `Sync target` on, the apps of a person can keep their encrypted sync files on this server instead of a WebDAV folder
+([sync.md](sync.md#the-holzwave-server-as-the-target)). The server stores what the sync engine of each device already produces:
+files encrypted with the person's passphrase, which the server never sees, and one small `meta.json` (at most 4 KiB, written
+once) with the salt and the key check. It checks only the header of each file and its size, never opens one, and writes no path,
+name or byte of a file to its log or its audit log; a request of the sync writes no audit line at all.
+
+The four routes (`POST /sync/v1/ensure/{dir}`, `GET /sync/v1/list/{dir}`, `GET` and `PUT /sync/v1/blob/{path}`) take only a device
+token, never a cookie, and every query is the device's own person's. A path is `meta.json`, `files/<name>` or `backups/<name>`
+and nothing else. The bounds are per person: `sync.quota_mib` (64), `sync.max_files` (512), `sync.backups_keep` (20) and
+`sync.max_blob_bytes` (8 MiB). A write past the space or the count is refused with 507 and the code `quota` and stores nothing, a
+file over the size with 413 and `too_large` before its body is read past the bound, a lost race with 412. The files are rows of
+`server.sqlite3` (written with `secure_delete`), are part of the backup of the volume, and are deleted with the person's account.
+A server can serve an older valid file instead of the newest, and nothing in the format notices (no rollback protection), as with
+a WebDAV server.
+
+Tested with the real sync engine and client of two devices against the real server in one process
+(`server/tests/sync_target.rs`, `server/tests/sync_client.rs`). Not run: a server on a real network or behind a real reverse
+proxy, two real computers or phones, and a body that arrives slowly (the 120-second limit on reading one is in the code and not
+in a test).
+
+## Remote sessions
+
+With `Remote sessions` on, a person's apps can keep terminal sessions running on the server. A **session** is a shell that the
+server runs for the person in their own worker, as their own user id, outside every window of the person. It outlives every
+client: an app that closes, loses its network or is put to sleep leaves it running, and the output made meanwhile is on its
+screen and in its scrollback when an app attaches again.
+
+A session ends when its program ends, when a person presses `End`, and when the person's worker ends: after
+`workers.idle_timeout` (a day by default) with no socket of the person attached (a browser tab or an app counts), when the
+account is disabled or deleted, and **when the server stops or restarts. A restart ends every session**, as it ends every pane;
+the workers do not survive it. A session counts against `workers.max_panes` (64) together with the panes of the person's
+browser window, and the socket of an app against `limits.sockets_per_person` (8) together with the page's sockets: the ninth
+socket of a person is closed with 1013.
+
+**One writer.** A session has one writer and any number of watchers; what a watcher types is dropped. The app that makes a
+session writes to it. The writer keeps the right while it says it is alive (an attached app does so every 10 seconds); after
+`remote.writer_timeout` (30 seconds) of silence the right is free. It never moves by itself: everyone sees `FREE` until
+somebody presses `Take over`, which moves it and tells every attached app. A writer that detaches gives it up at once. A
+session has one size, the size of the writer's pane; a watcher draws the same grid from the top-left corner.
+
+**Attach.** An attach sends the screen and a tail of the scrollback in one snapshot, then every byte the program writes. The
+tail is `remote.attach_tail_lines` (1000) unless the app asks for another; an app that scrolls to the top of what it holds asks
+again with a longer one, at most `remote.history_max_lines` (10000) and never more than the session's own scrollback. A snapshot
+over `remote.snapshot_max_bytes` (4 MiB) is refused whole and the session runs on. The snapshot carries the screen with its
+styles, links, the cursor and the terminal modes; it does not carry pictures, the window title, the selection or the main screen
+behind a full-screen program. An app that cannot keep up loses its stream and gets a fresh snapshot; the others are not slowed.
+
+**The device socket.** An app reaches its sessions over `GET /ws/device` with its device token in the `Authorization` header of
+the upgrade; a cookie is never accepted there and a device token never opens the page's socket. The socket carries text
+requests (`list`, `new`, `attach`, `detach`, `resize`, `takeover`, `end`, `beat`), answered with an id and one fixed word on
+failure, and binary frames with the bytes. It is bounded: 4 KiB for a request, 64 KiB of bytes in a frame, 32 requests waiting
+for an answer and 16 sessions attached at once, with the rate, silence and violation limits of the `limits` section that the
+page's socket has. A person reaches only their own sessions: another person's session answers `not_found` exactly as one that
+never existed. The close codes: 4401 the token was revoked or ran out or the account ended (at once when it is announced, and
+within `limits.session_recheck` otherwise), 1001 the feature was turned off or the server is stopping, 1013 too many sockets or
+a write that made no progress, 1012 the worker ended, 1008 a flood of requests or too many broken rules, 1009 a message over
+its size, 1003 a message of a kind the socket does not take. No terminal byte and no token reaches a log, the audit files or the database.
+
+**The browser window.** The window in a browser lists the server it was loaded from as `This server` in the Connections view,
+with `New session`, the person's sessions, `Attach` and `End`. A pane of the browser window that shows a session is one more
+client of the same session in the person's worker, so one writer rule covers the browser and every app. Two things differ from
+an app:
+
+- All tabs of one person share the window, so they share that pane: its scroll position, selection and search, and one right to
+  write. In an app each device draws the session itself, so those are its own.
+- The pane has no socket of its own. It counts as alive while at least one browser tab of the person is open, so **a browser tab
+  left open keeps the right to write until somebody presses `Take over`**. When the last tab closes, the right is free after the
+  30 seconds of silence (a reload inside that time keeps it); closing the pane gives it up at once.
+
+The worker renders a browser pane of a session with an engine of its own beside the session's, so such a session costs two
+engines in the worker; that cost was not measured.
+
+Tested against the real server in one process, with real shells on real pseudo terminals: the device socket and its bounds,
+the writer rules, revocation, the switch and the shared socket cap (`server/tests/remote_sessions.rs`), an app's pane against a
+real session including a cut of the network (`server/tests/remote_client.rs`, `server/tests/remote_host.rs`), the browser's
+panes (`server/tests/session_local.rs`, `server/tests/session_web.rs`) and a real browser against the real server
+(`app/tests/web/sessions.test.mjs`). **Never run:** a real phone or desktop against a real server over a real network, a real
+reverse proxy in front of the device socket, two real people, Android with the hand-back from its system browser and its secret
+vault, Android's Doze or the end of a background app, and a server restart under a real workload.
+
 ## The audit log
 
 The server writes one JSON line per security event to `/data/server/audit/audit-YYYY-MM-DD.jsonl` (UTC days, mode 0600,
 append-only): a sign-in and its failure and lock, a sign-out and an expired session, an account created, invited,
 redeemed, disabled, enabled, deleted or given another role, a credential added or changed, a recovery code used or replaced,
-and the reset, unlock and lock of the secret store. A line holds the time, the action, the result, the actor and the target
+the reset, unlock and lock of the secret store, a device approved (`device.approve`), denied (`device.deny`) or revoked
+(`device.revoke`, with the number of the device; also when a device ends its own sign-in), and a change of a switch of the
+device features (`device_access.change`, with the switch and its new value). The sync target and the remote sessions write no
+line per request. A line holds the time, the action, the result, the actor and the target
 as account numbers, the address and a few typed details. Nothing a person types can enter a line. The server does not rotate or
 delete the files: move or remove the files of earlier days yourself, and copy them to where you keep logs.
 
 ## The data volume: back up and restore
 
-`/data` is the one volume. It holds `server/server.sqlite3` (accounts, credentials, sessions, invitations and counters),
+`/data` is the one volume. It holds `server/server.sqlite3` (accounts, credentials, sessions, invitations and counters, and
+the devices, their open requests, the two switches and the encrypted sync files of the people),
 `server/audit/`, and `homes/<user id>/` for every person (files, saved passwords, uploads). The server key is not in it.
 
 Back up the volume and the key file separately, and stop the server first so that the database is whole:
@@ -276,7 +456,8 @@ who use a password and a code. These commands have not been run by the author on
 ## Updates
 
 Build the new image from the new source, back up as above, then `docker compose up -d --build` or `helm upgrade`. An upgrade
-stops the old server before it starts the new one, and a restart ends every pane. Read the release notes first; the guide for
+stops the old server before it starts the new one, and a restart ends every pane and every remote session. Read the release
+notes first; the guide for
 a version states what changed in the files and the keys.
 
 ## Compression
@@ -287,8 +468,20 @@ A reverse proxy in front of the server may compress the page files; the WebSocke
 
 ## Limits of this build
 
-- A server restart ends every pane. The accounts, the layout, the valid sessions and the settings stay; the commands that were
-  running do not.
+- A server restart ends every pane. It ends every remote session too. The accounts, the layout, the valid sessions, the devices, the
+  switches, the sync files and the settings stay; the commands that were running do not. A remote session also ends when the
+  person's worker ends after `workers.idle_timeout` with no tab and no app attached.
+- The device features (the sync target, remote sessions and the sign-in of apps) were never run on a real phone or a real
+  desktop against a real server over a real network, with a real passkey or single sign-on approving a device, behind a real
+  reverse proxy in front of the device socket, with two real people, on Android (with the hand-back from the system browser,
+  the secret vault, Doze and the end of a background app), or across a server restart under a real workload. Everything was
+  run against the real server in one process, over the loopback address, on the author's Mac.
+- A device token is not bound to the device: whoever holds it can use it until it is revoked or has been unused for
+  `devices.idle`. Approving a device can be phished (see [Device sign-in and devices](#device-sign-in-and-devices)).
+- A browser tab left open keeps the right to write of a session shown in its window until somebody presses `Take over`, and
+  all tabs of one person share that pane. A pane of the browser window that shows a session stays when `Remote sessions` is
+  turned off, until it is closed.
+- The 64 panes and the 8 sockets of a person are shared between the browser window, the remote sessions and the apps.
 - One server container or pod on one volume: the store is SQLite, never run a second one. The chart has no replica value.
 - One container serves one trust domain. People share the container's network and process view, so a person can see the
   processes of the others and reach the same network; `/tmp` is one directory for all of them (a person's own temporary files

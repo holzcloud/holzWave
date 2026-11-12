@@ -1,6 +1,7 @@
 //! The documents of the server agree with the server: the examples of `docs/config.md` are run through the validator that
 //! `serve` and `check-config` use, the keys the loader reads are the keys the document names, the bounds in the tables are
-//! the bounds in the code, and the sentences in the table of `docs/server.md` are the sentences the loader prints.
+//! the bounds in the code, the sentences in the table of `docs/server.md` are the sentences the loader prints, every key and
+//! audit action the guide names exists, and the guide names every key of the device features.
 //!
 //! The file system is a stand-in (a probe that says the certificate and secret files exist), so no certificate is needed.
 //! Every check is a plain function of the document text, and each has a negative control that feeds it a changed text and
@@ -13,6 +14,7 @@ use std::collections::BTreeSet;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
+use holzwave_server::audit::Action;
 use holzwave_server::config::{self, Env, Probe, RealProbe, Refusal, TlsSetup, prepare};
 use holzwave_server::keyfile::ServerKey;
 use holzwave_server::limits;
@@ -735,4 +737,103 @@ fn the_refusal_check_notices_a_changed_sentence_a_removed_row_and_a_made_up_one(
     );
     assert_ne!(extra, guide);
     assert!(!refusal_problems(&extra).is_empty(), "a made-up row");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The keys and audit actions the guide names
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The sections of the server's file whose keys the guide names as `section.key`.
+const SECTIONS: [&str; 11] = ["tls", "auth", "sessions", "limits", "workers", "upload", "transport", "device_access", "devices", "remote", "sync"];
+
+/// Code spans of the guide that look like keys of the `tls` section and are the two files of the certificate folder of the
+/// Compose quick start.
+const FILE_NAMES: [&str; 2] = ["tls.crt", "tls.key"];
+
+/// The sections whose every key the guide must name: the device features, which the guide explains key by key.
+const DEVICE_SECTIONS: [&str; 4] = ["device_access", "devices", "remote", "sync"];
+
+/// The code spans of a text, in order.
+fn spans(text: &str) -> Vec<&str> {
+    text.split('`').skip(1).step_by(2).filter(|s| !s.contains('\n')).collect()
+}
+
+/// Whether a code span has the shape of a key of the server's file: a section, a dot and lower-case words.
+fn looks_like_key(span: &str) -> bool {
+    span.split_once('.').is_some_and(|(section, rest)| {
+        SECTIONS.contains(&section) && !rest.is_empty() && rest.chars().all(|c| c.is_ascii_lowercase() || c == '_' || c == '.')
+    })
+}
+
+/// What is wrong with the keys and audit actions the guide names: a span that has the shape of a key must be a row of the
+/// configuration reference, or an action of the audit log, or one of the two file names.
+fn guide_key_problems(guide: &str, config_md: &str) -> Vec<String> {
+    let documented = documented_keys(config_md);
+    let actions: BTreeSet<&str> = Action::ALL.iter().map(|a| a.as_str()).collect();
+    let mut problems = Vec::new();
+    for span in spans(guide).into_iter().filter(|s| looks_like_key(s)) {
+        if !documented.contains(span) && !actions.contains(span) && !FILE_NAMES.contains(&span) {
+            problems.push(format!("the guide names `{span}`, which is no key of docs/config.md and no audit action"));
+        }
+    }
+    problems
+}
+
+/// The keys of the device features that the guide does not name, and the actions of the device features that its section
+/// about the audit log does not name.
+fn device_coverage_problems(guide: &str, loader: &BTreeSet<String>) -> Vec<String> {
+    let named: BTreeSet<&str> = spans(guide).into_iter().collect();
+    let mut problems = Vec::new();
+    for key in loader.iter().filter(|k| k.split_once('.').is_some_and(|(section, _)| DEVICE_SECTIONS.contains(&section))) {
+        if !named.contains(key.as_str()) {
+            problems.push(format!("the guide does not name `{key}`"));
+        }
+    }
+    let audit = section_from(guide, "## The audit log");
+    let audit = audit.split("\n## ").next().unwrap_or("");
+    for action in Action::ALL.iter().map(|a| a.as_str()).filter(|a| a.starts_with("device")) {
+        if !audit.contains(&format!("`{action}`")) {
+            problems.push(format!("the section about the audit log does not name `{action}`"));
+        }
+    }
+    problems
+}
+
+#[test]
+fn every_key_and_audit_action_the_guide_names_exists() {
+    let guide = doc("server.md");
+    assert!(spans(&guide).into_iter().filter(|s| looks_like_key(s)).count() > 25, "the guide's keys were not read");
+    let problems = guide_key_problems(&guide, &doc("config.md"));
+    assert!(problems.is_empty(), "docs/server.md: {problems:#?}");
+}
+
+#[test]
+fn the_guide_names_every_key_and_audit_action_of_the_device_features() {
+    let loader = loader_keys();
+    assert!(loader.iter().filter(|k| k.starts_with("sync.") || k.starts_with("remote.")).count() == 8, "the loader's keys were not read");
+    let problems = device_coverage_problems(&doc("server.md"), &loader);
+    assert!(problems.is_empty(), "docs/server.md: {problems:#?}");
+}
+
+#[test]
+fn the_guide_checks_notice_a_made_up_key_a_removed_row_and_a_key_or_action_left_out() {
+    let guide = doc("server.md");
+    let config_md = doc("config.md");
+    let loader = loader_keys();
+
+    let made_up = guide.replacen("`remote.writer_timeout`", "`remote.writer_timeouts`", 1);
+    assert_ne!(made_up, guide);
+    assert!(guide_key_problems(&made_up, &config_md).iter().any(|p| p.contains("remote.writer_timeouts")));
+
+    let removed: String = config_md.lines().filter(|l| !l.starts_with("| `devices.idle` |")).collect::<Vec<_>>().join("\n");
+    assert_ne!(removed, config_md, "the row exists to be removed");
+    assert!(guide_key_problems(&guide, &removed).iter().any(|p| p.contains("devices.idle")));
+
+    let unnamed = guide.replace("`sync.max_files`", "the most files");
+    assert_ne!(unnamed, guide);
+    assert!(device_coverage_problems(&unnamed, &loader).iter().any(|p| p.contains("sync.max_files")));
+
+    let silent = guide.replace("`device.revoke`", "a revocation");
+    assert_ne!(silent, guide);
+    assert!(device_coverage_problems(&silent, &loader).iter().any(|p| p.contains("device.revoke")));
 }

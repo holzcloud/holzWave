@@ -45,6 +45,8 @@ against scratch directories and never touch the real one.
 | `local_network.json` | whether the notice about the Local Network permission of macOS was answered (macOS 15 or later only) | when you answer the notice | yes |
 | `host_shell.json` | whether panes start on the host computer instead of inside the sandbox (inside a Flatpak only) | when you switch Host shell | yes |
 | `window_frame.json` | which frame the window has and which window buttons are drawn (Windows and Linux only) | when you change them in the Settings | yes |
+| `server_link.json` | the holzWave server this device is signed in to: `version`, `url` (an `https` origin), `device_id` and `name`; the token is in the keychain (`server:token`), never here (at most 4 KiB) | when the app signs in to a server; `Sign out` keeps it | yes, never synced ([sync.md](sync.md#the-holzwave-server-as-the-target)) |
+| `remote_panes.json` | which pane shows which session of that server: pane ids and session numbers only, no address, title or token (at most 64 KiB and 1024 entries) | when a pane attaches to a session or closes | yes, never synced |
 | `connections.json` | the saved SSH, WSL and Docker connections, without secrets | when a connection is saved or deleted | no |
 | `pane_connections.json` | which pane runs which connection | when it changes | yes (the assignments travel inside the layout, see [sync.md](sync.md)) |
 | `known_hosts` | the host keys SSH has learned (OpenSSH format) | when a new host is trusted | yes |
@@ -835,8 +837,10 @@ fixtures and have not been run against a real cluster, a real Talos, Azure or GA
 
 ## `sync.json` and `sync_state.json`
 
-`sync.json` is `{"endpoint": "...", "user": "..."}`: the folder address and the account of the encrypted sync. The app
-password and the passphrase are in the keychain (`sync:password`, `sync:passphrase`), never here. `sync_state.json` is
+`sync.json` is `{"endpoint": "...", "user": "...", "transport": "webdav"}`: the folder address and the account of the
+encrypted sync. `transport` is `webdav` (also what a file without the member means) or `server`, the holzWave server this device
+is signed in to; then `endpoint` is the address of that server and `user` is empty. The app password and the passphrase are in
+the keychain (`sync:password`, `sync:passphrase`), never here; the server transport needs only the passphrase. `sync_state.json` is
 the device's random id and, per synced file, what the last run left behind (the counter, the ETag, the SHA-256 of the content and the SHA-256 of the encrypted blob). A theme or widget file name (without `.json`) may be 112 characters for a theme and 111 for a widget at most, letters, digits, `-` and `_`; a longer one is not synced and the sync says so (see [sync.md](sync.md)). `sync-incoming/`
 holds the downloads of the files the running app owns (`layout.json`, `settings.json`, `connections.json`) until the next
 start; themes, widgets and notes are moved into place right after the run, and `sync-conflicts/` holds the local versions
@@ -1312,11 +1316,11 @@ Rules for the whole file:
 | `remote.attach_tail_lines` | 1000 | 0 to 1000000 | The rows of scrollback that come with the screen when an app attaches to a session on the server and does not say how many it wants. `0` sends the screen alone. May not be larger than `remote.history_max_lines`. |
 | `remote.history_max_lines` | 10000 | 0 to 1000000 | The most rows of scrollback any attach brings, however many the app asks for. The scrollback of the session itself (`workers.max_scrollback_lines`, or the person's own smaller `scrollback_lines`) is the other limit, and the smaller of the two holds. An app that scrolls up to older lines attaches again with a larger tail; it can never get more than this. |
 | `remote.snapshot_max_bytes` | 4194304 | 65536 to 16777216 | The most bytes of one snapshot, the screen with its tail as an app is sent them. A snapshot over it is refused whole, never cut; the session runs on, and the app may ask again for a shorter tail. |
+| `remote.writer_timeout` | 30s | 5s to 10m | A session has one writer and any number of watchers. A writer that gave no sign of life for this long loses the right to write: everyone attached sees `free`, and nobody gets the right by itself, a watcher takes it with an explicit action. An attached app sends a sign of life every 10 seconds. |
 | `sync.quota_mib` | 64 | 1 to 65536 | The space one person may use on the server as a sync target, in MiB: every encrypted file and every backup counts. A write that would take the person over it is refused with `507` and the code `quota`, and stores nothing; a write that replaces a file counts only the difference, so a person who is over a limit that was lowered can still make their data smaller. |
 | `sync.max_files` | 512 | 8 to 4096 | The most files one person keeps on the server as a sync target, the small metadata file and the backups included. A write that would make a new file past it is refused like one past the space. The sync engine's own client reads a listing of at most 4096 files, which is why the key stops there. |
 | `sync.backups_keep` | 20 | 1 to 1000 | How many of the newest backups of a person stay. A backup is the version that lost a conflict; after each write of one, the oldest beyond this number are deleted. There is no value that keeps them all. |
 | `sync.max_blob_bytes` | 8388608 | 65536 to 8388608 | The largest encrypted file the server takes, in bytes. A larger body is refused with `413` and the code `too_large` before it is read past the limit. The format itself has no file larger than 8 MiB, so the key can only narrow it; a file of the person's settings that is larger than this cannot be synced. |
-| `remote.writer_timeout` | 30s | 5s to 10m | A session has one writer and any number of watchers. A writer that gave no sign of life for this long loses the right to write: everyone attached sees `free`, and nobody gets the right by itself, a watcher takes it with an explicit action. An attached app sends a sign of life every 10 seconds. |
 
 The two device features, the server as a sync target and sessions that live on the server for the app, are off. An administrator
 turns each on in the People dialog (it asks for a recent sign-in, and every change writes one line `device_access.change` to the
@@ -1332,9 +1336,14 @@ bounds apply to the next write; the server reads them when it starts.
 
 A session that lives on the server is a shell in the person's own worker, outside every window. It keeps running while no app is
 attached, and the output made meanwhile is in the screen and the scrollback of the next attach. It ends when its program ends, when
-a person ends it, and when its worker ends: after `workers.idle_timeout`, and when the server stops or restarts. A session counts
-against `workers.max_panes` together with the panes of the person's browser window. The four `remote` keys bound what an app may
-ask of a session; they apply to the next attach and the next session, and the server reads them when it starts.
+a person ends it, and when its worker ends: after `workers.idle_timeout` with no tab and no app of the person attached, when the
+account is disabled or deleted, and when the server stops or restarts. A session counts against `workers.max_panes` together
+with the panes of the person's browser window, and the socket of an app against `limits.sockets_per_person` together with the
+page's sockets. A pane of the browser window that shows a session sends no sign of life of its own: it counts as alive while a
+browser tab of the person is open, so a tab left open keeps the right to write until somebody takes it over, and after the last
+tab closed the right is free after `remote.writer_timeout`. The four `remote` keys bound what an app may ask of a session; they
+apply to the next attach and the next session, and the server reads them when it starts. The guide says more:
+[server.md](server.md#remote-sessions), [server.md](server.md#the-sync-target).
 
 The `limits` section overrides any of these; every key is optional and has a default and a bound, and a pair that
 contradicts itself is refused (`max_connections_per_address` above `max_connections`, `ws_small_command_bytes` above

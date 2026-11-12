@@ -1,9 +1,14 @@
 # Sync
 
-Status: **built** (`core/src/sync`, `app/src-tauri/src/sync.rs`, `app/src/sync.ts`): format, WebDAV transport, merge engine,
+Status: **built** (`core/src/sync`, `host/src/sync.rs`, `app/src/sync.ts`): format, WebDAV transport, merge engine,
 account, scheduled runs, popover. Tested against an in-memory WebDAV server and, with `scripts/nextcloud-live-test.sh`, against
 a Nextcloud in Docker; two real computers, your own server and its app-password policy stay the owner's check (row S1 of
 `docs/test-plan.md`).
+
+The second transport, a holzWave server ([The holzWave server as the target](#the-holzwave-server-as-the-target)), is built
+too (`core/src/sync/server.rs`, `server/src/sync_target.rs`). It is tested with the real sync engine and the real client against
+the real server, in one process over the loopback address (`server/tests/sync_target.rs`, `server/tests/sync_client.rs`). It was
+never run against a server on a real network, behind a real reverse proxy, between two real computers or phones, or on Android.
 
 ## What is synced
 
@@ -46,9 +51,12 @@ you typed it, so enter it again on another one). The three AI settings (`ai_loca
 
 ## Decisions
 
-- **Transport:** WebDAV (Nextcloud and others): the endpoint folder, a user and an app password. `https` only (loopback
-  may use `http` for tests), no redirects (the password never goes to another host), every answer bounded. No server
-  component of our own.
+- **Transport:** one of two, and exactly one at a time. WebDAV (Nextcloud and others): the endpoint folder, a user and an
+  app password. Or a holzWave server that the app is signed in to as a device ([server.md](server.md#device-sign-in-and-devices)):
+  its address and the device token in the OS keychain. Both are `https` only (loopback may use `http` for tests), follow no
+  redirect (a credential never goes to another host) and bound every answer. The passphrase, the encrypted files, the
+  version stamps and the conflict rule below are the same for both; the server is a second place to keep the same files,
+  not a second format.
 - **Encryption:** end to end. Key: Argon2id (64 MiB, 3 passes, 1 lane by default; the parameters and a random 16 byte
   salt are in the plain `meta.json` of the folder, and bounded on reading) from the user's passphrase. Cipher:
   XChaCha20-Poly1305 with a random 24 byte nonce per write. Both from the audited RustCrypto crates. A lost passphrase
@@ -138,9 +146,58 @@ you typed it, so enter it again on another one). The three AI settings (`ai_loca
   deletions first.
 - **Adding a device:** enter the endpoint, user, app password and the same passphrase. A QR code comes with mobile.
 - **Local state:** `sync_state.json` (device id; per file the counter, the ETag, the SHA-256 of the content and the SHA-256
-  of the blob that the last run left behind), `sync.json` (endpoint, user, on/off), `sync-incoming/` (the downloads of the files the running app owns, which wait for the next start, with a
+  of the blob that the last run left behind), `sync.json` (endpoint, user and `transport`: `webdav`, which is also what a
+  file without the member means, or `server`, with the address of the server as the endpoint and no user), `sync-incoming/` (the downloads of the files the running app owns, which wait for the next start, with a
   record of the live file's hash at the time each was staged) and `sync-kept.json` (the names kept when a download replaced an edit,
   removed by the next run). The app password and the passphrase are in the OS keychain.
+
+## The holzWave server as the target
+
+A holzWave server ([server.md](server.md)) can keep the encrypted files of a person instead of a WebDAV folder. An operator turns
+this on: the switch `Sync target` is off on every server until an administrator turns it on
+([server.md](server.md#the-two-switches)); while it is off the popover says `Sync is off on this server.` The sync popover of
+the desktop and Android apps offers `holzWave server` next to `WebDAV` ([design.md](design.md) section 6.9); it needs the app
+to be signed in to the server as a device, once, in the person's browser. The window in a browser offers WebDAV only.
+
+- **What the server sees.** What a WebDAV server sees: the names of the files, their sizes, the version stamp and the random
+  id of the writing device in each header, and the time of each write. It checks the structure of a file (the header of
+  the format, without a key) and its size, and never opens it. It holds no key, never learns the passphrase and writes no
+  path, name or byte of a file to its log or its audit log. The files are rows of the server's database and are deleted with
+  the person's account.
+- **Three shapes of a path.** `meta.json`, `files/<name>` and `backups/<name>`, where the name passes the same check as on
+  WebDAV; anything else is refused before the store is asked. `meta.json` is written once and holds at most 4 KiB; the file
+  the engine writes is 269 bytes.
+- **Writes.** The same conditional writes as on WebDAV (`If-None-Match: *` for a new file, `If-Match` for a replacement), so a
+  write that lost a race takes the conflict path above. The server's entity tag, and the checksum its listing reports, is the
+  SHA-256 of the stored bytes, so two different writes never share one and the same-second limit of Nextcloud does not
+  arise.
+- **Bounds per person**, set by the operator ([config.md](config.md#the-server-configuration)): `sync.quota_mib` (64 MiB by
+  default), `sync.max_files` (512, `meta.json` and the backups included), `sync.backups_keep` (20: after each backup is
+  written, the oldest beyond this number are deleted on the server) and `sync.max_blob_bytes` (8 MiB, the largest file of
+  the format; the operator can only make it smaller). A write past the space or the file count is refused with the code
+  `quota` and stores nothing, and a file over the size with `too_large`; the popover shows the sync's own sentence for each
+  (`The file is too large for the server.`, `The space on the server is used up.`).
+- **Changing the transport copies nothing.** No file moves from WebDAV to the server or back, and no file is deleted on
+  either. What the engine recorded about the old target is set aside (`sync_state.json.previous`), so the first run treats
+  the new target as new and never reads an empty server as the deletion of the files of this computer; a first run that
+  fails puts everything back. After the first successful run against the server the WebDAV app password is removed from
+  the keychain. A sync that was set up with one server refuses a run against another (`The sync was set up with another
+  server. Turn it on again for this one.`).
+- **Signing out.** `Sign out` asks the server to end the device's sign-in, removes the token from the keychain and keeps the
+  address, so the next `Sign in…` goes straight to the code. A device whose token was revoked, or ran out after 90 days
+  without use (the default of the server), is treated the same way: the sync shows `signed_out` and makes no run until the person signs in again.
+- **Never synced.** The link to the server (`server_link.json`: the address, the device id and the device name) and the
+  record of which pane shows which server session (`remote_panes.json`) are files of this computer and are not on the sync's
+  list. The token is only in the OS keychain, under the account `server:token`, and the receiver of `secrets.json` refuses
+  that account (it accepts `ssh:<id>` and `int:<profile id>:<NAME>` only), so no other computer can set it.
+- **The limit the format always had.** A server can serve an older valid file instead of the newest one; nothing in the
+  format detects that (no rollback protection), on the server exactly as on WebDAV.
+
+Tested with the real engine on two devices of one person against the real server in one process: the same files arrive with
+one passphrase, the newer stamp wins and the older version is kept in `backups/`, a lost race is settled, another person can
+read, list or overwrite nothing, a wrong passphrase writes nothing, and no file the server writes holds a setting, the
+passphrase or a key (`server/tests/sync_target.rs`, `server/tests/sync_client.rs`). Not run: a server on a real network or
+behind a real reverse proxy, two real computers or phones, Android, and a person near the bounds over a long time.
 
 ## Not yet
 
@@ -152,3 +209,7 @@ you typed it, so enter it again on another one). The three AI settings (`ai_loca
   as a copy in `sync-conflicts/`. Applying them while the app runs would need the settings, the layout and the
   connection list to be reloaded from their files, which nothing asks for yet.
 - A run happens 10 s after the start and every five minutes, and with `Sync now`; not yet on exit.
+- One target at a time: a device syncs with WebDAV or with a holzWave server, never with both, and never with two servers.
+- Moving the files from one target to the other: changing the transport copies nothing (above); the first run against the
+  new target uploads what this computer holds, and the old target keeps its files until you delete them there.
+- The window in a browser cannot use its own server as the target; the choice is in the desktop and Android apps.
