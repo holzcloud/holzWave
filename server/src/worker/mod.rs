@@ -3,6 +3,7 @@
 pub mod dispatch;
 pub mod files;
 pub mod lease;
+pub mod local_attach;
 pub mod runtime;
 pub mod secretstore;
 pub mod sessions;

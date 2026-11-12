@@ -1257,8 +1257,11 @@ impl AppCore {
         });
         let server =
             server_parts.runtime.unwrap_or_else(|| Arc::new(crate::server::ServerRuntime::new(dir.clone(), secrets.clone())));
-        let sessions: Arc<dyn crate::sessions::SessionService> =
-            server_parts.sessions.unwrap_or_else(|| Arc::new(crate::sessions::ServerSessions::new(server.clone())));
+        // The sessions a caller passes in, else the host's own (the server's worker), else the desktop's.
+        let sessions: Arc<dyn crate::sessions::SessionService> = server_parts
+            .sessions
+            .or_else(|| host.sessions())
+            .unwrap_or_else(|| Arc::new(crate::sessions::ServerSessions::new(server.clone())));
         // Which pane shows which session. Pane ids are small per-device counters, so the entries of a layout that sync
         // replaced belong to other panes and are dropped.
         let remote_panes = {

@@ -22,6 +22,7 @@ use holzwave_host::state::{AppCore, ShellSpec};
 use crate::log::Level;
 use crate::wire::{Ctl, ExitReason, Frame, Note, PROTOCOL_VERSION, Ses, SesAnswer, SesEvent, StoreState, read_frame};
 use crate::worker::files::{FileHooks, Files};
+use crate::worker::local_attach::{BrowserSockets, LocalOptions, LocalSessions};
 pub use crate::worker::dispatch::{Gate, HookRow, Probe, QueueLimits};
 use crate::worker::dispatch::{self, Dispatcher, Outbound, Pin, Pushed, ServerSink, WorkerLog};
 use crate::worker::lease::WriterState;
@@ -80,10 +81,11 @@ pub enum RunEnd {
 }
 
 /// The host of a person's core: the web platform, the store of the controls, no local network source, no text scale, the
-/// caps of `Init`.
+/// caps of `Init`, and the sessions of this worker for the panes of its window.
 struct WebHost {
     secrets: Arc<SecretsHandle>,
     limits: HostLimits,
+    sessions: Arc<LocalSessions>,
 }
 
 impl Host for WebHost {
@@ -109,6 +111,10 @@ impl Host for WebHost {
 
     fn local_processes(&self) -> bool {
         false
+    }
+
+    fn sessions(&self) -> Option<Arc<dyn holzwave_host::sessions::SessionService>> {
+        Some(self.sessions.clone())
     }
 }
 
@@ -150,9 +156,13 @@ struct Running {
     files: Files,
     /// The store state the supervisor was told last.
     told: StoreState,
-    /// The sessions that live here for devices; the lane runs the requests about them.
+    /// The sessions that live here for devices and for the panes of the window; the lane runs the requests of devices.
     sessions: Arc<SessionHost>,
     lane: SessionLane,
+    /// The browser sockets that are attached: the proof of life of the panes that show a session.
+    browsers: Arc<BrowserSockets>,
+    /// The sessions as the window's panes see them; kept so that its thread lives as long as the run.
+    _local: Arc<LocalSessions>,
 }
 
 // ---- the sessions -------------------------------------------------------------------------------------------------------
@@ -162,8 +172,14 @@ pub const LANE_QUEUE: usize = 256;
 
 /// What starts a session in this worker: the person's own shell, through the core, and a place under the pane cap that the
 /// layout's panes share.
-struct CoreSpawner {
+pub struct CoreSpawner {
     core: Arc<AppCore>,
+}
+
+impl CoreSpawner {
+    pub fn new(core: Arc<AppCore>) -> CoreSpawner {
+        CoreSpawner { core }
+    }
 }
 
 impl Spawner for CoreSpawner {
@@ -241,8 +257,9 @@ fn done(result: Result<(), SesError>) -> SesAnswer {
     result.map_or_else(SesAnswer::Failed, |()| SesAnswer::Done)
 }
 
-/// Runs one request about sessions and answers it. A request that has no answer (input, a socket that ended) says nothing.
-fn handle_ses(host: &SessionHost, queue: &Arc<Outbound>, ses: Ses) {
+/// Runs one request of a device socket about sessions and answers it through `queue`, with the adapter every device socket
+/// has. A request that has no answer (input, a socket that ended) says nothing. The lane runs every request through here.
+pub fn handle_ses(host: &SessionHost, queue: &Arc<Outbound>, ses: Ses) {
     let attachment =
         |socket: u32| -> Arc<dyn Attachment> { Arc::new(SocketAttachment { socket, queue: queue.clone() }) };
     match ses {
@@ -393,13 +410,18 @@ fn serve(
                 queue.push(Frame::Note(Note::Exiting(ExitReason::Clean)));
                 break RunEnd::Shutdown;
             }
-            (Frame::Ctl(Ctl::Attach { socket }), Some(running)) => {
+            (Frame::Ctl(control @ Ctl::Attach { socket }), Some(running)) => {
+                // A page is attached: the panes of the window that show a session are alive while one is.
+                running.browsers.control(&control);
                 // The replay of titles and directories is for the page that attached alone.
                 let _pin = Pin::to(socket);
                 let _ = running.core.window_ready_in(dispatch::WINDOW);
             }
             // The socket of a page that ended; the same socket id may have been a device's, whose sessions it leaves.
-            (Frame::Ctl(Ctl::Detach { socket }), Some(running)) => running.lane.submit(Ses::Gone { socket }, queue),
+            (Frame::Ctl(control @ Ctl::Detach { socket }), Some(running)) => {
+                running.browsers.control(&control);
+                running.lane.submit(Ses::Gone { socket }, queue);
+            }
             (Frame::Ctl(Ctl::FileServe { request, what, token, offset, length }), Some(running)) => {
                 running.files.serve(request, what, &token, offset, length);
             }
@@ -479,7 +501,10 @@ fn start(
         DirBuilder::new().mode(0o700).create(&env.tmp).ok()?;
     }
     let secrets = Arc::new(SecretsHandle::open(&env.home));
-    let host = WebHost { secrets: secrets.clone(), limits };
+    // The service of the window's panes exists before the core that uses it, and is bound to the session host below.
+    let browsers = BrowserSockets::new();
+    let local = LocalSessions::new(browsers.clone(), LocalOptions::default());
+    let host = WebHost { secrets: secrets.clone(), limits, sessions: local.clone() };
     let sink = Arc::new(ServerSink::with_log(queue.clone(), log.clone()));
     let core = AppCore::new_with_host(dir, sink.clone(), env.shell.clone(), None, None, Arc::new(host));
     let repair_core = Arc::downgrade(&core);
@@ -496,14 +521,15 @@ fn start(
         Dispatcher::start(&core, &sink, queue, hooks.rows.clone(), hooks.probe.clone(), log.clone(), REPLAY_COMMAND);
     let files = Files::new(&core, queue, &env.home, hooks.files.clone(), log.clone());
     sink.set_observer(files.observer());
-    let sessions = Arc::new(SessionHost::new(Arc::new(CoreSpawner { core: core.clone() }), session_limits));
+    let sessions = Arc::new(SessionHost::new(Arc::new(CoreSpawner::new(core.clone())), session_limits));
+    local.bind(&sessions);
     {
         // The sessions count with the layout's panes in what the supervisor is told.
         let sink = sink.clone();
         sessions.set_count_hook(move |count| sink.announce_sessions(count));
     }
     let lane = SessionLane::start(sessions.clone(), queue.clone());
-    Some(Running { core, sink, secrets, dispatcher, files, told: StoreState::Absent, sessions, lane })
+    Some(Running { core, sink, secrets, dispatcher, files, told: StoreState::Absent, sessions, lane, browsers, _local: local })
 }
 
 // ---- the self-check, the modes and the wipes ----------------------------------------------------------------------------

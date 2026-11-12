@@ -58,7 +58,7 @@ const EVENT_COST: usize = 64;
 
 /// How many attaches in a row, made because the reader fell behind or the server asked, a subscription may need before it
 /// is ended: a reader that never catches up is not helped by another snapshot.
-const MAX_RESYNC_STREAK: u32 = 5;
+pub const MAX_RESYNC_STREAK: u32 = 5;
 
 /// How long the thread sleeps when it has nothing to read and nothing to do at all.
 const LONG_WAIT: Duration = Duration::from_secs(3600);
@@ -416,7 +416,8 @@ impl Hub {
             attached_before: false,
             streak: 0,
         };
-        let handle = SubHandle { id, session, cmd: self.inner.cmd.clone(), wake: tx.clone(), queued: queued.clone() };
+        let handle =
+            SubHandle { id, session, route: Route::Hub(self.inner.cmd.clone()), wake: tx.clone(), queued: queued.clone() };
         if let Err(mpsc::SendError(Cmd::Attach { sub })) = self.inner.cmd.send(Cmd::Attach { sub }) {
             sub.push(SubEvent::Lost(HubError::Disconnected), false, usize::MAX, &self.inner.stats);
         }
@@ -471,12 +472,84 @@ impl Subscription {
     }
 }
 
+/// Where the requests of a subscription go: the thread of a hub, or a host of sessions in this process.
+#[derive(Clone)]
+enum Route {
+    Hub(Sender<Cmd>),
+    Local(Arc<dyn LocalRoute>),
+}
+
+/// The requests of a subscription whose session lives in this process (the server's own worker, which shows a session in a
+/// pane of its window without a socket). Each call returns at once; what it causes arrives as [`SubEvent`]s through the
+/// subscription's [`SubFeed`], in the same order and with the same meaning as a hub delivers them, so the link of a pane
+/// cannot tell the two apart.
+pub trait LocalRoute: Send + Sync {
+    /// Typed bytes for the program (never empty).
+    fn input(&self, bytes: &[u8]) -> Result<(), HubError>;
+    /// Asks for the session to take this size; only the writer's is applied.
+    fn resize(&self, cols: u16, rows: u16) -> Result<(), HubError>;
+    /// Takes the right to write.
+    fn takeover(&self) -> Result<(), HubError>;
+    /// Attaches again from a fresh snapshot with `tail` rows: [`SubEvent::Reattaching`] first, then the answer.
+    fn reattach(&self, tail: Option<u32>, cause: Cause) -> Result<(), HubError>;
+    /// Leaves the session; it goes on.
+    fn detach(&self);
+}
+
+/// The feeding end of a subscription made by [`Subscription::local`]: whoever holds the session hands its events over here.
+/// The bytes of the snapshot and the live bytes are bounded like a hub's queue; the small events always pass.
+#[derive(Clone)]
+pub struct SubFeed {
+    tx: Sender<SubEvent>,
+    queued: Arc<AtomicUsize>,
+    bound: usize,
+}
+
+impl SubFeed {
+    /// Queues `event`. `false` when a snapshot chunk or live bytes would take the queue past its bound (nothing is queued
+    /// then), or when nobody reads the subscription any more.
+    pub fn push(&self, event: SubEvent) -> bool {
+        let bounded = matches!(event, SubEvent::Snapshot(_) | SubEvent::Live(_));
+        let cost = cost(&event);
+        if bounded && self.queued.load(Ordering::SeqCst).saturating_add(cost) > self.bound {
+            return false;
+        }
+        self.queued.fetch_add(cost, Ordering::SeqCst);
+        if self.tx.send(event).is_err() {
+            self.queued.fetch_sub(cost, Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
+
+    /// The bytes the reader has not taken yet.
+    pub fn queued(&self) -> usize {
+        self.queued.load(Ordering::SeqCst)
+    }
+
+    /// The bound of the queue in bytes.
+    pub fn bound(&self) -> usize {
+        self.bound
+    }
+}
+
+impl Subscription {
+    /// A subscription to `session` whose requests go to `route` and whose events are handed over through the returned
+    /// [`SubFeed`], with a queue of at most `bound` bytes of snapshot and output. Nothing is attached by this call.
+    pub fn local(session: u32, route: Arc<dyn LocalRoute>, bound: usize) -> (Subscription, SubFeed) {
+        let (tx, rx) = mpsc::channel();
+        let queued = Arc::new(AtomicUsize::new(0));
+        let handle = SubHandle { id: 0, session, route: Route::Local(route), wake: tx.clone(), queued: queued.clone() };
+        (Subscription { handle, rx, queued: queued.clone() }, SubFeed { tx, queued, bound })
+    }
+}
+
 /// What a pane sends over its subscription. Cheap to clone.
 #[derive(Clone)]
 pub struct SubHandle {
     id: u64,
     session: u32,
-    cmd: Sender<Cmd>,
+    route: Route,
     /// The subscription's own way to end itself ([`SubHandle::close`]).
     wake: Sender<SubEvent>,
     queued: Arc<AtomicUsize>,
@@ -490,7 +563,10 @@ impl fmt::Debug for SubHandle {
 
 impl SubHandle {
     fn send(&self, cmd: Cmd) -> Result<(), HubError> {
-        self.cmd.send(cmd).map_err(|_| HubError::Disconnected)
+        match &self.route {
+            Route::Hub(tx) => tx.send(cmd).map_err(|_| HubError::Disconnected),
+            Route::Local(_) => Ok(()),
+        }
     }
 
     /// Typed bytes for the program. They reach it only while this client holds the right to write: the hub drops them
@@ -499,31 +575,47 @@ impl SubHandle {
         if bytes.is_empty() {
             return Ok(());
         }
+        if let Route::Local(local) = &self.route {
+            return local.input(bytes);
+        }
         self.send(Cmd::Input { id: self.id, session: self.session, bytes: bytes.to_vec() })
     }
 
     /// Asks the server to resize the session; it does only for the writer.
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), HubError> {
+        if let Route::Local(local) = &self.route {
+            return local.resize(cols, rows);
+        }
         self.send(Cmd::Resize { id: self.id, session: self.session, cols, rows })
     }
 
     /// Takes the right to write.
     pub fn takeover(&self) -> Result<(), HubError> {
+        if let Route::Local(local) = &self.route {
+            return local.takeover();
+        }
         self.send(Cmd::Takeover { id: self.id, session: self.session })
     }
 
     /// Attaches again from a fresh snapshot with `tail` rows of scrollback.
     pub fn reattach(&self, tail: Option<u32>, cause: Cause) -> Result<(), HubError> {
-        self.send(Cmd::Reattach { id: self.id, session: self.session, tail: tail.map(|t| t.min(MAX_TAIL)), cause })
+        let tail = tail.map(|t| t.min(MAX_TAIL));
+        if let Route::Local(local) = &self.route {
+            return local.reattach(tail, cause);
+        }
+        self.send(Cmd::Reattach { id: self.id, session: self.session, tail, cause })
     }
 
-    /// One more try after the tries were used ([`SubEvent::GaveUp`]).
+    /// One more try after the tries were used ([`SubEvent::GaveUp`]). A session in this process has no connection to try.
     pub fn retry(&self) -> Result<(), HubError> {
         self.send(Cmd::Retry)
     }
 
     /// Leaves the session; it goes on.
     pub fn detach(&self) {
+        if let Route::Local(local) = &self.route {
+            return local.detach();
+        }
         let _ = self.send(Cmd::Detach { id: self.id, session: self.session });
     }
 

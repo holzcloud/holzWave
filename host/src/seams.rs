@@ -1,15 +1,16 @@
 //! The one seam between the core and the shell that runs it: everything the shell decides is asked of a [`Host`].
 //!
 //! The desktop app, the Android app and the server build the same [`AppCore`](crate::state::AppCore) and differ in
-//! exactly these ten answers: which platform the page is told it runs on (and so which table of default key chords it gets), where
-//! passwords, key passphrases, provider keys and integration secrets are kept, where the answer of the Local Network
+//! exactly these eleven answers: which platform the page is told it runs on (and so which table of default key chords it gets),
+//! where passwords, key passphrases, provider keys and integration secrets are kept, where the answer of the Local Network
 //! permission comes from, which text size the system asks for, how many panes and lines of scrollback a person may
 //! have, at which address the page finds a file it was granted, whether the machine's process table may be shown, and
 //! which private folders the shell of a pane lives in (only Android names them), the vault that is the secret store
-//! (only Android has one), and the system's document dialog that hands single files over (only Android has one).
+//! (only Android has one), the system's document dialog that hands single files over (only Android has one), and where
+//! the sessions of a server come from (only the server's own worker names them: its sessions live in the same process).
 //! [`NeutralHost`] answers for a build that is given no host: the platform of the build, secrets in memory, no
 //! permission source, a text scale of 100, no limits, the address `/files/<token>`, a process list that may be shown
-//! no private folders, no vault and no document dialog.
+//! no private folders, no vault, no document dialog and no sessions of its own.
 //! Every constructor that does not take a host uses it, so a test or a tool never touches a keychain.
 
 use std::path::{Path, PathBuf};
@@ -19,6 +20,7 @@ use holzwave_core::secrets::{MemoryStore, SecretStore};
 use holzwave_core::vault::VaultStore;
 
 use crate::local_network::{Source, Unsupported};
+use crate::sessions::SessionService;
 
 /// The platform the page is told it runs on. The page reads its spelling (`os-<name>` class, shortcut labels) and the
 /// core picks the table of default key chords by [`Platform::chord_table`].
@@ -185,6 +187,13 @@ pub trait Host: Send + Sync + 'static {
     fn file_picker(&self) -> Option<Arc<dyn FilePicker>> {
         None
     }
+
+    /// Where the sessions of a server come from, when this host has its own. Only the server's worker answers it: the
+    /// sessions live in the same process, so a pane of its window attaches to one without a socket and without a sign-in.
+    /// Everywhere else the answer is `None` and the core uses the server this device is signed in to.
+    fn sessions(&self) -> Option<Arc<dyn SessionService>> {
+        None
+    }
 }
 
 /// The host of a build that is given none: the platform of the build, secrets in memory, no permission source, a text
@@ -292,6 +301,7 @@ mod tests {
         assert_eq!(host.private_dirs(), None, "no private folders unless the Android host names them");
         assert!(host.vault().is_none(), "no vault unless the Android host has one");
         assert!(host.file_picker().is_none(), "no document dialog unless the Android host has one");
+        assert!(host.sessions().is_none(), "no sessions of its own unless the server's worker has them");
         // One store, however often it is asked for.
         host.secrets().set("ssh:a", "one").expect("set");
         assert_eq!(host.secrets().get("ssh:a").expect("get").as_deref(), Some("one"));
