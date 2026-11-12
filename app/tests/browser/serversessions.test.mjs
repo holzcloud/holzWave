@@ -1,19 +1,59 @@
 // The server as a source of sessions in the Connections dialog (docs/design.md 6.34): the row above the saved connections in each state
 // of the link, the list of running sessions with Attach and End, New session, and the host's refusals as bounded text. The stub plays
-// the host; nothing here talks to a real server.
+// the host; nothing here talks to a real server. Both builds draw the row: the desktop the server it is signed in to, with the states
+// of its link and the sign-in (which is the desktop's alone), the browser `This server` (6.30), which its own sign-in reaches.
 import assert from "node:assert/strict";
+import { currentBackend } from "./lib.mjs";
 import { ADDRESS, ROWS, SIGNED_IN, linkCalls, open, openDialog, rowButtons, sessionCalls, sessionTitles, status } from "./serversessions-lib.mjs";
 
-export const backends = ["tauri"];
-export const backendNote = "the server row and its sessions are the desktop's: the browser build has no command for them yet";
+export const backends = ["tauri", "ws"];
 
 export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(5000);
-  await statesCase(page, url);
+  if (currentBackend() === "ws") await webCase(page, url);
+  else await statesCase(page, url);
   await listCase(page, url);
   await actionsCase(page, url);
   await refusalCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
+}
+
+/** The row of the browser build: `This server`, signed in by the page, no sign-in and no sign-out; off and unreachable from the list. */
+async function webCase(page, url) {
+  const REMOTE_OFF = "Remote sessions are off on this server.";
+  await open(page, url);
+  await openDialog(page);
+  assert.equal(await page.locator(".conns .cx-srv-name").textContent(), "This server");
+  assert.equal(await page.locator(".conns .cx-srv-addr").textContent(), await page.evaluate(() => location.host), "the address is the page's own");
+  assert.equal(await page.locator(".conns .cx-dot").getAttribute("data-s"), "in", "a filled dot");
+  assert.deepEqual(await rowButtons(page), ["New session"], "no Sign in… and no Sign out: the page's sign-in is the credential");
+  await page.waitForSelector(".conns .cx-sess");
+  assert.deepEqual(await sessionTitles(page), ["cargo build", "Session 2"]);
+  assert.equal(await page.locator(".conns .cx-help").textContent(),
+    "A session keeps running on the server with no window open. It ends when the server restarts or after the idle limit of the server with nobody connected.");
+  assert.equal((await linkCalls(page, "server_refresh")).length + (await linkCalls(page, "server_status")).length, 0, "the browser has no link to ask");
+  await page.keyboard.press("Escape");
+
+  // Off: decided by the host's sentence, the one dim line, no list and no New session.
+  await open(page, url, { fails: { server_sessions: REMOTE_OFF } });
+  await openDialog(page);
+  await page.waitForFunction((s) => document.querySelector(".conns .cx-help")?.textContent === s, REMOTE_OFF);
+  assert.deepEqual(await rowButtons(page), []);
+  assert.equal(await page.locator(".conns .cx-sess").count(), 0);
+  assert.equal(await page.locator(".conns .cx-srv-state").textContent(), "signed in");
+  await page.keyboard.press("Escape");
+
+  // Any other refusal, and an answer that is not a list, are `unreachable`: never a guess at off.
+  await open(page, url, { fails: { server_sessions: "The server cannot be reached." } });
+  await openDialog(page, "unreachable");
+  assert.deepEqual(await rowButtons(page), []);
+  assert.equal(await page.locator(".conns .cx-dot").getAttribute("data-s"), "down");
+  assert.equal(await page.locator(".conns .cx-help").count(), 0, "neither the help line nor the off line");
+  await page.keyboard.press("Escape");
+  await open(page, url, { rows: "not a list" });
+  await openDialog(page, "unreachable");
+  assert.equal(await page.locator(".conns .cx-sess").count(), 0);
+  await page.keyboard.press("Escape");
 }
 
 async function statesCase(page, url) {

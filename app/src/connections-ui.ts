@@ -12,7 +12,7 @@ import { el, loadStyles, setText } from "./dom.js";
 import { pushKeyHandler } from "./keystack.js";
 import { INTERACTIVE_HINT } from "./loginpromptstate.js";
 import { lockedAnswer } from "./vaultstate.js";
-import { buildServerRow, desktopSource } from "./sessions-ui.js";
+import { buildServerRow, desktopSource, webSource } from "./sessions-ui.js";
 import type { ServerRowHandle } from "./sessions-ui.js";
 
 let opened: Promise<void> | null = null;
@@ -84,25 +84,23 @@ async function show(): Promise<void> {
     const statusLine = el("p", "set-status", box);
     statusLine.setAttribute("role", "status");
 
-    // The server is a source of sessions above the saved connections (docs/design.md 6.34). The browser build has no way to it
-    // here: its commands are the desktop's.
-    let server: ServerRowHandle | null = null;
+    // The server is a source of sessions above the saved connections (docs/design.md 6.34). The desktop shows the server it is
+    // signed in to; the browser build shows the server it was loaded from as `This server` (6.30), through the same commands.
     const serverSlot = el("div", "cx-server-slot", box);
-    if (backend === "tauri") {
-      // `Attach` on a session that this window already shows moves the keyboard to that pane.
-      const shownIn = (session: number): number | null => paneOfSession(session, (state.view?.panes ?? []).map(([id]) => id));
-      server = buildServerRow(serverSlot, { ...desktopSource(call), shownIn }, {
-        say: (text, quiet) => {
-          setText(statusLine, text);
-          if (quiet) statusLine.dataset["quiet"] = "true";
-          else delete statusLine.dataset["quiet"];
-        },
-        opened: (view) => {
-          finish();
-          showOpened(view);
-        },
-      });
-    } else serverSlot.remove();
+    // `Attach` on a session that this window already shows moves the keyboard to that pane.
+    const shownIn = (session: number): number | null => paneOfSession(session, (state.view?.panes ?? []).map(([id]) => id));
+    const source = backend === "tauri" ? desktopSource(call) : webSource(call, location.host);
+    const server: ServerRowHandle = buildServerRow(serverSlot, { ...source, shownIn }, {
+      say: (text, quiet) => {
+        setText(statusLine, text);
+        if (quiet) statusLine.dataset["quiet"] = "true";
+        else delete statusLine.dataset["quiet"];
+      },
+      opened: (view) => {
+        finish();
+        showOpened(view);
+      },
+    });
 
     const body = el("div", "cx-body", box);
     const list = el("div", "cx-list", body);
@@ -402,7 +400,7 @@ async function show(): Promise<void> {
 
     let pop: () => void = () => {};
     const finish = (): void => {
-      server?.dispose();
+      server.dispose();
       pop();
       backdrop.remove();
       resolve();

@@ -17,7 +17,10 @@ import {
   REMOTE_OFF,
   SERVER_LEGEND,
   STATE_WORDS,
+  THIS_SERVER,
   attachedText,
+  isRemoteOff,
+  webView,
   dirText,
   durationWords,
   helpLine,
@@ -47,7 +50,7 @@ const VIEW = { state: "signed_in", url: "https://holz.example.net", name: "Holz 
 // ---- the words ---------------------------------------------------------------------------------------------------------------------
 
 test("every word of the server row and the session rows is a word of the record", () => {
-  for (const word of [SERVER_LEGEND, NEW_SESSION, ATTACH, END, END_ARMED, FREE_WORD, HELD_WORD, REMOTE_OFF, SIGN_IN_LINK, SIGN_OUT, SIGN_OUT_ARMED, LOCKED_LINE]) {
+  for (const word of [SERVER_LEGEND, NEW_SESSION, ATTACH, END, END_ARMED, FREE_WORD, HELD_WORD, REMOTE_OFF, THIS_SERVER, SIGN_IN_LINK, SIGN_OUT, SIGN_OUT_ARMED, LOCKED_LINE]) {
     assert.ok(quoted(word), `the record has no word ${word}`);
   }
   for (const word of Object.values(STATE_WORDS)) assert.ok(quoted(word), `the record has no state word ${word}`);
@@ -146,6 +149,21 @@ test("each state of the link shows the record's word, dot and buttons", () => {
   assert.deepEqual([none.word, none.buttons, none.list], ["not signed in", [SIGN_IN_LINK], false], "no link: not signed in, Sign in… only");
   const failed = plan({}, true);
   assert.deepEqual([failed.word, failed.dot, failed.buttons, failed.list], ["unreachable", "down", [SIGN_OUT], false], "a list that cannot be read");
+});
+
+test("the row of the browser build is signed in by the page, has no sign-in and no sign-out, and reads off from the host's sentence", () => {
+  const on = rowPlan(webView(true), false, true);
+  assert.deepEqual([on.word, on.dot, on.buttons, on.list, on.help, on.off], ["signed in", "in", [NEW_SESSION], true, true, false]);
+  const off = rowPlan(webView(false), false, true);
+  assert.deepEqual([off.word, off.buttons, off.list, off.off], ["signed in", [], false, true], "off: the line, no list, no New session");
+  const failed = rowPlan(webView(true), true, true);
+  assert.deepEqual([failed.word, failed.dot, failed.buttons, failed.list], ["unreachable", "down", [], false], "a list that cannot be read");
+  // Only the host's exact sentence means off; anything else is a failure to read the list.
+  assert.equal(isRemoteOff(REMOTE_OFF), true);
+  assert.equal(isRemoteOff(new Error(REMOTE_OFF)), true);
+  for (const other of ["The server cannot be reached.", `${REMOTE_OFF} `, "remote sessions are off on this server.", null, undefined, 3]) {
+    assert.equal(isRemoteOff(other), false, String(other));
+  }
 });
 
 test("the name of the server is its host", () => {

@@ -6,8 +6,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { APP_DIR, callsOf, emit } from "./lib.mjs";
 
-export const backends = ["tauri"];
-export const backendNote = "a pane of a server session is the desktop's: the browser build has no command for it yet";
+// Both builds: the browser's worker shows a session in a pane of its window with the same header.
+export const backends = ["tauri", "ws"];
 
 export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(5000);

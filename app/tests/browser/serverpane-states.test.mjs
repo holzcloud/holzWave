@@ -2,18 +2,19 @@
 // The stub plays the host: its `remoteSessions` hook puts the remote member into the answer of `pane_connections`, and frames are
 // delivered as the core's `frame` event.
 import assert from "node:assert/strict";
-import { callsOf, emit } from "./lib.mjs";
+import { callsOf, currentBackend, emit } from "./lib.mjs";
 import { open as openPhone } from "./touch-lib.mjs";
 
-export const backends = ["tauri"];
-export const backendNote = "a pane of a server session is the desktop's (and the phone's): the browser build has no command for it yet";
+// Both builds: the browser's worker shows a session in a pane of its window with the same states. The phone is the Android app's
+// (the browser build has no phone layout), so that case runs on the desktop backend only.
+export const backends = ["tauri", "ws"];
 
 export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(5000);
   await statesCase(page, url);
   await olderCase(page, url);
   await gridCase(page, url);
-  await phoneCase(page, url);
+  if (currentBackend() === "tauri") await phoneCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 

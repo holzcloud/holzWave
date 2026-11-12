@@ -1,8 +1,9 @@
 // The server as a source of sessions in the Connections dialog (docs/design.md 6.34): one row above the saved connections with the
 // server's host, its address in mono, a state dot with its word and the buttons of the state, the help line, and under a signed-in
 // row the running sessions with `Attach` and `End`. The words and the decisions are in sessionstate.ts; this module draws them and
-// calls the source. The source is a parameter (the desktop wires it to the host's commands), so the row of another build is the same
-// code with another source, not a copy. Every value is set with `textContent`.
+// calls the source. The source is a parameter: the desktop wires it to the host's commands (`desktopSource`), and the browser build
+// to the same commands of its own worker (`webSource`), whose row is `This server` with no sign-in (6.30). Every value is set with
+// `textContent`.
 import { armed, el, setText } from "./dom.js";
 import { armSignOut, openServerSignIn } from "./serversignin.js";
 import { LOCKED_LINE, MAX_SENTENCE, SIGN_IN_LINK, SIGN_OUT, plain, readServerView } from "./serverstate.js";
@@ -14,11 +15,14 @@ import {
   NEW_SESSION,
   REMOTE_OFF,
   SERVER_LEGEND,
+  THIS_SERVER,
   helpLine,
+  isRemoteOff,
   readSessions,
   rowPlan,
   rowWords,
   serverName,
+  webView,
 } from "./sessionstate.js";
 import type { SessionRow } from "./sessionstate.js";
 import { isLockedFailure } from "./vaultstate.js";
@@ -29,6 +33,11 @@ export const REFRESH_MS = 5000;
 
 /** Where the row gets its answers. Every function may reject with the host's fixed sentence. */
 export interface ServerSource {
+  /**
+   * The browser build: the row is the server the page was loaded from, named `This server` with `host` as its address, signed in
+   * by the page's own sign-in. Whether remote sessions are on is read from the list's answer (the host's sentence when they are off).
+   */
+  web?: { host: string };
   /** The link; `fresh` asks the server again (once per opening), otherwise the host answers what it knows. */
   status(fresh: boolean): Promise<unknown>;
   list(): Promise<unknown>;
@@ -73,6 +82,19 @@ export function desktopSource(call: <T>(cmd: string, args?: Record<string, unkno
   };
 }
 
+/** The source of the browser build: the same commands, answered by the person's own worker; the page's sign-in is the link. */
+export function webSource(call: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>, host: string): ServerSource {
+  return {
+    web: { host },
+    status: () => Promise.resolve(null),
+    list: () => call<unknown>("server_sessions"),
+    create: () => call<View>("server_session_new"),
+    open: (session) => call<View>("server_session_open", { session }),
+    end: (session) => call<unknown>("server_session_end", { session }),
+    focus: (pane) => call<View>("focus_pane", { pane }),
+  };
+}
+
 /** Build the group `Server` as the first child of `parent`. */
 export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks: RowHooks): ServerRowHandle {
   const group = el("fieldset", "cx-server");
@@ -90,7 +112,8 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
 
   /** Each drawing of the buttons and the list has its own signal, so the listeners of an old drawing go with it. */
   let drawn = new AbortController();
-  let view: ServerView = readServerView(null);
+  const web = source.web ?? null;
+  let view: ServerView = web === null ? readServerView(null) : webView(true);
   let sessions: SessionRow[] = [];
   let listFailed = false;
   let drawnKey = "";
@@ -126,7 +149,7 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
   };
 
   const draw = (): void => {
-    const plan = rowPlan(view, listFailed);
+    const plan = rowPlan(view, listFailed, web !== null);
     const key = JSON.stringify([plan, view.url, sessions]);
     if (key === drawnKey) return;
     drawnKey = key;
@@ -135,8 +158,8 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
     drawn.abort();
     drawn = new AbortController();
     dot.dataset.s = plan.dot;
-    setText(name, serverName(view.url));
-    setText(address, view.url);
+    setText(name, web === null ? serverName(view.url) : THIS_SERVER);
+    setText(address, web === null ? view.url : web.host);
     setText(word, plan.word);
     acts.replaceChildren();
     below.replaceChildren();
@@ -224,8 +247,26 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
     if (focused !== undefined) group.querySelector<HTMLElement>(`[data-key="${CSS.escape(focused)}"]`)?.focus();
   };
 
+  /** The browser build: the list says it all. The host's sentence is `off`, any other failure or an unreadable answer `unreachable`. */
+  const readWeb = async (): Promise<void> => {
+    let raw: unknown = null;
+    let off = false;
+    try {
+      raw = await source.list();
+    } catch (failure) {
+      off = isRemoteOff(failure);
+    }
+    if (disposed) return;
+    view = webView(!off);
+    const read = off ? [] : readSessions(raw);
+    listFailed = read === null;
+    sessions = read ?? [];
+    draw();
+  };
+
   /** Read the link and, when it shows a list, the list; draw what changed. */
   const read = async (fresh: boolean): Promise<void> => {
+    if (web !== null) return readWeb();
     try {
       view = readServerView(await source.status(fresh));
     } catch {

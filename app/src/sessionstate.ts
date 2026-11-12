@@ -19,6 +19,8 @@ export const FREE_WORD = "free";
 export const HELD_WORD = "held";
 /** The row while the server has remote sessions off. */
 export const REMOTE_OFF = "Remote sessions are off on this server.";
+/** The name of the row in the browser build: the server the page was loaded from (design.md 6.30). */
+export const THIS_SERVER = "This server";
 /** The help line under the row: the idle limit is said in words when the page knows it, else by name. */
 export const HELP_START = "A session keeps running on the server with no window open. It ends when the server restarts or after ";
 export const HELP_UNKNOWN = `${HELP_START}the idle limit of the server with nobody connected.`;
@@ -196,10 +198,13 @@ export interface RowPlan {
 
 /**
  * What the row shows for `view`; `listFailed` says that the last read of the list failed, which the row says as `unreachable`.
- * A link with no address is drawn as `not signed in` with `Sign in…` only.
+ * A link with no address is drawn as `not signed in` with `Sign in…` only. `web` is the row of the browser build: the page's own
+ * sign-in is the credential, so the row is always signed in (or unreachable when the list cannot be read) and has neither
+ * `Sign in…` nor `Sign out`.
  */
-export function rowPlan(view: ServerView, listFailed: boolean): RowPlan {
-  const state: LinkState = view.url === "" ? "signed_out" : listFailed && view.state === "signed_in" ? "unreachable" : view.state;
+export function rowPlan(view: ServerView, listFailed: boolean, web = false): RowPlan {
+  const desktop: LinkState = view.url === "" ? "signed_out" : listFailed && view.state === "signed_in" ? "unreachable" : view.state;
+  const state: LinkState = web ? (listFailed ? "unreachable" : "signed_in") : desktop;
   const signedIn = state === "signed_in";
   let buttons: string[];
   switch (state) {
@@ -216,6 +221,7 @@ export function rowPlan(view: ServerView, listFailed: boolean): RowPlan {
       buttons = [];
   }
   if (view.locked) buttons = [];
+  if (web) buttons = buttons.filter((b) => b !== SIGN_OUT && b !== SIGN_IN_LINK);
   return {
     state,
     word: STATE_WORDS[state],
@@ -226,6 +232,17 @@ export function rowPlan(view: ServerView, listFailed: boolean): RowPlan {
     off: signedIn && !view.remoteOn,
     help: signedIn && view.remoteOn,
   };
+}
+
+/** The view the row of the browser build reads: signed in by the page's own sign-in, with remote sessions as the list said. */
+export function webView(remoteOn: boolean): ServerView {
+  return { state: "signed_in", url: "", name: "", locked: false, syncOn: false, remoteOn, error: null };
+}
+
+/** Whether a refusal is the host's sentence for remote sessions that are off: only that exact sentence says so. */
+export function isRemoteOff(failure: unknown): boolean {
+  const text = failure instanceof Error ? failure.message : typeof failure === "string" ? failure : "";
+  return text === REMOTE_OFF;
 }
 
 /** The name of the server in the row: its host, from the address. Empty without one. */

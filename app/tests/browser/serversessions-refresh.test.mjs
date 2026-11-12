@@ -1,10 +1,11 @@
 // When the Connections dialog reads the server's sessions (docs/design.md 6.34): when it opens, after each action, every five seconds
-// while it is open and never after it closed; and a list that cannot be read is said as `unreachable`. The stub plays the host.
+// while it is open and never after it closed; and a list that cannot be read is said as `unreachable`. The stub plays the host. The
+// browser build's row (`This server`) is the same code with no Sign out, so only its buttons differ.
 import assert from "node:assert/strict";
+import { currentBackend } from "./lib.mjs";
 import { SIGNED_IN, open, openDialog, rowButtons, sessionCalls } from "./serversessions-lib.mjs";
 
-export const backends = ["tauri"];
-export const backendNote = "the server row and its sessions are the desktop's: the browser build has no command for them yet";
+export const backends = ["tauri", "ws"];
 
 export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(8000);
@@ -41,10 +42,11 @@ async function unreadableCase(page, url) {
   await open(page, url, { view: SIGNED_IN, fails: { server_sessions: "The server cannot be reached." } });
   await openDialog(page, "unreachable");
   assert.equal(await page.locator(".conns .cx-dot").getAttribute("data-s"), "down", "hollow with a dash");
-  assert.deepEqual(await rowButtons(page), ["Sign out"], "Sign out still makes sense; New session does not");
+  const web = currentBackend() === "ws";
+  assert.deepEqual(await rowButtons(page), web ? [] : ["Sign out"], "Sign out still makes sense on the desktop; New session does not");
   assert.equal(await page.locator(".conns .cx-sess").count(), 0);
   // The list comes back: the row says so on the next read.
   await page.evaluate(() => window.__MOCK__.remoteSessions.fails("server_sessions", null));
   await page.waitForFunction(() => document.querySelector(".conns .cx-srv-state")?.textContent === "signed in", null, { timeout: 7000 });
-  assert.deepEqual(await rowButtons(page), ["Sign out", "New session"]);
+  assert.deepEqual(await rowButtons(page), web ? ["New session"] : ["Sign out", "New session"]);
 }

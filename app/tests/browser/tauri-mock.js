@@ -83,7 +83,7 @@
 //       setInterval(n)  the seconds of the interval the start and the polls state (default 5; a test that waits for a poll sets 1)
 //       calls          every call of the seven commands as `[command, args]`, oldest first
 //       reset()        back to the default
-//     remoteSessions   the sessions of the server the desktop is signed in to: the six commands `server_sessions`,
+//     remoteSessions   the sessions of the server (the desktop's signed-in one, or the browser's own): the six commands `server_sessions`,
 //                      `server_session_new`, `server_session_open`, `server_session_end`, `pane_takeover` and
 //                      `pane_load_older`, answered from this hook, and the panes of a session in the answer of `pane_connections`
 //       sessions       a copy of the rows `server_sessions` answers (default none):
