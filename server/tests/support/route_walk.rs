@@ -583,6 +583,11 @@ pub const URL_ALLOWED: &[(&str, &str, &str)] = &[
     ("/webtransport.js", "wss://${host}/ws", "the socket address built from the page's own host (location.host)"),
     ("/sync.js", "https://cloud.example.com/", "the grey example text of a settings field; shown, never fetched"),
     ("/dist-", "https://", "a scheme prefix a link check compares with; no host follows"),
+    (
+        "/serverstate.js",
+        "https://.",
+        "the sign-in's help line and refusal name the scheme a typed address must start with; no host follows and nothing is fetched",
+    ),
 ];
 
 /// The absolute and protocol-relative URL literals in a text: the scheme, `ws`, `wss`, `http` and `https`, and `//host`.
