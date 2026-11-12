@@ -25,12 +25,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Extension;
 use holzwave_host::commands::registry::lookup;
+use holzwave_host::sessions::SessionFault;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::{Notify, broadcast};
 use tokio::time::{Instant, MissedTickBehavior, interval_at, sleep_until, timeout};
 
 use super::app::{App, ConnectionPermit, Shutdown, StoreState};
+use super::features::{Feature, feature_of_command};
 use super::router::{Access, Authed, Part, SocketVerdict, seconds_left};
 use super::routes_auth::Object;
 use super::transport::{Inbound, Outgoing, SocketLimits, Transport, TransportError, Upgrade};
@@ -84,6 +86,13 @@ pub const ANSWER_TOO_MANY: &str = "Too many commands. Wait a moment.";
 pub const ANSWER_INVALID: &str = "The message is not valid.";
 /// The answer to a command the worker cannot take now.
 pub const ANSWER_BUSY: &str = "The server is busy. Try again.";
+
+/// The answer to a command that makes or reaches a session of the server while the operator has remote sessions off (the
+/// commands are named in [`super::features::REMOTE_PAGE_COMMANDS`]): the host's own sentence, so the page reads the same
+/// words as on the desktop.
+pub fn answer_remote_off() -> &'static str {
+    SessionFault::Off.sentence()
+}
 
 /// The commands that carry what the person types or does with the pointer: only these keep a session from going idle.
 pub const TOUCHING: [&str; 6] = ["key", "text", "paste", "mouse", "wheel", "send_edit"];
@@ -241,6 +250,8 @@ pub trait SessionPort: Send + Sync + 'static {
     fn locked(&self, account: AccountId) -> impl Future<Output = bool> + Send;
     /// A listener for the sessions that are ended on purpose.
     fn ended(&self) -> broadcast::Receiver<Ended>;
+    /// Whether the operator has `feature` on now: read for every command of the page that belongs to it.
+    fn feature_on(&self, feature: Feature) -> bool;
 }
 
 /// The sessions and the secret store of the application.
@@ -290,6 +301,10 @@ impl SessionPort for ManagerPort {
 
     fn ended(&self) -> broadcast::Receiver<Ended> {
         self.app.session_manager.subscribe_ended()
+    }
+
+    fn feature_on(&self, feature: Feature) -> bool {
+        self.app.features.is_on(feature)
     }
 }
 
@@ -519,6 +534,11 @@ fn answer_err(id: u64, text: &str) -> String {
     format!(r#"{{"id":{id},"err":"{text}"}}"#)
 }
 
+/// An error answer whose text is a sentence of the host, written as JSON whatever it holds.
+fn answer_sentence(id: u64, text: &str) -> String {
+    serde_json::json!({ "id": id, "err": text }).to_string()
+}
+
 /// A command as the page sends it. No other member is allowed: the window is always `main` and the client never names one.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -638,6 +658,13 @@ impl<P: SessionPort> Machine<'_, P> {
         if !command.admits(text.len()) {
             self.violation(now)?;
             return self.text(transport, answer_err(envelope.id, ANSWER_TOO_LARGE)).await;
+        }
+        // The switch is read for every such command, so turning it off or on takes effect with the next one. Nothing of the
+        // device surface (no token, no header) is read here: the page's own sign-in is the credential.
+        if let Some(feature) = feature_of_command(command.name)
+            && !self.port.feature_on(feature)
+        {
+            return self.text(transport, answer_sentence(envelope.id, answer_remote_off())).await;
         }
         if TOUCHING.contains(&command.name) {
             match self.port.touch(&self.session, self.clock.unix()).await {

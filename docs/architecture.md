@@ -196,7 +196,10 @@ commands of the terminal core, of the AI chat and of the integrations; the golde
 desktop app (`server_status`, `server_refresh`, `server_sign_in_start`, `server_sign_in_poll`, `server_sign_in_cancel`,
 `server_sign_out` and `sync_use_server`) link the app to a holzWave server, and six more (`server_sessions`,
 `server_session_new`, `server_session_open`, `server_session_end`, `pane_takeover` and `pane_load_older`) list, make, open and
-end the sessions of that server and run them as panes; the browser build has none of them. A pane of a server session reports
+end the sessions of that server and run them as panes. The browser build has none of the seven: it is the server's own page
+and its sign-in is the credential. It has the six of the sessions, which the person's worker answers from its own sessions,
+and the server answers `server_sessions`, `server_session_new`, `server_session_open` and `server_session_end` with
+`Remote sessions are off on this server.` before the worker sees them while that switch is off. A pane of a server session reports
 who writes, the session's grid and what it is busy with in the `remote` member of its `pane_connections` line. The Rust types are the
 source of truth; `app/tests/fixtures/protocol.json` is the golden written from them (`UPDATE_FIXTURES=1`) and read by
 the TypeScript tests too, so a renamed argument or a changed payload fails on both sides at once. Arguments are

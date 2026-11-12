@@ -4,7 +4,8 @@
 //! pane of a session is) are in [`crate::server`], [`crate::sync`] and [`crate::sessions`].
 //!
 //! No answer holds the token: the views have no member for it, and every failure is a fixed sentence. The commands wait for the
-//! network, so each is async, and the browser build does not have them (it is the server's own page).
+//! network, so each is async. The browser build (the server's own page) has no link and no sign-in, so it does not have the
+//! commands of the link; it has the six commands of the sessions, which its worker answers from its own sessions.
 
 use holzwave_core::layout::PaneId;
 

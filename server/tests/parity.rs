@@ -18,7 +18,8 @@ mod parity_env;
 mod ws_env;
 
 use holzwave_host::commands::registry::{COMMANDS, NOT_IN_BROWSER, lookup};
-use holzwave_server::http::ws::{ANSWER_TOO_LARGE, ANSWER_UNKNOWN};
+use holzwave_server::http::features::REMOTE_PAGE_COMMANDS;
+use holzwave_server::http::ws::{ANSWER_TOO_LARGE, ANSWER_UNKNOWN, answer_remote_off};
 use holzwave_host::commands::registry::{Command, Web};
 use parity_env::{
     Failure, Line, Probed, fresh, start_focused_pane, args_for, args_text_with, golden, golden_at, golden_command_args, golden_command_names, golden_event_names,
@@ -249,7 +250,15 @@ async fn walk_the_answers_by_kind_add_up_to_the_table_and_the_worker_ran_what_th
     nothing_wrong("the walk", &problems);
     let unavailable = walked.iter().filter(|w| w.kind == Kind::Unavailable).count();
     assert_eq!(unavailable, unavailable_rows().len(), "the answers of the sentence are the rows the table marks");
-    assert_eq!(probed.ran(), COMMANDS.len() - unavailable, "the worker ran every row the browser has and nothing else");
+    // Remote sessions are off on a new server: the edge answers the commands that make or reach a session itself.
+    for w in walked.iter().filter(|w| REMOTE_PAGE_COMMANDS.contains(&w.row.name)) {
+        assert_eq!(w.answer.get("err"), Some(&json!(answer_remote_off())), "{}", w.row.name);
+    }
+    assert_eq!(
+        probed.ran(),
+        COMMANDS.len() - unavailable - REMOTE_PAGE_COMMANDS.len(),
+        "the worker ran every row the browser has, except the session rows the switch keeps at the edge, and nothing else"
+    );
     assert_eq!(probed.env.counts(&alice).workers, 1, "one worker for the person");
     assert_eq!(probed.env.supervisor.stats().worker_deaths, 0, "no worker was declared dead");
 }
@@ -587,7 +596,7 @@ fn shapes_the_members_that_need_a_desktop_window_a_provider_or_a_tool_have_a_rea
         (
             "answers.sessions",
             &["server_sessions"],
-            "the sessions of the server a desktop is signed in to; the browser is that server's own page and has no such command",
+            "remote sessions are off on a new server, so the edge answers the sentence; the shape with the switch on is read in session_web",
         ),
         ("answers.ai.ticket", &["ai_send"], "a turn opens a connection to the provider"),
         ("answers.ai.profiles_on_device", &["ai_profiles"], "an on-device model of the desktop system"),
@@ -612,6 +621,35 @@ fn shapes_the_members_that_need_a_desktop_window_a_provider_or_a_tool_have_a_rea
 }
 
 // ---- the set the browser cannot offer -----------------------------------------------------------------------------------
+
+#[test]
+fn unavailable_the_sessions_of_a_server_are_in_both_builds_and_the_link_to_a_server_is_the_desktops_alone() {
+    let group: Vec<&Command> = COMMANDS.iter().filter(|row| row.group == "server").collect();
+    let both: Vec<&str> = group.iter().filter(|row| row.web == Web::Same).map(|row| row.name).collect();
+    let desktop: Vec<&str> = group.iter().filter(|row| row.web == Web::Unavailable).map(|row| row.name).collect();
+    assert_eq!(
+        both,
+        ["server_sessions", "server_session_new", "server_session_open", "server_session_end", "pane_takeover", "pane_load_older"],
+        "the browser's worker answers the sessions from its own"
+    );
+    assert_eq!(
+        desktop,
+        [
+            "server_status",
+            "server_refresh",
+            "server_sign_in_start",
+            "server_sign_in_poll",
+            "server_sign_in_cancel",
+            "server_sign_out",
+            "sync_use_server",
+        ],
+        "the browser is the server's own page: no link, no sign-in, no choice of the sync target"
+    );
+    assert_eq!(group.len(), both.len() + desktop.len());
+    for name in REMOTE_PAGE_COMMANDS {
+        assert!(both.contains(&name), "{name}: a gated command is one the browser has");
+    }
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unavailable_every_flagged_row_answers_the_sentence_and_runs_nothing() {

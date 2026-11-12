@@ -787,7 +787,8 @@ impl Transport for FakeTransport {
     }
 }
 
-/// A [`SessionPort`] the test sets: what the checks answer and whether the store is locked.
+/// A [`SessionPort`] the test sets: what the checks answer, whether the store is locked and whether remote sessions are on
+/// (off, as on a new server).
 pub struct FakePort {
     pub check_answer: Mutex<Result<(), PortError>>,
     pub touch_answer: Mutex<Result<(), PortError>>,
@@ -795,6 +796,7 @@ pub struct FakePort {
     pub checks: AtomicUsize,
     pub touches: AtomicUsize,
     pub ended: broadcast::Sender<Ended>,
+    pub remote: AtomicBool,
 }
 
 impl FakePort {
@@ -806,6 +808,7 @@ impl FakePort {
             checks: AtomicUsize::new(0),
             touches: AtomicUsize::new(0),
             ended: broadcast::channel(4).0,
+            remote: AtomicBool::new(false),
         })
     }
 }
@@ -830,6 +833,10 @@ impl SessionPort for PortHandle {
 
     fn ended(&self) -> broadcast::Receiver<Ended> {
         self.0.ended.subscribe()
+    }
+
+    fn feature_on(&self, feature: holzwave_server::http::features::Feature) -> bool {
+        feature == holzwave_server::http::features::Feature::Remote && self.0.remote.load(Ordering::SeqCst)
     }
 }
 

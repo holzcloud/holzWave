@@ -1661,10 +1661,10 @@ const SESSION_ROWS: [(&str, Scope, &[(&str, &str)], &str); 6] = [
 ];
 
 #[test]
-fn the_session_rows_are_desktop_only_take_a_number_at_most_and_fail_with_a_sentence() {
+fn the_session_rows_are_in_both_builds_take_a_number_at_most_and_fail_with_a_sentence() {
     for (name, scope, args, answer) in SESSION_ROWS {
         let row = lookup(name).expect("a row");
-        assert_eq!((row.group, row.scope, row.mode, row.web), ("server", scope, Mode::Async, Web::Unavailable), "{name}");
+        assert_eq!((row.group, row.scope, row.mode, row.web), ("server", scope, Mode::Async, Web::Same), "{name}");
         assert_eq!(row.args.iter().map(|arg| (arg.name, arg.ty)).collect::<Vec<_>>(), args, "{name}: only the named number");
         assert_eq!(row.answer.split_whitespace().collect::<String>(), answer, "{name}");
         assert_eq!(row.error, Some("String"), "{name}: a fixed sentence");
@@ -2082,11 +2082,11 @@ fn rows_expected() -> usize {
     golden_commands().len()
 }
 
-/// The 38 commands the browser build does not have: eight of the first table plan, nine of the second (the two that
+/// The 32 commands the browser build does not have: eight of the first table plan, nine of the second (the two that
 /// carry the window frame choices among them), the six that drive the vault of a phone, the two that hand a file over on
-/// a phone, the seven of the link to a server (the browser is that server's own page) and the six that run the sessions
-/// of that server as panes.
-const THE_UNAVAILABLE: [&str; 38] = [
+/// a phone and the seven of the link to a server (the browser is that server's own page). The six that run the sessions of
+/// a server as panes are in both builds: the browser's worker answers them from its own sessions.
+const THE_UNAVAILABLE: [&str; 32] = [
     "attach_pane",
     "attach_tab",
     "clipboard_text",
@@ -2100,15 +2100,9 @@ const THE_UNAVAILABLE: [&str; 38] = [
     "local_network_open_settings",
     "local_network_status",
     "open_url",
-    "pane_load_older",
-    "pane_takeover",
     "release_outside",
     "reveal_path",
     "server_refresh",
-    "server_session_end",
-    "server_session_new",
-    "server_session_open",
-    "server_sessions",
     "server_sign_in_cancel",
     "server_sign_in_poll",
     "server_sign_in_start",

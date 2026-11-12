@@ -158,6 +158,16 @@ pub const GATES: [(&str, Gate); 3] = [
     ("/ws/device", Gate::Feature(Feature::Remote)),
 ];
 
+/// The commands of the page's own socket that list, make, open or end a session of the server: the remote feature's part of
+/// that socket. While the feature is off the socket answers them itself and the worker never sees them. Taking over and asking
+/// for older lines act on a pane the window holds already, so they are not here.
+pub const REMOTE_PAGE_COMMANDS: [&str; 4] = ["server_sessions", "server_session_new", "server_session_open", "server_session_end"];
+
+/// The feature a command of the page's socket belongs to, if it belongs to one.
+pub fn feature_of_command(name: &str) -> Option<Feature> {
+    REMOTE_PAGE_COMMANDS.contains(&name).then_some(Feature::Remote)
+}
+
 /// The gate a path is under, if any. The path is read the way a person or a scanner could spell it: letters of either case,
 /// repeated slashes, a trailing slash, dot segments and percent-escapes all count as the plain path.
 pub fn gate_of(path: &str) -> Option<Gate> {
