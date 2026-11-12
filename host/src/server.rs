@@ -18,8 +18,9 @@
 //! take long: callers run them off the main thread. No lock of this file is held across a network call.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 
+use holzwave_core::remote::hub::{Endpoint, Hub, HubOptions};
 use holzwave_core::secrets::SecretStore;
 use holzwave_core::server_link::{Fault, LinkFileError, Origin, ServerLinkFile, Token, token_clear, token_load, token_save};
 use holzwave_core::server_signin::{self as signin, Client, Grant, Poll, SignInError};
@@ -199,6 +200,29 @@ pub struct ServerRuntime {
     /// Accept a loopback `http` address: for a test that runs a real server on this computer. The app never sets it.
     plain_loopback: bool,
     state: Mutex<State>,
+    /// The one connection of this device to the sessions of the server, made when something first asks for it.
+    hub: OnceLock<Hub>,
+    hub_options: HubOptions,
+}
+
+/// What the hub is told about the server: the address of the link file and, for every connection it makes, the token as the
+/// keychain holds it then. It keeps neither, so one hub lives through a sign-out and a new sign-in.
+struct LinkEndpoint(Weak<ServerRuntime>);
+
+impl Endpoint for LinkEndpoint {
+    fn origin(&self) -> Option<Origin> {
+        let runtime = self.0.upgrade()?;
+        let link = lock(&runtime.state).link.clone()?;
+        link.origin().ok()
+    }
+
+    fn token(&self) -> Result<Token, Fault> {
+        let runtime = self.0.upgrade().ok_or(Fault::SignedOut)?;
+        network_ready().map_err(|_| Fault::Unreachable)?;
+        // A store that is locked or cannot be read gives no token: the pane waits as a signed-out pane does and tries again
+        // on Enter, with whatever the store holds then.
+        runtime.token_and_origin().map(|(token, _)| token).map_err(|_| Fault::SignedOut)
+    }
 }
 
 impl ServerRuntime {
@@ -225,7 +249,37 @@ impl ServerRuntime {
             name: device_name(),
             plain_loopback,
             state: Mutex::new(State { link, link_error, pending: None, epoch: 0, seen: Seen::NONE }),
+            hub: OnceLock::new(),
+            hub_options: HubOptions::default(),
         }
+    }
+
+    /// The same runtime with other settings for its hub (the pauses between two tries). Meant for tests; it has to be called
+    /// before the hub is first asked for.
+    pub fn with_hub_options(mut self, options: HubOptions) -> ServerRuntime {
+        self.hub_options = options;
+        self
+    }
+
+    /// The one hub of this device: the connection that lists, makes and ends the sessions of the server and that every pane
+    /// of a session is attached through. Nothing is connected until something is asked of it; it asks this runtime for the
+    /// address and a fresh token whenever it connects.
+    pub fn hub(self: &Arc<Self>) -> Hub {
+        self.hub.get_or_init(|| Hub::new(Arc::new(LinkEndpoint(Arc::downgrade(self))), self.hub_options.clone())).clone()
+    }
+
+    /// Ends the connection of the hub, when there is one: its panes show the signed-out state and no session is ended.
+    fn drop_connection(&self) {
+        if let Some(hub) = self.hub.get() {
+            hub.disconnect();
+        }
+    }
+
+    /// The host of the server this device is linked to, for the name of a row: the host and nothing more. Empty when no
+    /// server is known.
+    pub fn host_name(&self) -> String {
+        let link = lock(&self.state).link.clone();
+        link.and_then(|link| link.origin().ok()).map(|origin| origin.host().to_owned()).unwrap_or_default()
     }
 
     /// A runtime that sends `name` as the name of this device. For tests.
@@ -338,6 +392,7 @@ impl ServerRuntime {
         let same = matches!(token_load(&*self.secrets), Ok(Some(current)) if current.bearer().as_str() == refused.bearer().as_str());
         if same {
             let _ = token_clear(&*self.secrets);
+            self.drop_connection();
         }
         lock(&self.state).seen = Seen::NONE;
     }
@@ -482,6 +537,8 @@ impl ServerRuntime {
         drop(token);
         token_clear(&*self.secrets).map_err(|e| if is_locked(&e) { SECRETS_LOCKED.to_owned() } else { NOT_FORGOTTEN.to_owned() })?;
         lock(&self.state).seen = Seen::NONE;
+        // The sessions of the server are not ended: the panes that show them say that the sign-in is gone.
+        self.drop_connection();
         Ok(self.view())
     }
 }

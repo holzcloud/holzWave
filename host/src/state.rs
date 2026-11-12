@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime};
 use holzwave_core::ai::service::AskEvent;
 use holzwave_core::blocks::{Block, BlockKind, BlockView, Blocks, Grant, LOCAL, Opened, Saved};
 use holzwave_core::conn::ConnState;
-use holzwave_core::connections::{ConnView, Connections, ProfileView, SecretChange, home_dir as user_home};
+use holzwave_core::connections::{ConnView, Connections, ProfileView, RemoteConn, SecretChange, home_dir as user_home};
 use holzwave_core::files::{Entry, FileSource, Listing};
 use holzwave_core::integrate::run::Launch as PaneLaunch;
 use holzwave_core::engine::{
@@ -54,6 +54,7 @@ use crate::integrate_host::{
     LaunchAnswer, LaunchNote,
 };
 use crate::seams::{Host, NeutralHost, Platform, PrivateDirs};
+use crate::sessions::{ServerParts, SessionFault, SessionRow};
 use crate::windows::{CursorSpot, DropKind, Drops, Hovers, Place};
 
 /// A layout file larger than this is not read: a real layout is a few KiB.
@@ -968,6 +969,11 @@ pub struct AppCore {
     sync: crate::sync::SyncRuntime,
     /// The link of this device to a holzWave server: its address, its token in the keychain and the sign-in that gets one.
     server: Arc<crate::server::ServerRuntime>,
+    /// The sessions of a server (see [`crate::sessions`]). The desktop's are those of the server this device is signed in to;
+    /// a build whose sessions live somewhere else passes its own.
+    sessions: Arc<dyn crate::sessions::SessionService>,
+    /// Which pane of the layout shows which session of a server. Kept per device and never synced.
+    remote_panes: crate::sessions::RemotePanes,
     /// The AI chat service and the calls the commands make on it. It owns its threads and takes no lock of the core.
     ai: AiHost,
     /// The Local Network permission of macOS: the person's stored choice and the probe of the system. Inert elsewhere.
@@ -1139,6 +1145,20 @@ impl AppCore {
         integration: Option<IntegrationParts>,
         host: Arc<dyn Host>,
     ) -> Arc<AppCore> {
+        AppCore::new_with_server(dir, sink, shell, ai, integration, host, ServerParts::default())
+    }
+
+    /// [`AppCore::new_with_host`] with the link to the server and the source of its sessions passed in (see
+    /// [`ServerParts`]). A part that is `None` is built as the desktop builds it.
+    pub fn new_with_server(
+        dir: PathBuf,
+        sink: Arc<dyn Sink>,
+        shell: ShellSpec,
+        ai: Option<AiParts>,
+        integration: Option<IntegrationParts>,
+        host: Arc<dyn Host>,
+        server_parts: ServerParts,
+    ) -> Arc<AppCore> {
         let secrets = host.secrets();
         let ai = ai.unwrap_or_else(|| AiParts::with_secrets(secrets.clone()));
         // What the sync downloaded last time is put in place before anything is read.
@@ -1235,7 +1255,16 @@ impl AppCore {
             eprintln!("holzwave: no history file ({e}); the history is kept in memory");
             holzwave_core::history::History::in_memory().expect("in-memory history")
         });
-        let server = Arc::new(crate::server::ServerRuntime::new(dir.clone(), secrets.clone()));
+        let server =
+            server_parts.runtime.unwrap_or_else(|| Arc::new(crate::server::ServerRuntime::new(dir.clone(), secrets.clone())));
+        let sessions: Arc<dyn crate::sessions::SessionService> =
+            server_parts.sessions.unwrap_or_else(|| Arc::new(crate::sessions::ServerSessions::new(server.clone())));
+        // Which pane shows which session. Pane ids are small per-device counters, so the entries of a layout that sync
+        // replaced belong to other panes and are dropped.
+        let remote_panes = {
+            let live = if adopted_layout { Vec::new() } else { lock(&windows).all_panes() };
+            crate::sessions::RemotePanes::load(&dir, &live)
+        };
         let sync = crate::sync::SyncRuntime::new(dir.clone(), secrets.clone(), server.clone());
         let ai_host = AiHost::new(&dir, sink.clone(), ai);
         let local_network = crate::local_network::LocalNetworkHost::new(&dir, Some(host.local_network()));
@@ -1293,6 +1322,8 @@ impl AppCore {
                 held: Mutex::new(BTreeMap::new()),
                 sync,
                 server,
+                sessions,
+                remote_panes,
                 ai: ai_host,
                 host,
                 local_network,
@@ -1612,6 +1643,15 @@ impl AppCore {
     /// directory may both have moved by the time the webview starts the new pane. `add` makes the pane in the set
     /// (so that the pane limit counts over all windows) and answers its id, `None` at a limit.
     fn grow_in(&self, label: &str, add: impl FnOnce(&mut WindowSet) -> Option<PaneId>) -> Result<View, String> {
+        self.grow_made_in(label, add).map(|(view, _)| view)
+    }
+
+    /// [`AppCore::grow_in`] that also answers the pane it made: `None` when the layout was at a limit and nothing was made.
+    fn grow_made_in(
+        &self,
+        label: &str,
+        add: impl FnOnce(&mut WindowSet) -> Option<PaneId>,
+    ) -> Result<(View, Option<PaneId>), String> {
         let (view, creator, created) = {
             let mut set = lock(&self.windows);
             self.room_for_a_pane(&set)?;
@@ -1630,7 +1670,7 @@ impl AppCore {
             }
         }
         self.saver.touch();
-        Ok(view)
+        Ok((view, created))
     }
 
     // ---- connections ------------------------------------------------------------------------------------------
@@ -1960,6 +2000,112 @@ impl AppCore {
         self.server.sign_out()
     }
 
+    // ---- sessions of a server ---------------------------------------------------------------------------------
+
+    /// The sessions of the person on the server, oldest first. Blocks on the network: not on the main thread. An error is
+    /// one of the fixed sentences of [`SessionFault`]; nothing the server wrote is passed on as a sentence.
+    pub fn server_sessions(&self) -> Result<Vec<SessionRow>, String> {
+        Ok(self.sessions.list()?)
+    }
+
+    /// Make a session on the server and show it in a new tab of the window `label`. The answer is the view with the new
+    /// tab shown; the webview starts the pane when it sees the view, and the session takes the size of the pane's tile then.
+    /// Refused before anything is made when the person has no room for a pane; a session that was made and cannot be shown
+    /// is ended again, so nothing is left behind. Blocks on the network: not on the main thread.
+    pub fn server_session_new_in(&self, label: &str) -> Result<View, String> {
+        self.room_for_a_session_pane(label)?;
+        let (cols, rows) = crate::sessions::NEW_SESSION_GRID;
+        let session = self.sessions.create(cols, rows)?;
+        self.show_session_in(label, session).inspect_err(|_| {
+            let _ = self.sessions.end(session);
+        })
+    }
+
+    /// Show the session `session` of the server in a new tab of the window `label`. The session has to exist for this
+    /// person (anything else is the one `not found` sentence) and must not be shown in a pane of this device already.
+    /// Blocks on the network: not on the main thread.
+    pub fn server_session_open_in(&self, label: &str, session: u32) -> Result<View, String> {
+        if self.remote_panes.pane_of(session).is_some() {
+            return Err(SessionFault::AlreadyOpen.into());
+        }
+        self.room_for_a_session_pane(label)?;
+        if !self.sessions.list()?.iter().any(|row| row.id == session) {
+            return Err(SessionFault::NotFound.into());
+        }
+        self.show_session_in(label, session)
+    }
+
+    /// End the program of a session on the server. The panes that show it say so and stay until they are closed. Blocks
+    /// on the network: not on the main thread.
+    pub fn server_session_end(&self, session: u32) -> Result<(), String> {
+        Ok(self.sessions.end(session)?)
+    }
+
+    /// Take the right to write in the session `pane` shows. The view of the pane (see [`AppCore::pane_connections`])
+    /// changes when the server has said so.
+    pub fn pane_takeover(&self, pane: PaneId) -> Result<(), String> {
+        self.session_pane(pane)?.takeover().map_err(|_| crate::sessions::NOT_A_SESSION_PANE.to_owned())
+    }
+
+    /// Ask the server for older lines of the session `pane` shows. Nothing happens when there are none or a request is
+    /// on its way.
+    pub fn pane_load_older(&self, pane: PaneId) -> Result<(), String> {
+        self.session_pane(pane)?.load_older().map_err(|_| crate::sessions::NOT_A_SESSION_PANE.to_owned())
+    }
+
+    /// The running pane `pane`, when it shows a session of a server.
+    fn session_pane(&self, pane: PaneId) -> Result<PaneHandle, String> {
+        let not_one = || crate::sessions::NOT_A_SESSION_PANE.to_owned();
+        self.remote_panes.session_of(pane).ok_or_else(not_one)?;
+        self.handle(pane).ok_or_else(not_one)
+    }
+
+    /// Said before a request goes to the server: the window exists and the person may have one more pane. The check is made
+    /// again, with the layout locked, when the tab is made.
+    fn room_for_a_session_pane(&self, label: &str) -> Result<(), String> {
+        let set = lock(&self.windows);
+        set.layout(label).ok_or_else(no_such_window)?;
+        self.room_for_a_pane(&set)
+    }
+
+    /// A new tab in the window `label` whose pane shows `session`: the pane is in the record before the page can start
+    /// it. No tab is left behind when the pane cannot be recorded, and none is made at a limit of the layout.
+    fn show_session_in(&self, label: &str, session: u32) -> Result<View, String> {
+        let (view, made) = self.grow_made_in(label, |set| set.new_tab(label))?;
+        let Some(pane) = made else {
+            return Err(crate::sessions::NO_ROOM.to_owned());
+        };
+        // The pane of a session starts nothing on this computer: it has no directory to start in.
+        lock(&self.starts).remove(&pane);
+        if !self.remote_panes.assign(pane, session) {
+            self.close_pane_in(label, pane)?;
+            return Err(crate::sessions::NO_ROOM.to_owned());
+        }
+        Ok(view)
+    }
+
+    /// Make `spec` the session of the server that `pane` shows, when the record names one; `false` for every other pane.
+    /// Such a pane never becomes a local shell: without a way to the session it shows the failed state with one fixed
+    /// sentence and runs nothing. It starts no program here, so it has no directory, no environment and no sandbox line,
+    /// and it stays on the screen with its last output when the session ends, until Enter or a close.
+    fn apply_remote(&self, pane: PaneId, spec: &mut PaneSpec) -> bool {
+        let Some(session) = self.remote_panes.session_of(pane) else {
+            return false;
+        };
+        let target = self
+            .sessions
+            .target(session)
+            .unwrap_or_else(|fault| crate::sessions::failed_target(session, fault, self.sessions.name()));
+        spec.remote = Some(target);
+        spec.blank = false;
+        spec.host_spawn = false;
+        spec.cwd = None;
+        spec.notice = None;
+        spec.env.clear();
+        spec.linger = Some(Duration::MAX);
+        true
+    }
+
     /// The scheduled run.
     pub fn sync_background(&self) {
         self.sync.background();
@@ -2170,14 +2316,27 @@ impl AppCore {
     /// The connection state of every running pane that has a connection. The webview asks about once a second while it
     /// shows one.
     pub fn pane_connections(&self) -> Vec<ConnView> {
-        let states: Vec<_> = lock(&self.panes)
+        let running: Vec<(PaneId, PaneHandle)> = lock(&self.panes)
             .iter()
             .filter_map(|(pane, slot)| match slot {
-                Slot::Running(handle) => Some((*pane, handle.conn_state())),
+                Slot::Running(handle) => Some((*pane, handle.clone())),
                 Slot::Starting(_) => None,
             })
             .collect();
-        self.connections.views(states)
+        let mut views = self.connections.views(running.iter().map(|(pane, handle)| (*pane, handle.conn_state())));
+        // The panes that show a session of a server: the name is the host of the server and the remote member says who
+        // writes, the grid of the session and what the pane is busy with.
+        let mut name = None;
+        for (pane, handle) in &running {
+            if self.remote_panes.session_of(*pane).is_none() {
+                continue;
+            }
+            let Some(view) = handle.remote_view() else { continue };
+            let name = name.get_or_insert_with(|| self.sessions.name());
+            views.push(ConnView::remote(*pane, name, &handle.conn_state(), RemoteConn::of(&view)));
+        }
+        views.sort_by_key(|view| view.pane);
+        views
     }
 
     /// Whether the person may have one more pane: the layout, over all windows, holds fewer panes than the cap of the host
@@ -2862,6 +3021,11 @@ impl AppCore {
         if self.exiting.load(Ordering::SeqCst) || !lock(&self.panes).contains_key(&pane) {
             return;
         }
+        // The directory of a session on a server is a directory of the server: it is not kept as one of this computer,
+        // where a split would start in it and the session file would hold it.
+        if self.remote_panes.session_of(pane).is_some() {
+            return;
+        }
         lock(&self.last_cwd).insert(pane, cwd.to_owned());
         self.session_saver.touch();
     }
@@ -2880,6 +3044,7 @@ impl AppCore {
         lock(&self.starts).remove(&pane);
         lock(&self.pane_targets).remove(&pane);
         self.connections.forget(pane);
+        self.remote_panes.forget(pane);
         // The selection, the held mark and the shell overlay of an integration pane, and the page is told.
         self.integrations.pane_closed(pane);
         // A chat pane that leaves the layout ends the shares of its chat: the block is read before it is forgotten.
@@ -3517,7 +3682,10 @@ impl AppCore {
         // A registered launch is consumed by this start: it replaces the shell, the connection and the environment of the
         // app (no socket, no token, no `wsh` folder in `PATH`), and its secrets are dropped as soon as they were copied.
         let launch = lock(&self.launches).remove(&pane);
-        if let Some(launch) = launch {
+        if self.apply_remote(pane, &mut spec) {
+            // A pane that shows a session of a server runs nothing here: a launch has no place in it.
+            drop(launch);
+        } else if let Some(launch) = launch {
             launch.apply_to(&mut spec);
             drop(launch);
         } else {
@@ -3786,6 +3954,9 @@ impl AppCore {
                     SetClose::LastPane => {
                         last = true;
                         exit_to = label;
+                        // The pane ended by itself (its session ended and the person pressed Enter) and the app ends
+                        // with it. The layout keeps the pane; it is not shown the same ended session at every start.
+                        self.remote_panes.forget(pane);
                     }
                     SetClose::Unknown => exit_to = closed_in(&self.routes),
                 }

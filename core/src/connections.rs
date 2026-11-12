@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
 
-use crate::conn::ConnState;
+use crate::conn::{ConnState, RemoteState, RemoteView};
 use crate::layout::{LoadStatus, PaneId};
 use crate::pane::PaneSpec;
 use crate::platform::Os;
@@ -73,19 +73,65 @@ pub struct ConnView {
     pub attempt: u32,
     pub of: u32,
     pub secs: u64,
+    /// Only for a pane that shows a session of a holzWave server; left out of the answer for every other pane.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteConn>,
+}
+
+/// What a pane that shows a session of a server adds to its [`ConnView`]: who writes, which session, its grid, whether the
+/// server holds older lines, and what the pane is busy with. Nothing here is a secret and nothing is text the server wrote.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RemoteConn {
+    /// This pane's own view of the right to write: `writing`, `watching` or `free`.
+    pub writer: &'static str,
+    /// The number of the session on the server.
+    pub session: u32,
+    /// The grid of the session in cells.
+    pub cols: u16,
+    pub rows: u16,
+    /// Whether the server holds lines older than the ones this pane has.
+    pub more: bool,
+    /// What the pane is busy with: `attaching`, `loading_older`, `resyncing`, or the empty text when it shows the session.
+    pub phase: &'static str,
+}
+
+impl RemoteConn {
+    /// The member for what the pane's link says now.
+    pub fn of(view: &RemoteView) -> Self {
+        let phase = match view.state {
+            RemoteState::None => "",
+            RemoteState::Attaching => "attaching",
+            RemoteState::LoadingOlder => "loading_older",
+            RemoteState::Resyncing => "resyncing",
+        };
+        Self { writer: view.writer.word(), session: view.session, cols: view.cols, rows: view.rows, more: view.more, phase }
+    }
+}
+
+/// The word and the numbers of a connection state, or `None` for a pane that has no connection.
+fn state_parts(state: &ConnState) -> Option<(&'static str, u32, u32, u64)> {
+    Some(match state {
+        ConnState::Local => return None,
+        ConnState::Connecting => ("connecting", 0, 0, 0),
+        ConnState::Connected => ("connected", 0, 0, 0),
+        ConnState::Reconnecting { attempt, of, in_secs } => ("reconnecting", *attempt, *of, *in_secs),
+        ConnState::Failed => ("failed", 0, 0, 0),
+        ConnState::Closed => ("closed", 0, 0, 0),
+    })
 }
 
 impl ConnView {
     pub fn new(pane: PaneId, profile: &Profile, state: &ConnState) -> Option<Self> {
-        let (name, attempt, of, secs) = match state {
-            ConnState::Local => return None,
-            ConnState::Connecting => ("connecting", 0, 0, 0),
-            ConnState::Connected => ("connected", 0, 0, 0),
-            ConnState::Reconnecting { attempt, of, in_secs } => ("reconnecting", *attempt, *of, *in_secs),
-            ConnState::Failed => ("failed", 0, 0, 0),
-            ConnState::Closed => ("closed", 0, 0, 0),
-        };
-        Some(Self { pane, profile: profile.id.clone(), name: profile.name.clone(), state: name, attempt, of, secs })
+        let (name, attempt, of, secs) = state_parts(state)?;
+        Some(Self { pane, profile: profile.id.clone(), name: profile.name.clone(), state: name, attempt, of, secs, remote: None })
+    }
+
+    /// The view of a pane that shows a session of a server: `host` is the name of the server (its host and nothing more),
+    /// the profile id is empty because a server is not a saved connection, and `remote` is what the pane's link says. A
+    /// link that reports no state of its own yet reads as `connecting`.
+    pub fn remote(pane: PaneId, host: &str, state: &ConnState, remote: RemoteConn) -> Self {
+        let (name, attempt, of, secs) = state_parts(state).unwrap_or(("connecting", 0, 0, 0));
+        Self { pane, profile: String::new(), name: host.to_owned(), state: name, attempt, of, secs, remote: Some(remote) }
     }
 }
 
@@ -708,5 +754,64 @@ mod tests {
     fn a_secret_change_never_prints_the_secret() {
         let change = SecretChange::Set { value: "hunter2".into() };
         assert!(!format!("{change:?}").contains("hunter2"));
+    }
+
+    #[test]
+    fn the_view_of_a_saved_connection_has_no_remote_member_and_its_json_is_what_it_was() {
+        let profile = Profile::new("web-1", "Web", "web.example.org");
+        let view = ConnView::new(4, &profile, &ConnState::Connected).unwrap();
+        assert_eq!(view.remote, None);
+        assert_eq!(
+            serde_json::to_value(&view).unwrap(),
+            serde_json::json!({ "pane": 4, "profile": "web-1", "name": "Web", "state": "connected", "attempt": 0, "of": 0, "secs": 0 })
+        );
+        assert!(ConnView::new(4, &profile, &ConnState::Local).is_none(), "a local pane has no view");
+    }
+
+    #[test]
+    fn the_view_of_a_pane_of_a_server_session_names_the_host_and_says_who_writes() {
+        use crate::remote::proto::WriterView;
+        let seen = |writer, state| RemoteView { session: 7, writer, cols: 120, rows: 40, more: true, state, dropped_input: 3 };
+        let view =
+            ConnView::remote(9, "hw.example.test", &ConnState::Connected, RemoteConn::of(&seen(WriterView::Writing, RemoteState::None)));
+        assert_eq!(
+            serde_json::to_value(&view).unwrap(),
+            serde_json::json!({
+                "pane": 9, "profile": "", "name": "hw.example.test", "state": "connected", "attempt": 0, "of": 0, "secs": 0,
+                "remote": { "writer": "writing", "session": 7, "cols": 120, "rows": 40, "more": true, "phase": "" }
+            })
+        );
+        // Every word of the member, and the states of the connection it rides on.
+        let words: Vec<(&str, &str)> = [
+            (WriterView::Watching, RemoteState::Attaching),
+            (WriterView::Free, RemoteState::LoadingOlder),
+            (WriterView::Writing, RemoteState::Resyncing),
+        ]
+        .into_iter()
+        .map(|(writer, state)| {
+            let remote = RemoteConn::of(&seen(writer, state));
+            (remote.writer, remote.phase)
+        })
+        .collect();
+        assert_eq!(words, [("watching", "attaching"), ("free", "loading_older"), ("writing", "resyncing")]);
+        let remote = RemoteConn::of(&seen(WriterView::Free, RemoteState::None));
+        let states: Vec<(&str, u32, u32, u64)> = [
+            ConnState::Local,
+            ConnState::Connecting,
+            ConnState::Reconnecting { attempt: 2, of: 5, in_secs: 3 },
+            ConnState::Failed,
+            ConnState::Closed,
+        ]
+        .iter()
+        .map(|state| {
+            let view = ConnView::remote(9, "h", state, remote.clone());
+            (view.state, view.attempt, view.of, view.secs)
+        })
+        .collect();
+        assert_eq!(
+            states,
+            [("connecting", 0, 0, 0), ("connecting", 0, 0, 0), ("reconnecting", 2, 5, 3), ("failed", 0, 0, 0), ("closed", 0, 0, 0)],
+            "a link that has said nothing yet reads as connecting, never as a local pane"
+        );
     }
 }
