@@ -35,6 +35,8 @@ pub struct FakeEndpoint {
     handed: Mutex<Vec<String>>,
     /// When set, the endpoint says that the person is signed out.
     signed_out: Mutex<bool>,
+    /// How often the hub said that the server refused the token.
+    refusals: AtomicU64,
 }
 
 impl FakeEndpoint {
@@ -45,6 +47,11 @@ impl FakeEndpoint {
 
     pub fn sign_out(&self, out: bool) {
         *self.signed_out.lock().unwrap() = out;
+    }
+
+    /// How often the hub said that the server refused the token.
+    pub fn refusals(&self) -> u64 {
+        self.refusals.load(Ordering::SeqCst)
     }
 }
 
@@ -58,6 +65,10 @@ impl Endpoint for FakeEndpoint {
         let text = format!("hwd_{n:0>43}");
         self.handed.lock().unwrap().push(text.clone());
         Token::parse(&text)
+    }
+
+    fn refused(&self) {
+        self.refusals.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -80,6 +91,7 @@ impl FakeDevice {
             counter: AtomicU64::new(0),
             handed: Mutex::new(Vec::new()),
             signed_out: Mutex::new(false),
+            refusals: AtomicU64::new(0),
         });
         FakeDevice { listener, addr, endpoint, seen: Arc::new(Mutex::new(Vec::new())) }
     }

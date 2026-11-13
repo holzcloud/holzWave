@@ -18,6 +18,7 @@
 //! take long: callers run them off the main thread. No lock of this file is held across a network call.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 
 use holzwave_core::remote::hub::{Endpoint, Hub, HubOptions};
@@ -211,6 +212,8 @@ pub struct ServerRuntime {
     /// The one connection of this device to the sessions of the server, made when something first asks for it.
     hub: OnceLock<Hub>,
     hub_options: HubOptions,
+    /// A check of the token after the hub heard a refusal is running ([`LinkEndpoint::refused`]): one at a time.
+    checking: AtomicBool,
 }
 
 /// What the hub is told about the server: the address of the link file and, for every connection it makes, the token as the
@@ -230,6 +233,25 @@ impl Endpoint for LinkEndpoint {
         // A store that is locked or cannot be read gives no token: the pane waits as a signed-out pane does and tries again
         // on Enter, with whatever the store holds then.
         runtime.token_and_origin().map(|(token, _)| token).map_err(|_| Fault::SignedOut)
+    }
+
+    /// The server refused a token of this device on the session socket. Which one is not known here, and a new sign-in may
+    /// have put another in its place since, so the token the keychain holds now is checked with the server once, off the
+    /// hub's thread ([`ServerRuntime::refresh`]): a refused one is forgotten and the view says signed out; one that works
+    /// stays.
+    fn refused(&self) {
+        let Some(runtime) = self.0.upgrade() else { return };
+        if runtime.checking.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let checker = runtime.clone();
+        let spawned = std::thread::Builder::new().name("hw-server-check".into()).spawn(move || {
+            checker.refresh();
+            checker.checking.store(false, Ordering::SeqCst);
+        });
+        if spawned.is_err() {
+            runtime.checking.store(false, Ordering::SeqCst);
+        }
     }
 }
 
@@ -259,6 +281,7 @@ impl ServerRuntime {
             state: Mutex::new(State { link, link_error, pending: None, epoch: 0, seen: Seen::NONE }),
             hub: OnceLock::new(),
             hub_options: HubOptions::default(),
+            checking: AtomicBool::new(false),
         }
     }
 
@@ -1096,6 +1119,38 @@ mod tests {
         assert!(dir.join("server_link.json").exists());
         assert_eq!(*fake.revoked.lock().unwrap(), vec![SECOND.to_owned()], "the new device is ended, the old one is not");
         assert_eq!(rt.refresh().state, "signed_in", "the old sign-in still works");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_refusal_the_hub_hears_forgets_the_token_only_when_the_server_refuses_the_one_kept_now() {
+        let wait_for = |what: &str, check: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !check() {
+                assert!(std::time::Instant::now() < deadline, "{what} did not happen in time");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        // The token kept now works: one check, and it stays.
+        let (rt, store, dir) = runtime("refused-works");
+        let rt = Arc::new(rt);
+        let fake = Fake::start();
+        sign_in(&rt, &fake);
+        LinkEndpoint(Arc::downgrade(&rt)).refused();
+        wait_for("the check", &|| fake.count("GET /api/device/me") == 1 && !rt.checking.load(Ordering::SeqCst));
+        assert_eq!(store.get(TOKEN_ACCOUNT).unwrap().as_deref(), Some(TOKEN));
+        assert_eq!(rt.view().state, "signed_in");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The server refuses it: it is forgotten, and the view reads as signed out without anything else asking.
+        let (rt, store, dir) = runtime("refused-gone");
+        let rt = Arc::new(rt);
+        let fake = Fake::start();
+        sign_in(&rt, &fake);
+        fake.accepts.store(false, Ordering::SeqCst);
+        LinkEndpoint(Arc::downgrade(&rt)).refused();
+        wait_for("the token to be forgotten", &|| store.get(TOKEN_ACCOUNT).unwrap().is_none());
+        assert_eq!(rt.view().state, "signed_out");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

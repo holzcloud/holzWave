@@ -215,6 +215,8 @@ fn a_refused_upgrade_is_one_fixed_fault_by_its_status_and_is_not_tried_again() {
         let events = events_until(&sub, is_lost);
         assert_eq!(events.last(), Some(&SubEvent::Lost(HubError::Fault(fault))));
         assert!(device.accept_within(Duration::from_millis(400)).is_none(), "a refused token is never retried");
+        // Only a 401 tells the keeper of the token that the server refused it, once per refusal.
+        assert_eq!(device.endpoint.refusals(), if status == 401 { 2 } else { 0 }, "{status}");
     }
 }
 
@@ -692,6 +694,7 @@ fn a_close_code_of_a_revoked_token_is_final_and_is_not_tried_again_but_a_busy_se
     let events = events_until(&sub, is_lost);
     assert_eq!(events.last(), Some(&SubEvent::Lost(HubError::Fault(Fault::SignedOut))));
     assert!(device.accept_within(Duration::from_millis(400)).is_none(), "4401 is never retried");
+    assert_eq!(device.endpoint.refusals(), 1, "the keeper of the token is told");
 
     let device = FakeDevice::start();
     let hub = hub_with(&device, |o| o.reconnect = Reconnect { attempts: 3, delay: Duration::from_millis(30) });
@@ -735,6 +738,7 @@ fn a_signed_out_endpoint_is_a_final_fault_without_any_connection() {
     assert_eq!(events, vec![SubEvent::Lost(HubError::Fault(Fault::SignedOut))]);
     assert!(device.accept_within(Duration::from_millis(200)).is_none());
     assert_eq!(hub.list(), Err(HubError::Fault(Fault::SignedOut)));
+    assert_eq!(device.endpoint.refusals(), 0, "no server refused anything");
 }
 
 #[test]

@@ -79,6 +79,11 @@ pub trait Endpoint: Send + Sync {
     fn tls(&self) -> Option<Arc<rustls::ClientConfig>> {
         None
     }
+
+    /// The server refused the token this device sent: a 401 on the upgrade, or the close code 4401 (the token was revoked
+    /// or ran out). The keeper of the token may check it and forget it; a token that a new sign-in put in its place since
+    /// must stay. Called on the hub's thread, so it must not block. The default does nothing.
+    fn refused(&self) {}
 }
 
 /// The settings of a hub. Every wait and every size has a bound.
@@ -1147,7 +1152,12 @@ impl Core {
         let origin = self.endpoint.origin().ok_or(Fault::SignedOut)?;
         let token: Token = self.endpoint.token()?;
         let url = origin.socket_url("/ws/device").map_err(|_| Fault::Protocol)?;
-        WsClient::connect(&url, &token, self.endpoint.tls(), &self.limits)
+        let connected = WsClient::connect(&url, &token, self.endpoint.tls(), &self.limits);
+        // Only what the server said counts: an endpoint that has no token says signed out as well, and is not told.
+        if matches!(connected, Err(WsError::Fault(Fault::SignedOut))) {
+            self.endpoint.refused();
+        }
+        connected
     }
 
     fn begin_backoff(&mut self) {
@@ -1283,6 +1293,9 @@ impl Core {
                 self.binary(&bytes);
             }
             Ok(Recv::Closed(code)) => {
+                if code == proto::CLOSE_REVOKED {
+                    self.endpoint.refused();
+                }
                 self.drop_connection(final_close(code));
             }
             Err(error) => self.broken(&error),
