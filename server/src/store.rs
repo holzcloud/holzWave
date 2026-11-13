@@ -2442,8 +2442,8 @@ impl Tx<'_> {
     /// Writes `body` at `path` for `account` if `cond` holds, as one atomic step.
     ///
     /// The step reads the current blob, checks the condition (`Absent`: no blob; `Match(etag)`: the blob has that etag;
-    /// `Any`: always), writes, prunes `backups/` to the newest `bounds.backups_keep` when the path is under it (never the
-    /// blob just written), and then looks at what the person holds: a write that leaves them over their bytes or over their
+    /// `Any`: always), writes, prunes `backups/` to `bounds.backups_keep` blobs when the path is under it (the blob just written
+    /// and the newest others, so exactly that many stay whatever the time stamps say), and then looks at what the person holds: a write that leaves them over their bytes or over their
     /// number of blobs, and holds more than before, is undone whole, pruning included, and answers `OverQuota` or
     /// `TooManyFiles`. So replacing a blob counts only the difference, and a person who is over a limit that was lowered can
     /// still make their data smaller. The etag is computed here from the body; a client's claim is never trusted. A body
@@ -2489,13 +2489,15 @@ impl Tx<'_> {
             )?
             .execute(params![account.0, path, etag, size, now, body])?;
         if bounds.backups_keep > 0 && path.starts_with("backups/") {
+            // The blob just written always stays and takes one of the places; the others go by age. Ranking it among the
+            // others instead would keep one too many when it is not the newest (a tie of the second, an older stamp).
             self.conn
                 .prepare_cached(
                     "DELETE FROM sync_blobs WHERE account_id = ?1 AND substr(path, 1, 8) = 'backups/' AND path <> ?2 \
                      AND rowid NOT IN (SELECT rowid FROM sync_blobs WHERE account_id = ?1 AND substr(path, 1, 8) = 'backups/' \
-                                       ORDER BY updated_at DESC, path DESC LIMIT ?3)",
+                                       AND path <> ?2 ORDER BY updated_at DESC, path DESC LIMIT ?3)",
                 )?
-                .execute(params![account.0, path, cap(bounds.backups_keep)])?;
+                .execute(params![account.0, path, cap(bounds.backups_keep - 1)])?;
         }
         let after = self.blob_usage(account)?;
         let refused = if after.bytes > bounds.quota_bytes && after.bytes > before.bytes {

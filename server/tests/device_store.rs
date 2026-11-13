@@ -1137,10 +1137,25 @@ fn after_a_write_into_backups_only_the_newest_keep_remain() {
     }
     let left: Vec<String> = store2.read(|tx| tx.blob_list(dave.id, "backups/")).expect("list").into_iter().map(|e| e.name).collect();
     assert_eq!(left, ["c", "d"]);
-    // A write stamped older than the rest is never pruned by its own write (it is the newest the person made).
+    // A write stamped older than the rest is never pruned by its own write (it is the newest the person made), and it takes
+    // one of the places: exactly `keep` stay.
     put(&store2, &dave, "backups/zz", b"b", Cond::Absent, keep2, NOW - 10_000);
     let left: Vec<String> = store2.read(|tx| tx.blob_list(dave.id, "backups/")).expect("list").into_iter().map(|e| e.name).collect();
-    assert_eq!(left, ["c", "d", "zz"], "the blob that was just written stays");
+    assert_eq!(left, ["d", "zz"], "the blob that was just written stays, with the newest other one");
+
+    // The same second, and the blob just written is not the last by path: still exactly `keep` stay, and it is one of them.
+    let (_s3, store3) = open("blob-backups-tie-low");
+    make(&store3, "root", Role::Admin);
+    let erin = make(&store3, "erin", Role::Member);
+    for name in ["backups/b", "backups/c", "backups/a"] {
+        put_with(&store3, &erin, name, b"b", Cond::Absent, keep2);
+    }
+    let left: Vec<String> = store3.read(|tx| tx.blob_list(erin.id, "backups/")).expect("list").into_iter().map(|e| e.name).collect();
+    assert_eq!(left, ["a", "c"]);
+    let keep1 = BlobBounds { backups_keep: 1, ..keep3 };
+    put_with(&store3, &erin, "backups/0", b"b", Cond::Absent, keep1);
+    let left: Vec<String> = store3.read(|tx| tx.blob_list(erin.id, "backups/")).expect("list").into_iter().map(|e| e.name).collect();
+    assert_eq!(left, ["0"], "a keep of one keeps only the blob just written");
 }
 
 #[test]
