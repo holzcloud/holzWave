@@ -44,6 +44,7 @@
    hairline buttons with the 28 px desktop and 44 px touch floor. */
 .conns .cx-server { box-sizing: border-box; margin: 0 0 .833rem; padding: .25rem .833rem .5rem; min-width: 0;
                     border: 1px solid var(--hw-line); border-radius: .333rem; }
+.conns .cx-legend:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
 .conns .cx-legend { padding: 0 .333rem; color: var(--hw-dim); font-size: calc(11rem / 12); letter-spacing: .1em; text-transform: uppercase; }
 .conns .cx-srv { display: flex; align-items: center; flex-wrap: wrap; gap: .25rem .833rem; min-height: max(32px, calc(32rem / 12)); }
 .conns .cx-dot { position: relative; box-sizing: border-box; flex: none; width: .583rem; height: .583rem; border-radius: 50%;

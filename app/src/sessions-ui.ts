@@ -99,7 +99,12 @@ export function webSource(call: <T>(cmd: string, args?: Record<string, unknown>)
 export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks: RowHooks): ServerRowHandle {
   const group = el("fieldset", "cx-server");
   parent.prepend(group);
-  el("legend", "label cx-legend", group).textContent = SERVER_LEGEND;
+  const legend = el("legend", "label cx-legend", group);
+  legend.textContent = SERVER_LEGEND;
+  // The legend is never redrawn, so it is where the focus comes back to from the sign-in dialog: the button that opened it is gone
+  // by then (the row has no buttons while signing in), and a lost focus would fall to the terminal behind this dialog. It is not an
+  // ancestor of the buttons, so a click that does not focus its button (WebKit on a Mac) never lands on it.
+  legend.tabIndex = -1;
   const row = el("div", "cx-srv", group);
   const dot = el("span", "cx-dot", row);
   dot.setAttribute("aria-hidden", "true");
@@ -187,8 +192,10 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
           "click",
           () =>
             void act(async () => {
-              await openServerSignIn(b);
+              await openServerSignIn(legend);
+              toRow();
               await refresh();
+              toRow();
             }),
           { signal: drawn.signal },
         );
@@ -247,7 +254,13 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
       });
     }
     if (focused !== undefined) group.querySelector<HTMLElement>(`[data-key="${CSS.escape(focused)}"]`)?.focus();
+    toRow();
   };
+
+  /** The focus that rests on the legend (after the sign-in dialog) moves on to the first button of the row once there is one. */
+  function toRow(): void {
+    if (document.activeElement === legend) acts.querySelector<HTMLElement>("button")?.focus();
+  }
 
   /**
    * Every read has a number, and only the newest may write what it learnt: an older answer that comes back late (the host blocks on
