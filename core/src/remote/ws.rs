@@ -226,7 +226,9 @@ pub struct WsLimits {
     pub max_frame: usize,
     /// How long a connection attempt to one address may take.
     pub connect_timeout: Duration,
-    /// How long the TLS and upgrade handshakes may take, as the longest silence while they run.
+    /// How long the TLS and upgrade handshakes may wait on the network, in all: the time every read and write of the
+    /// handshakes blocks is added up, so a peer that sends one byte at a time cannot hold the connect beyond it. The time the
+    /// certificate check takes is not counted (it waits on no byte of the peer).
     pub handshake_timeout: Duration,
     /// How long one write may block.
     pub write_timeout: Duration,
@@ -326,17 +328,84 @@ pub fn platform_tls() -> Result<Arc<rustls::ClientConfig>, WsError> {
     crate::ai::http::tls_config().map(Arc::new).map_err(|_| WsError::Tls)
 }
 
+/// The TCP connection under both kinds of stream. While the handshakes run it has a budget of time: every read and write is
+/// given only what is left of it as its timeout, the time it blocked is taken off, and once nothing is left every read and
+/// write fails as timed out. After the handshakes there is no budget and the caller's timeouts apply.
+struct Sock {
+    tcp: TcpStream,
+    budget: Option<Duration>,
+    write_timeout: Duration,
+}
+
+impl Sock {
+    /// One read or write under the budget, when there is one. `set` gives the call its timeout.
+    fn timed<T>(
+        &mut self,
+        set: fn(&TcpStream, Option<Duration>) -> io::Result<()>,
+        cap: Duration,
+        call: impl FnOnce(&mut TcpStream) -> io::Result<T>,
+    ) -> io::Result<T> {
+        let Some(left) = self.budget else { return call(&mut self.tcp) };
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        set(&self.tcp, Some(left.min(cap)))?;
+        let started = Instant::now();
+        let result = call(&mut self.tcp);
+        self.budget = Some(left.saturating_sub(started.elapsed()));
+        result
+    }
+
+    /// The handshakes are done: the read timeout is the caller's again (set before the next read) and the write timeout is
+    /// the one of the limits.
+    fn end_budget(&mut self) -> io::Result<()> {
+        self.budget = None;
+        self.tcp.set_write_timeout(Some(self.write_timeout))
+    }
+}
+
+impl Read for Sock {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.timed(TcpStream::set_read_timeout, Duration::MAX, |tcp| tcp.read(buf))
+    }
+}
+
+impl Write for Sock {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let cap = self.write_timeout;
+        self.timed(TcpStream::set_write_timeout, cap, |tcp| tcp.write(buf))
+    }
+
+    /// All the buffers in one write, as the socket does it: rustls hands its last records (a refused certificate's alert after
+    /// the change of cipher) over in one call and does not call again, so a write of the first buffer alone would lose the alert.
+    fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        let cap = self.write_timeout;
+        self.timed(TcpStream::set_write_timeout, cap, |tcp| tcp.write_vectored(bufs))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.tcp.flush()
+    }
+}
+
 /// The two kinds of stream the client runs over.
 enum Stream {
-    Plain(TcpStream),
-    Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
+    Plain(Sock),
+    Tls(Box<rustls::StreamOwned<rustls::ClientConnection, Sock>>),
 }
 
 impl Stream {
     fn tcp(&self) -> &TcpStream {
         match self {
-            Stream::Plain(tcp) => tcp,
-            Stream::Tls(tls) => &tls.sock,
+            Stream::Plain(sock) => &sock.tcp,
+            Stream::Tls(tls) => &tls.sock.tcp,
+        }
+    }
+
+    fn sock_mut(&mut self) -> &mut Sock {
+        match self {
+            Stream::Plain(sock) => sock,
+            Stream::Tls(tls) => &mut tls.sock,
         }
     }
 }
@@ -450,15 +519,15 @@ impl WsClient {
         let tls = if url.secure() { Some(tls.map_or_else(platform_tls, Ok)?) } else { None };
         let tcp = open(url, &limits)?;
         tcp.set_nodelay(true).map_err(|_| Fault::Unreachable)?;
-        tcp.set_read_timeout(Some(limits.handshake_timeout)).map_err(|_| Fault::Unreachable)?;
-        tcp.set_write_timeout(Some(limits.write_timeout)).map_err(|_| Fault::Unreachable)?;
+        // Both handshakes together may wait on the network for the handshake bound, however the peer spreads its bytes.
+        let sock = Sock { tcp, budget: Some(limits.handshake_timeout), write_timeout: limits.write_timeout };
         let stream = match tls {
             Some(config) => {
                 let name = ServerName::try_from(url.host().to_owned()).map_err(|_| Fault::Protocol)?;
                 let connection = rustls::ClientConnection::new(config, name).map_err(|_| WsError::Tls)?;
-                Stream::Tls(Box::new(rustls::StreamOwned::new(connection, tcp)))
+                Stream::Tls(Box::new(rustls::StreamOwned::new(connection, sock)))
             }
-            None => Stream::Plain(tcp),
+            None => Stream::Plain(sock),
         };
 
         let uri: Uri = url.to_uri_text().parse().map_err(|_| Fault::Protocol)?;
@@ -478,7 +547,11 @@ impl WsClient {
             .max_frame_size(Some(limits.max_frame))
             .accept_unmasked_frames(false);
         match tungstenite::client::client_with_config(request, stream, Some(config)) {
-            Ok((ws, _response)) => Ok(WsClient { ws, limits, read_timeout: Some(limits.handshake_timeout), closed: None }),
+            Ok((mut ws, _response)) => {
+                ws.get_mut().sock_mut().end_budget().map_err(|_| Fault::Unreachable)?;
+                // The read timeout on the socket is whatever the budget left: the first wait sets its own.
+                Ok(WsClient { ws, limits, read_timeout: None, closed: None })
+            }
             Err(HandshakeError::Failure(e)) => Err(map_error(e)),
             // A blocking stream that ran out of time in the handshake.
             Err(HandshakeError::Interrupted(_)) => Err(Fault::Unreachable.into()),

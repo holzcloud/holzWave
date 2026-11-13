@@ -443,6 +443,34 @@ fn a_peer_that_does_not_upgrade_ends_the_handshake_in_time() {
     thread.join().expect("the peer ended");
 }
 
+#[test]
+fn a_peer_that_answers_the_upgrade_one_byte_at_a_time_cannot_hold_the_handshake_beyond_its_bound() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+    let addr = listener.local_addr().expect("address");
+    let thread = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("a connection");
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf);
+        // An answer that never ends, a byte every 40 ms: never silent for long, so a bound on each read alone never trips.
+        let answer = format!("HTTP/1.1 101 Switching Protocols\r\nX-Slow: {}", "a".repeat(400));
+        for byte in answer.bytes() {
+            if stream.write_all(&[byte]).is_err() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(40));
+        }
+    });
+    let url = WsUrl::parse(&format!("ws://{addr}/ws/device")).expect("an address");
+    let mut limits = WsLimits::default();
+    limits.handshake_timeout = Duration::from_millis(300);
+    let started = Instant::now();
+    let Err(e) = WsClient::connect(&url, &token(), None, &limits) else { panic!("an answer that never ends is no connection") };
+    let took = started.elapsed();
+    assert_eq!(e, WsError::Fault(Fault::Unreachable));
+    assert!(took < Duration::from_secs(2), "the whole handshake is bounded, it took {took:?}");
+    thread.join().expect("the peer ended");
+}
+
 // ---- TLS ----
 
 /// A self-signed certificate for `127.0.0.1` and `localhost` (valid for a century) and its key, made once with `openssl req
