@@ -151,6 +151,9 @@ impl RemoteControl for Shared {
     }
 
     fn takeover(&self) -> Result<()> {
+        if self.signed_out.load(Ordering::SeqCst) {
+            return Err(HubError::Fault(Fault::SignedOut).into());
+        }
         if self.state.get() != ConnState::Connected {
             return Err(HubError::Fault(Fault::Unreachable).into());
         }

@@ -2047,13 +2047,13 @@ impl AppCore {
     /// Take the right to write in the session `pane` shows. The view of the pane (see [`AppCore::pane_connections`])
     /// changes when the server has said so.
     pub fn pane_takeover(&self, pane: PaneId) -> Result<(), String> {
-        self.session_pane(pane)?.takeover().map_err(|_| crate::sessions::NOT_A_SESSION_PANE.to_owned())
+        self.session_pane(pane)?.takeover().map_err(session_pane_failure)
     }
 
     /// Ask the server for older lines of the session `pane` shows. Nothing happens when there are none or a request is
     /// on its way.
     pub fn pane_load_older(&self, pane: PaneId) -> Result<(), String> {
-        self.session_pane(pane)?.load_older().map_err(|_| crate::sessions::NOT_A_SESSION_PANE.to_owned())
+        self.session_pane(pane)?.load_older().map_err(session_pane_failure)
     }
 
     /// The running pane `pane`, when it shows a session of a server.
@@ -4127,6 +4127,15 @@ impl Drop for AppCore {
     }
 }
 
+/// The fixed sentence of a request of a session pane that failed: the fault of its connection (unreachable while it
+/// reconnects, signed out, refused by the server), or, for any other failure of the pane, that it shows no session.
+fn session_pane_failure(error: holzwave_core::Error) -> String {
+    match holzwave_core::remote::hub::HubError::of(&error) {
+        Some(fault) => SessionFault::from(fault).into(),
+        None => crate::sessions::NOT_A_SESSION_PANE.to_owned(),
+    }
+}
+
 /// The answer of a command that names a window the core has no layout for.
 fn no_such_window() -> String {
     "no such window".to_owned()
@@ -4799,6 +4808,22 @@ mod tests {
     use holzwave_core::layout::Axis;
 
     const WAIT: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn a_failed_request_of_a_session_pane_says_the_fault_of_its_connection_not_that_it_shows_no_session() {
+        use holzwave_core::remote::hub::HubError;
+        use holzwave_core::remote::proto::ErrorWord;
+        use holzwave_core::server_link::Fault;
+        let said = |error: HubError| session_pane_failure(error.into());
+        assert_eq!(said(HubError::Fault(Fault::Unreachable)), SessionFault::Unreachable.sentence());
+        assert_eq!(said(HubError::Disconnected), SessionFault::Unreachable.sentence());
+        assert_eq!(said(HubError::Fault(Fault::SignedOut)), SessionFault::SignedOut.sentence());
+        assert_eq!(said(HubError::Word(ErrorWord::Refused)), SessionFault::Refused.sentence());
+        assert_eq!(said(HubError::Word(ErrorWord::NotFound)), SessionFault::NotFound.sentence());
+        // Any other failure of the pane is the one sentence of a pane that shows no session.
+        assert_eq!(session_pane_failure(holzwave_core::Error::Pty("the pane is closed".into())), crate::sessions::NOT_A_SESSION_PANE);
+        assert_eq!(session_pane_failure(std::io::Error::other("other").into()), crate::sessions::NOT_A_SESSION_PANE);
+    }
 
     // Every test that starts a pane starts a real POSIX shell (`/bin/cat`, `/bin/sh -c ...`), so those are
     // `#[cfg(unix)]`; the tests that only build a core, a layout or a launch vector run everywhere. Real Windows

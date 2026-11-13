@@ -201,7 +201,18 @@ impl From<Fault> for HubError {
 
 impl From<HubError> for crate::Error {
     fn from(error: HubError) -> Self {
-        crate::Error::Io(std::io::Error::other(error.sentence()))
+        // The error itself is kept inside, so that a caller can still tell the case ([`HubError::of`]); it prints its sentence.
+        crate::Error::Io(std::io::Error::other(error))
+    }
+}
+
+impl HubError {
+    /// The error of the hub that `error` carries, when it is one: what a pane's request to its session failed with.
+    pub fn of(error: &crate::Error) -> Option<HubError> {
+        match error {
+            crate::Error::Io(io) => io.get_ref().and_then(|inner| inner.downcast_ref::<HubError>()).copied(),
+            _ => None,
+        }
     }
 }
 

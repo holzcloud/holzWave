@@ -654,6 +654,8 @@ async fn without_a_sign_in_or_with_the_switch_off_every_request_says_one_sentenc
     desk.until_screen(pane, "the signed-out sentence", |text| has_line(text, SIGN_IN_ENDED)).await;
     until("the failed state", SHELL, || desk.conn(pane).is_some_and(|line| line.state == "failed")).await;
     assert_eq!(desk.conn(pane).and_then(|line| line.remote).map(|r| r.session), Some(session));
+    // Take over says why it cannot be done now, not that the pane shows no session.
+    assert_eq!(desk.core.pane_takeover(pane).err().as_deref(), Some(NOT_SIGNED_IN));
     assert_eq!(desk.core.session_counts(), (0, 0), "nothing was started on this computer");
     desk.typed(pane, "echo local-$((2+2))");
     tokio::time::sleep(Duration::from_millis(300)).await;
