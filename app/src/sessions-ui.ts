@@ -172,6 +172,8 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
         b.dataset.key = "signout";
         armSignOut(b, group, drawn.signal, (result) => {
           if (result.ok) {
+            // A read that started before the sign-out would bring the signed-in link back: its answer is dropped.
+            seq++;
             view = result.view;
             sessions = [];
             listFailed = false;
@@ -247,8 +249,16 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
     if (focused !== undefined) group.querySelector<HTMLElement>(`[data-key="${CSS.escape(focused)}"]`)?.focus();
   };
 
+  /**
+   * Every read has a number, and only the newest may write what it learnt: an older answer that comes back late (the host blocks on
+   * the network for both calls) is dropped, and so is one that started before a sign-out. `inFlight` counts the reads still out, so
+   * the timer skips a tick instead of piling calls up in the host behind a slow server.
+   */
+  let seq = 0;
+  let inFlight = 0;
+
   /** The browser build: the list says it all. The host's sentence is `off`, any other failure or an unreadable answer `unreachable`. */
-  const readWeb = async (): Promise<void> => {
+  const readWeb = async (mine: number): Promise<void> => {
     let raw: unknown = null;
     let off = false;
     try {
@@ -256,7 +266,7 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
     } catch (failure) {
       off = isRemoteOff(failure);
     }
-    if (disposed) return;
+    if (disposed || mine !== seq) return;
     view = webView(!off);
     const read = off ? [] : readSessions(raw);
     listFailed = read === null;
@@ -264,16 +274,18 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
     draw();
   };
 
-  /** Read the link and, when it shows a list, the list; draw what changed. */
-  const read = async (fresh: boolean): Promise<void> => {
-    if (web !== null) return readWeb();
+  /** The desktop: read the link and, when it shows a list, the list; draw what changed. */
+  const readLink = async (mine: number, fresh: boolean): Promise<void> => {
+    let next: ServerView;
     try {
-      view = readServerView(await source.status(fresh));
+      next = readServerView(await source.status(fresh));
     } catch {
-      view = readServerView(null);
+      next = readServerView(null);
     }
-    if (disposed) return;
-    if (rowPlan(view, false).list) {
+    if (disposed || mine !== seq) return;
+    let rows: SessionRow[] = [];
+    let failed = false;
+    if (rowPlan(next, false).list) {
       let raw: unknown = null;
       let locked = false;
       try {
@@ -283,19 +295,35 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
         locked = isLockedFailure(failure);
         raw = null;
       }
-      if (disposed) return;
-      if (locked) view = { ...view, locked: true };
+      if (disposed || mine !== seq) return;
+      if (locked) next = { ...next, locked: true };
       const read = locked ? [] : readSessions(raw);
-      listFailed = read === null;
-      sessions = read ?? [];
-    } else {
-      listFailed = false;
-      sessions = [];
+      failed = read === null;
+      rows = read ?? [];
     }
+    view = next;
+    listFailed = failed;
+    sessions = rows;
     draw();
   };
 
+  const read = async (fresh: boolean): Promise<void> => {
+    const mine = ++seq;
+    inFlight++;
+    try {
+      await (web !== null ? readWeb(mine) : readLink(mine, fresh));
+    } finally {
+      inFlight--;
+    }
+  };
+
+  /** Read again now; a read that is still out is overtaken, and its answer dropped. */
   const refresh = (): Promise<void> => read(false);
+
+  /** The timer: nothing while a read is out, so a server that answers slowly gets one call at a time. */
+  const tick = (): void => {
+    if (inFlight === 0) void read(false);
+  };
 
   function dispose(): void {
     if (disposed) return;
@@ -307,6 +335,6 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
 
   draw();
   void read(true);
-  timer = setInterval(() => void refresh(), REFRESH_MS);
+  timer = setInterval(tick, REFRESH_MS);
   return { refresh, dispose };
 }
