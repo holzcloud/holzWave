@@ -188,10 +188,14 @@ async function actionsCase(page, url) {
   assert.equal((await sessionCalls(page, "server_session_end")).length, 0);
   await page.locator(".conns .cx-form input").first().click();
   assert.equal(await end.textContent(), "End", "a press in the saved connections disarms End");
-  await end.click();
-  await end.click();
+  // From the keyboard: the focus is on End when its row leaves.
+  await end.focus();
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Enter");
   await page.waitForFunction(() => document.querySelector('.conns .cx-sess[data-session="4"]') === null);
   assert.deepEqual(await sessionCalls(page, "server_session_end"), [{ session: 4 }]);
+  // The focus goes to Attach of the row that took the place of the one that left, never to the page behind the dialog.
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.key), "attach-7", "the next row's Attach");
   assert.ok(await page.locator(".dlg.conns").isVisible(), "ending a session keeps the dialog open");
 }
 

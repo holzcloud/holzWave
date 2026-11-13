@@ -161,7 +161,11 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
     if (key === drawnKey) return;
     drawnKey = key;
     // A button that is armed is redrawn only when something changed; the focus stays where it was when that button is drawn again.
-    const focused = document.activeElement instanceof HTMLElement && group.contains(document.activeElement) ? document.activeElement.dataset.key : undefined;
+    const active = document.activeElement instanceof HTMLElement && group.contains(document.activeElement) ? document.activeElement : null;
+    const focused = active?.dataset.key;
+    // The place of the session row that holds the focus, so the focus can go to the row that takes its place when it leaves.
+    const holder = active?.closest<HTMLElement>(".cx-sess") ?? null;
+    const place = holder === null ? -1 : Array.from(below.querySelectorAll(".cx-sess")).indexOf(holder);
     drawn.abort();
     drawn = new AbortController();
     dot.dataset.s = plan.dot;
@@ -255,7 +259,21 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
         end.setAttribute("aria-label", `${END} ${words.title}`);
       });
     }
-    if (focused !== undefined) group.querySelector<HTMLElement>(`[data-key="${CSS.escape(focused)}"]`)?.focus();
+    if (focused !== undefined) {
+      const again = group.querySelector<HTMLElement>(`[data-key="${CSS.escape(focused)}"]`);
+      if (again !== null) again.focus();
+      else {
+        // The button is gone (its session ended, or the row changed state): the focus stays in the dialog, on the `Attach` of the
+        // row that took its place, else `New session`, else the first button of the row, else the legend.
+        const next = place < 0 ? null : (below.querySelectorAll(".cx-sess")[place] ?? null);
+        const to =
+          next?.querySelector<HTMLElement>('[data-key^="attach-"]') ??
+          acts.querySelector<HTMLElement>('[data-key="new"]') ??
+          acts.querySelector<HTMLElement>("button") ??
+          legend;
+        to.focus();
+      }
+    }
     toRow();
   };
 
