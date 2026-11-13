@@ -123,7 +123,18 @@ impl WsEnv {
 
     /// An environment with the given options.
     pub async fn start_with(options: WsOptions) -> WsEnv {
-        let test = TestApp::new();
+        WsEnv::start_on(TestApp::new(), options).await
+    }
+
+    /// The server restarted: this one stops (its listener and every worker end, as at a shutdown), and a new one starts over
+    /// the same store with a new supervisor, new workers and a new listener. What only lived in memory is gone.
+    pub async fn restarted(&self, options: WsOptions) -> WsEnv {
+        self.shutdown.trigger();
+        self.supervisor.shutdown().await;
+        WsEnv::start_on(self.test.reopened(), options).await
+    }
+
+    async fn start_on(test: TestApp, options: WsOptions) -> WsEnv {
         let scratch = Scratch::new("ws");
         let shell = ShellSpec::new("/bin/sh", &[]);
         let launcher = Arc::new(InProcessLauncher::new(scratch.path().to_path_buf(), shell).with_hooks(options.hooks.clone()));

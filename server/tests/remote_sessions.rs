@@ -940,3 +940,31 @@ async fn no_terminal_byte_and_no_token_reaches_a_log_the_audit_files_or_the_data
     // The scan is not blind.
     assert!(!sweep.scan_text("a planted line", &format!("typed {}", canaries[0].text())).is_empty());
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A restart of the server
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_restart_ends_every_remote_session_and_an_old_session_number_is_not_found() {
+    let env = env().await;
+    let alice = env.person("alice");
+    let laptop = mint(&env, &alice, "laptop");
+    let mut device = Device::connect(&env, &laptop.token).await;
+    let session = device.new_session().await;
+    device.attach(session, None).await;
+    device.ok(Op::Takeover { session }).await;
+    device.type_into(session, SUM.as_bytes()).await;
+    device.until_live(session, "hw-42", SHELL).await;
+    let Answer::List(before) = device.ok(Op::List).await else { panic!("a list") };
+    assert_eq!(before.len(), 1);
+
+    let again = env.restarted(WsOptions { real_gate: true, ..WsOptions::default() }).await;
+    remote(&again, true);
+    // The device token is in the store, so the same device signs in to the new server.
+    let mut device = Device::connect(&again, &laptop.token).await;
+    assert_eq!(device.ok(Op::List).await, Answer::List(vec![]), "no session outlived the restart");
+    for op in [Op::Attach { session, tail: None }, Op::Takeover { session }, Op::End { session }] {
+        assert_eq!(device.err(op).await, ErrorWord::NotFound, "{} of the old session", op.name());
+    }
+}

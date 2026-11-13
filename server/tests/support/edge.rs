@@ -150,9 +150,19 @@ impl TestApp {
 
     /// An application with the given options.
     pub fn with(options: Options) -> TestApp {
+        TestApp::with_store_at(options, None, NOW)
+    }
+
+    /// A new application over the store of this one, as a server that restarts finds it on disk: the accounts, the
+    /// sessions and the devices are kept, everything held in memory is new. The clock starts where this one stands.
+    pub fn reopened(&self) -> TestApp {
+        TestApp::with_store_at(Options::default(), Some(self._scratch.path()), self.clock.unix())
+    }
+
+    fn with_store_at(options: Options, store_dir: Option<&std::path::Path>, now: i64) -> TestApp {
         let scratch = Scratch::new("edge");
-        let store = Arc::new(Store::open(scratch.path()).expect("open the store"));
-        let clock = Arc::new(ManualClock::new(NOW));
+        let store = Arc::new(Store::open(store_dir.unwrap_or(scratch.path())).expect("open the store"));
+        let clock = Arc::new(ManualClock::new(now));
         let dyn_clock: Arc<dyn Clock> = clock.clone();
         let audit = Arc::new(Audit::open(scratch.path(), dyn_clock.clone()).expect("open the audit log"));
         let sessions = Arc::new(SessionManager::new(store.clone(), dyn_clock.clone(), Sessions::default()).with_audit(audit.clone()));
