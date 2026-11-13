@@ -21,7 +21,8 @@
 //! - The **writer thread** owns the PTY writer behind an unbounded channel. The engine thread never writes to the
 //!   PTY itself: a bounded queue plus a blocking write on the engine thread is a deadlock (RESEARCH Pitfall 6), for
 //!   example a 4 MiB paste into `cat`. Replies to a program's own queries are dropped when the writer is far behind
-//!   ([`REPLY_BACKLOG`]); what the user typed or pasted never is.
+//!   ([`REPLY_BACKLOG`]); what the user typed or pasted never is. A pane that shows a session on a server sends no replies
+//!   at all: the session's engine on the server answers its program.
 //!
 //! # Taps
 //!
@@ -1145,6 +1146,9 @@ struct Writer {
     tx: Sender<Vec<u8>>,
     /// Bytes sent and not yet written.
     pending: Arc<AtomicUsize>,
+    /// The engine's answers to the program's queries go to the program. False for a pane that shows a session on a server:
+    /// the session's own engine on the server answers its program, and a second answer would reach it as typed input.
+    answers: bool,
 }
 
 impl Writer {
@@ -1153,9 +1157,10 @@ impl Writer {
         self.push(bytes);
     }
 
-    /// An engine reply to a query the program made: dropped, whole, when the writer is [`REPLY_BACKLOG`] behind.
+    /// An engine reply to a query the program made: dropped, whole, when the writer is [`REPLY_BACKLOG`] behind, and always
+    /// when the pane's engine only draws a session whose program is answered elsewhere ([`Writer::answers`]).
     fn reply(&self, bytes: Vec<u8>) {
-        if self.pending.load(Ordering::Relaxed) >= REPLY_BACKLOG {
+        if !self.answers || self.pending.load(Ordering::Relaxed) >= REPLY_BACKLOG {
             return;
         }
         self.push(bytes);
@@ -1989,7 +1994,7 @@ fn engine_main<E, F, S>(
         engine,
         pty: Some(pty),
         encoder: FrameEncoder::new(pane),
-        writer: Writer { tx, pending },
+        writer: Writer { tx, pending, answers: spec.remote.is_none() },
         queue,
         reaped,
         sink,

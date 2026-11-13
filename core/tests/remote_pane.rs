@@ -518,6 +518,34 @@ fn a_watcher_drops_what_is_typed_before_it_is_sent_and_counts_it_and_a_writer_se
 }
 
 #[test]
+fn a_remote_pane_never_answers_the_programs_queries_because_the_sessions_engine_on_the_server_does() {
+    let device = FakeDevice::start();
+    let hub = hub_with(&device, fast());
+    let mut session = Session::new(80, 24);
+    session.print("asking$ ");
+    let (pane, _probe, mut conn) = attached_pane(&device, &hub, 4, &mut session, WriterView::Writing, None, "asking$");
+    // Cursor position, primary and secondary device attributes, the colour of the text, the kitty keyboard flags and the
+    // version: every one of them a query a local pane's engine answers.
+    session.live(&mut conn, 4, "\x1b[6n\x1b[c\x1b[>c\x1b]10;?\x1b\\\x1b[?u\x1b[>0q");
+    session.live(&mut conn, 4, "asked$ ");
+    wait_text(&pane, "asked$");
+    assert!(conn.drain(Duration::from_millis(300)).is_empty(), "a pane that writes sent an answer to the program");
+    assert_eq!(hub.stats().input_frames, 0);
+    // What is typed is still sent.
+    pane.text("ls\r".into()).unwrap();
+    assert_eq!(conn.drain(Duration::from_millis(500)), vec![Got::Input { session: 4, bytes: b"ls\r".to_vec() }]);
+
+    // A pane that watches does not count the answers it never sends as dropped typing.
+    conn.event(Event::Writer { session: 4, state: WriterView::Watching });
+    wait_for("watching", || pane.remote_view().is_some_and(|v| v.writer == WriterView::Watching));
+    session.live(&mut conn, 4, "\x1b[6n\x1b[c watched$ ");
+    wait_text(&pane, "watched$");
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(pane.remote_view().unwrap().dropped_input, 0);
+    assert!(conn.drain(Duration::from_millis(300)).is_empty());
+}
+
+#[test]
 fn the_writers_size_is_the_sessions_a_watcher_follows_and_taking_over_sends_the_new_writers_size_once() {
     let device = FakeDevice::start();
     let hub = hub_with(&device, fast());
