@@ -751,6 +751,57 @@ fn a_push_that_cannot_be_taken_ends_that_attachments_stream_with_a_resync() {
 }
 
 #[test]
+fn a_reattach_answers_only_after_the_old_stream_has_pushed_its_last_byte_so_nothing_old_follows_the_answer() {
+    let programs = Programs::new(TICKING);
+    let host = host_of(&programs);
+    // One recorder for both attaches, as one socket is for a device: the order it sees is the order the client reads.
+    let rec = Rec::new();
+    let id = started(&host, &rec);
+    attach_whole(&host, 1, &rec, id, Some(0)).expect("attach");
+    until("live bytes flow", || !rec.live_text().is_empty());
+
+    // The old reader is caught inside a push of live bytes while the client attaches again.
+    rec.hold.store(true, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(300));
+    let (tx, rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            host.attach(1, rec.clone(), id, Some(0), |answer| {
+                rec.push(Got::Writer(WriterState::Free)); // a marker: where the answer stands in what the client read
+                let _ = tx.send(answer);
+            });
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        rec.hold.store(false, Ordering::SeqCst);
+    });
+    let attached = rx.recv_timeout(WAIT).expect("answered").expect("attached again");
+    until("the new snapshot arrives", || {
+        let got = rec.got();
+        let at = got.iter().position(|g| *g == Got::Writer(WriterState::Free)).expect("the marker");
+        let sent: usize = got[at..].iter().map(|g| if let Got::Snapshot(_, b) = g { b.len() } else { 0 }).sum();
+        sent == attached.snapshot_bytes as usize
+    });
+    until("the new stream carries live bytes", || {
+        let got = rec.got();
+        let at = got.iter().position(|g| *g == Got::Writer(WriterState::Free)).expect("the marker");
+        got[at..].iter().any(|g| matches!(g, Got::Live(..)))
+    });
+    let got = rec.got();
+    let at = got.iter().position(|g| *g == Got::Writer(WriterState::Free)).expect("the marker");
+    let after: Vec<u32> = got[at..]
+        .iter()
+        .filter_map(|g| match g {
+            Got::Snapshot(seq, _) | Got::Live(seq, _) => Some(*seq),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(after.first(), Some(&0), "the first chunk after the answer is the new snapshot's first: {after:?}");
+    assert!(after.windows(2).all(|w| w[1] == w[0] + 1), "no chunk of the old stream after the answer: {after:?}");
+    assert!(matches!(got[at + 1], Got::Snapshot(0, _)), "the answer is followed by the snapshot: {:?}", &got[at..at + 2]);
+    assert_eq!(rec.resyncs(), 0, "the old stream ended quietly");
+}
+
+#[test]
 fn a_writer_whose_stream_is_dropped_keeps_its_right_to_write_and_gets_a_new_stream_when_it_attaches_again() {
     // No echo of the terminal: whatever comes back was written by `cat`, so it reached the program.
     let programs = Programs::new("stty -echo; cat");

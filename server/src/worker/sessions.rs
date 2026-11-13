@@ -292,11 +292,34 @@ enum Event {
     Stop,
 }
 
+/// The end of a stream on purpose. The reader holds it while it hands anything to its attachment, and whoever ends the stream
+/// takes it to do so: once [`Halt::set`] has returned, nothing of this stream reaches the attachment any more. That is what
+/// lets an attach answer a client right after it ended the client's old stream, with no old byte after the answer.
+#[derive(Default)]
+struct Halt(Mutex<bool>);
+
+impl Halt {
+    /// Ends the stream; waits for a push that is under way, which never blocks (see [`Attachment`]).
+    fn set(&self) {
+        *lock(&self.0) = true;
+    }
+
+    fn is_set(&self) -> bool {
+        *lock(&self.0)
+    }
+
+    /// Runs `push` unless the stream was ended, and keeps it from being ended while `push` runs; `None` when it was ended.
+    fn unless<R>(&self, push: impl FnOnce() -> R) -> Option<R> {
+        let halted = lock(&self.0);
+        if *halted { None } else { Some(push()) }
+    }
+}
+
 /// The flags of one attachment's reader thread.
 struct Stream {
     tap: TapId,
     /// Set by whoever ends the stream on purpose: the reader then says nothing more.
-    stop: Arc<AtomicBool>,
+    stop: Arc<Halt>,
     /// Set by the reader as its last act.
     done: Arc<AtomicBool>,
     /// Set by whoever tells this attachment that the program ended, so that it is told once.
@@ -491,7 +514,7 @@ impl SessionHost {
         let s = &mut *guard;
         let Some(member) = s.members.iter_mut().find(|m| m.client == client) else { return Ok(()) };
         if let Some(stream) = member.stream.take() {
-            stream.stop.store(true, Ordering::SeqCst);
+            stream.stop.set();
             s.pane.detach_tap(stream.tap);
         }
         Ok(())
@@ -595,7 +618,7 @@ impl SessionHost {
             let s = lock(session);
             for member in &s.members {
                 if let Some(stream) = &member.stream {
-                    stream.stop.store(true, Ordering::SeqCst);
+                    stream.stop.set();
                 }
             }
             s.pane.close();
@@ -731,11 +754,12 @@ impl Shared {
         }
         let wanted = tail.unwrap_or(self.limits.attach_tail_lines).min(self.limits.history_max_lines);
         let tail_rows = usize::try_from(wanted).unwrap_or(usize::MAX).min(s.scrollback);
-        // The old stream of this client (a reattach) ends first, so that it cannot hand a byte to the new one's place.
+        // The old stream of this client (a reattach) ends first, so that it cannot hand a byte to the new one's place: once
+        // `set` returns, its reader pushes nothing more, so nothing of it follows the answer below.
         if let Some(at) = existing
             && let Some(stream) = s.members[at].stream.take()
         {
-            stream.stop.store(true, Ordering::SeqCst);
+            stream.stop.set();
             s.pane.detach_tap(stream.tap);
         }
         let max_bytes = usize::try_from(self.limits.snapshot_max_bytes).unwrap_or(usize::MAX);
@@ -762,7 +786,7 @@ impl Shared {
         };
         let stream = Stream {
             tap: tap.id,
-            stop: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(Halt::default()),
             done: Arc::new(AtomicBool::new(false)),
             told_exit: Arc::new(AtomicBool::new(false)),
         };
@@ -794,7 +818,7 @@ impl Shared {
         let Some(at) = s.members.iter().position(|m| m.client == client) else { return };
         let member = s.members.remove(at);
         if let Some(stream) = member.stream {
-            stream.stop.store(true, Ordering::SeqCst);
+            stream.stop.set();
             s.pane.detach_tap(stream.tap);
         }
         let changes = s.lease.detach(member.who);
@@ -892,7 +916,7 @@ struct StreamStart {
     tap: TapId,
     pane: PaneHandle,
     meta: Arc<Meta>,
-    stop: Arc<AtomicBool>,
+    stop: Arc<Halt>,
     done: Arc<AtomicBool>,
     told_exit: Arc<AtomicBool>,
 }
@@ -906,46 +930,51 @@ impl StreamStart {
         }
     }
 
+    /// Every push to the attachment, and every word about the stream, happens inside [`Halt::unless`]: a stream that was ended
+    /// on purpose (a reattach, a detach) says nothing more, not even a `resync` that would undo the new attach.
     fn read(self, att: &dyn Attachment, session: u32) {
         let lost = |start: &StreamStart| {
             start.pane.detach_tap(start.tap);
-            att.resync(session);
+            start.stop.unless(|| att.resync(session));
         };
         let mut seq: u32 = 0;
         let mut healthy = true;
         for chunk in self.snapshot.chunks(CHUNK_BYTES) {
-            if self.stop.load(Ordering::SeqCst) {
-                self.finish(att, session);
-                return;
+            match self.stop.unless(|| att.snapshot_chunk(session, seq, chunk)) {
+                None => {
+                    self.finish(att, session);
+                    return;
+                }
+                Some(true) => seq = seq.wrapping_add(1),
+                Some(false) => {
+                    lost(&self);
+                    healthy = false;
+                    break;
+                }
             }
-            if !att.snapshot_chunk(session, seq, chunk) {
-                lost(&self);
-                healthy = false;
-                break;
-            }
-            seq = seq.wrapping_add(1);
         }
         loop {
             // A snapshot that could not be sent ends the stream before it starts; so does a stream ended on purpose.
-            if !healthy || self.stop.load(Ordering::SeqCst) {
+            if !healthy || self.stop.is_set() {
                 break;
             }
             match self.rx.recv(Duration::from_millis(250)) {
-                Some(TapMsg::Bytes(bytes)) => {
-                    if !att.live(session, seq, &bytes) {
+                Some(TapMsg::Bytes(bytes)) => match self.stop.unless(|| att.live(session, seq, &bytes)) {
+                    None => break,
+                    Some(true) => seq = seq.wrapping_add(1),
+                    Some(false) => {
                         lost(&self);
                         break;
                     }
-                    seq = seq.wrapping_add(1);
-                }
+                },
                 Some(TapMsg::End(TapEnd::Overflow)) => {
-                    att.resync(session);
+                    self.stop.unless(|| att.resync(session));
                     break;
                 }
                 Some(TapMsg::End(TapEnd::Closed)) => {
                     // The pane ended after the last byte it delivered, unless this stream was ended on purpose; the status of
                     // the program arrives from the pane's own thread a moment later.
-                    if !self.stop.load(Ordering::SeqCst) {
+                    if !self.stop.is_set() {
                         let _ = self.meta.wait_exit(EXIT_STATUS_WAIT);
                     }
                     break;
@@ -959,13 +988,12 @@ impl StreamStart {
     /// The last act of the reader: it is done, and an attachment that was not told that the program ended is told now.
     fn finish(&self, att: &dyn Attachment, session: u32) {
         self.done.store(true, Ordering::SeqCst);
-        if self.stop.load(Ordering::SeqCst) {
-            return;
-        }
-        if let Some(exit) = self.meta.exit()
-            && !self.told_exit.swap(true, Ordering::SeqCst)
-        {
-            att.exited(session, exit);
+        if let Some(exit) = self.meta.exit() {
+            self.stop.unless(|| {
+                if !self.told_exit.swap(true, Ordering::SeqCst) {
+                    att.exited(session, exit);
+                }
+            });
         }
     }
 }
