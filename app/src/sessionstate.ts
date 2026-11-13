@@ -188,7 +188,7 @@ export interface RowPlan {
   buttons: string[];
   /** The store of secrets is locked: the dim locked line takes the place of the buttons. */
   locked: boolean;
-  /** The list of sessions is drawn. */
+  /** The list of sessions is read and drawn: never while locked, because the host needs the token in the store to ask the server. */
   list: boolean;
   /** The dim line that remote sessions are off takes the place of the list. */
   off: boolean;
@@ -200,7 +200,8 @@ export interface RowPlan {
  * What the row shows for `view`; `listFailed` says that the last read of the list failed, which the row says as `unreachable`.
  * A link with no address is drawn as `not signed in` with `Sign in…` only. `web` is the row of the browser build: the page's own
  * sign-in is the credential, so the row is always signed in (or unreachable when the list cannot be read) and has neither
- * `Sign in…` nor `Sign out`.
+ * `Sign in…` nor `Sign out`. While the store of secrets is locked only the row and the locked line are drawn: the host would refuse
+ * the list (and on Android that refusal opens the unlock sheet), and `remoteOn` is then the server's last answer, not a fresh one.
  */
 export function rowPlan(view: ServerView, listFailed: boolean, web = false): RowPlan {
   const desktop: LinkState = view.url === "" ? "signed_out" : listFailed && view.state === "signed_in" ? "unreachable" : view.state;
@@ -228,9 +229,9 @@ export function rowPlan(view: ServerView, listFailed: boolean, web = false): Row
     dot: STATE_DOTS[state],
     buttons,
     locked: view.locked,
-    list: signedIn && view.remoteOn,
-    off: signedIn && !view.remoteOn,
-    help: signedIn && view.remoteOn,
+    list: signedIn && view.remoteOn && !view.locked,
+    off: signedIn && !view.remoteOn && !view.locked,
+    help: signedIn && view.remoteOn && !view.locked,
   };
 }
 

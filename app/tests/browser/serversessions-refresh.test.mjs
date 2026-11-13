@@ -11,6 +11,7 @@ export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(8000);
   await timerCase(page, url);
   await unreadableCase(page, url);
+  await lockedCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -49,4 +50,29 @@ async function unreadableCase(page, url) {
   await page.evaluate(() => window.__MOCK__.remoteSessions.fails("server_sessions", null));
   await page.waitForFunction(() => document.querySelector(".conns .cx-srv-state")?.textContent === "signed in", null, { timeout: 7000 });
   assert.deepEqual(await rowButtons(page), web ? ["New session"] : ["Sign out", "New session"]);
+}
+
+/** While the store of secrets is locked the list is never asked for: the host would refuse it, and on Android that opens the unlock sheet. */
+async function lockedCase(page, url) {
+  if (currentBackend() === "ws") return; // the browser build has no store of secrets
+  await open(page, url, { view: { ...SIGNED_IN, locked: true } });
+  await page.evaluate(() => window.__registry.runAction("connections.open"));
+  await page.waitForSelector(".conns .cx-srv-acts .cx-quiet");
+  await page.waitForTimeout(5600);
+  assert.equal(await lists(page), 0, "no list is read while locked, not even by the timer");
+  assert.equal(await page.locator(".conns .cx-srv-state").textContent(), "signed in", "never unreachable");
+  assert.equal(await page.locator(".conns .cx-sess").count(), 0);
+  assert.equal(await page.locator(".conns .cx-help").count(), 0, "neither the help line nor the off line");
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(".dlg.conns", { state: "detached" });
+
+  // The store locks between the read of the link and the read of the list: the row says the locked line, not unreachable.
+  await open(page, url, { fails: { server_sessions: "secrets are locked" } });
+  await page.evaluate(() => window.__registry.runAction("connections.open"));
+  await page.waitForSelector(".conns .cx-srv-acts .cx-quiet");
+  assert.equal(await page.locator(".conns .cx-srv-acts .cx-quiet").textContent(), "Locked: unlock to connect");
+  assert.notEqual(await page.locator(".conns .cx-srv-state").textContent(), "unreachable");
+  assert.deepEqual(await rowButtons(page), []);
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(".dlg.conns", { state: "detached" });
 }

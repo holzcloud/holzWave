@@ -275,13 +275,17 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
     if (disposed) return;
     if (rowPlan(view, false).list) {
       let raw: unknown = null;
+      let locked = false;
       try {
         raw = await source.list();
-      } catch {
+      } catch (failure) {
+        // The store locked after the link was read: that is the locked row, not a server that cannot be reached.
+        locked = isLockedFailure(failure);
         raw = null;
       }
       if (disposed) return;
-      const read = readSessions(raw);
+      if (locked) view = { ...view, locked: true };
+      const read = locked ? [] : readSessions(raw);
       listFailed = read === null;
       sessions = read ?? [];
     } else {

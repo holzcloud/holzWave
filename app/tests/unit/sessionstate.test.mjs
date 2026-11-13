@@ -145,6 +145,9 @@ test("each state of the link shows the record's word, dot and buttons", () => {
   assert.deepEqual([plan({ state: "unreachable" }).word, plan({ state: "unreachable" }).dot, plan({ state: "unreachable" }).buttons], ["unreachable", "down", [SIGN_OUT]]);
   const locked = plan({ locked: true });
   assert.deepEqual([locked.buttons, locked.locked], [[], true], "while locked the buttons give way to the locked line");
+  assert.deepEqual([locked.list, locked.help, locked.off], [false, false, false], "while locked nothing under the row is read or drawn");
+  const lockedOff = plan({ locked: true, remoteOn: false });
+  assert.deepEqual([lockedOff.list, lockedOff.off], [false, false], "a remote switch read before the lock is not said");
   const none = plan({ url: "", state: "signed_in" });
   assert.deepEqual([none.word, none.buttons, none.list], ["not signed in", [SIGN_IN_LINK], false], "no link: not signed in, Sign in… only");
   const failed = plan({}, true);
