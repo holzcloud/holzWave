@@ -66,6 +66,25 @@ async function lockedCase(page, url) {
     window.__MOCK__.serverLink.set({ locked: false });
   });
   await page.waitForFunction(() => [...document.querySelectorAll(".server-signin button")].some((b) => b.textContent === "Start again"), undefined, { timeout: 5000 });
+  assert.equal(await stateText(page), "!The sign-in failed.", "the locked sentence goes with the lock");
+  await page.keyboard.press("Escape");
+  await gone(page);
+
+  // The address is known, so the request starts at once, and the store is locked: after the unlock `Start again` is there.
+  await open(page, url, { view: { url: GOOD }, startFails: "secrets are locked" });
+  await openDialog(page);
+  await page.evaluate(() => window.__MOCK__.serverLink.set({ locked: true }));
+  await page.waitForSelector(".server-signin .ss-locked");
+  assert.deepEqual(await buttons(page), ["Cancel"]);
+  await page.evaluate(() => {
+    window.__MOCK__.serverLink.startFails(null);
+    window.__MOCK__.serverLink.set({ locked: false });
+  });
+  await page.waitForFunction(() => [...document.querySelectorAll(".server-signin button")].some((b) => b.textContent === "Start again"), undefined, { timeout: 5000 });
+  assert.deepEqual(await buttons(page), ["Start again", "Cancel"]);
+  assert.equal(await page.locator(".server-signin .ss-locked").count(), 0);
+  await dialog(page).getByRole("button", { name: "Start again", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector(".ss-code")?.textContent === "BCDF-GHJK");
   await page.keyboard.press("Escape");
   await gone(page);
 }

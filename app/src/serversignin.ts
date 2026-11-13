@@ -93,6 +93,8 @@ async function run(returnTo?: HTMLElement | null): Promise<ServerView | null> {
       let typed = view.url;
       let openNote = "";
       let started = false;
+      /** Starts of a sign-in whose answer has not come back yet. */
+      let starting = 0;
 
       const layer = await openLayer({
         cls: "server-signin",
@@ -144,6 +146,9 @@ async function run(returnTo?: HTMLElement | null): Promise<ServerView | null> {
             if (closed || !locked || now.locked) return;
             locked = false;
             view = now;
+            // The locked sentence of a refused approval is not true any more: the grant it ended is gone, so the state is the plain
+            // failure with `Start again` (a start refused as locked has no state and gets `Start again` from drawActions).
+            if (sentence === LOCKED_LINE) sentence = "";
             if (unlockTimer !== null) clearInterval(unlockTimer);
             unlockTimer = null;
             draw();
@@ -236,6 +241,15 @@ async function run(returnTo?: HTMLElement | null): Promise<ServerView | null> {
 
       /** Start (or start again) at `address`. A failure is said on the screen the person is on. */
       async function begin(address: string): Promise<void> {
+        starting++;
+        try {
+          await start(address);
+        } finally {
+          starting--;
+        }
+      }
+
+      async function start(address: string): Promise<void> {
         const mine = ++generation;
         started = true;
         stopTimers();
@@ -431,7 +445,8 @@ async function run(returnTo?: HTMLElement | null): Promise<ServerView | null> {
             if (sentence !== LOCKED_LINE) lockedLine(actions2);
           } else if (wait === "waiting" && grant !== null) {
             first = button(actions2, OPEN_AGAIN, false, () => openBrowser(generation, false));
-          } else if (wait !== null && isFailure(wait)) {
+          } else if ((wait !== null && isFailure(wait)) || (wait === null && starting === 0)) {
+            // After a failure, and after a start that was refused before it had a state (the store was locked) once it is unlocked.
             first = button(actions2, START_AGAIN, false, () => void begin(view.url !== "" ? view.url : typed));
           }
           button(actions2, CANCEL, false, leave);
@@ -464,8 +479,7 @@ async function run(returnTo?: HTMLElement | null): Promise<ServerView | null> {
       if (view.url !== "" && !locked) {
         // The address is known (a sign-out keeps it), so the first screen is not shown again: the request starts at once.
         screen = 2;
-        draw();
-        void begin(view.url);
+        void begin(view.url); // draws the second screen before its first wait
       } else {
         draw();
       }
