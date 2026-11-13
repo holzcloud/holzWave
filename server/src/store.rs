@@ -2174,17 +2174,36 @@ impl Tx<'_> {
         Ok(optional(stmt.query_row(params![&device_code_hash[..], now], grant_from_row))?)
     }
 
-    /// How many grants are open at `now` (not expired, not taken) on the whole server and from `addr`.
+    /// How many grants are open at `now` (not expired, not taken) on the whole server, from `addr` (the address as the throttle
+    /// counts it, see [`crate::proxy::key_of`]) and, for an IPv6 address, from its network of
+    /// [`crate::device::PENDING_NET_BITS`] bits. The open grants are at most [`crate::device::MAX_PENDING`], so the network is
+    /// counted by reading their IPv6 addresses.
     pub fn grant_counts(&self, addr: std::net::IpAddr, now: i64) -> Result<GrantCounts> {
         let (all, from_addr): (i64, i64) = self.conn.query_row(
             "SELECT count(*), coalesce(sum(addr = ?2), 0) FROM device_grants WHERE expires_at > ?1",
             params![now, addr.to_string()],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        Ok(GrantCounts {
-            all: usize::try_from(all).unwrap_or(usize::MAX),
-            from_addr: usize::try_from(from_addr).unwrap_or(usize::MAX),
-        })
+        let from_addr = usize::try_from(from_addr).unwrap_or(usize::MAX);
+        let from_net = match addr {
+            std::net::IpAddr::V4(_) => from_addr,
+            std::net::IpAddr::V6(v6) => {
+                let shift = 128 - crate::device::PENDING_NET_BITS;
+                let net = u128::from(v6) >> shift;
+                let mut stmt = self
+                    .conn
+                    .prepare_cached("SELECT addr FROM device_grants WHERE expires_at > ?1 AND instr(addr, ':') > 0")?;
+                let rows = stmt.query_map(params![now], |r| r.get::<_, String>(0))?;
+                let mut count = 0usize;
+                for row in rows {
+                    if row?.parse::<std::net::Ipv6Addr>().is_ok_and(|other| u128::from(other) >> shift == net) {
+                        count += 1;
+                    }
+                }
+                count
+            }
+        };
+        Ok(GrantCounts { all: usize::try_from(all).unwrap_or(usize::MAX), from_addr, from_net })
     }
 
     /// Records a poll of the grant `id` at `now`. With `slow` the grant's interval goes up by
@@ -2281,6 +2300,9 @@ pub struct GrantCounts {
     pub all: usize,
     /// From one client address.
     pub from_addr: usize,
+    /// From the IPv6 network of the address ([`crate::device::PENDING_NET_BITS`] bits); for an IPv4 address the same as
+    /// `from_addr`.
+    pub from_net: usize,
 }
 
 const GRANT_COLUMNS: &str =

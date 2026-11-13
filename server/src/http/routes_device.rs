@@ -12,7 +12,7 @@
 //! - **The grant is guessed at its own cost.** A device code is 256 bits and a user code is eight of twenty letters; both live
 //!   ten minutes and only their hashes are stored. Wrong codes (unknown, expired, malformed) are counted per account and per
 //!   address and lock both after five in ten minutes, a poll that comes too soon is told to slow down, open grants are capped
-//!   per address and for the whole server, and an unknown device code is answered as an expired one.
+//!   per address, per IPv6 /48 and for the whole server, and an unknown device code is answered as an expired one.
 //! - **The token is delivered once.** The poll that finds the grant approved makes the device and its token in one transaction,
 //!   deletes the grant and answers with the token; the token string exists nowhere else, and no log, audit line, list or
 //!   `Debug` text holds it.
@@ -40,7 +40,7 @@ use crate::audit::{Action, Actor, DetailKey, DetailValue, Event, Outcome};
 use crate::auth::throttle::scoped_key;
 use crate::clock::{from_unix, rfc3339};
 use crate::device::{
-    DeviceToken, GRANT_CAP_RETRY, GRANT_FAILURES, GRANT_TTL, GrantCode, MAX_PENDING, MAX_PENDING_PER_ADDR,
+    DeviceToken, GRANT_CAP_RETRY, GRANT_FAILURES, GRANT_TTL, GrantCode, MAX_PENDING, MAX_PENDING_PER_ADDR, MAX_PENDING_PER_NET,
     MAX_POLL_INTERVAL, PLATFORMS, POLL_INTERVAL, PollVerdict, UserCode, poll_verdict,
 };
 use crate::http::app::App;
@@ -292,7 +292,7 @@ async fn code_route(
         let now = worker.clock.unix();
         worker.store.write(|tx| {
             let open = tx.grant_counts(counted, now)?;
-            if open.all >= MAX_PENDING || open.from_addr >= MAX_PENDING_PER_ADDR {
+            if open.all >= MAX_PENDING || open.from_addr >= MAX_PENDING_PER_ADDR || open.from_net >= MAX_PENDING_PER_NET {
                 return Ok(Started::Full);
             }
             let device_code = GrantCode::generate().map_err(|_| StoreError::Storage("no random bytes"))?;

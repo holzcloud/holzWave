@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use holzwave_server::device::{
     DEVICE_PREFIX, DeviceToken, GRANT_TTL, GrantCode, MAX_DEVICES_PER_ACCOUNT, MAX_LISTED_DEVICES, MAX_PENDING,
-    MAX_PENDING_PER_ADDR, MAX_POLL_INTERVAL, POLL_INTERVAL, PollVerdict, TOUCH_INTERVAL, USER_CODE_ALPHABET, UserCode,
+    MAX_PENDING_PER_ADDR, MAX_PENDING_PER_NET, MAX_POLL_INTERVAL, POLL_INTERVAL, PollVerdict, TOUCH_INTERVAL, USER_CODE_ALPHABET, UserCode,
     poll_verdict,
 };
 use holzwave_server::store::{
@@ -605,12 +605,30 @@ fn a_grant_is_stored_by_hashes_found_by_either_decided_once_and_taken_once() {
 }
 
 #[test]
+fn open_grants_of_one_ipv6_48_are_counted_together_whatever_their_64() {
+    let (_scratch, store) = open("grant-counts-net");
+    // Two /64s of one /48, the same /48 written another way, a neighbouring /48 and an IPv4 address.
+    grant(&store, "a", "2001:db8:aa::", NOW);
+    grant(&store, "b", "2001:db8:aa:1::", NOW);
+    grant(&store, "c", "2001:db8:aa:ffff::", NOW);
+    grant(&store, "d", "2001:db8:ab::", NOW);
+    grant(&store, "e", "192.0.2.1", NOW);
+    let counts = |ip: &str, now: i64| store.read(|tx| tx.grant_counts(ip.parse().expect("an address"), now)).expect("counts");
+    let here = counts("2001:db8:aa:2::", NOW);
+    assert_eq!((here.all, here.from_addr, here.from_net), (5, 0, 3), "a fresh /64 of the /48 sees its neighbours");
+    let first = counts("2001:0db8:00aa:0000::", NOW);
+    assert_eq!((first.from_addr, first.from_net), (1, 3));
+    assert_eq!(counts("2001:db8:ab:5::", NOW).from_net, 1, "the next /48 is another network");
+    assert_eq!(counts("2001:db8:aa:2::", NOW + GRANT_TTL).from_net, 0, "an expired grant counts nowhere");
+}
+
+#[test]
 fn pending_grants_are_counted_exactly_and_expired_ones_are_not_counted_and_are_purged() {
     let (scratch, store) = open("grant-counts");
     let a: IpAddr = "192.0.2.10".parse().expect("address");
     let b: IpAddr = "2001:db8::10".parse().expect("address");
     let c: IpAddr = "192.0.2.99".parse().expect("address");
-    const { assert!(MAX_PENDING_PER_ADDR == 5 && MAX_PENDING == 200) };
+    const { assert!(MAX_PENDING_PER_ADDR == 5 && MAX_PENDING_PER_NET == 20 && MAX_PENDING == 1_000) };
     assert_eq!(store.read(|tx| tx.grant_counts(a, NOW)).expect("counts").all, 0);
     for _ in 0..3 {
         grant(&store, "a", "192.0.2.10", NOW);
@@ -622,6 +640,7 @@ fn pending_grants_are_counted_exactly_and_expired_ones_are_not_counted_and_are_p
     assert_eq!((counts(a, NOW).all, counts(a, NOW).from_addr), (5, 3));
     assert_eq!((counts(b, NOW).all, counts(b, NOW).from_addr), (5, 2));
     assert_eq!((counts(c, NOW).all, counts(c, NOW).from_addr), (5, 0));
+    assert_eq!(counts(a, NOW).from_net, 3, "an IPv4 address is its own network");
     // One more that expires sooner than the rest.
     store
         .write(|tx| {

@@ -47,10 +47,18 @@ pub const POLL_INTERVAL: i64 = 5;
 pub const MAX_POLL_INTERVAL: i64 = 60;
 
 /// The most grants that are open (not expired, not taken) at once, on the whole server.
-pub const MAX_PENDING: usize = 200;
+pub const MAX_PENDING: usize = 1_000;
 
-/// The most grants that are open at once from one client address.
+/// The most grants that are open at once from one client address: an IPv4 address, or an IPv6 address by its /64 (the network
+/// one subscriber usually gets), as the throttle counts it.
 pub const MAX_PENDING_PER_ADDR: usize = 5;
+
+/// The most grants that are open at once from one IPv6 network of [`PENDING_NET_BITS`] bits, whatever its /64s. One site or
+/// subscriber often holds a whole /48, so the cap per /64 alone would let it hold the server's cap with a few dozen /64s.
+pub const MAX_PENDING_PER_NET: usize = 20;
+
+/// The prefix length of the IPv6 network that [`MAX_PENDING_PER_NET`] counts.
+pub const PENDING_NET_BITS: u32 = 48;
 
 /// How long a device token works without the device being seen, in seconds: 90 days.
 pub const DEVICE_IDLE_DEFAULT: i64 = 90 * 24 * 3_600;

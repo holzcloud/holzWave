@@ -283,9 +283,9 @@ only the SHA-256 of each, never the token, writes neither to a log or an audit l
 the token. Bounds against guessing and floods: an app that asks too soon is told `slow_down` and must wait 5 seconds longer each
 time, up to 60; five wrong codes typed by a person within ten minutes lock that account and that address out of typing codes for
 ten minutes (a code that was never issued and one that expired give the same answer); five unknown requests asked for by one
-address within ten minutes lock that address for ten minutes; at most 5 open requests come from one address and 200 from
-everywhere, and the next start is refused (429, with a hint to try again in a minute) until older ones run out; a person has
-at most 20 devices, and an approved request past that waits, answered `too_many`, until a device is revoked or the request
+address within ten minutes lock that address for ten minutes; at most 5 open requests come from one address (an IPv6 address
+counts by its /64), 20 from one IPv6 /48 and 1000 from everywhere, and the next start is refused (429, with a hint to try again
+in a minute) until older ones run out; a person has at most 20 devices, and an approved request past that waits, answered `too_many`, until a device is revoked or the request
 runs out.
 
 A device token ends after `devices.idle` (90 days by default) without a request; every request renews it, and the time it was last

@@ -28,7 +28,7 @@ use device_env::{
 use edge::{ORIGIN, Resp};
 use holzwave_server::clock::{Clock as _, from_unix, rfc3339};
 use holzwave_server::device::{
-    GRANT_TTL, MAX_DEVICES_PER_ACCOUNT, MAX_PENDING, MAX_PENDING_PER_ADDR, POLL_INTERVAL,
+    GRANT_TTL, MAX_DEVICES_PER_ACCOUNT, MAX_PENDING, MAX_PENDING_PER_ADDR, MAX_PENDING_PER_NET, POLL_INTERVAL,
     USER_CODE_ALPHABET,
 };
 use holzwave_server::http::features::Feature;
@@ -705,11 +705,38 @@ async fn unknown_device_codes_lock_the_address_of_an_anonymous_poll() {
 }
 
 #[tokio::test]
+async fn open_grants_are_capped_per_ipv6_48_whatever_the_64_they_come_from() {
+    let env = env();
+    open(&env);
+    assert_eq!(MAX_PENDING_PER_NET, 20);
+    let body = device_env::start_body("Laptop", "linux");
+    let in_net = |sub: u16| IpAddr::from([0x2001, 0x0db8, 0x00aa, sub, 0, 0, 0, 1]);
+    // Five /64s of one /48: the first four fill the network with five each, the fifth /64 is refused although it has none.
+    for sub in 0..4u16 {
+        for _ in 0..MAX_PENDING_PER_ADDR {
+            let resp = env.send(native_post_from(device_env::CODE, &body, in_net(sub))).await;
+            assert_eq!(resp.status, 200, "{}", resp.text());
+        }
+    }
+    assert_eq!(grant_rows(&env), MAX_PENDING_PER_NET as i64);
+    let refused = env.send(native_post_from(device_env::CODE, &body, in_net(0x00ff))).await;
+    assert_eq!((refused.status.as_u16(), code(&refused).as_str()), (429, "throttled"), "{}", refused.text());
+    assert_eq!(grant_rows(&env), MAX_PENDING_PER_NET as i64, "the refused start stored nothing");
+    // The next /48 and an IPv4 address are not held back.
+    let other = IpAddr::from([0x2001, 0x0db8, 0x00ab, 0, 0, 0, 0, 1]);
+    assert_eq!(env.send(native_post_from(device_env::CODE, &body, other)).await.status, 200);
+    assert_eq!(env.send(native_post_from(device_env::CODE, &body, peer(9))).await.status, 200);
+    // When the grants run out, the network may start again.
+    env.clock.advance(GRANT_TTL + 1);
+    assert_eq!(env.send(native_post_from(device_env::CODE, &body, in_net(0x00ff))).await.status, 200);
+}
+
+#[tokio::test]
 async fn open_grants_are_capped_per_address_and_for_the_whole_server_and_the_counts_drop_with_the_expiry()
  {
     let env = env();
     open(&env);
-    assert_eq!((MAX_PENDING_PER_ADDR, MAX_PENDING), (5, 200));
+    assert_eq!((MAX_PENDING_PER_ADDR, MAX_PENDING), (5, 1_000));
     let body = device_env::start_body("Laptop", "linux");
     for _ in 0..MAX_PENDING_PER_ADDR {
         assert_eq!(
@@ -740,8 +767,8 @@ async fn open_grants_are_capped_per_address_and_for_the_whole_server_and_the_cou
             .map(|s| s.to_string())
     );
     assert_eq!(grant_rows(&env), 5, "the refused start stored nothing");
-    // The whole server: 195 more from 39 other addresses fill it; the 201st is refused from a new address.
-    for address in 0..39u8 {
+    // The whole server: 995 more from 199 other addresses fill it; the 1001st is refused from a new address.
+    for address in 0..199u8 {
         for _ in 0..MAX_PENDING_PER_ADDR {
             let resp = env
                 .send(native_post_from(
@@ -753,7 +780,7 @@ async fn open_grants_are_capped_per_address_and_for_the_whole_server_and_the_cou
             assert_eq!(resp.status, 200, "{}", resp.text());
         }
     }
-    assert_eq!(grant_rows(&env), 200);
+    assert_eq!(grant_rows(&env), 1_000);
     let full = env
         .send(native_post_from(
             device_env::CODE,
@@ -767,7 +794,7 @@ async fn open_grants_are_capped_per_address_and_for_the_whole_server_and_the_cou
         "{}",
         full.text()
     );
-    assert_eq!(grant_rows(&env), 200);
+    assert_eq!(grant_rows(&env), 1_000);
     // After the expiry the counts drop (the rows are still there until the purge) and a start works again.
     env.clock.advance(GRANT_TTL + 1);
     assert_eq!(
