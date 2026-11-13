@@ -146,7 +146,10 @@ async function takeoverCase(page, url) {
   await take.focus();
   const ring = await take.evaluate((b) => ({ focused: document.activeElement === b, tab: b.tabIndex }));
   assert.ok(ring.focused && ring.tab >= 0, "the button takes the keyboard focus");
-  assert.match(css, /\.ph-take:focus-visible \{ outline: 2px solid var\(--hw-ink\); outline-offset: -2px; \}/, "the focus ring is 2 px");
+  assert.match(css, /\.ph-take:focus-visible \{ outline: 2px solid var\(--hw-ink\); outline-offset: 0; \}/, "the focus ring is 2 px, outside the button");
+  // The button is drawn 20 px tall, and the ring around it still fits the strip, so the strip's clip never cuts it.
+  assert.ok(Math.abs(fine.drawn - 20) < 0.5, `the drawn button is 20 px (${fine.drawn})`);
+  assert.ok(fine.drawn + 4 <= fine.strip, `the ring fits the strip (${fine.drawn} + 4 of ${fine.strip})`);
   const visual = await head(page, 2).evaluate((h) => Array.from(h.querySelectorAll("button")).map((b) => b.className));
   assert.deepEqual(visual, ["label ph-take", "close ph-close"], "the focus order of the strip is its visual order");
 

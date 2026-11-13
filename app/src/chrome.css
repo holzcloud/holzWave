@@ -308,7 +308,7 @@
 /* The hit box: as tall as `--ph-hit`, centred on the drawn button. */
 .ph-take::before { content: ""; position: absolute; left: 0; right: 0; top: calc((100% - var(--ph-hit)) / 2); bottom: calc((100% - var(--ph-hit)) / 2); }
 .ph-take:hover { background: var(--hw-rose-wash); }
-.ph-take:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
+.ph-take:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 0; }
 @media (pointer: coarse) {
   .panehead.remote { --ph-hit: max(44px, calc(44rem / 12)); }
 }
