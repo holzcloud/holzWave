@@ -1181,7 +1181,7 @@
         "code": "BCDF-GHJK",
         "expires_in": 600,
         "interval": 5,
-        "url": "https://sync.example.test/#device=hwg_x"
+        "url": "https://sync.example.test/#device=BCDF-GHJK"
       }
     ],
     "sign_in_poll": [

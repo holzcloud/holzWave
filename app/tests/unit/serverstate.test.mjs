@@ -125,7 +125,7 @@ test("no member for a secret is read, even when present", () => {
   const read = readServerView({ ...VIEW, token: CANARY, device_code: CANARY, hwd: CANARY });
   assert.equal(JSON.stringify(read).includes(CANARY), false);
   assert.deepEqual(Object.keys(read).sort(), ["error", "locked", "name", "remoteOn", "state", "syncOn", "url"]);
-  const start = readSignIn({ code: "BCDF-GHJK", url: "https://holz.example.net/#device=hwg_x", expires_in: 600, interval: 5, token: CANARY, device_code: CANARY });
+  const start = readSignIn({ code: "BCDF-GHJK", url: "https://holz.example.net/#device=BCDF-GHJK", expires_in: 600, interval: 5, token: CANARY, device_code: CANARY });
   assert.equal(JSON.stringify(start).includes(CANARY), false);
   assert.deepEqual(Object.keys(start).sort(), ["code", "expiresIn", "interval", "openUrl"]);
   const poll = readPoll({ state: "approved", interval: 5, token: CANARY });
@@ -145,7 +145,7 @@ test("a hostile name, error or address is bounded text", () => {
 });
 
 test("the start of a sign-in needs a code of the right shape and a web address", () => {
-  const good = { code: "BCDF-GHJK", url: "https://holz.example.net/#device=hwg_x", expires_in: 600, interval: 5 };
+  const good = { code: "BCDF-GHJK", url: "https://holz.example.net/#device=BCDF-GHJK", expires_in: 600, interval: 5 };
   assert.deepEqual(readSignIn(good), { code: "BCDF-GHJK", openUrl: good.url, expiresIn: 600, interval: 5 });
   for (const code of ["bcdf-ghjk", "BCDFGHJK", "BCDF-GHJA", "BCDF-GHJ", "", 5, null, "<b>x</b>"]) assert.equal(readSignIn({ ...good, code }), null, String(code));
   for (const url of ["javascript:alert(1)", "file:///etc/passwd", "http://holz.example.net/", "https://a b", "", null, "https://x/" + "a".repeat(2100)]) {

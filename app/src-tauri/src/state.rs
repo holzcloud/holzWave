@@ -271,8 +271,6 @@ mod protocol {
         }
     }
 
-    /// The answers of the integration commands, written by the real types: the recorded output of a fake `kubectl` goes
-    /// through the real parser, and the tool entries are the real compiled-in descriptions.
     /// The answer of `pane_connections`: a pane of a saved connection (no remote member), then panes of server sessions in
     /// every word of who writes and of what the pane is busy with.
     fn pane_connection_samples() -> Value {
@@ -296,6 +294,8 @@ mod protocol {
         ])
     }
 
+    /// The answers of the integration commands, written by the real types: the recorded output of a fake `kubectl` goes
+    /// through the real parser, and the tool entries are the real compiled-in descriptions.
     fn integration_samples() -> Value {
         use holzwave_host::integrate_host::{ConfirmAnswer, ConfirmKind, LaunchAnswer, PaneAnswer};
         use holzwave_core::integrate::ticket::{Card, Guard};
@@ -748,7 +748,7 @@ mod protocol {
                     to_value(&ServerView { state: "signed_in", url: "https://sync.example.test".into(), name: "Laptop".into(), locked: false, sync_on: true, remote_on: true, error: None }),
                     to_value(&ServerView { state: "unreachable", url: "https://sync.example.test".into(), name: "Laptop".into(), locked: true, sync_on: false, remote_on: false, error: Some("The server cannot be reached.".into()) }),
                 ],
-                "sign_in": [to_value(&SignInView { code: "BCDF-GHJK".into(), url: "https://sync.example.test/#device=hwg_x".into(), expires_in: 600, interval: 5 })],
+                "sign_in": [to_value(&SignInView { code: "BCDF-GHJK".into(), url: "https://sync.example.test/#device=BCDF-GHJK".into(), expires_in: 600, interval: 5 })],
                 "sign_in_poll": [
                     to_value(&SignInPoll { state: "pending", interval: 5 }),
                     to_value(&SignInPoll { state: "approved", interval: 5 }),
