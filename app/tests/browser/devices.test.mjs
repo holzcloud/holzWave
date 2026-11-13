@@ -400,6 +400,12 @@ export default async function ({ page, url, errors }) {
     assert.equal(plain.locked.text, "OFF");
     assert.equal(plain.locked.style, "dashed", "a switch closed by the configuration has a dashed outline besides its word");
     assert.notEqual(plain.on.colour, plain.locked.colour, "the two states differ in colour too, but never in colour alone");
+    // A UI scale under 100 % makes the root font smaller; the targets keep their 28 px floor.
+    await page.evaluate(() => document.documentElement.style.setProperty("font-size", "9px"));
+    const small = await probe();
+    await page.evaluate(() => document.documentElement.style.removeProperty("font-size"));
+    assert.ok(small.revoke.height >= 27.99, `Revoke stays 28 px high at 75 % (${small.revoke.height})`);
+    assert.ok(small.on.height >= 27.99 && small.locked.height >= 27.99, `the switches stay 28 px high at 75 % (${small.on.height})`);
 
     await page.emulateMedia({ forcedColors: "active" });
     const forced = await probe();
@@ -456,6 +462,8 @@ export default async function ({ page, url, errors }) {
       assert.ok(coarse.includes(selector), `the coarse-pointer rule covers ${selector}`);
     }
     assert.match(coarse, /min-height: max\(44px, calc\(44rem \/ 12\)\)/);
+    // The desktop floor of the two dialogs' buttons is in pixels as well, so a small UI scale cannot take them under 28 px.
+    assert.match(css, /\.dlg\.device-authorize button, \.dlg\.device-code button \{ min-height: max\(28px, calc\(28rem \/ 12\)\); \}/);
     await page.keyboard.press("Escape");
   }
   assert.deepEqual(errors, [], "the page reported errors");

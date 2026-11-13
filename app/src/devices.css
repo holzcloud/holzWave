@@ -1,13 +1,13 @@
 /* The device features of the web page (devices.ts, docs/design.md 6.35). Loaded after dialogs.css, settings.css and websession.css,
-   whose box, fields and buttons it uses. Every colour is a `--hw-*` token and every size is in rem, so the UI scale moves it; the one
-   fixed pixel size is the 44 px floor of a touch target. Flat and hairline: the dialogs are floating layers and carry the one shadow
+   whose box, fields and buttons it uses. Every colour is a `--hw-*` token and every size is in rem, so the UI scale moves it; the
+   fixed pixel sizes are the floors of a target, 28 px on the desktop and 44 px on touch, which a UI scale under 100 % must not cross. Flat and hairline: the dialogs are floating layers and carry the one shadow
    of the box, nothing here has another. A state is never colour alone: a result has a glyph (`●` approved, `○` denied, `!` and an
    underline for a code that is not valid), and a switch has its word inside the knob. Rose marks focus only. Nothing moves, so
    there is nothing for reduced motion to remove. `contrast-high` reaches the hairlines and the dim text through their tokens. */
 .dlg.settings.device-authorize, .dlg.settings.device-code { width: min(24rem, calc(100vw - 4rem)); }
 .dlg.device-authorize [hidden], .dlg.device-code [hidden] { display: none !important; }
 .dlg.device-authorize .dev-title { outline: none; }
-.dlg.device-authorize button, .dlg.device-code button { min-height: calc(28rem / 12); }
+.dlg.device-authorize button, .dlg.device-code button { min-height: max(28px, calc(28rem / 12)); }
 
 /* The rows: who asks, and from where. The code is real text in a bordered block to compare with the app. */
 .dlg.device-authorize .dev-kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .333rem 1rem; margin: 0 0 .833rem; }
@@ -36,7 +36,7 @@
 .dlg .dev-item { display: flex; align-items: center; gap: .667rem; min-height: 2rem; }
 .dlg .dev-name { flex: 0 1 auto; min-width: 0; font-weight: 700; color: var(--hw-ink); overflow-wrap: anywhere; }
 .dlg .dev-meta { flex: 1 1 auto; min-width: 0; color: var(--hw-dim); overflow-wrap: anywhere; }
-.dlg.settings .dev-revoke { flex: none; min-height: calc(28rem / 12); }
+.dlg.settings .dev-revoke { flex: none; min-height: max(28px, calc(28rem / 12)); }
 .dlg.settings .dev-revoke[data-armed="true"] { color: var(--hw-danger); border-color: var(--hw-danger); }
 .dlg.settings .dev-revoke:focus-visible, .dlg.settings .dev-switch:focus-visible { outline: 2px solid var(--hw-rose); outline-offset: 2px; }
 
@@ -53,7 +53,7 @@
    is drawn `OFF` with a dashed outline and says why in dim text; the dashes and the words are its cues besides colour. */
 .dlg .dev-sw-row { display: flex; align-items: center; justify-content: space-between; gap: .667rem; min-height: 2rem; }
 .dlg .dev-sw-label { min-width: 0; color: var(--hw-ink); overflow-wrap: anywhere; }
-.dlg.settings .dev-switch { min-width: calc(28rem / 12 * 2.4); min-height: calc(28rem / 12); }
+.dlg.settings .dev-switch { min-width: max(calc(28px * 2.4), calc(28rem / 12 * 2.4)); min-height: max(28px, calc(28rem / 12)); }
 .dlg .dev-switch[data-locked="true"] { border-style: dashed; cursor: default; color: var(--hw-dim); background: none; }
 .dlg .dev-dim, .dlg .dev-help { margin: .167rem 0 .333rem; color: var(--hw-dim); overflow-wrap: anywhere; }
 .dlg .dev-help { margin-top: .5rem; }
