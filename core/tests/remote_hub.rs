@@ -491,6 +491,39 @@ fn the_exit_of_a_session_is_told_once_and_the_place_is_given_back() {
     assert_eq!(request.op, Op::Detach { session: 3 });
 }
 
+#[test]
+fn a_subscription_nobody_reads_any_more_is_detached_on_the_server_too() {
+    let device = FakeDevice::start();
+    let hub = plain_hub(&device);
+    let (sub, mut conn) = attach_plain(&device, &hub, 3, b"");
+    // The reader went away without a word; the next chunk finds nobody.
+    drop(sub);
+    conn.live(3, 0, b"to nobody");
+    let request = conn.request();
+    assert_eq!(request.op, Op::Detach { session: 3 }, "the server must not keep the attachment alive under the beat");
+}
+
+#[test]
+fn a_detach_is_sent_even_when_as_many_requests_wait_as_may() {
+    let device = FakeDevice::start();
+    let hub = hub_with(&device, |o| o.call_timeout = Duration::from_secs(3));
+    let (sub, mut conn) = attach_plain(&device, &hub, 3, b"");
+    let calls: Vec<_> = (0..proto::MAX_PENDING)
+        .map(|_| {
+            let h = hub.clone();
+            std::thread::spawn(move || h.list())
+        })
+        .collect();
+    for _ in 0..proto::MAX_PENDING {
+        assert_eq!(conn.request().op, Op::List);
+    }
+    sub.handle().detach();
+    assert_eq!(conn.request().op, Op::Detach { session: 3 });
+    for call in calls {
+        assert_eq!(call.join().unwrap(), Err(HubError::Timeout));
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Reconnect
 // ---------------------------------------------------------------------------------------------------------------------

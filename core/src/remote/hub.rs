@@ -872,11 +872,7 @@ impl Core {
             }
             Cmd::Detach { id, session } => {
                 if self.owns(id, session) {
-                    self.subs.remove(&session);
-                    if matches!(self.mode, Mode::Up) {
-                        self.quiet(Op::Detach { session });
-                    }
-                    self.rest_if_unused();
+                    self.forget(session);
                 }
             }
             Cmd::Retry => {
@@ -988,8 +984,7 @@ impl Core {
 
     /// Sends a request and files it under its number. `Err` gives the pending back when the connection broke.
     fn send(&mut self, op: Op, pending: Pending, deadline: Instant) -> Result<u64, Pending> {
-        let id = self.next_req;
-        self.next_req = if id >= proto::MAX_ID { 1 } else { id + 1 };
+        let id = self.next_id();
         let text = Request { id, op }.encode();
         let Some(ws) = self.ws.as_mut() else { return Err(pending) };
         match ws.send_text(&text) {
@@ -1002,6 +997,13 @@ impl Core {
                 Err(pending)
             }
         }
+    }
+
+    /// The number of the next request.
+    fn next_id(&mut self) -> u64 {
+        let id = self.next_req;
+        self.next_req = if id >= proto::MAX_ID { 1 } else { id + 1 };
+        id
     }
 
     /// A request nobody waits the answer of.
@@ -1045,8 +1047,30 @@ impl Core {
         if let Some(sub) = self.subs.get(&session)
             && sub.push(event, false, bound, &self.stats) == Pushed::Gone
         {
-            self.subs.remove(&session);
-            self.rest_if_unused();
+            self.forget(session);
+        }
+    }
+
+    /// The subscription of `session` is gone (detached, or nobody reads it any more): the server is told, so that it does not
+    /// keep the attachment, and with it maybe the right to write, alive under the beat of this socket.
+    fn forget(&mut self, session: u32) {
+        if self.subs.remove(&session).is_some() {
+            self.detach_on_server(session);
+        }
+        self.rest_if_unused();
+    }
+
+    /// Tells the server this device left `session`, when connected. Never dropped for the number of requests that wait:
+    /// nothing waits for its answer, so it is not filed, and the answer is ignored when it comes.
+    fn detach_on_server(&mut self, session: u32) {
+        if !matches!(self.mode, Mode::Up) {
+            return;
+        }
+        let text = Request { id: self.next_id(), op: Op::Detach { session } }.encode();
+        if let Some(ws) = self.ws.as_mut()
+            && let Err(error) = ws.send_text(&text)
+        {
+            self.broken(&error);
         }
     }
 
@@ -1062,9 +1086,7 @@ impl Core {
     fn end_sub(&mut self, session: u32, error: HubError) {
         if let Some(sub) = self.subs.remove(&session) {
             sub.push(SubEvent::Lost(error), false, self.options.sub_queue_bytes, &self.stats);
-            if matches!(self.mode, Mode::Up) {
-                self.quiet(Op::Detach { session });
-            }
+            self.detach_on_server(session);
             self.rest_if_unused();
         }
     }
@@ -1381,8 +1403,7 @@ impl Core {
             Event::Exited { code, .. } => {
                 self.tell(session, SubEvent::Exited(code));
                 // The session is over: the place it held on the server is given back.
-                self.subs.remove(&session);
-                self.quiet(Op::Detach { session });
+                self.forget(session);
             }
             Event::Resync { .. } => self.resync(session),
             Event::Dropped { .. } => self.offer(session, SubEvent::InputDropped, true, bound),
@@ -1394,9 +1415,7 @@ impl Core {
         let Some(sub) = self.subs.get(&session) else { return };
         match sub.push(event, bounded, bound, &self.stats) {
             Pushed::Queued => {}
-            Pushed::Gone => {
-                self.subs.remove(&session);
-            }
+            Pushed::Gone => self.forget(session),
             Pushed::Full => self.overflow(session),
         }
     }
@@ -1452,9 +1471,7 @@ impl Core {
                     sub.streak = 0;
                 }
             }
-            Pushed::Gone => {
-                self.subs.remove(&session);
-            }
+            Pushed::Gone => self.forget(session),
             Pushed::Full => self.overflow(session),
         }
     }
