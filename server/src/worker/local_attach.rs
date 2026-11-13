@@ -432,7 +432,21 @@ impl Tie {
         let tail = *lock(&self.tail);
         host.attach(self.client, att, self.session, tail, |result| match result {
             Ok(attached) => {
-                lock(&self.shared.live).insert((self.client, self.session));
+                // The pane may have closed while it was being attached (a fresh start races the close): then the new
+                // attachment leaves at once instead of staying behind for a subscription nobody reads. `closed` is looked at
+                // under the same lock `leave` sets it under, so either `leave` removes what is inserted here or this sees it.
+                let closed = {
+                    let mut live = lock(&self.shared.live);
+                    let closed = self.closed.load(Ordering::SeqCst);
+                    if !closed {
+                        live.insert((self.client, self.session));
+                    }
+                    closed
+                };
+                if closed {
+                    let _ = host.detach(self.client, self.session);
+                    return;
+                }
                 self.pass(
                     generation,
                     SubEvent::Attached {
@@ -473,8 +487,11 @@ impl Tie {
     }
 
     fn leave(&self) {
-        self.closed.store(true, Ordering::SeqCst);
-        lock(&self.shared.live).remove(&(self.client, self.session));
+        {
+            let mut live = lock(&self.shared.live);
+            self.closed.store(true, Ordering::SeqCst);
+            live.remove(&(self.client, self.session));
+        }
         if let Some(host) = self.shared.host() {
             let _ = host.detach(self.client, self.session);
         }
