@@ -33,10 +33,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use holzwave_core::Error as PaneError;
 use holzwave_core::layout::PaneId;
 use holzwave_core::pane::{
-    MAX_DIM, MAX_TAPS, MIN_COLS, MIN_ROWS, PaneEvent, PaneHandle, PaneSpec, RAW_BACKLOG_FULL, TapEnd, TapId, TapMsg, TapReceiver,
+    MAX_DIM, MAX_RAW_BACKLOG, MAX_TAPS, MIN_COLS, MIN_ROWS, PaneEvent, PaneHandle, PaneSpec, RAW_BACKLOG_FULL, TapEnd, TapId,
+    TapMsg, TapReceiver,
 };
 
 use crate::worker::lease::{Changes, Input, Lease, Refused, Who, WriterState};
+use crate::worker::paste::PasteGate;
 
 /// The most bytes of a snapshot chunk or of a live chunk one call of an attachment carries. A snapshot is cut into chunks of
 /// this size; a live chunk is never larger because the pane reads its PTY in chunks of this size.
@@ -340,6 +342,8 @@ struct Member {
     stream: Option<Stream>,
     /// When this client was last told that input of its was dropped because the program does not read, on the host's clock.
     told_dropped: Option<u64>,
+    /// The bracketed paste of this client that is on its way, see [`crate::worker::paste`].
+    paste: PasteGate,
 }
 
 struct Session {
@@ -540,7 +544,8 @@ impl SessionHost {
     /// [`holzwave_core::pane::MAX_RAW_BACKLOG`] bytes of its input unread: the pane refuses it, so a sender cannot grow the
     /// worker's memory by writing to a program that does not read. That drop is not silent: the answer is
     /// `Err(SesError::Busy)`, at most once per [`DROPPED_NOTE_MS`] for one client, and the caller tells the client; the other
-    /// drops of the same time answer `Ok(Input::Dropped)`.
+    /// drops of the same time answer `Ok(Input::Dropped)`. A bracketed paste is held until its end marker has come and is then
+    /// written whole or dropped whole ([`crate::worker::paste`]), so the program never gets one of its markers without the other.
     pub fn input(&self, client: u64, session: u32, bytes: &[u8]) -> Result<Input, SesError> {
         if bytes.len() > MAX_INPUT_BYTES {
             return Err(SesError::BadRequest);
@@ -552,19 +557,28 @@ impl SessionHost {
         if s.lease.input(who, now) == Input::Dropped || s.exited_at.is_some() {
             return Ok(Input::Dropped);
         }
-        match s.pane.write_raw(bytes) {
-            Ok(()) => Ok(Input::Accepted),
-            Err(PaneError::Pty(text)) if text == RAW_BACKLOG_FULL => {
-                // The sender is told, at most once per `DROPPED_NOTE_MS`: `Busy` asks the caller to say so to the client.
-                let Some(member) = s.members.iter_mut().find(|m| m.client == client) else { return Ok(Input::Dropped) };
-                if member.told_dropped.is_some_and(|at| now.saturating_sub(at) < DROPPED_NOTE_MS) {
-                    return Ok(Input::Dropped);
-                }
-                member.told_dropped = Some(now);
-                Err(SesError::Busy)
+        let room = MAX_RAW_BACKLOG.saturating_sub(s.pane.raw_backlog());
+        let s = &mut *s;
+        let Some(member) = s.members.iter_mut().find(|m| m.client == client) else { return Ok(Input::Dropped) };
+        // A bracketed paste is held until its end and written whole or not at all; the rest is written as it comes.
+        let fed = member.paste.feed(bytes, MAX_INPUT_BYTES, room);
+        let mut dropped = fed.dropped;
+        for part in &fed.parts {
+            match s.pane.write_raw_whole(part.bytes()) {
+                Ok(()) => {}
+                Err(PaneError::Pty(text)) if text == RAW_BACKLOG_FULL => dropped = true,
+                Err(_) => return Ok(Input::Dropped),
             }
-            Err(_) => Ok(Input::Dropped),
         }
+        if !dropped {
+            return Ok(Input::Accepted);
+        }
+        // The sender is told, at most once per `DROPPED_NOTE_MS`: `Busy` asks the caller to say so to the client.
+        if member.told_dropped.is_some_and(|at| now.saturating_sub(at) < DROPPED_NOTE_MS) {
+            return Ok(Input::Dropped);
+        }
+        member.told_dropped = Some(now);
+        Err(SesError::Busy)
     }
 
     /// Resizes `session` to `cols` x `rows` for `client`, which must hold the right to write; every attachment is told.
@@ -722,7 +736,7 @@ impl Shared {
             id,
             pane,
             lease,
-            members: vec![Member { client, who, att, stream: None, told_dropped: None }],
+            members: vec![Member { client, who, att, stream: None, told_dropped: None, paste: PasteGate::default() }],
             cols,
             rows,
             scrollback,
@@ -797,7 +811,7 @@ impl Shared {
                 };
                 // The first entry of the change is the new attachment's own view, which the answer carries.
                 let changes = s.lease.attach(who, false, now);
-                s.members.push(Member { client, who, att, stream: None, told_dropped: None });
+                s.members.push(Member { client, who, att, stream: None, told_dropped: None, paste: PasteGate::default() });
                 let others: Changes = changes.into_iter().filter(|(w, _)| *w != who).collect();
                 tell_writers(&s, &others);
                 who

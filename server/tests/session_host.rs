@@ -781,6 +781,50 @@ fn input_that_a_program_leaves_unread_is_dropped_and_the_writer_is_told_once_a_s
 }
 
 #[test]
+fn a_bracketed_paste_reaches_the_program_whole_or_not_at_all_and_never_one_marker_alone() {
+    // The program reads nothing for a while, then shows everything it got, escapes made visible (`^[[200~`).
+    let programs = Programs::new("stty raw -echo; sleep 3; exec cat -v");
+    let clock = ManualClock::new();
+    let host = SessionHost::start(programs.clone(), HostSettings::default(), clock.clone());
+    let writer = Rec::new();
+    let id = started(&host, &writer);
+    attach(&host, 1, &writer, id, Some(0)).expect("attach");
+    std::thread::sleep(Duration::from_millis(300)); // `stty` has run
+    // A client cuts one write into full frames from its start, as the device protocol does.
+    let send = |write: &[u8]| -> Vec<Result<Input, SesError>> {
+        write.chunks(MAX_INPUT_BYTES).map(|frame| host.input(1, id, frame)).collect()
+    };
+    let paste = |fill: u8, len: usize| [b"\x1b[200~".as_slice(), &vec![fill; len], b"\x1b[201~"].concat();
+
+    // A paste over two frames that fits: held until its end, then written whole.
+    let kept = send(&paste(b'q', MAX_INPUT_BYTES + 10));
+    assert!(kept.iter().all(|a| *a == Ok(Input::Accepted)), "{kept:?}");
+    // Fill what the program may leave unread with plain input, in pieces that leave room for a small frame (more than the
+    // last frame of the next paste, less than the whole paste), then send a paste that cannot fit: it is dropped whole. Cut
+    // into frames and dropped frame by frame, its end marker would fit and reach the program alone.
+    let mut filled = 0;
+    while host.input(1, id, &vec![b'a'; MAX_INPUT_BYTES - 1000]) == Ok(Input::Accepted) {
+        filled += 1;
+        assert!(filled < 64, "the backlog never filled");
+    }
+    let lost = send(&[paste(b'p', 3 * MAX_INPUT_BYTES), b"z".to_vec()].concat());
+    assert!(lost.iter().all(|a| matches!(a, Ok(Input::Dropped | Input::Accepted))), "told once a second only: {lost:?}");
+
+    // When the program reads, it got the first paste with both markers and nothing of the second.
+    let shown = || writer.live_text();
+    until("the program shows what it read", || shown().matches('q').count() >= MAX_INPUT_BYTES + 10);
+    std::thread::sleep(Duration::from_millis(1500));
+    let text = shown();
+    assert_eq!(text.matches("^[[200~").count(), 1, "one start marker");
+    assert_eq!(text.matches("^[[201~").count(), 1, "one end marker");
+    assert_eq!(text.matches('q').count(), MAX_INPUT_BYTES + 10, "the first paste whole");
+    assert_eq!(text.matches('p').count(), 0, "nothing of the paste that did not fit");
+    let start = text.find("^[[200~").expect("the start");
+    let end = text.find("^[[201~").expect("the end");
+    assert!(start < end && text[start..end].chars().skip(7).all(|c| c == 'q'), "the paste is in one piece");
+}
+
+#[test]
 fn a_reattach_answers_only_after_the_old_stream_has_pushed_its_last_byte_so_nothing_old_follows_the_answer() {
     let programs = Programs::new(TICKING);
     let host = host_of(&programs);

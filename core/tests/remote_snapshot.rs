@@ -718,6 +718,32 @@ mod taps {
     }
 
     #[test]
+    fn raw_input_written_whole_takes_its_room_in_one_step_and_is_refused_whole_when_it_does_not_fit() {
+        let probe = Probe::default();
+        let pane = start(headless("stty raw -echo; exec sleep 60"), &probe);
+        thread::sleep(Duration::from_millis(300));
+        while pane.write_raw(&vec![b'x'; 1000]).is_ok() {}
+        // The writer thread is blocked on a program that reads nothing: the backlog stands still.
+        let room = MAX_RAW_BACKLOG - pane.raw_backlog();
+        assert!(room < 1000, "{room}");
+        let before = pane.raw_backlog();
+        assert!(pane.write_raw_whole(&vec![b'y'; room + 1]).is_err(), "one byte too many is refused whole");
+        assert_eq!(pane.raw_backlog(), before, "and takes no room");
+        assert!(pane.write_raw_whole(&vec![b'y'; room]).is_ok(), "exactly the room is taken");
+        assert_eq!(pane.raw_backlog(), MAX_RAW_BACKLOG);
+        assert!(pane.write_raw_whole(&[]).is_ok(), "nothing always fits");
+        close(pane);
+
+        let pane = start(headless("stty raw -echo; exec sleep 60"), &Probe::default());
+        assert!(pane.write_raw_whole(&vec![b'z'; MAX_RAW_BACKLOG + 1]).is_err(), "more than the whole backlog never fits");
+        assert!(pane.write_raw_whole(&vec![b'z'; MAX_RAW_BYTES * 3 + 5]).is_ok(), "more than one call of write_raw does");
+        close(pane);
+        let plain = start(PaneSpec::new("/bin/cat", 80, 24), &Probe::default());
+        assert!(plain.write_raw_whole(b"nope").is_err(), "only a headless pane");
+        close(plain);
+    }
+
+    #[test]
     fn a_headless_pane_emits_no_frame_and_the_other_events_still_come() {
         let script = "printf '\\033]2;a title\\007'; echo one; sleep 0.4; echo two; sleep 0.4";
         let mut spec = headless(script);

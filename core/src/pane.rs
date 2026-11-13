@@ -1050,6 +1050,20 @@ impl PaneHandle {
         if bytes.len() > MAX_RAW_BYTES {
             return Err(Error::Pty(format!("raw input is limited to {MAX_RAW_BYTES} bytes per call")));
         }
+        self.write_raw_whole(bytes)
+    }
+
+    /// [`PaneHandle::write_raw`] for up to [`MAX_RAW_BACKLOG`] bytes that must reach the program whole or not at all, such
+    /// as a bracketed paste with its start and end marker: the room for all of them is taken in one step, so the call is
+    /// refused whole ([`RAW_BACKLOG_FULL`]) when they do not all fit, and never writes a part. The bytes are queued in
+    /// pieces of at most [`MAX_RAW_BYTES`], in order.
+    pub fn write_raw_whole(&self, bytes: &[u8]) -> Result<()> {
+        if !self.shared.headless {
+            return Err(Error::Pty("raw input is for headless panes only".into()));
+        }
+        if bytes.len() > MAX_RAW_BACKLOG {
+            return Err(Error::Pty(RAW_BACKLOG_FULL.into()));
+        }
         let n = bytes.len();
         let pending = &self.shared.writer_pending;
         // Counted here, before the bytes are queued, so that what waits in the control queue counts as well; the engine
@@ -1062,11 +1076,14 @@ impl PaneHandle {
         {
             return Err(Error::Pty(RAW_BACKLOG_FULL.into()));
         }
-        let sent = self.send(Control::WriteRaw(bytes.to_vec()));
-        if sent.is_err() {
-            pending.fetch_sub(n, Ordering::Relaxed);
+        for (at, piece) in bytes.chunks(MAX_RAW_BYTES).enumerate() {
+            if let Err(error) = self.send(Control::WriteRaw(piece.to_vec())) {
+                // The pane is closed: what was not queued no longer waits.
+                pending.fetch_sub(n - at * MAX_RAW_BYTES, Ordering::Relaxed);
+                return Err(error);
+            }
         }
-        sent
+        Ok(())
     }
 
     /// The bytes on their way to the program that are not written yet: raw input and the engine's replies. At most
