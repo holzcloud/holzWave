@@ -134,6 +134,17 @@ impl Shared {
         view
     }
 
+    /// The older lines that were asked for do not come as asked: the request could not be sent, or the connection went before
+    /// the answer. The pane may ask again, and the header no longer says they are loading. A reconnect still attaches with
+    /// the longer tail.
+    fn older_not_coming(&self) {
+        let mut inner = self.lock();
+        inner.older = false;
+        if inner.view.state == RemoteState::LoadingOlder {
+            inner.view.state = RemoteState::None;
+        }
+    }
+
     /// The pane starts to write: the session takes the size of its tile, once, when that is not the size it has.
     fn send_tile_if_needed(&self) {
         let inner = self.lock();
@@ -171,7 +182,8 @@ impl RemoteControl for Shared {
             inner.tail = inner.tail.max(1).saturating_mul(2).min(MAX_TAIL);
             inner.tail
         };
-        Ok(self.handle().reattach(Some(tail), Cause::Older)?)
+        self.handle().reattach(Some(tail), Cause::Older).inspect_err(|_| self.older_not_coming())?;
+        Ok(())
     }
 
     fn tile(&self, cols: u16, rows: u16) {
@@ -348,6 +360,7 @@ impl ServerReader {
                 self.say(word);
             }
             SubEvent::Reconnecting { attempt, of, in_secs } => {
+                self.shared.older_not_coming();
                 self.shared.state.set(ConnState::Reconnecting { attempt, of, in_secs });
                 if !self.reconnect_noticed {
                     self.reconnect_noticed = true;
@@ -355,6 +368,7 @@ impl ServerReader {
                 }
             }
             SubEvent::GaveUp => {
+                self.shared.older_not_coming();
                 self.shared.state.set(ConnState::Failed);
                 self.say(NOTICE_UNREACHABLE);
             }
@@ -366,6 +380,7 @@ impl ServerReader {
                 // The server does not take the token any more. The pane stays and says so; after a new sign-in Enter attaches
                 // again, with the token the endpoint has then.
                 self.say(error.sentence());
+                self.shared.older_not_coming();
                 self.shared.state.set(ConnState::Failed);
                 self.shared.signed_out.store(true, Ordering::SeqCst);
             }

@@ -676,6 +676,32 @@ fn older_lines_double_the_tail_keep_the_viewport_where_it_was_and_stop_when_the_
 }
 
 #[test]
+fn older_lines_that_a_lost_connection_cut_off_are_not_said_to_load_and_can_be_asked_for_again() {
+    let device = FakeDevice::start();
+    let hub = hub_with(&device, fast());
+    let mut session = rich_session();
+    let (pane, _probe, mut conn) = attached_pane(&device, &hub, 4, &mut session, WriterView::Writing, Some(100), "marker-end");
+    pane.load_older().unwrap();
+    let request = conn.request();
+    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(200) });
+    wait_for("loading older", || pane.remote_view().is_some_and(|v| v.state == RemoteState::LoadingOlder));
+    // The connection goes before the answer.
+    conn.cut();
+    wait_state(&pane, |s| matches!(s, ConnState::Reconnecting { .. }));
+    assert_ne!(pane.remote_view().unwrap().state, RemoteState::LoadingOlder, "nothing is loading while the connection is down");
+    // The reconnect attaches with the longer tail; afterwards older lines can be asked for again.
+    let mut conn = device.accept();
+    let request = conn.request();
+    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(200) });
+    session.serve(&mut conn, &request, WriterView::Writing, 100);
+    wait_state(&pane, |s| *s == ConnState::Connected);
+    wait_for("the state to end", || pane.remote_view().is_some_and(|v| v.state == RemoteState::None));
+    pane.load_older().unwrap();
+    let request = conn.request();
+    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(400) });
+}
+
+#[test]
 fn closing_a_remote_pane_detaches_and_never_ends_the_session() {
     let device = FakeDevice::start();
     let hub = hub_with(&device, fast());
