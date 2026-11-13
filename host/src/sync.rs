@@ -953,4 +953,184 @@ mod tests {
         assert_eq!((view.state, view.error), ("paused", None));
         assert_eq!(fake.total(), before);
     }
+
+    // ---- switching between WebDAV and the server ----
+
+    /// A WebDAV folder on the loopback address that keeps its files and records every request as `METHOD path`.
+    struct Dav {
+        url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Dav {
+        fn start() -> Dav {
+            use std::collections::{BTreeMap, BTreeSet};
+            use std::io::{BufRead, BufReader, Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://127.0.0.1:{}/dav", listener.local_addr().unwrap().port());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            type Files = BTreeMap<String, (Vec<u8>, u64)>;
+            let store: Arc<Mutex<(Files, BTreeSet<String>, u64)>> = Arc::default();
+            let seen = requests.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let (seen, store) = (seen.clone(), store.clone());
+                    std::thread::spawn(move || {
+                        let mut out = stream.try_clone().unwrap();
+                        let mut reader = BufReader::new(stream);
+                        loop {
+                            let mut line = String::new();
+                            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                                return;
+                            }
+                            let mut parts = line.split_whitespace();
+                            let (method, path) = (parts.next().unwrap_or("").to_owned(), parts.next().unwrap_or("").to_owned());
+                            let mut headers = std::collections::HashMap::new();
+                            loop {
+                                let mut h = String::new();
+                                if reader.read_line(&mut h).unwrap_or(0) == 0 || h.trim().is_empty() {
+                                    break;
+                                }
+                                if let Some((k, v)) = h.split_once(':') {
+                                    headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_owned());
+                                }
+                            }
+                            let len: usize = headers.get("content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
+                            let mut body = vec![0u8; len];
+                            if reader.read_exact(&mut body).is_err() {
+                                return;
+                            }
+                            seen.lock().unwrap().push(format!("{method} {path}"));
+                            let rel = path.trim_start_matches("/dav").trim_matches('/').to_owned();
+                            let mut guard = store.lock().unwrap();
+                            let (files, dirs, next) = &mut *guard;
+                            let (status, extra, payload): (u16, String, Vec<u8>) = match method.as_str() {
+                                "MKCOL" => {
+                                    if dirs.insert(rel) { (201, String::new(), vec![]) } else { (405, String::new(), vec![]) }
+                                }
+                                "GET" => match files.get(&rel) {
+                                    Some((b, e)) => (200, format!("ETag: \"v{e}\"\r\n"), b.clone()),
+                                    None => (404, String::new(), vec![]),
+                                },
+                                "PUT" => {
+                                    let current = files.get(&rel).map(|(_, e)| format!("\"v{e}\""));
+                                    let ok = match (headers.get("if-none-match"), headers.get("if-match")) {
+                                        (Some(_), _) => current.is_none(),
+                                        (_, Some(m)) => current.as_deref() == Some(m.as_str()),
+                                        _ => true,
+                                    };
+                                    if ok {
+                                        *next += 1;
+                                        let created = current.is_none();
+                                        files.insert(rel, (body, *next));
+                                        (if created { 201 } else { 204 }, format!("ETag: \"v{next}\"\r\n"), vec![])
+                                    } else {
+                                        (412, String::new(), vec![])
+                                    }
+                                }
+                                "PROPFIND" if !rel.is_empty() && !dirs.contains(&rel) => (404, String::new(), vec![]),
+                                "PROPFIND" => {
+                                    let prefix = if rel.is_empty() { String::new() } else { format!("{rel}/") };
+                                    let mut xml = String::from(r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">"#);
+                                    xml.push_str(&format!("<d:response><d:href>/dav/{prefix}</d:href><d:propstat><d:prop><d:getetag>\"d\"</d:getetag><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>"));
+                                    for (p, (_, e)) in files.iter() {
+                                        if let Some(name) = p.strip_prefix(&prefix) {
+                                            if !name.contains('/') {
+                                                xml.push_str(&format!("<d:response><d:href>/dav/{p}</d:href><d:propstat><d:prop><d:getetag>&quot;v{e}&quot;</d:getetag><d:resourcetype/></d:prop></d:propstat></d:response>"));
+                                            }
+                                        }
+                                    }
+                                    xml.push_str("</d:multistatus>");
+                                    (207, "Content-Type: application/xml\r\n".into(), xml.into_bytes())
+                                }
+                                _ => (405, String::new(), vec![]),
+                            };
+                            drop(guard);
+                            let head = format!("HTTP/1.1 {status} X\r\n{extra}Content-Length: {}\r\nConnection: keep-alive\r\n\r\n", payload.len());
+                            if out.write_all(head.as_bytes()).and_then(|()| out.write_all(&payload)).is_err() {
+                                return;
+                            }
+                        }
+                    });
+                }
+            });
+            Dav { url, requests }
+        }
+
+        fn total(&self) -> usize {
+            self.requests.lock().unwrap().len()
+        }
+
+        fn all(&self) -> Vec<String> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    fn some_local_files(dir: &std::path::Path) -> Vec<(&'static str, Vec<u8>)> {
+        let local: [(&str, &[u8]); 3] =
+            [("settings.json", br#"{"font_size":14}"#), ("layout.json", br#"{"version":1}"#), ("themes/mine.json", br#"{"name":"mine"}"#)];
+        std::fs::create_dir_all(dir.join("themes")).unwrap();
+        local
+            .iter()
+            .map(|(name, bytes)| {
+                std::fs::write(dir.join(name), bytes).unwrap();
+                (*name, bytes.to_vec())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn switching_from_webdav_to_the_server_asks_nothing_more_of_the_old_webdav_folder() {
+        let dav = Dav::start();
+        let fake = Fake::start();
+        let (rt, _server, store, dir) = on_server("dav-to-srv", &fake);
+        let local = some_local_files(&dir);
+        let view = rt.save(&dav.url, "holz", "pw", "long enough pass").expect("the first run against WebDAV");
+        assert_eq!(view.transport, Transport::Webdav);
+        assert!(dav.all().iter().any(|r| r.starts_with("PUT /dav/files/")), "the files went to WebDAV: {:?}", dav.all());
+        let before = dav.total();
+
+        let view = rt.use_server("long enough pass").expect("the switch to the server");
+        assert_eq!(view.transport, Transport::Server);
+        assert_eq!(view.removed, 0, "{view:?}");
+        assert_eq!(dav.total(), before, "the old WebDAV folder was asked again: {:?}", &dav.all()[before..]);
+        for (name, bytes) in &local {
+            assert_eq!(&std::fs::read(dir.join(name)).unwrap(), bytes, "{name} is unchanged");
+        }
+        assert_eq!(store.get(PASSWORD).unwrap(), None, "the app password of WebDAV is forgotten");
+        // A later run goes to the server only.
+        rt.run().expect("a run on the server");
+        assert_eq!(dav.total(), before, "a run after the switch went to WebDAV");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn switching_from_the_server_back_to_webdav_loses_no_file_and_leaves_the_server_sign_in_alone() {
+        let dav = Dav::start();
+        let fake = Fake::start();
+        let (rt, server, store, dir) = on_server("srv-to-dav", &fake);
+        let local = some_local_files(&dir);
+        let view = rt.use_server("long enough pass").expect("the first run against the server");
+        assert_eq!(view.transport, Transport::Server);
+        assert!(fake.count("PUT /sync/v1/") + fake.count("POST /sync/v1/") > 0, "the server was used");
+        let on_server_before = fake.requests.lock().unwrap().iter().filter(|l| l.contains("/sync/v1/")).count();
+
+        let view = rt.save(&dav.url, "holz", "pw", "long enough pass").expect("the switch back to WebDAV");
+        assert_eq!(view.transport, Transport::Webdav);
+        assert_eq!(view.removed, 0, "{view:?}");
+        for (name, bytes) in &local {
+            assert_eq!(&std::fs::read(dir.join(name)).unwrap(), bytes, "{name} is unchanged");
+        }
+        rt.run().expect("a run on WebDAV");
+        let after = fake.requests.lock().unwrap().iter().filter(|l| l.contains("/sync/v1/")).count();
+        assert_eq!(after, on_server_before, "the server's sync was asked after the switch");
+        let gets: Vec<String> = dav.all().into_iter().filter(|r| r.starts_with("GET /dav/files/")).collect();
+        assert!(gets.is_empty(), "WebDAV was asked for blobs it never had: {gets:?}");
+        assert!(dav.all().iter().any(|r| r.starts_with("PUT /dav/files/")), "the local files went to the new folder");
+        // The sign-in at the server is untouched.
+        assert_eq!(store.get("server:token").unwrap().as_deref(), Some(TOKEN));
+        assert_ne!(server.view().state, "signed_out");
+        assert!(dir.join("server_link.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
