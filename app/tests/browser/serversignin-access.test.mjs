@@ -94,6 +94,8 @@ async function accessibilityCase(page, url) {
   await open(page, url, { view: { url: GOOD }, polls: ["pending"], interval: 5 });
   await openDialog(page);
   await page.waitForFunction(() => document.querySelector(".ss-code")?.textContent === "BCDF-GHJK");
+  // The code is real text in a named group, so assistive technology says what it is.
+  assert.equal(await dialog(page).getByRole("group", { name: "Code", exact: true }).textContent(), "BCDF-GHJK");
   const probe = () =>
     page.evaluate(() => {
       const pick = (selector) => {

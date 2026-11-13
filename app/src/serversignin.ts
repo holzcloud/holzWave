@@ -394,6 +394,8 @@ async function run(returnTo?: HTMLElement | null): Promise<ServerView | null> {
         title.textContent = SIGN_IN_TITLE;
         title.tabIndex = -1;
         codeNode = el("div", "ss-code", box);
+        // A name on a plain div is ignored: as a group the code is announced as `Code` and then read as its text.
+        codeNode.setAttribute("role", "group");
         codeNode.setAttribute("aria-label", "Code");
         const kv = el("div", "ss-kv", box);
         el("span", "ss-k", kv).textContent = SERVER_LABEL;
