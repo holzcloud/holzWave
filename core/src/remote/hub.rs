@@ -236,6 +236,8 @@ pub enum SubEvent {
     Reconnecting { attempt: u32, of: u32, in_secs: u64 },
     /// The tries are used: the subscription waits for [`SubHandle::retry`].
     GaveUp,
+    /// Input this client sent was dropped because the program does not read its input; said at most about once a second.
+    InputDropped,
     /// The subscription is over and will not be attached again.
     Lost(HubError),
 }
@@ -1319,6 +1321,7 @@ impl Core {
                 self.quiet(Op::Detach { session });
             }
             Event::Resync { .. } => self.resync(session),
+            Event::Dropped { .. } => self.offer(session, SubEvent::InputDropped, true, bound),
         }
     }
 

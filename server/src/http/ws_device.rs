@@ -509,6 +509,7 @@ impl Machine<'_> {
                         Event::Resync { session }
                     }
                     SesEvent::Size { cols, rows } => Event::Size { session, cols, rows },
+                    SesEvent::Dropped => Event::Dropped { session },
                 };
                 self.text(transport, Reply::Event(event).encode()).await
             }

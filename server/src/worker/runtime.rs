@@ -284,7 +284,10 @@ pub fn handle_ses(host: &SessionHost, queue: &Arc<Outbound>, ses: Ses) {
             answer(queue, socket, request, done(host.detach(u64::from(socket), session)))
         }
         Ses::Input { socket, session, bytes } => {
-            let _ = host.input(u64::from(socket), session, &bytes);
+            // Input is never answered; input the program left unread is not dropped in silence: the socket is told.
+            if host.input(u64::from(socket), session, &bytes) == Err(SesError::Busy) {
+                queue.push(Frame::Ses(Ses::Event { socket, session, event: SesEvent::Dropped }));
+            }
         }
         Ses::Resize { socket, request, session, cols, rows } => {
             answer(queue, socket, request, done(host.resize(u64::from(socket), session, cols, rows)));

@@ -485,6 +485,25 @@ async fn a_socket_holds_at_most_the_most_attachments_and_leaving_one_makes_room(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn input_a_program_leaves_unread_is_dropped_and_the_writer_is_told() {
+    let env = env().await;
+    let alice = env.person("alice");
+    let mut a = device_of(&env, &alice, "a").await;
+    let session = a.new_session().await;
+    a.attach(session, None).await;
+    // The program reads nothing and the terminal neither echoes nor discards.
+    a.type_into(session, b"stty raw -echo; exec sleep 600\r").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let chunk = vec![b'x'; holzwave_core::remote::proto::MAX_INPUT];
+    for _ in 0..2 * holzwave_core::pane::MAX_RAW_BACKLOG / chunk.len() + 4 {
+        a.type_into(session, &chunk).await;
+    }
+    a.until("the word that input was dropped", SHELL, |d| d.events.contains(&Event::Dropped { session })).await;
+    assert!(a.closed.is_none() && !a.ended, "the socket goes on");
+    assert!(a.strange.is_empty(), "{:?}", a.strange);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_session_whose_program_ended_no_longer_counts_against_the_cap_of_attachments() {
     let env = env().await;
     let alice = env.person("alice");

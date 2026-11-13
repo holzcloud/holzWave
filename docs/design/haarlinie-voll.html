@@ -776,14 +776,14 @@ td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
 .sv-mgr{display:flex;flex:1;min-height:0;border-top:1px solid var(--edge);margin-top:8px}
 .sv-frame{border:1px solid var(--edge);border-radius:6px;background:var(--pane);overflow:hidden}
 .sv-frame .pane{background:transparent}
-.sv-frame .term{flex:none;padding:4px 10px 5px;font-size:10.5px;line-height:1.4}
+.sv-frame .term{flex:none;padding:2px 10px 3px;font-size:10.5px;line-height:1.4}
 .sv-line{color:var(--ink3);white-space:normal}
-.sv-page{flex:1;min-height:0;display:flex;flex-direction:column;gap:8px;padding:14px 20px;background:var(--ground);overflow:hidden}
-.sv-page .cap{margin:0 0 3px}
-.sv-3{display:flex;flex-direction:column;gap:6px}
+.sv-page{flex:1;min-height:0;display:flex;flex-direction:column;gap:4px;padding:8px 20px;background:var(--ground);overflow:hidden}
+.sv-page .cap{margin:0 0 1px}
+.sv-3{display:flex;flex-direction:column;gap:4px}
 .sv-rw{display:grid;grid-template-columns:300px 1fr;gap:0 12px;align-items:center}.sv-rw .cap{margin:0}
-.sv-6{display:grid;grid-template-columns:repeat(2,1fr);gap:6px 16px}
-.sv-s3{display:grid;grid-template-columns:repeat(3,1fr);gap:6px 16px}
+.sv-6{display:grid;grid-template-columns:repeat(2,1fr);gap:3px 16px}
+.sv-s3{display:grid;grid-template-columns:repeat(3,1fr);gap:3px 16px}
 .ph:has(.sv-chip) .lbl{white-space:nowrap}
 .ph:has(.sv-chip) .ctx{min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ph:has(.sv-chip){overflow:hidden}
@@ -1758,7 +1758,7 @@ const svConn=()=>{
    <div class="row" style="gap:8px;margin-top:4px"><span class="btn p">Connect</span><span class="btn">Test</span><span class="btn" style="margin-left:auto">Close</span></div></div></div></div>`;
 };
 Object.defineProperty(ovl,'server-sessions',{enumerable:true,get:svConn});
-/* The panes of the states view: three headers with the three writer words, and the six states of 6.34. */
+/* The panes of the states view: three headers with the three writer words, and the seven states of 6.34. */
 const svCell=(cap,body)=>`<div class="dv-cell"><div class="cap">${cap}</div>${body}</div>`;
 const svRw=(cap,body)=>`<div class="sv-rw"><div class="cap">${cap}</div>${body}</div>`;
 const svFrame=(w,o={})=>`<div class="sv-frame">${svPane(w,o)}</div>`;
@@ -1768,6 +1768,7 @@ const svStates=[
  ['Attaching','dr',['Attaching…'],'Attaching…',null],
  ['Older lines, the person scrolled to the top','', ['Loading older lines…'],'Loading older lines…','writing'],
  ['The server asked for a fresh start','dr',['Resyncing…'],'Resyncing…','writing'],
+ ['The program reads no input','',[svWarn('Input dropped')],'$ ./import --wait','writing'],
  ['The session ended','fl',[svWarn('Session ended · exit 1')],'Session ended · exit 1',null],
  ['The connection was lost','dr',['Reconnecting…'],'Reconnecting…',null],
  ['No try is left','fl',[svWarn('Server unreachable')],'Server unreachable. Press Enter to try again.',null]
@@ -1907,7 +1908,7 @@ const views=[
  ['web-people','Web: people','The people dialog, for administrators only: the table of accounts with role, state (active with a dot, disabled with a ring, locked out with ! and an underline) and last sign-in, the menu of one row (Make admin, Disable, Unlock sign-in while locked out, Reset secrets, Delete) and the layer that shows a new invitation link once with Copy link. The dialog shows no secret, terminal, command or layout of anyone.'],
  ['web-window','Web: window','The window as a browser shows it: the bar starts at the left edge, with no window buttons and no drag region. In the status line the marks reconnecting (a dotted ring), session ends in 4 min (a quarter circle) and secrets locked (a lock and the text button Unlock), and the notice Not available in the browser. A file dragged over a pane that takes it (a shell, a chat or a file browser; a preview, the monitor and a tool view take nothing and show no edge) shows a dashed edge and Drop to upload, with the upload folder once the page has seen it (the first drop of a page load shows the label alone); the edge is drawn here on the shell pane, and it is the same on a chat and on a file browser. A dropped file becomes its quoted path typed in a shell, the same path in the message of a chat, and the selected row of a file browser that lists the upload folder (a browser that lists another folder stays as it is and the status line says Uploaded to the folder). The row menu of a file in the file browser has the one entry Download; Settings has the row Notifications, here off, on and blocked by the browser.'],
   ['server-sessions','Server sessions','The Connections view with the holzWave server above the saved connections (docs/design.md 6.34): its name, its address in mono, the state dot with its word, Sign out and New session; under it the running sessions with the program title, the directory, the size, the start, how many are attached, free or held, Attach and End; the help line under the row. Behind the dialog a local pane and a remote pane whose header says WRITING. With the Browser platform the row is This server, with no sign-in and no sign-out.'],
- ['server-pane-states','Server pane states','The header of a remote pane (6.34): WRITING with a filled square, WATCHING with a hollow one and FREE with a dashed one, and Take over after the label when the pane does not write. Then the six states of the pane, each a dot shape and a word in the context slot and one dim line on the screen, and the server row in its states: signed in, not signed in, signing in, unreachable, remote sessions off on the server, and the Android row while the secrets are locked.'],
+ ['server-pane-states','Server pane states','The header of a remote pane (6.34): WRITING with a filled square, WATCHING with a hollow one and FREE with a dashed one, and Take over after the label when the pane does not write. Then the seven states of the pane, each a dot shape and a word in the context slot and, except for Input dropped, one dim line on the screen, and the server row in its states: signed in, not signed in, signing in, unreachable, remote sessions off on the server, and the Android row while the secrets are locked.'],
  ['device-authorize','Device sign-in','Signing in to a server from the app (docs/design.md 6.35): step 1 asks for the address of the server (an address that is not https is refused), step 2 shows the code while the browser page opens; and the page Authorize device of the browser with the device, the platform, the address, the time and the code to compare, Deny and Approve. Under them the states of step 2 and the three results of the page. Each state is a dot shape or the mark ! besides its words.'],
  ['device-lists','Device lists','The Devices group of the Account dialog (a revoke that asks a second time, and the empty list), the list of devices of an administrator in the People dialog with the column Owner, and the Device access group with the two switches Sync target and Remote sessions (docs/design.md 6.35): the word ON or OFF is inside the knob, and a switch that the server configuration turned off for good is OFF, dashed, not operable, with its line.'],
  ['links','Links','Links the program marked, in a shell pane (docs/design.md 6.31): two at rest with a dotted underline, one under the pointer with a solid underline and its target in the LINK segment of the status line (cut in the middle) with the notice beside it that says why a click could not open it (the host\u2019s own sentence, here an opener that cannot be started), one with the open gesture held in solid rose, one in text the program underlined itself, and an address with a scheme that is not allowed, which stays plain text. The pointer cursor is the system\u2019s and is not drawn.'],

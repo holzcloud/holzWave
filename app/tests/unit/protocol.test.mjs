@@ -234,7 +234,7 @@ test("the app info and the pointer commands are pinned", () => {
     assert.deepEqual(keys(conn.remote), ["cols", "more", "phase", "rows", "session", "writer"]);
   }
   assert.deepEqual([...new Set(conns.slice(1).map((c) => c.remote.writer))].sort(), ["free", "watching", "writing"]);
-  assert.deepEqual([...new Set(conns.slice(1).map((c) => c.remote.phase))].sort(), ["", "attaching", "loading_older", "resyncing"]);
+  assert.deepEqual([...new Set(conns.slice(1).map((c) => c.remote.phase))].sort(), ["", "attaching", "input_dropped", "loading_older", "resyncing"]);
   assert.ok(!JSON.stringify([golden.answers.sessions, conns]).includes("hwd_"), "no sample holds a device token");
   assert.deepEqual(golden.commands.wheel, ["pane", "rows", "x", "y", "mods"]);
   for (const name of ["note_window", "placement"]) {

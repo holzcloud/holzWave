@@ -23,7 +23,7 @@
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::hub::{Cause, Hub, HubError, SubEvent, SubHandle, Subscription};
 use super::proto::{MAX_TAIL, WriterView};
@@ -62,6 +62,10 @@ pub const RESET_BEFORE_SNAPSHOT: &[u8] = b"\x1bc";
 /// what the doubling of [`RemoteControl::load_older`] starts from.
 const DEFAULT_TAIL: u32 = 1000;
 
+/// How long the pane says that input was dropped after the server last said so. The server says it at most once a second
+/// while it lasts, so the state holds while input keeps being dropped and ends a few seconds after.
+pub const INPUT_DROPPED_FOR: Duration = Duration::from_secs(5);
+
 /// The exit status of a pane that ended because the link could not go on.
 pub const EXIT_GAVE_UP: u32 = 255;
 
@@ -87,6 +91,8 @@ struct Inner {
     older: bool,
     /// The status of the program, once the session ended.
     exit: Option<u32>,
+    /// Until when the pane says that input was dropped ([`RemoteState::InputDropped`]).
+    dropped_until: Option<Instant>,
 }
 
 /// Makes a new subscription to the same session, for a pane whose sign-in ended and that is asked to try again.
@@ -116,7 +122,13 @@ impl Shared {
     }
 
     fn view(&self) -> RemoteView {
-        let mut view = self.lock().view.clone();
+        let inner = self.lock();
+        let mut view = inner.view.clone();
+        // A state that is under way says more than the drop of a moment ago, and takes its place.
+        if view.state == RemoteState::None && inner.dropped_until.is_some_and(|until| Instant::now() < until) {
+            view.state = RemoteState::InputDropped;
+        }
+        drop(inner);
         view.dropped_input = self.dropped.load(Ordering::Relaxed);
         view
     }
@@ -197,6 +209,7 @@ impl ServerLink {
                 snapshot: 0,
                 older: false,
                 exit: None,
+                dropped_until: None,
             }),
             dropped: AtomicU64::new(0),
             closed: AtomicBool::new(false),
@@ -340,6 +353,9 @@ impl ServerReader {
                 self.shared.state.set(ConnState::Failed);
                 self.say(NOTICE_UNREACHABLE);
             }
+            // Only the header says it: a line on the screen would move the session's own text, which the server's screen does
+            // not have.
+            SubEvent::InputDropped => self.shared.lock().dropped_until = Some(Instant::now() + INPUT_DROPPED_FOR),
             SubEvent::Lost(HubError::Closed) => self.ending = Some(Ending::Closed),
             SubEvent::Lost(error @ HubError::Fault(Fault::SignedOut)) => {
                 // The server does not take the token any more. The pane stays and says so; after a new sign-in Enter attaches

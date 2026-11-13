@@ -1074,6 +1074,23 @@
         },
         "secs": 0,
         "state": "failed"
+      },
+      {
+        "attempt": 0,
+        "name": "sync.example.test",
+        "of": 0,
+        "pane": 14,
+        "profile": "",
+        "remote": {
+          "cols": 120,
+          "more": true,
+          "phase": "input_dropped",
+          "rows": 40,
+          "session": 7,
+          "writer": "writing"
+        },
+        "secs": 0,
+        "state": "connected"
       }
     ],
     "release_outside": [

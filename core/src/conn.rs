@@ -78,6 +78,9 @@ pub enum RemoteState {
     LoadingOlder,
     /// The server asked for a fresh start, or this pane fell behind.
     Resyncing,
+    /// Input this pane sent was dropped a moment ago, because the program in the session does not read its input. It lasts
+    /// a few seconds after the server last said so.
+    InputDropped,
 }
 
 /// What a link to a session on a server lets the rest of the program do. Every method returns at once.

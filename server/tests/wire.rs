@@ -1277,6 +1277,7 @@ fn ses_events_are_operation_19_then_the_session_the_event_and_its_body() {
         Frame::Ses(Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Size { cols: 90, rows: 20 } }),
         head(&[4, 0, 90, 0, 20]),
     );
+    pinned(Frame::Ses(Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Dropped }), head(&[5]));
 }
 
 #[test]
@@ -1310,6 +1311,7 @@ fn ses_frames_with_a_fixed_length_are_an_error_cut_anywhere_or_with_a_byte_too_m
         Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Exited(Some(3)) },
         Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Size { cols: 1, rows: 1 } },
         Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Resync },
+        Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Dropped },
     ];
     for ses in frames {
         let frame = Frame::Ses(ses);
@@ -1360,7 +1362,7 @@ fn a_session_frame_refuses_an_id_of_0_a_size_of_0_and_a_byte_it_does_not_know() 
         vec![0x06, 16, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 6, 6],
         vec![0x06, 16, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 3, 0, 1, 0, 1, 3, 0, 0, 0, 0, 0],
         vec![0x06, 19, 0, 0, 0, 1, 0, 0, 0, 1, 0],
-        vec![0x06, 19, 0, 0, 0, 1, 0, 0, 0, 1, 5],
+        vec![0x06, 19, 0, 0, 0, 1, 0, 0, 0, 1, 6],
         vec![0x06, 19, 0, 0, 0, 1, 0, 0, 0, 1, 1, 3],
         vec![0x06, 19, 0, 0, 0, 1, 0, 0, 0, 1, 2, 2],
         vec![0x06, 19, 0, 0, 0, 1, 0, 0, 0, 1, 4, 0, 0, 0, 1],

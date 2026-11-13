@@ -91,7 +91,8 @@ pub struct RemoteConn {
     pub rows: u16,
     /// Whether the server holds lines older than the ones this pane has.
     pub more: bool,
-    /// What the pane is busy with: `attaching`, `loading_older`, `resyncing`, or the empty text when it shows the session.
+    /// What the pane is busy with: `attaching`, `loading_older`, `resyncing`, `input_dropped`, or the empty text when it shows
+    /// the session.
     pub phase: &'static str,
 }
 
@@ -103,6 +104,7 @@ impl RemoteConn {
             RemoteState::Attaching => "attaching",
             RemoteState::LoadingOlder => "loading_older",
             RemoteState::Resyncing => "resyncing",
+            RemoteState::InputDropped => "input_dropped",
         };
         Self { writer: view.writer.word(), session: view.session, cols: view.cols, rows: view.rows, more: view.more, phase }
     }
@@ -786,6 +788,7 @@ mod tests {
             (WriterView::Watching, RemoteState::Attaching),
             (WriterView::Free, RemoteState::LoadingOlder),
             (WriterView::Writing, RemoteState::Resyncing),
+            (WriterView::Writing, RemoteState::InputDropped),
         ]
         .into_iter()
         .map(|(writer, state)| {
@@ -793,7 +796,10 @@ mod tests {
             (remote.writer, remote.phase)
         })
         .collect();
-        assert_eq!(words, [("watching", "attaching"), ("free", "loading_older"), ("writing", "resyncing")]);
+        assert_eq!(
+            words,
+            [("watching", "attaching"), ("free", "loading_older"), ("writing", "resyncing"), ("writing", "input_dropped")]
+        );
         let remote = RemoteConn::of(&seen(WriterView::Free, RemoteState::None));
         let states: Vec<(&str, u32, u32, u64)> = [
             ConnState::Local,

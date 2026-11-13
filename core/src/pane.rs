@@ -385,6 +385,10 @@ pub const MAX_RAW_BYTES: usize = 64 * 1024;
 /// whole, so a sender whose program does not read its input cannot grow the memory of the process without a bound.
 pub const MAX_RAW_BACKLOG: usize = 1024 * 1024;
 
+/// The text of the error of a [`PaneHandle::write_raw`] call that [`MAX_RAW_BACKLOG`] refused, so that a caller can tell it from a
+/// pane that is closed and tell its sender.
+pub const RAW_BACKLOG_FULL: &str = "the program is not reading its input";
+
 /// The identity of a tap, for [`PaneHandle::detach_tap`]. Unique in the process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TapId(u64);
@@ -1056,7 +1060,7 @@ impl PaneHandle {
             })
             .is_err()
         {
-            return Err(Error::Pty("the program is not reading its input".into()));
+            return Err(Error::Pty(RAW_BACKLOG_FULL.into()));
         }
         let sent = self.send(Control::WriteRaw(bytes.to_vec()));
         if sent.is_err() {

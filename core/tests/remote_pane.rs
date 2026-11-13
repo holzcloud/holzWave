@@ -24,7 +24,7 @@ use holzwave_core::engine::{DomKey, TerminalEngine};
 use holzwave_core::pane::{PaneEvent, PaneHandle, PaneSpec, RemoteTarget};
 use holzwave_core::remote::hub::{Hub, HubOptions};
 use holzwave_core::remote::link::{
-    EXIT_GAVE_UP, NOTICE_ATTACHING, NOTICE_LOADING_OLDER, NOTICE_RECONNECTING, NOTICE_RESYNCING, NOTICE_UNREACHABLE, notice,
+    EXIT_GAVE_UP, INPUT_DROPPED_FOR, NOTICE_ATTACHING, NOTICE_LOADING_OLDER, NOTICE_RECONNECTING, NOTICE_RESYNCING, NOTICE_UNREACHABLE, notice,
     notice_ended,
 };
 use holzwave_core::remote::proto::{Event, Op, Request, WriterView};
@@ -471,6 +471,30 @@ fn the_view_is_none_for_a_local_pane_and_follows_the_events_of_the_server_in_ord
     wait_for("free", || pane.remote_view().is_some_and(|v| v.writer == WriterView::Free));
     conn.event(Event::Writer { session: 4, state: WriterView::Writing });
     wait_for("writing", || pane.remote_view().is_some_and(|v| v.writer == WriterView::Writing));
+}
+
+#[test]
+fn input_the_server_dropped_is_said_in_the_view_for_a_few_seconds_and_never_on_the_screen() {
+    let device = FakeDevice::start();
+    let hub = hub_with(&device, fast());
+    let mut session = Session::new(80, 24);
+    session.print("busy$ ");
+    let (pane, _probe, mut conn) = attached_pane(&device, &hub, 4, &mut session, WriterView::Writing, None, "busy$");
+    let before = screen(&pane);
+    conn.event(Event::Dropped { session: 4 });
+    wait_for("the dropped state", || pane.remote_view().is_some_and(|v| v.state == RemoteState::InputDropped));
+    assert_eq!(pane.remote_view().unwrap().writer, WriterView::Writing, "the writer view stays");
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(screen(&pane), before, "the screen stays the session's: the notice is the header's");
+    // An event about another session changes nothing here.
+    conn.event(Event::Dropped { session: 5 });
+    // The state ends by itself a few seconds after the last word of the server.
+    let deadline = Instant::now() + INPUT_DROPPED_FOR + Duration::from_secs(5);
+    while pane.remote_view().is_some_and(|v| v.state == RemoteState::InputDropped) {
+        assert!(Instant::now() < deadline, "the dropped state never ended");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(pane.remote_view().unwrap().state, RemoteState::None);
 }
 
 #[test]

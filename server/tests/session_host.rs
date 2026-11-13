@@ -14,9 +14,10 @@ use holzwave_core::pane::PaneSpec;
 use holzwave_core::textread::TextRegion;
 use holzwave_server::config::Remote;
 use holzwave_server::worker::lease::{Input, WriterState};
+use holzwave_core::pane::MAX_RAW_BACKLOG;
 use holzwave_server::worker::sessions::{
-    Attached, Attachment, CHUNK_BYTES, Clock, EXITED_GRACE_MS, HostSettings, MonotonicClock, Place, SesError, SessionHost,
-    SessionLimits, Spawner,
+    Attached, Attachment, CHUNK_BYTES, Clock, DROPPED_NOTE_MS, EXITED_GRACE_MS, HostSettings, MAX_INPUT_BYTES, MonotonicClock,
+    Place, SesError, SessionHost, SessionLimits, Spawner,
 };
 
 const WAIT: Duration = Duration::from_secs(30);
@@ -748,6 +749,35 @@ fn a_push_that_cannot_be_taken_ends_that_attachments_stream_with_a_resync() {
     assert!(refusing.bytes().is_empty());
     until("the other client has the end", || other.live_text().contains("done"));
     assert_eq!(other.resyncs(), 0);
+}
+
+#[test]
+fn input_that_a_program_leaves_unread_is_dropped_and_the_writer_is_told_once_a_second() {
+    // Raw mode, no echo, and a program that never reads: everything typed waits in the pane.
+    let programs = Programs::new("stty raw -echo; exec sleep 600");
+    let clock = ManualClock::new();
+    let host = SessionHost::start(programs.clone(), HostSettings::default(), clock.clone());
+    let writer = Rec::new();
+    let id = started(&host, &writer);
+    std::thread::sleep(Duration::from_millis(300)); // `stty` has run
+    let chunk = vec![b'x'; MAX_INPUT_BYTES];
+    let mut answers = Vec::new();
+    for _ in 0..2 * MAX_RAW_BACKLOG / MAX_INPUT_BYTES + 8 {
+        answers.push(host.input(1, id, &chunk));
+    }
+    let busy = answers.iter().filter(|a| **a == Err(SesError::Busy)).count();
+    assert_eq!(busy, 1, "told once while the clock stands still: {answers:?}");
+    let first_busy = answers.iter().position(|a| *a == Err(SesError::Busy)).expect("told");
+    assert!(answers[..first_busy].iter().all(|a| *a == Ok(Input::Accepted)), "what fits is taken first");
+    assert!(answers[first_busy + 1..].iter().all(|a| *a == Ok(Input::Dropped)), "the rest is dropped quietly: {answers:?}");
+    // A second later the writer is told again; a watcher's input is dropped by the lease and never told.
+    clock.set(DROPPED_NOTE_MS - 1);
+    assert_eq!(host.input(1, id, &chunk), Ok(Input::Dropped));
+    clock.set(DROPPED_NOTE_MS);
+    assert_eq!(host.input(1, id, &chunk), Err(SesError::Busy));
+    let watcher = Rec::new();
+    attach(&host, 2, &watcher, id, Some(0)).expect("attach");
+    assert_eq!(host.input(2, id, &chunk), Ok(Input::Dropped));
 }
 
 #[test]

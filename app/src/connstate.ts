@@ -20,7 +20,7 @@ export interface PaneConn {
 /** Who writes, from this pane's own view: it holds the right, another pane holds it, or nobody does. */
 export type Writer = "writing" | "watching" | "free";
 /** What a pane of a session is busy with; the empty text when it shows the session. */
-export type Phase = "" | "attaching" | "loading_older" | "resyncing";
+export type Phase = "" | "attaching" | "loading_older" | "resyncing" | "input_dropped";
 
 /** What a pane that shows a session of a server adds to its connection. Nothing here is text the server wrote. */
 export interface RemoteConn {
@@ -36,7 +36,7 @@ export interface RemoteConn {
 
 /** The closed sets of the remote member, as the core spells them. */
 export const WRITERS: readonly Writer[] = ["writing", "watching", "free"];
-export const PHASES: readonly Phase[] = ["", "attaching", "loading_older", "resyncing"];
+export const PHASES: readonly Phase[] = ["", "attaching", "loading_older", "resyncing", "input_dropped"];
 
 /** The writer label of a pane header (docs/design.md 6.34): the word, written in capitals by the page, and the shape of its square. */
 export const WRITER_LABELS: Readonly<Record<Writer, { word: string; shape: "filled" | "hollow" | "dashed" }>> = {

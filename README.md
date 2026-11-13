@@ -149,7 +149,7 @@ Drawings of the design for the server as a sync target and for terminal sessions
 
 | The server row and its sessions | The writer label and the states of a remote pane | The sessions on a phone |
 |---|---|---|
-| ![Drawing of the design: the Connections view with the server above the saved connections, its two sessions with Attach and End, and behind it a remote pane whose header says WRITING](docs/design/server-sessions.png) | ![Drawing of the design: the writer label WRITING, WATCHING and FREE as a square and a word with Take over, the six states of a remote pane and the server row in its states](docs/design/server-pane-states.png) | ![Drawing of the design: the sessions sheet of the Connections view and a remote pane that watches, with the label WATCHING and Take over](docs/design/server-sessions-phone.png) |
+| ![Drawing of the design: the Connections view with the server above the saved connections, its two sessions with Attach and End, and behind it a remote pane whose header says WRITING](docs/design/server-sessions.png) | ![Drawing of the design: the writer label WRITING, WATCHING and FREE as a square and a word with Take over, the seven states of a remote pane and the server row in its states](docs/design/server-pane-states.png) | ![Drawing of the design: the sessions sheet of the Connections view and a remote pane that watches, with the label WATCHING and Take over](docs/design/server-sessions-phone.png) |
 
 | Signing in to a server | Devices and the two switches | The target of the sync |
 |---|---|---|

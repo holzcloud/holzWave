@@ -206,6 +206,16 @@ test("each state of a pane says the record's word in the context slot, with a do
   assert.equal(paneState(seen("connecting")).state, "attaching", "a link that said nothing yet is attaching");
   assert.equal(paneState(seen("connected")), null, "a pane that shows its session has no state");
   assert.equal(paneState(seen("connected", "exploding")), null, "an unknown phase reads as none");
+  // Input the program did not read: the header says it in the warn tone; the screen says nothing, it stays the session's.
+  const [, , dot, context, line, label] = row("input dropped");
+  const dropped = paneState(seen("connected", "input_dropped"));
+  assert.equal(dropped.text, context.match(/`([^`]+)`/)[1]);
+  assert.equal(dropped.text, "Input dropped");
+  assert.equal(dropped.dot, dots[dot]);
+  assert.ok(dropped.warn && context.includes("warn"), "the warn tone with its mark and underline");
+  assert.equal(dropped.label, label === "shown", "the writer label stays");
+  assert.ok(line.startsWith("none"), "no line on the screen");
+  assert.ok(section.includes("goes 5 seconds after the server last said it"), "the record says how long it lasts");
 });
 
 // ---- older lines -------------------------------------------------------------------------------------------------------------------

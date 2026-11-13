@@ -292,6 +292,7 @@ mod protocol {
             remote(11, &ConnState::Connecting, WriterView::Free, RemoteState::Attaching),
             remote(12, &ConnState::Reconnecting { attempt: 1, of: 5, in_secs: 3 }, WriterView::Free, RemoteState::Resyncing),
             remote(13, &ConnState::Failed, WriterView::Free, RemoteState::None),
+            remote(14, &ConnState::Connected, WriterView::Writing, RemoteState::InputDropped),
         ])
     }
 

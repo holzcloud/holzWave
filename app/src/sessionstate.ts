@@ -258,13 +258,14 @@ export function serverName(url: string): string {
 // ---- the states of a pane that shows a session (docs/design.md 6.34, "The states of a pane") ----------------------------------------
 
 /** The transient states of a remote pane. */
-export type PaneState = "attaching" | "loading_older" | "resyncing" | "ended" | "reconnecting" | "unreachable";
+export type PaneState = "attaching" | "loading_older" | "resyncing" | "input_dropped" | "ended" | "reconnecting" | "unreachable";
 
 /** The words of the header's context slot for each state; `ended` with a status is `Session ended · exit N`. */
 export const PANE_STATE_WORDS: Readonly<Record<PaneState, string>> = {
   attaching: "Attaching…",
   loading_older: "Loading older lines…",
   resyncing: "Resyncing…",
+  input_dropped: "Input dropped",
   ended: "Session ended",
   reconnecting: "Reconnecting…",
   unreachable: "Server unreachable",
@@ -292,7 +293,7 @@ export interface PaneStateView {
 /** The parts of a pane's connection the state is read from (connstate's `PaneConn`, without importing it). */
 export interface RemoteSeen {
   state: "connecting" | "connected" | "reconnecting" | "failed" | "closed";
-  remote: { phase: "" | "attaching" | "loading_older" | "resyncing" };
+  remote: { phase: "" | "attaching" | "loading_older" | "resyncing" | "input_dropped" };
 }
 
 /**
@@ -304,7 +305,7 @@ export function paneState(c: RemoteSeen, held?: { status: number | null } | null
     state,
     text,
     dot,
-    warn: state === "ended" || state === "unreachable",
+    warn: state === "ended" || state === "unreachable" || state === "input_dropped",
     label,
   });
   if (held) return view("ended", "failed", false, endedText(held.status));
@@ -327,6 +328,8 @@ export function paneState(c: RemoteSeen, held?: { status: number | null } | null
       return view("loading_older", null, true);
     case "resyncing":
       return view("resyncing", "wait", true);
+    case "input_dropped":
+      return view("input_dropped", null, true);
     default:
       return null;
   }

@@ -519,6 +519,23 @@ fn tracer_a_window_pane_shows_a_session_of_its_own_worker_and_closing_it_only_de
     assert_eq!(w.core.server_sessions().expect("the list").iter().map(|row| row.id).collect::<Vec<_>>(), vec![session]);
 }
 
+#[test]
+fn input_a_program_leaves_unread_is_dropped_and_the_window_pane_says_so() {
+    let w = World::start("dropped", None, LocalOptions::default());
+    let (pane, _session) = w.new_session();
+    w.start_pane(pane, 80, 24);
+    w.until_prompt(pane);
+    // The program reads nothing and the terminal neither echoes nor discards.
+    w.typed(pane, "stty raw -echo; exec sleep 600\r");
+    std::thread::sleep(Duration::from_millis(500));
+    let phase = || w.conn(pane).and_then(|view| view.remote).map_or("", |remote| remote.phase);
+    assert_eq!(phase(), "");
+    let text = "x".repeat(holzwave_core::pane::MAX_RAW_BACKLOG - 1);
+    w.typed(pane, &text);
+    w.typed(pane, &text);
+    until("the pane says that input was dropped", PATIENCE, || phase() == "input_dropped");
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // One writer across the window and the devices
 // ---------------------------------------------------------------------------------------------------------------------

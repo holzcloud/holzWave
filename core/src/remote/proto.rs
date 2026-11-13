@@ -485,6 +485,9 @@ pub enum Event {
     Resync { session: u32 },
     /// The grid of the session changed.
     Size { session: u32, cols: u16, rows: u16 },
+    /// Input this client sent was dropped because the program in the session leaves too much of its input unread. Said at
+    /// most about once a second while it lasts.
+    Dropped { session: u32 },
 }
 
 impl Event {
@@ -495,6 +498,7 @@ impl Event {
             Event::Exited { .. } => "exited",
             Event::Resync { .. } => "resync",
             Event::Size { .. } => "size",
+            Event::Dropped { .. } => "dropped",
         }
     }
 
@@ -504,7 +508,8 @@ impl Event {
             Event::Writer { session, .. }
             | Event::Exited { session, .. }
             | Event::Resync { session }
-            | Event::Size { session, .. } => *session,
+            | Event::Size { session, .. }
+            | Event::Dropped { session } => *session,
         }
     }
 }
@@ -576,6 +581,7 @@ enum EventText {
     Exited { session: u32, code: Option<u32> },
     Resync { session: u32 },
     Size { session: u32, cols: u16, rows: u16 },
+    Dropped { session: u32 },
 }
 
 impl From<Event> for EventText {
@@ -585,6 +591,7 @@ impl From<Event> for EventText {
             Event::Exited { session, code } => EventText::Exited { session, code },
             Event::Resync { session } => EventText::Resync { session },
             Event::Size { session, cols, rows } => EventText::Size { session, cols, rows },
+            Event::Dropped { session } => EventText::Dropped { session },
         }
     }
 }
@@ -596,6 +603,7 @@ impl From<EventText> for Event {
             EventText::Exited { session, code } => Event::Exited { session, code },
             EventText::Resync { session } => Event::Resync { session },
             EventText::Size { session, cols, rows } => Event::Size { session, cols, rows },
+            EventText::Dropped { session } => Event::Dropped { session },
         }
     }
 }
@@ -952,6 +960,7 @@ mod tests {
             Reply::Event(Event::Exited { session: 9, code: None }),
             Reply::Event(Event::Resync { session: 9 }),
             Reply::Event(Event::Size { session: 9, cols: 120, rows: 40 }),
+            Reply::Event(Event::Dropped { session: 9 }),
         ];
         out.extend(ErrorWord::ALL.into_iter().enumerate().map(|(i, e)| Reply::Answer { id: i as u64 + 6, result: Err(e) }));
         out
@@ -981,6 +990,7 @@ mod tests {
             Reply::Event(Event::Exited { session: 4, code: None }).encode(),
             r#"{"event":"exited","session":4,"code":null}"#
         );
+        assert_eq!(Reply::Event(Event::Dropped { session: 4 }).encode(), r#"{"event":"dropped","session":4}"#);
         for (word, error) in [
             ("not_found", ErrorWord::NotFound),
             ("refused", ErrorWord::Refused),

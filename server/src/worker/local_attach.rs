@@ -42,7 +42,7 @@ use holzwave_host::sessions::{SessionFault, SessionRow, SessionService};
 
 use crate::wire::Ctl;
 use crate::worker::lease::WriterState;
-use crate::worker::sessions::{Attachment, SesError, SessionHost};
+use crate::worker::sessions::{Attachment, MAX_INPUT_BYTES, SesError, SessionHost};
 
 /// The first client number of a pane's attachment. Socket numbers are `u32` and start at 1, so every number from here on
 /// is one no socket can have.
@@ -511,7 +511,20 @@ impl TieRoute {
 impl LocalRoute for TieRoute {
     fn input(&self, bytes: &[u8]) -> Result<(), HubError> {
         let tie = &self.0;
-        self.host()?.input(tie.client, tie.session, bytes).map(|_| ()).map_err(hub_error)
+        let host = self.host()?;
+        // In the frames a device sends, so that a long paste is taken as it is from a device.
+        for part in bytes.chunks(MAX_INPUT_BYTES) {
+            match host.input(tie.client, tie.session, part) {
+                Ok(_) => {}
+                // The program does not read: the pane is told, as a device is.
+                Err(SesError::Busy) => {
+                    let generation = *lock(&tie.generation);
+                    tie.pass(generation, SubEvent::InputDropped);
+                }
+                Err(error) => return Err(hub_error(error)),
+            }
+        }
+        Ok(())
     }
 
     fn resize(&self, cols: u16, rows: u16) -> Result<(), HubError> {

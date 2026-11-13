@@ -66,6 +66,7 @@ async function statesCase(page, url) {
     [{ state: "connected", remote: { phase: "attaching" } }, "Attaching…", { dot: "wait", label: null }],
     [{ state: "connected", remote: { phase: "loading_older" } }, "Loading older lines…", { tone: null, label: "WRITING" }],
     [{ state: "connected", remote: { phase: "resyncing" } }, "Resyncing…", { dot: "wait", label: "WRITING" }],
+    [{ state: "connected", remote: { phase: "input_dropped" } }, "Input dropped", { tone: "warn", label: "WRITING", underline: "underline" }],
     [{ state: "reconnecting", attempt: 2, of: 5, secs: 3, remote: { phase: "" } }, "Reconnecting…", { dot: "wait", tone: null, label: null }],
     [{ state: "failed", remote: { phase: "" } }, "Server unreachable", { dot: "failed", tone: "warn", label: null, underline: "underline" }],
     [{ state: "closed", remote: { phase: "" } }, "Session ended", { dot: "failed", tone: "warn", label: null, underline: "underline" }],

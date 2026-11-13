@@ -114,7 +114,8 @@
 //!   18 Live      2..6 socket | 6..10 session | 10..14 u32 seq, which continues the count of the snapshot | 14.. the bytes,
 //!                1 to 65536
 //!   19 Event     2..6 socket | 6..10 session | 10 u8 event: 1 writer (u8 state as above), 2 exited (u8 has a status: 0 or 1,
-//!                u32 status only when there is one), 3 resync, 4 size (u16 cols, u16 rows)
+//!                u32 status only when there is one), 3 resync, 4 size (u16 cols, u16 rows), 5 dropped (input of this socket
+//!                was dropped because the program does not read it)
 //! ```
 //!
 //! A frame that holds a key prints nothing of it in `Debug`, and the key is wiped from the frame when it is dropped.
@@ -560,6 +561,8 @@ pub enum SesEvent {
     Resync,
     /// The grid of the session changed.
     Size { cols: u16, rows: u16 },
+    /// Input this socket sent was dropped because the program leaves too much of its input unread.
+    Dropped,
 }
 
 /// A frame about the sessions that live in a worker. The requests come from the supervisor on behalf of a device socket,
@@ -944,6 +947,7 @@ const EVENT_WRITER: u8 = 1;
 const EVENT_EXITED: u8 = 2;
 const EVENT_RESYNC: u8 = 3;
 const EVENT_SIZE: u8 = 4;
+const EVENT_DROPPED: u8 = 5;
 
 fn error_byte(error: SesError) -> u8 {
     match error {
@@ -1134,6 +1138,7 @@ fn encode_ses(ses: &Ses, out: &mut Vec<u8>) -> Result<(), WireError> {
                     out.extend_from_slice(&code.to_be_bytes());
                 }
                 SesEvent::Resync => out.push(EVENT_RESYNC),
+                SesEvent::Dropped => out.push(EVENT_DROPPED),
                 SesEvent::Size { cols, rows } => {
                     out.push(EVENT_SIZE);
                     out.extend_from_slice(&nonzero_dim(*cols)?.to_be_bytes());
@@ -1234,7 +1239,8 @@ fn decode_ses(fields: &mut Fields<'_>) -> Result<Ses, WireError> {
                 }
                 EVENT_RESYNC => SesEvent::Resync,
                 EVENT_SIZE => SesEvent::Size { cols: fields.dim()?, rows: fields.dim()? },
-                _ => return Err(WireError::BadValue("a session event is not 1 to 4")),
+                EVENT_DROPPED => SesEvent::Dropped,
+                _ => return Err(WireError::BadValue("a session event is not 1 to 5")),
             };
             Ses::Event { socket, session, event }
         }
