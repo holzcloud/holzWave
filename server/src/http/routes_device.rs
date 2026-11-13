@@ -29,11 +29,11 @@ use std::sync::Arc;
 
 use axum::extract::Path;
 use axum::extract::rejection::PathRejection;
-use axum::http::StatusCode;
-use axum::response::Response;
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Extension, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::audit::{Action, Actor, DetailKey, DetailValue, Event, Outcome};
@@ -70,6 +70,33 @@ fn busy() -> Refusal {
 
 fn time_text(unix: i64) -> String {
     rfc3339(from_unix(unix))
+}
+
+/// Room for the whole answer that hands a device its token: the members and their names, the 47 characters of the token, a
+/// row id and a time come to well under this.
+const APPROVED_BYTES: usize = 512;
+
+/// The answer that hands a device its token. The text is written once, straight into the buffer that becomes the body, which
+/// is large enough from the start so that no outgrown buffer with a part of the token is left behind, and no other copy of the
+/// token is made (no JSON value, no second serialisation). The body itself goes to the connection and cannot be wiped; the
+/// token's own text is wiped when it is dropped.
+fn approved_answer(token: &DeviceToken, device: &Device) -> Result<Response, Refusal> {
+    #[derive(Serialize)]
+    struct Approved<'a> {
+        state: &'static str,
+        token: &'a str,
+        device_id: i64,
+        expires_at: String,
+    }
+    let approved =
+        Approved { state: "approved", token: token.expose(), device_id: device.id, expires_at: time_text(device.expires_at) };
+    let mut body = Vec::with_capacity(APPROVED_BYTES);
+    serde_json::to_writer(&mut body, &approved).map_err(|_| busy())?;
+    let mut response = (StatusCode::OK, body).into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 /// The row id a path names: plain digits, at most [`MAX_ID_DIGITS`] of them. Anything else names no device.
@@ -431,16 +458,7 @@ async fn token_route(
         Polled::State(state, None) => answer(StatusCode::OK, &json!({ "state": state }), Vec::new()),
         Polled::Approved(delivered) => {
             let (token, device) = *delivered;
-            answer(
-                StatusCode::OK,
-                &json!({
-                    "state": "approved",
-                    "token": token.expose(),
-                    "device_id": device.id,
-                    "expires_at": time_text(device.expires_at),
-                }),
-                Vec::new(),
-            )
+            approved_answer(&token, &device)?
         }
         Polled::Unknown => answer(StatusCode::OK, &json!({ "state": "expired" }), Vec::new()),
     })

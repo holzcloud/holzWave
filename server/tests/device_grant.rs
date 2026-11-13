@@ -171,8 +171,17 @@ async fn tracer_an_app_with_nothing_in_hand_gets_a_working_device_token_only_thr
         delivered.header("cache-control").as_deref(),
         Some("no-store")
     );
+    assert_eq!(
+        delivered.header("content-type").as_deref(),
+        Some("application/json")
+    );
     let body = delivered.json();
     assert_eq!(body["state"], "approved");
+    assert_eq!(
+        body.as_object().map(|o| o.len()),
+        Some(4),
+        "state, token, device id and expiry, nothing else: {body}"
+    );
     let token = body["token"].as_str().expect("a token").to_owned();
     assert!(
         token.starts_with("hwd_") && token.len() == 4 + 43,
