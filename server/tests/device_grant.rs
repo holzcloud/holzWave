@@ -1027,3 +1027,27 @@ async fn the_21st_device_of_an_account_is_refused_at_delivery_and_the_grant_wait
     assert_eq!(devices_of(&env, account).len(), 20);
     assert_eq!(grant_rows(&env), 0);
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Who may approve: a sign-in by passkey or by single sign-on approves like one by password
+// ---------------------------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_person_signed_in_with_a_passkey_or_through_single_sign_on_approves_a_device_that_then_works() {
+    use holzwave_server::store::{Role, SignInMethod};
+    let env = env();
+    open(&env);
+    let (by_passkey, _key) = env.member_with_passkey("pia");
+    assert_eq!(by_passkey.session.method, SignInMethod::Passkey);
+    env.bare("olaf", Role::Member);
+    let by_oidc = env.signed_with("olaf", 0, SignInMethod::Oidc);
+    assert_eq!(by_oidc.session.method, SignInMethod::Oidc);
+
+    for (who, name) in [(&by_passkey, "pia"), (&by_oidc, "olaf")] {
+        let granted = grant_flow(&env, who, "Phone").await;
+        let me = env.send(bearer_get(ME, &granted.token)).await;
+        assert_eq!(me.status, 200, "the token approved by {name} works: {}", me.text());
+        let mine = devices_of(&env, account_of(&env, name));
+        assert!(mine.iter().any(|d| d.id == granted.device_id), "the device belongs to {name}");
+    }
+}
