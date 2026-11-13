@@ -500,6 +500,3 @@ export async function openAccount(): Promise<void> {
   await devices.load();
   (groups.querySelector<HTMLElement>(".acc-main") ?? close).focus();
 }
-
-// The button that asks twice lives in dom.ts (the Connections dialog uses it too); it is still named here for the modules that import it.
-export { armed };

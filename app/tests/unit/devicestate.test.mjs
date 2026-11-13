@@ -256,3 +256,10 @@ test("a failed change says the generic sentence, or the busy and slow ones", () 
   assert.equal(deviceChangeMessage(0), "Could not reach the server. Try again.");
   assert.match(deviceChangeMessage(429, { retry_seconds: 30 }), /30 seconds/);
 });
+
+test("the Devices group and the Account dialog do not import each other", () => {
+  const src = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "src");
+  const imports = (file) => [...readFileSync(join(src, file), "utf8").matchAll(/from "\.\/([a-z]+)\.js"/g)].map((m) => m[1]);
+  assert.ok(imports("account.ts").includes("devices"), "the Account dialog builds the Devices group");
+  assert.ok(!imports("devices.ts").includes("account"), "so the Devices group takes the button that asks twice from dom.ts");
+});

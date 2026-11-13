@@ -9,7 +9,6 @@
 // asks for a recent sign-in shows `Confirm it is you` once and the change is repeated once. Every string the server sends is put in
 // with `textContent`; the only request function is `http` of the bridge.
 import { http } from "./bridge.js";
-import { armed } from "./account.js";
 import { CHANGE_FAILED, SAVED } from "./accountstate.js";
 import {
   ACCESS_HELP,
@@ -51,7 +50,7 @@ import {
   requestedText,
 } from "./devicestate.js";
 import type { Access, DeviceRow, Lookup, SwitchKey } from "./devicestate.js";
-import { el } from "./dom.js";
+import { armed, el } from "./dom.js";
 import { UNREACHABLE } from "./loginstate.js";
 import { StepUpCancelled, withStepUp } from "./stepup.js";
 import { openLayer } from "./weblayer.js";
