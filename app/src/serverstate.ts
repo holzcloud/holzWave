@@ -167,13 +167,15 @@ export function readServerView(raw: unknown): ServerView {
   };
 }
 
-/** What the page needs to show a sign-in that started. */
+/**
+ * What the page needs to show a sign-in that started. The host's `expires_in` is not read: the server decides when a code expires and
+ * the host's poll says `expired`, so the page keeps no clock of its own for it.
+ */
 export interface SignInView {
   /** The user code to compare, `XXXX-XXXX`. */
   code: string;
   /** The address the host asks the system browser to open. */
   openUrl: string;
-  expiresIn: number;
   /** Seconds between two polls. */
   interval: number;
 }
@@ -191,7 +193,7 @@ function seconds(raw: unknown, fallback: number): number {
 
 /**
  * Read the answer of `server_sign_in_start`: a code of the right shape, an address to open that is a web address of a bounded length,
- * and the interval. Anything else is null (no code, nothing to show); a member that is not one of these four is not read.
+ * and the interval. Anything else is null (no code, nothing to show); a member that is not one of these three is not read.
  */
 export function readSignIn(raw: unknown): SignInView | null {
   if (!isObject(raw)) return null;
@@ -206,11 +208,9 @@ export function readSignIn(raw: unknown): SignInView | null {
     return null;
   }
   if (url.protocol !== "https:" && !(url.protocol === "http:" && LOOPBACK.has(url.hostname))) return null;
-  const expires = own(raw, "expires_in");
   return {
     code,
     openUrl: open,
-    expiresIn: typeof expires === "number" && Number.isFinite(expires) && expires > 0 && expires <= 86400 ? Math.floor(expires) : 600,
     interval: seconds(own(raw, "interval"), DEFAULT_INTERVAL),
   };
 }

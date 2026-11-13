@@ -127,7 +127,7 @@ test("no member for a secret is read, even when present", () => {
   assert.deepEqual(Object.keys(read).sort(), ["error", "locked", "name", "remoteOn", "state", "syncOn", "url"]);
   const start = readSignIn({ code: "BCDF-GHJK", url: "https://holz.example.net/#device=BCDF-GHJK", expires_in: 600, interval: 5, token: CANARY, device_code: CANARY });
   assert.equal(JSON.stringify(start).includes(CANARY), false);
-  assert.deepEqual(Object.keys(start).sort(), ["code", "expiresIn", "interval", "openUrl"]);
+  assert.deepEqual(Object.keys(start).sort(), ["code", "interval", "openUrl"], "expires_in is the host's and the server's, not read");
   const poll = readPoll({ state: "approved", interval: 5, token: CANARY });
   assert.deepEqual(Object.keys(poll).sort(), ["interval", "state"]);
   assert.equal(JSON.stringify(poll).includes(CANARY), false);
@@ -146,7 +146,7 @@ test("a hostile name, error or address is bounded text", () => {
 
 test("the start of a sign-in needs a code of the right shape and a web address", () => {
   const good = { code: "BCDF-GHJK", url: "https://holz.example.net/#device=BCDF-GHJK", expires_in: 600, interval: 5 };
-  assert.deepEqual(readSignIn(good), { code: "BCDF-GHJK", openUrl: good.url, expiresIn: 600, interval: 5 });
+  assert.deepEqual(readSignIn(good), { code: "BCDF-GHJK", openUrl: good.url, interval: 5 });
   for (const code of ["bcdf-ghjk", "BCDFGHJK", "BCDF-GHJA", "BCDF-GHJ", "", 5, null, "<b>x</b>"]) assert.equal(readSignIn({ ...good, code }), null, String(code));
   for (const url of ["javascript:alert(1)", "file:///etc/passwd", "http://holz.example.net/", "https://a b", "", null, "https://x/" + "a".repeat(2100)]) {
     assert.equal(readSignIn({ ...good, url }), null, String(url).slice(0, 30));
@@ -163,7 +163,7 @@ test("the interval is bounded to 1 to 60 seconds", () => {
   assert.equal(readSignIn({ ...good, interval: 2.9 }).interval, 2);
   assert.equal(readPoll({ state: "pending", interval: 0 }).interval, 5);
   assert.equal(readPoll({ state: "pending", interval: 999 }).interval, 5);
-  assert.equal(readSignIn({ ...good, interval: 5, expires_in: -1 }).expiresIn, 600);
+  assert.notEqual(readSignIn({ ...good, interval: 5, expires_in: -1 }), null, "an expiry the page does not read never refuses the start");
 });
 
 test("a poll reads its word from a closed set", () => {
