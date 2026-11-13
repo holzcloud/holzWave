@@ -484,6 +484,27 @@ async fn a_socket_holds_at_most_the_most_attachments_and_leaving_one_makes_room(
     a.new_session().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn requests_sent_under_one_number_cannot_pass_the_cap_of_attachments() {
+    let env = env().await;
+    let alice = env.person("alice");
+    let mut a = device_of(&env, &alice, "a").await;
+    // Far more `new` requests than the socket may hold, all under one number and sent before any answer is read.
+    const SAME: u64 = 1_000_000;
+    let new = format!(r#"{{"id":{SAME},"op":"new","cols":80,"rows":24}}"#);
+    for _ in 0..MAX_ATTACHED + 8 {
+        a.send_text(&new).await;
+    }
+    // A request sent after them is answered after them: by then every one of them was answered or refused.
+    let Answer::List(listed) = a.ok(Op::List).await else { panic!("a list") };
+    assert!(
+        listed.len() <= MAX_ATTACHED,
+        "{} sessions were made for one socket that may hold {MAX_ATTACHED}",
+        listed.len()
+    );
+    assert!(!listed.is_empty(), "the first request under the number was done");
+}
+
 /// Settings of a socket that allows three requests at once and one more a second, and ends after five refusals in a row.
 fn rate_limited(settings: &mut SocketSettings) {
     settings.per_second = 1;

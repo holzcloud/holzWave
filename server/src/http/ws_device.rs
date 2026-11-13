@@ -379,6 +379,11 @@ impl Machine<'_> {
         };
         let socket = self.handle.id();
         let id = call.id;
+        // A number that a request still waits under is refused: a second one would take the first one's place, so the answer
+        // of one of them would be lost, and requests sent under one number would count against the cap of attachments once.
+        if self.pending.contains_key(&id) {
+            return self.error(transport, id, ErrorWord::BadRequest).await;
+        }
         match call.op {
             Op::List => self.forward(transport, id, Pending::Other, Ses::List { socket, request: id }).await,
             Op::New { cols, rows } => {
