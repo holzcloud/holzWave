@@ -410,11 +410,10 @@ impl RemotePanes {
         let mut map = read.unwrap_or_default();
         let before = map.len();
         map.retain(|pane, _| live.contains(pane));
-        let panes = RemotePanes { path, map: Mutex::new(map) };
-        if unreadable || lock(&panes.map).len() != before {
-            panes.save();
+        if unreadable || map.len() != before {
+            save(&path, &map);
         }
-        panes
+        RemotePanes { path, map: Mutex::new(map) }
     }
 
     /// The session `pane` shows, when it shows one.
@@ -434,32 +433,32 @@ impl RemotePanes {
 
     /// `pane` shows `session` from now on. `false` when the record is full; nothing is written then.
     pub fn assign(&self, pane: PaneId, session: u32) -> bool {
-        {
-            let mut map = lock(&self.map);
-            if map.len() >= MAX_ENTRIES && !map.contains_key(&pane) {
-                return false;
-            }
-            map.insert(pane, session);
+        let mut map = lock(&self.map);
+        if map.len() >= MAX_ENTRIES && !map.contains_key(&pane) {
+            return false;
         }
-        self.save();
+        map.insert(pane, session);
+        save(&self.path, &map);
         true
     }
 
     /// `pane` is gone, or shows no session any more.
     pub fn forget(&self, pane: PaneId) {
-        let had = lock(&self.map).remove(&pane).is_some();
-        if had {
-            self.save();
+        let mut map = lock(&self.map);
+        if map.remove(&pane).is_some() {
+            save(&self.path, &map);
         }
     }
+}
 
-    fn save(&self) {
-        let stored = Stored { version: VERSION, panes: lock(&self.map).iter().map(|(pane, session)| (pane.to_string(), *session)).collect() };
-        let text = serde_json::to_string_pretty(&stored).unwrap_or_else(|_| "{}".into());
-        let dir = self.path.parent().unwrap_or(Path::new("."));
-        if let Err(e) = std::fs::create_dir_all(dir).and_then(|()| write_atomic(&self.path, text.as_bytes())) {
-            eprintln!("holzwave: cannot save {FILE}: {e}");
-        }
+/// Writes the record. The callers hold the lock of the map while they change it and while this writes, so two changes made
+/// at the same time reach the file in the order they were made: the file never holds an older state than the map.
+fn save(path: &Path, map: &BTreeMap<PaneId, u32>) {
+    let stored = Stored { version: VERSION, panes: map.iter().map(|(pane, session)| (pane.to_string(), *session)).collect() };
+    let text = serde_json::to_string_pretty(&stored).unwrap_or_else(|_| "{}".into());
+    let dir = path.parent().unwrap_or(Path::new("."));
+    if let Err(e) = std::fs::create_dir_all(dir).and_then(|()| write_atomic(path, text.as_bytes())) {
+        eprintln!("holzwave: cannot save {FILE}: {e}");
     }
 }
 
@@ -622,6 +621,32 @@ mod tests {
         }
         assert!(!panes.assign(MAX_ENTRIES as u64, 2), "a full record takes no new pane");
         assert!(panes.assign(0, 2), "a pane it holds can be given another session");
+    }
+
+    #[test]
+    fn changes_made_at_the_same_time_reach_the_file_in_their_order_so_it_ends_as_the_record_is() {
+        let dir = Scratch::new("concurrent");
+        let live: Vec<PaneId> = (0..160).collect();
+        let panes = std::sync::Arc::new(RemotePanes::load(&dir.0, &live));
+        let threads: Vec<_> = (0..8u64)
+            .map(|t| {
+                let panes = panes.clone();
+                std::thread::spawn(move || {
+                    for n in 0..20u64 {
+                        let pane = t * 20 + n;
+                        panes.assign(pane, u32::try_from(pane).unwrap() + 1);
+                        if n % 2 == 1 {
+                            panes.forget(pane);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(panes.all().len(), 80);
+        assert_eq!(RemotePanes::load(&dir.0, &live).all(), panes.all(), "the file holds the last state of the record");
     }
 
     #[test]
