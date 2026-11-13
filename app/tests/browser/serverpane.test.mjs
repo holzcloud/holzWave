@@ -150,8 +150,14 @@ async function takeoverCase(page, url) {
   const visual = await head(page, 2).evaluate((h) => Array.from(h.querySelectorAll("button")).map((b) => b.className));
   assert.deepEqual(visual, ["label ph-take", "close ph-close"], "the focus order of the strip is its visual order");
 
-  // A press calls the command once; after the next poll the label changes and the button goes.
-  await take.click();
+  // A press calls the command once, also when the pointer moves a few pixels while it is down (a finger on a tablet): the button is
+  // not a handle of the pane, so no drag starts and swallows the click. After the next poll the label changes and the button goes.
+  const box = await take.boundingBox();
+  await page.mouse.move(box.x + box.width / 2 + 3, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 - 3, box.y + box.height / 2, { steps: 4 });
+  await page.mouse.up();
+  assert.equal((await callsOf(page, "move_pane")).length, 0, "no pane moved");
   await waitWord(page, 2, "WRITING");
   assert.deepEqual((await callsOf(page, "pane_takeover")), [{ pane: 2 }]);
   assert.equal(await head(page, 2).locator(".ph-take").count(), 0, "no Take over while the pane writes");

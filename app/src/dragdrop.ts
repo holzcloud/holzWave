@@ -90,7 +90,8 @@ function headerPaneAt(x: number, y: number): number {
 
 function sourceOf(e: PointerEvent): Source | null {
   const target = e.target instanceof Element ? e.target : null;
-  if (target?.closest(".close")) return null; // a × is a button, not a handle: a press on it drags nothing
+  // A × and `Take over` are buttons, not handles: a press on one drags nothing, so a finger that moves a few pixels still presses it.
+  if (target?.closest(".close, .ph-take")) return null;
   const tab = indexOf(target, ".tab");
   if (tab >= 0) return { kind: "tab", index: tab };
   const head = target?.closest<HTMLElement>(".panehead");
