@@ -924,9 +924,24 @@ struct StreamStart {
 impl StreamStart {
     /// Starts the reader thread: the snapshot in chunks, then every byte the tap delivers.
     fn run(self, att: Arc<dyn Attachment>, session: u32) {
+        let (pane, tap, meta) = (self.pane.clone(), self.tap, self.meta.clone());
+        let (stop, done, told_exit) = (self.stop.clone(), self.done.clone(), self.told_exit.clone());
+        let told = att.clone();
         let spawned = std::thread::Builder::new().name(format!("hw-stream-{session}")).spawn(move || self.read(&*att, session));
         if spawned.is_err() {
-            // No thread, no stream: the tap is dropped with the closure and the client attaches again.
+            // No thread, no stream (the worker may be at its limit of threads): the tap ends, and the attachment is told to
+            // attach again, as when a push could not be taken. The stream is done, so the end of the program reaches the
+            // attachment from the host; one that has ended already is told here.
+            pane.detach_tap(tap);
+            stop.unless(|| told.resync(session));
+            done.store(true, Ordering::SeqCst);
+            if let Some(exit) = meta.exit() {
+                stop.unless(|| {
+                    if !told_exit.swap(true, Ordering::SeqCst) {
+                        told.exited(session, exit);
+                    }
+                });
+            }
         }
     }
 
