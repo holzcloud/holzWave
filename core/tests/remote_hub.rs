@@ -562,6 +562,94 @@ fn the_state_says_five_tries_three_seconds_apart_and_then_gives_up_and_waits_for
     assert!(matches!(events[0], SubEvent::Attached { again: true, .. }), "{events:?}");
 }
 
+/// A hub whose tries are used, with `sub` attached to session 3 and told `GaveUp`.
+fn gave_up(device: &FakeDevice) -> (Hub, Subscription) {
+    let hub = hub_with(device, |o| o.reconnect = Reconnect { attempts: 2, delay: Duration::from_millis(30) });
+    let (sub, conn) = attach_plain(device, &hub, 3, b"");
+    conn.cut();
+    device.drop_connections_for(Duration::from_millis(400));
+    events_until(&sub, |e| e.contains(&SubEvent::GaveUp));
+    (hub, sub)
+}
+
+#[test]
+fn after_the_tries_are_used_a_call_tries_once_and_on_success_the_waiting_pane_is_attached_again() {
+    let device = FakeDevice::start();
+    let (hub, sub) = gave_up(&device);
+
+    // While the server still does not speak, a call makes one try and fails; the pane is told nothing new.
+    let h = hub.clone();
+    let call = std::thread::spawn(move || h.list());
+    device.drop_connections_for(Duration::from_millis(300));
+    assert_eq!(call.join().unwrap(), Err(HubError::Fault(Fault::Unreachable)));
+    assert!(events_for(&sub, Duration::from_millis(200)).is_empty(), "the pane already says the tries are used");
+    assert!(device.accept_within(Duration::from_millis(200)).is_none(), "no loop of tries started");
+
+    // The server is back: the next call connects, and the waiting pane is attached again without its Enter.
+    let h = hub.clone();
+    let call = std::thread::spawn(move || h.list());
+    let mut conn = device.accept();
+    let attach = conn.request();
+    assert_eq!(attach.op, Op::Attach { session: 3, tail: None });
+    let list = conn.request();
+    assert_eq!(list.op, Op::List);
+    conn.attached(attach.id, 3, 80, 24, WriterView::Writing, false, 0);
+    conn.answer(list.id, Answer::List(Vec::new()));
+    assert_eq!(call.join().unwrap(), Ok(Vec::new()));
+    let events = events_until(&sub, |e| !e.is_empty());
+    assert!(matches!(events[0], SubEvent::Attached { again: true, .. }), "{events:?}");
+}
+
+#[test]
+fn after_the_tries_are_used_and_the_last_pane_is_gone_list_new_and_end_connect_again() {
+    let device = FakeDevice::start();
+    let (hub, sub) = gave_up(&device);
+    sub.handle().close();
+    // The server comes back; no pane is left to press Enter, and the calls still reach it.
+    let h = hub.clone();
+    let call = std::thread::spawn(move || h.new_session(80, 24));
+    let mut conn = device.accept();
+    let request = conn.request();
+    assert_eq!(request.op, Op::New { cols: 80, rows: 24 });
+    conn.answer(request.id, Answer::Created { session: 9, writer: WriterView::Writing });
+    assert_eq!(call.join().unwrap(), Ok((9, WriterView::Writing)));
+}
+
+#[test]
+fn after_the_tries_are_used_a_new_attach_tries_once_and_only_the_new_pane_is_told_when_it_fails() {
+    let device = FakeDevice::start();
+    let (hub, sub) = gave_up(&device);
+
+    let h = hub.clone();
+    let second = std::thread::spawn(move || {
+        let sub = h.attach(4, None);
+        let events = events_until(&sub, |e| !e.is_empty());
+        (sub, events)
+    });
+    device.drop_connections_for(Duration::from_millis(300));
+    let (second, events) = second.join().unwrap();
+    assert_eq!(events, vec![SubEvent::GaveUp]);
+    assert!(events_for(&sub, Duration::from_millis(200)).is_empty());
+
+    // The next new pane finds the server: both are attached.
+    let third = hub.attach(5, None);
+    let mut conn = device.accept();
+    let mut sessions: Vec<u32> = (0..3)
+        .map(|_| {
+            let request = conn.request();
+            let Op::Attach { session, .. } = request.op else { panic!("an attach was expected, got {request:?}") };
+            conn.attached(request.id, session, 80, 24, WriterView::Writing, false, 0);
+            session
+        })
+        .collect();
+    sessions.sort_unstable();
+    assert_eq!(sessions, vec![3, 4, 5]);
+    for sub in [&sub, &second, &third] {
+        let events = events_until(sub, |e| !e.is_empty());
+        assert!(matches!(events[0], SubEvent::Attached { .. }), "{events:?}");
+    }
+}
+
 #[test]
 fn a_close_code_of_a_revoked_token_is_final_and_is_not_tried_again_but_a_busy_server_is_tried_again() {
     let device = FakeDevice::start();

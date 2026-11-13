@@ -26,7 +26,9 @@
 //! ([`Reconnect`]: five tries, three seconds apart), with a fresh token from the [`Endpoint`] for every try, and every
 //! subscription is attached again from a fresh snapshot with the tail it last used. A token the server refuses (a 401 on the
 //! upgrade or the close code 4401), a feature that is off, a refused upgrade and a certificate that is not trusted are final:
-//! they are not tried again.
+//! they are not tried again. Once the tries are used, a pane's Enter, a call (`list`, `new`, `end`) or a new attach makes one
+//! more try, and on success every waiting subscription is attached again; with no subscription left the hub simply connects
+//! on the next request.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -709,7 +711,8 @@ enum Mode {
     Up,
     /// Lost; try number `attempt` is due at `at`.
     Backoff { attempt: u32, at: Instant },
-    /// The tries are used; a retry starts one more.
+    /// The tries are used; a retry starts one more, and so does a request that needs the connection (a call, a connect or a
+    /// new attach). With no subscription left the hub is `Down` instead.
     Failed,
 }
 
@@ -829,7 +832,8 @@ impl Core {
             Cmd::Connect(reply) => {
                 let result = match self.mode {
                     Mode::Up => Ok(()),
-                    Mode::Backoff { .. } | Mode::Failed => Err(HubError::Fault(Fault::Unreachable)),
+                    Mode::Backoff { .. } => Err(HubError::Fault(Fault::Unreachable)),
+                    Mode::Failed => self.try_once(),
                     Mode::Down => self.connect_now(),
                 };
                 let _ = reply.send(result);
@@ -861,6 +865,7 @@ impl Core {
                     if matches!(self.mode, Mode::Up) {
                         self.quiet(Op::Detach { session });
                     }
+                    self.rest_if_unused();
                 }
             }
             Cmd::Retry => {
@@ -886,13 +891,15 @@ impl Core {
 
     fn call(&mut self, op: Op, reply: Sender<Result<Answer, HubError>>) {
         match self.mode {
-            Mode::Down => {
-                if let Err(error) = self.connect_now() {
+            Mode::Down | Mode::Failed => {
+                let tried = if matches!(self.mode, Mode::Failed) { self.try_once() } else { self.connect_now() };
+                if let Err(error) = tried {
                     let _ = reply.send(Err(error));
                     return;
                 }
             }
-            Mode::Backoff { .. } | Mode::Failed => {
+            // The reconnect loop runs and tries again by itself soon.
+            Mode::Backoff { .. } => {
                 let _ = reply.send(Err(HubError::Fault(Fault::Unreachable)));
                 return;
             }
@@ -934,7 +941,12 @@ impl Core {
                 let (of, in_secs) = (self.options.reconnect.attempts, self.options.reconnect.delay.as_secs());
                 self.tell(session, SubEvent::Reconnecting { attempt, of, in_secs });
             }
-            Mode::Failed => self.tell(session, SubEvent::GaveUp),
+            Mode::Failed => {
+                // A new pane is a request for the connection: one try. On success every subscription is attached again.
+                if self.try_once().is_err() && matches!(self.mode, Mode::Failed) {
+                    self.tell(session, SubEvent::GaveUp);
+                }
+            }
         }
     }
 
@@ -1023,6 +1035,15 @@ impl Core {
             && sub.push(event, false, bound, &self.stats) == Pushed::Gone
         {
             self.subs.remove(&session);
+            self.rest_if_unused();
+        }
+    }
+
+    /// With no subscription left there is nothing to reconnect for: a hub that waits for its next try, or that used its
+    /// tries, is `Down`, so the next request connects at once instead of being refused.
+    fn rest_if_unused(&mut self) {
+        if self.subs.is_empty() && matches!(self.mode, Mode::Backoff { .. } | Mode::Failed) {
+            self.mode = Mode::Down;
         }
     }
 
@@ -1033,6 +1054,7 @@ impl Core {
             if matches!(self.mode, Mode::Up) {
                 self.quiet(Op::Detach { session });
             }
+            self.rest_if_unused();
         }
     }
 
@@ -1121,25 +1143,56 @@ impl Core {
         }
     }
 
+    /// The connection is back: every subscription is attached again.
+    fn reconnected(&mut self, ws: WsClient) {
+        self.ws = Some(ws);
+        self.mode = Mode::Up;
+        self.last_beat = Instant::now();
+        bump(&self.stats.connects);
+        let sessions: Vec<u32> = self.subs.keys().copied().collect();
+        for session in sessions {
+            if let Some(sub) = self.subs.get_mut(&session) {
+                sub.phase = Phase::Wanting;
+            }
+            self.ask_attach(session);
+        }
+    }
+
+    /// One try from `Failed` for a request that needs the connection (a call, a connect, a new attach). On success every
+    /// subscription is attached again. On a failure that trying again may help the hub stays `Failed` and tells the panes
+    /// nothing new: they already say that the tries are used and wait for Enter. A final failure ends them, as in the loop.
+    fn try_once(&mut self) -> Result<(), HubError> {
+        match self.open() {
+            Ok(ws) => {
+                self.reconnected(ws);
+                Ok(())
+            }
+            Err(error) => {
+                let final_fault = final_fault(&error);
+                let fault = match &error {
+                    WsError::Fault(fault) => *fault,
+                    _ => final_fault.unwrap_or(Fault::Unreachable),
+                };
+                if let Some(fault) = final_fault {
+                    self.lose_all(HubError::Fault(fault));
+                    self.mode = Mode::Down;
+                }
+                self.rest_if_unused();
+                Err(HubError::Fault(fault))
+            }
+        }
+    }
+
     /// One try of the reconnect loop, after try number `attempt` was due (0 for the one try that a retry starts).
     fn try_again(&mut self, attempt: u32) {
         match self.open() {
-            Ok(ws) => {
-                self.ws = Some(ws);
-                self.mode = Mode::Up;
-                self.last_beat = Instant::now();
-                bump(&self.stats.connects);
-                let sessions: Vec<u32> = self.subs.keys().copied().collect();
-                for session in sessions {
-                    if let Some(sub) = self.subs.get_mut(&session) {
-                        sub.phase = Phase::Wanting;
-                    }
-                    self.ask_attach(session);
-                }
-            }
+            Ok(ws) => self.reconnected(ws),
             Err(error) => {
                 if let Some(fault) = final_fault(&error) {
                     self.lose_all(HubError::Fault(fault));
+                    self.mode = Mode::Down;
+                } else if self.subs.is_empty() {
+                    // Nobody waits for the connection any more.
                     self.mode = Mode::Down;
                 } else if attempt == 0 || attempt >= self.options.reconnect.attempts {
                     self.give_up();
