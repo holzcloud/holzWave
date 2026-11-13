@@ -409,6 +409,10 @@ an app:
 - The pane has no socket of its own. It counts as alive while at least one browser tab of the person is open, so **a browser tab
   left open keeps the right to write until somebody presses `Take over`**. When the last tab closes, the right is free after the
   30 seconds of silence (a reload inside that time keeps it); closing the pane gives it up at once.
+- When its session ends, the pane stays and its header says `Session ended · exit N` until you close it; it never becomes a
+  shell of the worker. The pane lives in the worker, so a reload shows the same pane. A server restart ends the worker's panes
+  with the sessions, so the window comes back without them. The header state is tested on the page; a reload after a session
+  ended and a restart with a browser tab open were never run in a real browser.
 
 The worker renders a browser pane of a session with an engine of its own beside the session's, so such a session costs two
 engines in the worker; that cost was not measured.
