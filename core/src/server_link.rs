@@ -455,6 +455,18 @@ mod tests {
     }
 
     #[test]
+    fn a_host_is_one_server_in_any_case() {
+        let o = Origin::parse("https://Sync.EXAMPLE:8443/").unwrap();
+        assert_eq!((o.host(), o.to_text().as_str()), ("sync.example", "https://sync.example:8443"));
+        assert_eq!(o, Origin::parse("https://sync.example:8443").unwrap());
+        assert_eq!(Origin::parse("http://LocalHost:8080").unwrap().to_text(), "http://localhost:8080", "loopback in any case");
+        assert_eq!(Origin::parse("https://[FE80::1]").unwrap().to_text(), "https://[fe80::1]");
+        // A link file written with another spelling reads as the same server.
+        let link = ServerLinkFile::new("https://Sync.Example", "17", "laptop").unwrap();
+        assert_eq!(link.url(), "https://sync.example");
+    }
+
+    #[test]
     fn the_socket_address_of_an_origin_follows_its_scheme() {
         let secure = Origin::parse("https://sync.example:8443").unwrap().socket_url("/ws/device").unwrap();
         assert_eq!((secure.secure(), secure.host(), secure.port(), secure.path()), (true, "sync.example", 8443, "/ws/device"));

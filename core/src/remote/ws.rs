@@ -122,7 +122,8 @@ fn is_loopback_name(host: &str) -> bool {
 impl WsUrl {
     /// Reads an address. Refused: any other scheme (including `https://`), `ws://` for a host that is not loopback, user
     /// information, a query, a fragment, an empty or malformed host, a bad port, a path with anything but letters, digits and
-    /// `-._~/`, and anything over [`MAX_URL`], [`MAX_HOST`] or [`MAX_PATH`].
+    /// `-._~/`, and anything over [`MAX_URL`], [`MAX_HOST`] or [`MAX_PATH`]. The host is kept in lower case: a DNS name is
+    /// the same name in any case, and so the same server is one address however it was typed.
     pub fn parse(text: &str) -> Result<WsUrl, UrlError> {
         if text.len() > MAX_URL {
             return Err(UrlError::TooLong);
@@ -183,10 +184,11 @@ impl WsUrl {
         if path.len() > MAX_PATH || !path.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._~/".contains(&b)) {
             return Err(UrlError::Path);
         }
-        if !secure && !is_loopback_name(host) {
+        let host = host.to_ascii_lowercase();
+        if !secure && !is_loopback_name(&host) {
             return Err(UrlError::Insecure);
         }
-        Ok(WsUrl { secure, host: host.to_owned(), port, path: path.to_owned() })
+        Ok(WsUrl { secure, host, port, path: path.to_owned() })
     }
 
     /// `wss://` (TLS) or `ws://` (loopback only).

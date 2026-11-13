@@ -29,6 +29,16 @@ const STATE_FILE: &str = "sync_state.json";
 const STATE_PARKED: &str = "sync_state.json.previous";
 /// What a run says when the sync was set up with another server than the one this device is signed in to now.
 pub const OTHER_TARGET: &str = "The sync was set up with another server. Turn it on again for this one.";
+
+/// Whether two addresses name the same server: compared as origins, so a host written in another case (a set-up stored
+/// before addresses were kept in lower case) is the same server. An address that is not an origin is compared as it is.
+fn same_server(a: &str, b: &str) -> bool {
+    use holzwave_core::server_link::Origin;
+    match (Origin::parse(a), Origin::parse(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
 const PASSWORD: &str = "sync:password";
 const PASSPHRASE: &str = "sync:passphrase";
 /// The shortest passphrase accepted. It is stretched by Argon2id, but it is all that protects the data on the server.
@@ -322,7 +332,7 @@ impl SyncRuntime {
             return Err(SECRETS_LOCKED.to_owned());
         }
         let mut before = self.before();
-        let same_target = matches!(&before.account, Some(Account { transport: Transport::Server, endpoint, .. }) if *endpoint == origin);
+        let same_target = matches!(&before.account, Some(Account { transport: Transport::Server, endpoint, .. }) if same_server(endpoint, &origin));
         before.parked = !same_target && self.park_state();
         if let Err(e) = self.secrets.set(PASSPHRASE, passphrase) {
             if before.parked {
@@ -500,7 +510,7 @@ impl SyncRuntime {
                 })?;
                 // The record of the engine belongs to the server the sync was set up with: another one is a new target, and a run
                 // against it would read its empty folder as the deletion of every file.
-                if origin != account.endpoint {
+                if !same_server(&origin, &account.endpoint) {
                     return Err(Fault::Failed(OTHER_TARGET.to_owned()));
                 }
                 let backend = ServerBackend::new(&origin, &token).map_err(Fault::of)?;
@@ -540,6 +550,15 @@ mod tests {
     use super::*;
     use holzwave_core::secrets::MemoryStore;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn a_server_address_stored_in_another_case_is_the_same_server_and_another_host_is_not() {
+        assert!(same_server("https://Sync.Example", "https://sync.example"));
+        assert!(same_server("https://sync.example:443", "https://sync.example"));
+        assert!(!same_server("https://sync.example", "https://other.example"));
+        assert!(!same_server("https://sync.example", "https://sync.example:8443"));
+        assert!(!same_server("not an address", "https://sync.example"));
+    }
 
     fn runtime(tag: &str) -> (SyncRuntime, Arc<MemoryStore>, PathBuf) {
         let dir = std::env::temp_dir().join(format!("hw-app-sync-{tag}-{}", std::process::id()));
