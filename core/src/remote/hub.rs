@@ -74,6 +74,13 @@ pub trait Endpoint: Send + Sync {
     /// The token of this device, read from where it is kept. [`Fault::SignedOut`] when there is none.
     fn token(&self) -> Result<Token, Fault>;
 
+    /// The server and its token for one connection. An endpoint whose sign-in can change between [`Endpoint::origin`] and
+    /// [`Endpoint::token`] reads both at once here, so a token is never sent to a server it was not made for.
+    fn credential(&self) -> Result<(Origin, Token), Fault> {
+        let origin = self.origin().ok_or(Fault::SignedOut)?;
+        Ok((origin, self.token()?))
+    }
+
     /// A TLS configuration that trusts something other than the platform's store. Only a test passes one; `None` (the
     /// default) is the platform's own.
     fn tls(&self) -> Option<Arc<rustls::ClientConfig>> {
@@ -1149,8 +1156,7 @@ impl Core {
 
     /// The connection itself: the origin, a fresh token, the upgrade.
     fn open(&self) -> Result<WsClient, WsError> {
-        let origin = self.endpoint.origin().ok_or(Fault::SignedOut)?;
-        let token: Token = self.endpoint.token()?;
+        let (origin, token) = self.endpoint.credential()?;
         let url = origin.socket_url("/ws/device").map_err(|_| Fault::Protocol)?;
         let connected = WsClient::connect(&url, &token, self.endpoint.tls(), &self.limits);
         // Only what the server said counts: an endpoint that has no token says signed out as well, and is not told.

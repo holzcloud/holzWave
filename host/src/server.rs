@@ -235,6 +235,14 @@ impl Endpoint for LinkEndpoint {
         runtime.token_and_origin().map(|(token, _)| token).map_err(|_| Fault::SignedOut)
     }
 
+    fn credential(&self) -> Result<(Origin, Token), Fault> {
+        let runtime = self.0.upgrade().ok_or(Fault::SignedOut)?;
+        network_ready().map_err(|_| Fault::Unreachable)?;
+        let (token, link) = runtime.token_and_link().map_err(|_| Fault::SignedOut)?;
+        let origin = link.origin().map_err(|_| Fault::SignedOut)?;
+        Ok((origin, token))
+    }
+
     /// The server refused a token of this device on the session socket. Which one is not known here, and a new sign-in may
     /// have put another in its place since, so the token the keychain holds now is checked with the server once, off the
     /// hub's thread ([`ServerRuntime::refresh`]): a refused one is forgotten and the view says signed out; one that works
@@ -431,9 +439,16 @@ impl ServerRuntime {
     /// The credential of this device and the address it is for, for a caller that makes a request (the sync run, the session
     /// link). The token is the caller's to drop.
     pub fn token_and_origin(&self) -> Result<(Token, String), Unavailable> {
-        let link = lock(&self.state).link.clone().ok_or(Unavailable::SignedOut)?;
+        self.token_and_link().map(|(token, link)| (token, link.url().to_owned()))
+    }
+
+    /// The token and the link file it belongs to, read under one hold of the state lock. A sign-in keeps its token and its
+    /// link under that lock as well, so the pair is never one server's token with another server's address.
+    fn token_and_link(&self) -> Result<(Token, ServerLinkFile), Unavailable> {
+        let state = lock(&self.state);
+        let link = state.link.clone().ok_or(Unavailable::SignedOut)?;
         match token_load(&*self.secrets) {
-            Ok(Some(token)) => Ok((token, link.url().to_owned())),
+            Ok(Some(token)) => Ok((token, link)),
             Ok(None) => Err(Unavailable::SignedOut),
             Err(e) if is_locked(&e) => Err(Unavailable::Locked),
             Err(_) => Err(Unavailable::Keychain),
@@ -1151,6 +1166,34 @@ mod tests {
         LinkEndpoint(Arc::downgrade(&rt)).refused();
         wait_for("the token to be forgotten", &|| store.get(TOKEN_ACCOUNT).unwrap().is_none());
         assert_eq!(rt.view().state, "signed_out");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_hub_gets_the_address_and_the_token_of_one_sign_in_in_a_single_read() {
+        let (rt, store, dir) = runtime("credential");
+        let rt = Arc::new(rt);
+        let endpoint = LinkEndpoint(Arc::downgrade(&rt));
+        assert_eq!(endpoint.credential().unwrap_err(), Fault::SignedOut, "nothing before a sign-in");
+        let fake = Fake::start();
+        sign_in(&rt, &fake);
+        let (origin, token) = endpoint.credential().unwrap();
+        assert_eq!(origin.to_text(), Origin::parse(&fake.origin).unwrap().to_text());
+        assert_eq!(token.bearer().as_str(), format!("Bearer {TOKEN}"));
+        // The pair is read while the state is held: a sign-in that holds it keeps the read waiting until both are kept.
+        let held = lock(&rt.state);
+        let reader = {
+            let endpoint = LinkEndpoint(Arc::downgrade(&rt));
+            std::thread::spawn(move || endpoint.credential().map(|(origin, _)| origin.to_text()))
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!reader.is_finished(), "the read waits for the state");
+        drop(held);
+        assert!(reader.join().unwrap().is_ok());
+        // A locked store gives no pair, as it gives no token.
+        store.lock(true);
+        assert_eq!(endpoint.credential().unwrap_err(), Fault::SignedOut);
+        store.lock(false);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
