@@ -548,7 +548,7 @@ fn an_unknown_kind_or_operation_is_an_error_never_a_panic() {
     for op in [0u8, 15, 16, 100, 255] {
         assert!(matches!(Frame::from_payload(&[0x04, op]), Err(WireError::UnknownOp { kind: 4, op: o }) if o == op), "ctl {op}");
     }
-    for op in [0u8, 11, 12, 15, 20, 255] {
+    for op in [0u8, 12, 13, 15, 20, 255] {
         assert!(
             matches!(Frame::from_payload(&[0x06, op, 0, 0, 0, 1]), Err(WireError::UnknownOp { kind: 6, op: o }) if o == op),
             "ses {op}"
@@ -1149,6 +1149,14 @@ fn ses_gone_is_operation_10_then_the_socket() {
 }
 
 #[test]
+fn ses_lost_is_operation_11_then_the_socket_and_the_session() {
+    let mut expected = vec![0x06, 0x0B, 0x0A, 0x0B, 0x0C, 0x0D];
+    expected.extend_from_slice(&SESSION_BYTES);
+    assert_eq!(expected.len(), 10);
+    pinned(Frame::Ses(Ses::Lost { socket: SOCKET, session: SESSION }), expected);
+}
+
+#[test]
 fn ses_answers_are_operation_16_then_the_socket_the_request_the_answer_kind_and_its_body() {
     // The list: a count, then per session the id, the title, the directory, the size, the start, the clients, the writer.
     let mut list = ses_head(16, true);
@@ -1283,6 +1291,7 @@ fn ses_frames_with_a_fixed_length_are_an_error_cut_anywhere_or_with_a_byte_too_m
         Ses::End { socket: SOCKET, request: ID, session: SESSION },
         Ses::Beat { socket: SOCKET, request: ID, session: SESSION },
         Ses::Gone { socket: SOCKET },
+        Ses::Lost { socket: SOCKET, session: SESSION },
         Ses::Answer { socket: SOCKET, request: ID, answer: SesAnswer::Done },
         Ses::Answer { socket: SOCKET, request: ID, answer: SesAnswer::Created { session: SESSION } },
         Ses::Answer {
@@ -1326,6 +1335,8 @@ fn a_session_frame_refuses_an_id_of_0_a_size_of_0_and_a_byte_it_does_not_know() 
         Ses::Attach { socket: SOCKET, request: ID, session: 0, tail: None },
         Ses::Resize { socket: SOCKET, request: ID, session: SESSION, cols: 0, rows: 1 },
         Ses::Gone { socket: 0 },
+        Ses::Lost { socket: 0, session: SESSION },
+        Ses::Lost { socket: SOCKET, session: 0 },
         Ses::Input { socket: SOCKET, session: 0, bytes: vec![1] },
         Ses::Event { socket: SOCKET, session: 0, event: SesEvent::Resync },
         Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Size { cols: 0, rows: 1 } },
@@ -1446,6 +1457,7 @@ fn only_the_requests_a_supervisor_sends_are_requests() {
         (Ses::List { socket: 1, request: 1 }, true),
         (Ses::Input { socket: 1, session: 1, bytes: vec![1] }, true),
         (Ses::Gone { socket: 1 }, true),
+        (Ses::Lost { socket: 1, session: 1 }, true),
         (Ses::Answer { socket: 1, request: 1, answer: SesAnswer::Done }, false),
         (Ses::Snapshot { socket: 1, session: 1, seq: 0, bytes: vec![1] }, false),
         (Ses::Live { socket: 1, session: 1, seq: 0, bytes: vec![1] }, false),

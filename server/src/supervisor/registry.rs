@@ -665,10 +665,9 @@ impl Worker {
                     Delivery::Done => {}
                     Delivery::Overflow(socket) => self.drop_sockets(&mut state, &[socket]),
                     Delivery::Lost { socket, session } => {
-                        // The worker lets the socket go from the session, so that it stops writing a stream nobody takes.
-                        state.synthetic += 1;
-                        let request = limits::SYNTHETIC_REQUEST_BASE + state.synthetic;
-                        if let Ok(frame) = encode(&Frame::Ses(Ses::Detach { socket, request, session })) {
+                        // The worker ends that stream only, so that it stops writing what nobody takes; the socket stays
+                        // attached and keeps its place in the lease until it attaches again.
+                        if let Ok(frame) = encode(&Frame::Ses(Ses::Lost { socket, session })) {
                             let _ = self.out.push_control(frame);
                         }
                     }

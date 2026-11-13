@@ -99,6 +99,8 @@
 //!   8 End        2..6 socket | 6..14 request | 14..18 session                                              (18 bytes)
 //!   9 Beat       2..6 socket | 6..14 request | 14..18 session                                              (18 bytes)
 //!   10 Gone      2..6 socket; the socket ended: it leaves every session; never answered                    (6 bytes)
+//!   11 Lost      2..6 socket | 6..10 session; the supervisor could not keep up with the socket's stream of the session:
+//!                the stream ends, the attachment and its place in the lease stay; never answered          (10 bytes)
 //!   worker -> supervisor:
 //!   16 Answer    2..6 socket | 6..14 request | 14 u8 answer: 1 list, 2 created, 3 attached, 4 done, 5 ended, 6 failed
 //!                1 list: u16 count 0 to 1024, then per session: u32 id | u16 title length 0 to 256 and the title |
@@ -617,6 +619,12 @@ pub enum Ses {
     Gone {
         socket: u32,
     },
+    /// The supervisor could not keep up with the stream of `session` to the socket and told the socket to attach again: the
+    /// worker ends that stream only, and the attachment keeps its place in the lease. Never answered.
+    Lost {
+        socket: u32,
+        session: u32,
+    },
     Answer {
         socket: u32,
         request: u64,
@@ -656,6 +664,7 @@ impl Ses {
                 | Ses::End { .. }
                 | Ses::Beat { .. }
                 | Ses::Gone { .. }
+                | Ses::Lost { .. }
         )
     }
 }
@@ -718,6 +727,9 @@ impl fmt::Debug for Ses {
                 .field("session", session)
                 .finish(),
             Ses::Gone { socket } => f.debug_struct("Gone").field("socket", socket).finish(),
+            Ses::Lost { socket, session } => {
+                f.debug_struct("Lost").field("socket", socket).field("session", session).finish()
+            }
             Ses::Answer { socket, request, answer } => f
                 .debug_struct("Answer")
                 .field("socket", socket)
@@ -915,6 +927,7 @@ const SES_TAKEOVER: u8 = 7;
 const SES_END: u8 = 8;
 const SES_BEAT: u8 = 9;
 const SES_GONE: u8 = 10;
+const SES_LOST: u8 = 11;
 const SES_ANSWER: u8 = 16;
 const SES_SNAPSHOT: u8 = 17;
 const SES_LIVE: u8 = 18;
@@ -1055,6 +1068,11 @@ fn encode_ses(ses: &Ses, out: &mut Vec<u8>) -> Result<(), WireError> {
             out.push(SES_GONE);
             out.extend_from_slice(&nonzero(*socket)?.to_be_bytes());
         }
+        Ses::Lost { socket, session } => {
+            out.push(SES_LOST);
+            out.extend_from_slice(&nonzero(*socket)?.to_be_bytes());
+            out.extend_from_slice(&nonzero_session(*session)?.to_be_bytes());
+        }
         Ses::Answer { socket, request, answer } => {
             head(out, SES_ANSWER, *socket, *request)?;
             match answer {
@@ -1155,6 +1173,7 @@ fn decode_ses(fields: &mut Fields<'_>) -> Result<Ses, WireError> {
             rows: fields.dim()?,
         },
         SES_GONE => Ses::Gone { socket: fields.socket()? },
+        SES_LOST => Ses::Lost { socket: fields.socket()?, session: fields.session()? },
         SES_ANSWER => {
             let (socket, request) = (fields.socket()?, fields.id()?);
             let answer = match fields.u8()? {

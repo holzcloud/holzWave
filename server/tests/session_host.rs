@@ -750,6 +750,38 @@ fn a_push_that_cannot_be_taken_ends_that_attachments_stream_with_a_resync() {
     assert_eq!(other.resyncs(), 0);
 }
 
+#[test]
+fn a_writer_whose_stream_is_dropped_keeps_its_right_to_write_and_gets_a_new_stream_when_it_attaches_again() {
+    // No echo of the terminal: whatever comes back was written by `cat`, so it reached the program.
+    let programs = Programs::new("stty -echo; cat");
+    let host = host_of(&programs);
+    let writer = Rec::new();
+    let id = started(&host, &writer);
+    attach_whole(&host, 1, &writer, id, None).expect("attach");
+    let watcher = Rec::new();
+    attach(&host, 2, &watcher, id, None).expect("attach");
+    std::thread::sleep(Duration::from_millis(300)); // `stty` has run
+
+    // The supervisor could not deliver the writer's stream: only the stream ends.
+    host.drop_stream(1, id).expect("the session is there");
+    assert!(watcher.writers().is_empty(), "nobody is told of a change of the writer");
+    assert!(host.list()[0].writer_held && host.list()[0].attached == 2, "{:?}", host.list());
+    assert_eq!(writer.resyncs(), 0, "the supervisor tells the client, the host does not tell it again");
+    assert_eq!(host.input(1, id, b"still-the-writer\n"), Ok(Input::Accepted));
+    until("the watcher sees the writer's line", || watcher.live_text().contains("still-the-writer"));
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!writer.live_text().contains("still-the-writer"), "the dropped stream carries nothing more");
+
+    // Attaching again keeps the place in the lease and brings the screen.
+    let again = Rec::new();
+    let attached = attach_whole(&host, 1, &again, id, None).expect("attach again");
+    assert_eq!(attached.writer, WriterState::Writing);
+    assert!(render(&attached, &again).contains("still-the-writer"));
+    assert_eq!(host.drop_stream(1, 999), Err(SesError::NotFound), "an unknown session");
+    assert_eq!(host.drop_stream(77, id), Ok(()), "a client that is not attached changes nothing");
+    assert!(host.list()[0].writer_held);
+}
+
 // ---- the pane cap -----------------------------------------------------------------------------------------------------------------
 
 #[test]

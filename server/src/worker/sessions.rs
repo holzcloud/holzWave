@@ -482,6 +482,21 @@ impl SessionHost {
         Ok(())
     }
 
+    /// The stream of `client` in `session` could not be delivered and the client was told to attach again: the stream ends,
+    /// and the client stays attached with its place in the lease, as when its own reader loses the stream. An attach of the
+    /// client gives it a new one.
+    pub fn drop_stream(&self, client: u64, session: u32) -> Result<(), SesError> {
+        let found = self.shared.find(session).ok_or(SesError::NotFound)?;
+        let mut guard = lock(&found);
+        let s = &mut *guard;
+        let Some(member) = s.members.iter_mut().find(|m| m.client == client) else { return Ok(()) };
+        if let Some(stream) = member.stream.take() {
+            stream.stop.store(true, Ordering::SeqCst);
+            s.pane.detach_tap(stream.tap);
+        }
+        Ok(())
+    }
+
     /// The socket of `client` ended: it leaves every session.
     pub fn gone(&self, client: u64) {
         for session in self.shared.all() {

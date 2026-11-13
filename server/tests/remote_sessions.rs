@@ -724,12 +724,18 @@ async fn a_large_output_arrives_whole_and_in_order_for_a_reader_that_keeps_up() 
 /// still far more than a burst of the program that a reader which keeps up has to absorb while its task is not running.
 const QUEUE: usize = 1024 * 1024;
 
+/// Small queues, and a writer that may be silent for far longer than the test runs: a lease that changes hands in the test of the
+/// slow reader is the loss of the stream's doing, never the clock's.
 fn small_queues() -> SupervisorSettings {
-    SupervisorSettings { socket_queue_bytes: QUEUE, ..SupervisorSettings::default() }
+    SupervisorSettings {
+        socket_queue_bytes: QUEUE,
+        sessions: SessionLimits { writer_timeout_ms: 600_000, ..SessionLimits::DEFAULT },
+        ..SupervisorSettings::default()
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_client_that_does_not_read_loses_its_stream_with_a_resync_while_the_other_sees_every_byte_and_the_queue_stays_inside_its_bound() {
+async fn a_client_that_does_not_read_loses_its_stream_with_a_resync_and_keeps_its_right_to_write_while_the_other_sees_every_byte_and_the_queue_stays_inside_its_bound() {
     let env = env_with(WsOptions { tune: Some(patient), supervisor: Some(small_queues()), ..WsOptions::default() }).await;
     let alice = env.person("alice");
     let mut slow = device_of(&env, &alice, "slow").await;
@@ -762,14 +768,19 @@ async fn a_client_that_does_not_read_loses_its_stream_with_a_resync_while_the_ot
     );
     assert!(env.supervisor.stats().lost_streams > lost_before, "the slow stream was counted as lost");
     assert!(quick.events.iter().all(|e| !matches!(e, Event::Resync { .. })), "the reader that kept up lost nothing");
+    assert_eq!(quick.writer_words(session), Vec::<&str>::new(), "the lease did not move when the writer's stream was lost");
 
     // The slow one reads at last: its socket is open, it is told that the stream was cut, and attaching again works.
     slow.until("the resync", Duration::from_secs(60), |d| d.events.contains(&Event::Resync { session })).await;
     assert!(slow.closed.is_none() && !slow.ended, "only the stream was lost, not the socket");
     slow.snapshot.remove(&session);
-    let Answer::Attached { snapshot, .. } = slow.attach(session, None).await else { panic!("attached") };
+    let Answer::Attached { snapshot, writer, .. } = slow.attach(session, None).await else { panic!("attached") };
+    assert_eq!(writer, WriterView::Writing, "losing the stream cost the writer only the stream, not the right to write");
     slow.until("the snapshot", SHELL, |d| d.snapshot.get(&session).is_some_and(|b| b.len() as u32 >= snapshot)).await;
     assert!(slow.snapshot_text(session).contains("hw-end49"), "the new attachment shows where the output stands");
+    slow.type_into(session, SUM.as_bytes()).await;
+    slow.until_live(session, "hw-42", SHELL).await;
+    assert_eq!(quick.writer_words(session), Vec::<&str>::new(), "nobody was told of a change of the writer");
     assert!(slow.strange.is_empty() && quick.strange.is_empty(), "{:?} {:?}", slow.strange, quick.strange);
 }
 

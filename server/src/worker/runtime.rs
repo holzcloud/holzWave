@@ -299,6 +299,9 @@ pub fn handle_ses(host: &SessionHost, queue: &Arc<Outbound>, ses: Ses) {
             answer(queue, socket, request, done(host.beat(u64::from(socket), session)))
         }
         Ses::Gone { socket } => host.gone(u64::from(socket)),
+        Ses::Lost { socket, session } => {
+            let _ = host.drop_stream(u64::from(socket), session);
+        }
         // The frames a worker writes are not for a worker; the loop never hands them over.
         Ses::Answer { .. } | Ses::Snapshot { .. } | Ses::Live { .. } | Ses::Event { .. } => {}
     }
@@ -331,7 +334,8 @@ impl SessionLane {
 
     /// Queues a request. When too many wait, a request that has an answer is answered `busy` and input is dropped.
     fn submit(&self, ses: Ses, queue: &Outbound) {
-        let leaving = matches!(ses, Ses::Gone { .. });
+        // Leaving and ending a lost stream are never refused: they free what the others wait for.
+        let leaving = matches!(ses, Ses::Gone { .. } | Ses::Lost { .. });
         if !leaving && self.pending.load(Ordering::SeqCst) >= LANE_QUEUE {
             if let Some((socket, request)) = answered(&ses) {
                 answer(queue, socket, request, SesAnswer::Failed(SesError::Busy));
