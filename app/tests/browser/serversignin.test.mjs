@@ -13,6 +13,7 @@ export default async function ({ page, url, errors }) {
   if (currentBackend() === "tauri") {
     await firstScreenCase(page, url);
     await approveCase(page, url);
+    await twiceCase(page, url);
   }
   assert.deepEqual(errors, [], "the page reported errors");
 }
@@ -104,3 +105,32 @@ async function approveCase(page, url) {
   assert.equal(await count(page, "server_sign_in_cancel"), 0);
 }
 
+
+/** Enter twice (or a held key) while the start is out asks the server for one code, not two. */
+async function twiceCase(page, url) {
+  await open(page, url);
+  await openDialog(page);
+  await page.evaluate(() => {
+    window.__starts = 0;
+    window.__MOCK__.on("server_sign_in_start", (args) => {
+      window.__starts++;
+      return new Promise((go) => {
+        window.__go = () => go({ code: "BCDF-GHJK", url: `${args.address}/#device=hwg_mock`, expires_in: 600, interval: 5 });
+      });
+    });
+  });
+  await page.locator("#ss-address").fill(GOOD);
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(150);
+  assert.equal(await page.evaluate(() => window.__starts), 1, "one start while the first is out");
+  await page.evaluate(() => {
+    window.__MOCK__.on("server_sign_in_start", null);
+    window.__go();
+  });
+  await page.waitForFunction(() => document.querySelector(".ss-code")?.textContent === "BCDF-GHJK");
+  assert.equal(await page.evaluate(() => window.__starts), 1);
+  await page.keyboard.press("Escape");
+  await gone(page);
+}

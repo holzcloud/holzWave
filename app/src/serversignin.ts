@@ -225,7 +225,8 @@ async function run(returnTo?: HTMLElement | null): Promise<ServerView | null> {
       }
 
       function submit(): void {
-        if (closed || locked || screen !== 1) return;
+        // A second Enter (or a held key) while the start is out would ask the server for a second code.
+        if (closed || locked || screen !== 1 || starting > 0) return;
         const input = box.querySelector<HTMLInputElement>("#ss-address");
         const checked = checkAddress(input?.value ?? typed);
         if (!checked.ok) {
