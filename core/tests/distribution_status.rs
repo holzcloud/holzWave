@@ -13,6 +13,7 @@ const PAGE: &str = include_str!("../../docs/distribution.md");
 const README: &str = include_str!("../../README.md");
 const STATUS_PAGE: &str = include_str!("../../docs/status.md");
 const SIGNING: &str = include_str!("../../docs/signing.md");
+const ROADMAP: &str = include_str!("../../docs/roadmap.md");
 
 /// The only words a channel's status may be.
 const STATUS_WORDS: [&str; 6] = ["not built", "not submitted", "in review", "available", "on hold", "refused"];
@@ -475,6 +476,47 @@ fn the_status_page_and_the_readme_say_what_of_the_server_sync_and_the_remote_ses
     let row = README.lines().find(|l| l.starts_with("| **Remote sessions:**")).expect("the README has the row of the remote sessions");
     let gaps = never_run_gaps(row);
     assert!(gaps.is_empty(), "the README's row of the remote sessions lacks {gaps:?}");
+}
+
+/// What the roadmap's section on the server sync and the remote sessions has to name as never run, in lower case.
+const ROADMAP_NEVER_RUN: [&str; 10] = [
+    "real phone",
+    "real desktop",
+    "real network",
+    "passkey",
+    "single sign-on",
+    "reverse proxy",
+    "two real people",
+    "android",
+    "server restart",
+    "real workload",
+];
+
+/// What the roadmap section lacks: the words `never run`, a name of [`ROADMAP_NEVER_RUN`], or the note that a restart ends
+/// every remote session.
+fn roadmap_never_run_gaps(section_text: &str) -> Vec<&'static str> {
+    let lowered = flat(section_text).to_lowercase();
+    let mut gaps: Vec<&'static str> = Vec::new();
+    if !lowered.contains("never run") {
+        gaps.push("never run");
+    }
+    gaps.extend(ROADMAP_NEVER_RUN.into_iter().filter(|name| !lowered.contains(name)));
+    if !lowered.contains("a restart ends every remote session") {
+        gaps.push("a restart ends every remote session");
+    }
+    gaps
+}
+
+#[test]
+fn the_roadmap_says_what_of_the_server_sync_and_the_remote_sessions_was_never_run() {
+    let text = section(ROADMAP, "Server sync and remote sessions (after the web build)");
+    let gaps = roadmap_never_run_gaps(text);
+    assert!(gaps.is_empty(), "the roadmap section on the server sync and the remote sessions lacks {gaps:?}");
+    // The matcher notices when the sentences go.
+    assert!(roadmap_never_run_gaps(&text.replace("never run", "run")).contains(&"never run"));
+    assert!(roadmap_never_run_gaps(&text.replace("(a restart ends every remote session)", "")).contains(&"a restart ends every remote session"));
+    assert!(roadmap_never_run_gaps(&text.replace("with two real people", "")).contains(&"two real people"));
+    assert!(roadmap_never_run_gaps(&text.replace("across a server restart", "")).contains(&"server restart"));
 }
 
 #[test]
