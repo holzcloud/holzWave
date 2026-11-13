@@ -497,7 +497,12 @@ impl Machine<'_> {
             Ses::Event { session, event, .. } => {
                 let event = match event {
                     SesEvent::Writer(state) => Event::Writer { session, state: view(state) },
-                    SesEvent::Exited(code) => Event::Exited { session, code },
+                    SesEvent::Exited(code) => {
+                        // The program ended: input to the session goes nowhere, and the session no longer counts against the
+                        // cap, whether or not the client detaches.
+                        self.attached.remove(&session);
+                        Event::Exited { session, code }
+                    }
                     SesEvent::Resync => {
                         // The stream is gone and the client attaches again; until it does the session no longer counts.
                         self.attached.remove(&session);

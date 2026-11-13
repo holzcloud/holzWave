@@ -485,6 +485,26 @@ async fn a_socket_holds_at_most_the_most_attachments_and_leaving_one_makes_room(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_session_whose_program_ended_no_longer_counts_against_the_cap_of_attachments() {
+    let env = env().await;
+    let alice = env.person("alice");
+    let mut a = device_of(&env, &alice, "a").await;
+    let mut made = Vec::new();
+    for _ in 0..MAX_ATTACHED {
+        made.push(a.new_session().await);
+    }
+    assert_eq!(a.err(Op::New { cols: 80, rows: 24 }).await, ErrorWord::TooMany);
+    // The program of one session ends; the client is told and does not detach.
+    let ended = made[0];
+    a.attach(ended, None).await;
+    a.type_into(ended, b"exit\r").await;
+    a.until("the end of the program", SHELL, |d| d.events.iter().any(|e| matches!(e, Event::Exited { session, .. } if *session == ended)))
+        .await;
+    a.new_session().await;
+    assert_eq!(a.err(Op::New { cols: 80, rows: 24 }).await, ErrorWord::TooMany, "the cap still holds");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn requests_sent_under_one_number_cannot_pass_the_cap_of_attachments() {
     let env = env().await;
     let alice = env.person("alice");
