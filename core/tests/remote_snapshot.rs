@@ -529,7 +529,7 @@ mod engines {
 
 mod taps {
     use super::*;
-    use holzwave_core::pane::MAX_RAW_BYTES;
+    use holzwave_core::pane::{MAX_RAW_BACKLOG, MAX_RAW_BYTES};
 
     #[test]
     fn a_tap_that_never_reads_is_dropped_and_told_so_and_the_pane_keeps_its_pace() {
@@ -692,6 +692,28 @@ mod taps {
         assert!(pane.write_raw(&vec![b'x'; MAX_RAW_BYTES + 1]).is_err(), "a byte over");
         assert!(pane.write_raw(&[b'y'; 0]).is_ok(), "nothing is fine");
         assert!(pane.write_raw(&b"z\n".repeat(MAX_RAW_BYTES / 2)).is_ok(), "exactly the bound");
+        close(pane);
+    }
+
+    #[test]
+    fn raw_input_to_a_program_that_does_not_read_is_refused_once_the_backlog_is_full() {
+        // In raw mode the terminal neither echoes nor discards: what the program does not read stays in the PTY, the
+        // writer thread blocks, and every further byte would wait in memory.
+        let probe = Probe::default();
+        let pane = start(headless("stty raw -echo; exec sleep 60"), &probe);
+        thread::sleep(Duration::from_millis(300));
+        let chunk = vec![b'x'; MAX_RAW_BYTES];
+        let most_calls = 2 * MAX_RAW_BACKLOG / MAX_RAW_BYTES + 64;
+        let mut accepted = 0usize;
+        let refused = (0..most_calls).any(|_| {
+            let taken = pane.write_raw(&chunk).is_ok();
+            accepted += usize::from(taken);
+            !taken
+        });
+        assert!(refused, "{most_calls} calls of {MAX_RAW_BYTES} bytes were all taken by a program that reads nothing");
+        assert!(pane.raw_backlog() <= MAX_RAW_BACKLOG, "{} bytes wait", pane.raw_backlog());
+        assert!(pane.write_raw(&chunk).is_err(), "a full backlog stays refused");
+        assert!(accepted >= MAX_RAW_BACKLOG / MAX_RAW_BYTES - 1, "the backlog takes what fits first: {accepted} calls");
         close(pane);
     }
 

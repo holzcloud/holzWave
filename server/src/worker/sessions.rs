@@ -490,7 +490,9 @@ impl SessionHost {
     }
 
     /// Input of `client` for `session`: it reaches the program when `client` holds the right to write and is dropped when it
-    /// does not.
+    /// does not. It is also dropped, whole, while the program leaves more than
+    /// [`holzwave_core::pane::MAX_RAW_BACKLOG`] bytes of its input unread: the pane refuses it, so a sender cannot grow the
+    /// worker's memory by writing to a program that does not read.
     pub fn input(&self, client: u64, session: u32, bytes: &[u8]) -> Result<Input, SesError> {
         if bytes.len() > MAX_INPUT_BYTES {
             return Err(SesError::BadRequest);

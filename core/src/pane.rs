@@ -380,6 +380,11 @@ pub const MAX_TAPS: usize = 32;
 /// The most bytes one [`PaneHandle::write_raw`] call may hand to the program.
 pub const MAX_RAW_BYTES: usize = 64 * 1024;
 
+/// The most bytes that may wait for the program of a headless pane: raw input on its way to the PTY writer and not yet
+/// written, together with the engine's own replies. A [`PaneHandle::write_raw`] call that would go past it is refused
+/// whole, so a sender whose program does not read its input cannot grow the memory of the process without a bound.
+pub const MAX_RAW_BACKLOG: usize = 1024 * 1024;
+
 /// The identity of a tap, for [`PaneHandle::detach_tap`]. Unique in the process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TapId(u64);
@@ -646,6 +651,9 @@ struct Shared {
     headless: bool,
     /// How many times a timer woke the engine thread, see [`PaneHandle::timer_wakes`].
     timer_wakes: Arc<AtomicU64>,
+    /// The bytes on their way to the PTY writer and not yet written; the same counter as the writer's own, see
+    /// [`PaneHandle::raw_backlog`].
+    writer_pending: Arc<AtomicUsize>,
 }
 
 impl Drop for Shared {
@@ -711,14 +719,39 @@ impl PaneHandle {
         let headless = spec.headless;
         let timer_wakes = Arc::new(AtomicU64::new(0));
         let engine_timer_wakes = timer_wakes.clone();
+        let writer_pending = Arc::new(AtomicUsize::new(0));
+        let engine_pending = writer_pending.clone();
         let join = thread::Builder::new()
             .name(format!("hw-pane-{pane}-engine"))
-            .spawn(move || engine_main::<E, F, S>(pane, spec, make_engine, sink, engine_queue, started_tx, wrap, engine_conn, engine_remote, engine_timer_wakes))
+            .spawn(move || {
+                engine_main::<E, F, S>(
+                    pane,
+                    spec,
+                    make_engine,
+                    sink,
+                    engine_queue,
+                    started_tx,
+                    wrap,
+                    engine_conn,
+                    engine_remote,
+                    engine_timer_wakes,
+                    engine_pending,
+                )
+            })
             .map_err(Error::Io)?;
 
         match started_rx.recv_timeout(START_TIMEOUT) {
             Ok(Ok(pid)) => Ok(PaneHandle {
-                shared: Arc::new(Shared { queue, pid, thread: Mutex::new(Some(join)), conn, remote, headless, timer_wakes }),
+                shared: Arc::new(Shared {
+                    queue,
+                    pid,
+                    thread: Mutex::new(Some(join)),
+                    conn,
+                    remote,
+                    headless,
+                    timer_wakes,
+                    writer_pending,
+                }),
             }),
             Ok(Err(e)) => {
                 // The thread reported its failure and is on its way out.
@@ -998,7 +1031,9 @@ impl PaneHandle {
     /// Write `bytes` to the program as they are, the way a person's typing arrives, with no key encoder in between. Only a
     /// pane that was started headless ([`PaneSpec::headless`]) takes them: any other pane refuses with an error and writes
     /// nothing, and so does a call of more than [`MAX_RAW_BYTES`]. Returns at once; the engine thread queues the bytes
-    /// for the PTY writer thread like a person's own input, which is never dropped.
+    /// for the PTY writer thread. Unlike a person's own input at this machine, raw input is bounded: a call that would
+    /// take the bytes waiting for the program past [`MAX_RAW_BACKLOG`] is refused whole and writes nothing, because the
+    /// sender is on the network and a program that does not read its input would otherwise keep every byte in memory.
     ///
     /// This is the one place where bytes enter a pane from outside, so who may call it is part of its contract: the
     /// session host of a server, after it has checked that the sender holds the write right of the session. The page
@@ -1011,7 +1046,29 @@ impl PaneHandle {
         if bytes.len() > MAX_RAW_BYTES {
             return Err(Error::Pty(format!("raw input is limited to {MAX_RAW_BYTES} bytes per call")));
         }
-        self.send(Control::WriteRaw(bytes.to_vec()))
+        let n = bytes.len();
+        let pending = &self.shared.writer_pending;
+        // Counted here, before the bytes are queued, so that what waits in the control queue counts as well; the engine
+        // thread hands them to the writer without counting them again.
+        if pending
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |waiting| {
+                waiting.checked_add(n).filter(|&total| total <= MAX_RAW_BACKLOG)
+            })
+            .is_err()
+        {
+            return Err(Error::Pty("the program is not reading its input".into()));
+        }
+        let sent = self.send(Control::WriteRaw(bytes.to_vec()));
+        if sent.is_err() {
+            pending.fetch_sub(n, Ordering::Relaxed);
+        }
+        sent
+    }
+
+    /// The bytes on their way to the program that are not written yet: raw input and the engine's replies. At most
+    /// [`MAX_RAW_BACKLOG`] of it is raw input. It exists for tests and diagnostics, as [`PaneHandle::timer_wakes`] does.
+    pub fn raw_backlog(&self) -> usize {
+        self.shared.writer_pending.load(Ordering::Relaxed)
     }
 
     /// How many times a timer woke the engine thread with nothing queued for it: the next frame, an animated picture, the
@@ -1081,6 +1138,17 @@ impl Writer {
             return;
         }
         self.push(bytes);
+    }
+
+    /// Raw input of a headless pane: [`PaneHandle::write_raw`] counted the bytes in `pending` already.
+    fn counted(&self, bytes: Vec<u8>) {
+        let n = bytes.len();
+        if n == 0 {
+            return;
+        }
+        if self.tx.send(bytes).is_err() {
+            self.pending.fetch_sub(n, Ordering::Relaxed);
+        }
     }
 
     fn push(&self, bytes: Vec<u8>) {
@@ -1335,7 +1403,11 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
     /// A control message of a held pane: what would reach the program is dropped, the rest is as in a live pane.
     fn handle_held(&mut self, control: Control) {
         match control {
-            Control::Key(_) | Control::Edit(_) | Control::Text(_) | Control::Mouse(_) | Control::CwdFound(_) | Control::WriteRaw(_) => {}
+            Control::Key(_) | Control::Edit(_) | Control::Text(_) | Control::Mouse(_) | Control::CwdFound(_) => {}
+            // The bytes were counted when they were queued; dropped here, they no longer wait.
+            Control::WriteRaw(bytes) => {
+                self.writer.pending.fetch_sub(bytes.len(), Ordering::Relaxed);
+            }
             Control::Paste { reply, .. } => {
                 let _ = reply.send(Err(Error::Pty("the program has ended".into())));
             }
@@ -1518,7 +1590,9 @@ impl<E: TerminalEngine, S: FnMut(PaneEvent)> Actor<E, S> {
             // The handle refused a pane that is not headless; the engine thread does not trust that alone.
             Control::WriteRaw(bytes) => {
                 if self.headless {
-                    self.writer.input(bytes);
+                    self.writer.counted(bytes);
+                } else {
+                    self.writer.pending.fetch_sub(bytes.len(), Ordering::Relaxed);
                 }
             }
             Control::DetachTap(id) => {
@@ -1842,6 +1916,7 @@ fn engine_main<E, F, S>(
     conn: Arc<Mutex<Option<SharedState>>>,
     remote: Arc<Mutex<Option<Arc<dyn RemoteControl>>>>,
     timer_wakes: Arc<AtomicU64>,
+    pending: Arc<AtomicUsize>,
 ) where
     E: TerminalEngine,
     F: FnOnce(&PaneSpec) -> Result<E>,
@@ -1872,7 +1947,6 @@ fn engine_main<E, F, S>(
     };
 
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
-    let pending = Arc::new(AtomicUsize::new(0));
     let reader_queue = queue.clone();
     let reaped = Arc::new(AtomicBool::new(false));
     let reader_reaped = reaped.clone();
