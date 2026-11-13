@@ -596,6 +596,26 @@ fn the_writers_size_is_the_sessions_a_watcher_follows_and_taking_over_sends_the_
 }
 
 #[test]
+fn a_size_that_changes_while_output_is_still_queued_is_applied_after_that_output_as_on_the_server() {
+    let device = FakeDevice::start();
+    let hub = hub_with(&device, fast());
+    let mut session = Session::new(120, 40);
+    session.print("wide$ ");
+    let (pane, _probe, mut conn) = attached_pane(&device, &hub, 4, &mut session, WriterView::Watching, None, "wide$");
+    // A flood the pane is still feeding when the size changes, and at its end text placed where only the old width has room.
+    for n in 0..40 {
+        let chunk: String = (0..200).map(|i| format!("{n:02} filler line {i:04} of the flood at the old size\r\n")).collect();
+        session.live(&mut conn, 4, &chunk);
+    }
+    session.live(&mut conn, 4, "\x1b[5;100Hfar-right\x1b[20;1Hthe end");
+    conn.event(Event::Size { session: 4, cols: 80, rows: 40 });
+    session.engine.resize(80, 40, (0, 0)).expect("the session's engine resizes");
+    wait_for("the engine to follow", || pane_snapshot(&pane, 0).1 == (80, 40));
+    wait_text(&pane, "the end");
+    assert_eq!(pane_snapshot(&pane, 0).0, session.fresh(0), "the pane's screen is the session's");
+}
+
+#[test]
 fn a_pane_that_writes_with_a_tile_that_is_not_the_sessions_size_sends_its_size_when_it_attaches() {
     let device = FakeDevice::start();
     let hub = hub_with(&device, fast());

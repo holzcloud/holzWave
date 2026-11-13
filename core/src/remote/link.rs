@@ -6,7 +6,8 @@
 //! * **Bytes.** The reader hands the pane, in order: a notice line, the reset that makes the engine empty, the snapshot the
 //!   server sent with the attach, and then the live bytes. Notices (the words of the design record) travel the same path, so
 //!   their order with the bytes is the order they happened in. The grid of the session is applied before the first byte of a
-//!   snapshot ([`PaneSink::grid`]).
+//!   snapshot ([`PaneSink::grid`]); a size that changes while the session runs is applied after the live bytes before it
+//!   ([`PaneSink::grid_in_order`]), which the session wrote at the old size.
 //! * **The writer rule.** Only the writer's typed bytes are sent. Typed bytes of a pane that watches, or that nobody is told
 //!   writes, are dropped here and counted ([`RemoteView::dropped_input`]); the hub drops them again and the server a third
 //!   time. Nothing typed is kept while the connection is down.
@@ -322,7 +323,8 @@ impl ServerReader {
                     inner.view.cols = cols;
                     inner.view.rows = rows;
                 }
-                self.sink.grid(cols, rows);
+                // After the live bytes before it: they were written at the old size.
+                self.sink.grid_in_order(cols, rows);
             }
             SubEvent::Exited(code) => {
                 self.say(&notice_ended(code));

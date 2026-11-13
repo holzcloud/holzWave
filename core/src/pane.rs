@@ -270,6 +270,13 @@ impl PaneSink {
         self.queue.push_control(Control::Grid { cols: cols.clamp(MIN_COLS, MAX_DIM), rows: rows.clamp(MIN_ROWS, MAX_DIM) });
     }
 
+    /// [`PaneSink::grid`] for a size that changes in the middle of the stream: handled once every byte queued so far has been
+    /// fed, so output the session wrote at the old size is drawn at that size, as the session's own engine drew it.
+    pub fn grid_in_order(&self, cols: u16, rows: u16) {
+        self.settle();
+        self.grid(cols, rows);
+    }
+
     /// Remember how far the viewport is from the bottom of the screen, once every byte queued so far has been fed.
     pub fn mark_scroll(&self) {
         self.settle();
