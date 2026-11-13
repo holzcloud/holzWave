@@ -132,6 +132,14 @@ struct Pending {
     name: String,
 }
 
+/// Why an approved sign-in was not kept.
+enum NotKept {
+    /// It was cancelled or replaced while its poll was out.
+    Stale,
+    /// The fixed sentence of a keychain or file failure.
+    Failed(String),
+}
+
 struct State {
     link: Option<ServerLinkFile>,
     link_error: Option<LinkFileError>,
@@ -470,10 +478,18 @@ impl ServerRuntime {
             Ok(Poll::Denied) => Ok(SignInPoll { state: "denied", interval }),
             Ok(Poll::Expired) => Ok(SignInPoll { state: "expired", interval }),
             Ok(Poll::TooMany) => Ok(SignInPoll { state: "too_many", interval }),
-            Ok(Poll::Granted { token, device_id, .. }) => {
-                self.keep_sign_in(&pending, &token, &device_id)?;
-                Ok(SignInPoll { state: "approved", interval })
-            }
+            Ok(Poll::Granted { token, device_id, .. }) => match self.keep_sign_in(&pending, &token, &device_id, epoch) {
+                Ok(()) => Ok(SignInPoll { state: "approved", interval }),
+                Err(NotKept::Stale) => {
+                    // The person cancelled, signed out or started another sign-in while the request was out: a sign-in they
+                    // no longer want is not kept, and the device the server just made for it is ended there, best effort.
+                    if network_ready().is_ok() {
+                        let _ = signin::revoke_self(&pending.origin, &token);
+                    }
+                    Ok(SignInPoll { state: "expired", interval })
+                }
+                Err(NotKept::Failed(sentence)) => Err(sentence),
+            },
             Err(SignInError::Fault(Fault::Off)) => Ok(SignInPoll { state: "off", interval }),
             Err(SignInError::Fault(Fault::Unreachable)) => {
                 keep(pending);
@@ -488,14 +504,23 @@ impl ServerRuntime {
 
     /// Writes what an approved sign-in comes to: the token into the keychain, then the link file; if the file cannot be written
     /// the token is taken out again, so a failure leaves no half. The device that is in the file is the one the server made.
-    fn keep_sign_in(&self, pending: &Pending, token: &Token, device_id: &str) -> Result<(), String> {
-        let link = ServerLinkFile::new_with(&pending.origin, device_id, &pending.name, self.plain_loopback).map_err(|e| e.sentence().to_owned())?;
-        token_save(&*self.secrets, token).map_err(|e| if is_locked(&e) { SECRETS_LOCKED.to_owned() } else { NOT_KEPT.to_owned() })?;
+    ///
+    /// Nothing is written when the sign-in of `epoch` was cancelled or replaced while its poll was out ([`NotKept::Stale`]).
+    /// The check and the writes happen under the lock of the state, which a cancel, a sign-out and a new sign-in also take to
+    /// end the sign-in in progress, so none of them can come between the two (the writes are local: no network call).
+    fn keep_sign_in(&self, pending: &Pending, token: &Token, device_id: &str, epoch: u64) -> Result<(), NotKept> {
+        let link = ServerLinkFile::new_with(&pending.origin, device_id, &pending.name, self.plain_loopback)
+            .map_err(|e| NotKept::Failed(e.sentence().to_owned()))?;
+        let mut state = lock(&self.state);
+        if state.epoch != epoch || state.pending.is_some() {
+            return Err(NotKept::Stale);
+        }
+        token_save(&*self.secrets, token)
+            .map_err(|e| NotKept::Failed(if is_locked(&e) { SECRETS_LOCKED.to_owned() } else { NOT_KEPT.to_owned() }))?;
         if let Err(e) = link.save(&self.dir) {
             let _ = token_clear(&*self.secrets);
-            return Err(e.sentence().to_owned());
+            return Err(NotKept::Failed(e.sentence().to_owned()));
         }
-        let mut state = lock(&self.state);
         state.link = Some(link);
         state.link_error = None;
         state.pending = None;
@@ -517,16 +542,19 @@ impl ServerRuntime {
     /// Signs this device out: the server is asked to end this device's sign-in (best effort), the token is forgotten and the
     /// address stays. With the store locked nothing is changed, because the token cannot be reached.
     pub fn sign_out(&self) -> Result<ServerView, String> {
-        let token = match token_load(&*self.secrets) {
-            Ok(token) => token,
-            Err(e) if is_locked(&e) => return Err(SECRETS_LOCKED.to_owned()),
-            Err(_) => return Err(KEYCHAIN.to_owned()),
-        };
-        {
+        // Read under the lock that ends the sign-in in progress: an approval that is being kept now is either in the keychain
+        // already, and is the token signed out here, or finds the sign-in ended and is not kept.
+        let token = {
             let mut state = lock(&self.state);
+            let token = match token_load(&*self.secrets) {
+                Ok(token) => token,
+                Err(e) if is_locked(&e) => return Err(SECRETS_LOCKED.to_owned()),
+                Err(_) => return Err(KEYCHAIN.to_owned()),
+            };
             state.pending = None;
             state.epoch += 1;
-        }
+            token
+        };
         let link = lock(&self.state).link.clone();
         if let (Some(token), Some(link)) = (&token, &link)
             && network_ready().is_ok()
@@ -549,7 +577,7 @@ pub(crate) mod fake {
     use std::collections::BTreeMap;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
 
@@ -581,6 +609,8 @@ pub(crate) mod fake {
         pub sync_on: Arc<AtomicBool>,
         /// When set, the server stops answering (every connection is closed unanswered).
         pub down: Arc<AtomicBool>,
+        /// How long the answer to a poll is held back, in milliseconds: a poll that is still out while the person acts.
+        pub poll_delay: Arc<AtomicU64>,
     }
 
     fn respond(stream: &mut TcpStream, status: &str, extra: &str, body: &[u8]) {
@@ -602,15 +632,32 @@ pub(crate) mod fake {
                 revokes: Arc::new(AtomicUsize::new(0)),
                 sync_on: Arc::new(AtomicBool::new(true)),
                 down: Arc::new(AtomicBool::new(false)),
+                poll_delay: Arc::new(AtomicU64::new(0)),
             };
-            let (grant, accepts, requests, files, revokes, sync_on, down) =
-                (fake.grant.clone(), fake.accepts.clone(), fake.requests.clone(), fake.files.clone(), fake.revokes.clone(), fake.sync_on.clone(), fake.down.clone());
+            let (grant, accepts, requests, files, revokes, sync_on, down, poll_delay) = (
+                fake.grant.clone(),
+                fake.accepts.clone(),
+                fake.requests.clone(),
+                fake.files.clone(),
+                fake.revokes.clone(),
+                fake.sync_on.clone(),
+                fake.down.clone(),
+                fake.poll_delay.clone(),
+            );
             thread::spawn(move || {
                 for stream in listener.incoming() {
                     let Ok(stream) = stream else { return };
-                    let (grant, accepts, requests, files, revokes, sync_on, down) =
-                        (grant.clone(), accepts.clone(), requests.clone(), files.clone(), revokes.clone(), sync_on.clone(), down.clone());
-                    thread::spawn(move || serve(stream, &grant, &accepts, &requests, &files, &revokes, &sync_on, &down));
+                    let (grant, accepts, requests, files, revokes, sync_on, down, poll_delay) = (
+                        grant.clone(),
+                        accepts.clone(),
+                        requests.clone(),
+                        files.clone(),
+                        revokes.clone(),
+                        sync_on.clone(),
+                        down.clone(),
+                        poll_delay.clone(),
+                    );
+                    thread::spawn(move || serve(stream, &grant, &accepts, &requests, &files, &revokes, &sync_on, &down, &poll_delay));
                 }
             });
             fake
@@ -635,6 +682,7 @@ pub(crate) mod fake {
         revokes: &AtomicUsize,
         sync_on: &AtomicBool,
         down: &AtomicBool,
+        poll_delay: &AtomicU64,
     ) {
         let mut reader = BufReader::new(stream.try_clone().expect("clone"));
         loop {
@@ -685,6 +733,7 @@ pub(crate) mod fake {
                     respond(&mut stream, "200 OK", "", started.as_bytes());
                 }
                 ("POST", "/api/device/token") => {
+                    thread::sleep(std::time::Duration::from_millis(poll_delay.load(Ordering::SeqCst)));
                     let answer = match mode {
                         Grant::Pending | Grant::Off => r#"{"state":"pending"}"#.to_owned(),
                         Grant::Denied => r#"{"state":"denied"}"#.to_owned(),
@@ -916,6 +965,75 @@ mod tests {
         assert_eq!(rt.sign_in_poll().unwrap().state, "off");
         assert_eq!(rt.view().state, "signed_out", "the wait ended");
         assert_eq!(rt.sign_in_poll().unwrap().state, "expired");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Starts a sign-in at `fake` that the server approves, and polls it on another thread with the answer held back; `meanwhile`
+    /// runs while that poll is out. Returns the poll's answer.
+    fn poll_out_while(rt: &ServerRuntime, fake: &Fake, meanwhile: impl FnOnce()) -> SignInPoll {
+        rt.sign_in_start(&fake.origin).expect("a sign-in starts");
+        *fake.grant.lock().unwrap() = Mode::Approved;
+        std::thread::sleep(Duration::from_millis(1100));
+        fake.poll_delay.store(400, Ordering::SeqCst);
+        let polls = fake.count("POST /api/device/token");
+        std::thread::scope(|scope| {
+            let poll = scope.spawn(|| rt.sign_in_poll());
+            while fake.count("POST /api/device/token") == polls {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            meanwhile();
+            poll.join().unwrap().expect("a poll")
+        })
+    }
+
+    #[test]
+    fn an_approval_that_comes_back_after_cancel_is_not_kept_and_the_device_it_made_is_ended() {
+        let (rt, store, dir) = runtime("late-cancel");
+        let fake = Fake::start();
+        let answer = poll_out_while(&rt, &fake, || {
+            rt.sign_in_cancel();
+        });
+        assert_eq!(answer.state, "expired");
+        assert_eq!(store.get(TOKEN_ACCOUNT).unwrap(), None, "nothing in the keychain");
+        assert!(!dir.join("server_link.json").exists(), "no link file");
+        assert_eq!(rt.view().state, "signed_out");
+        assert_eq!(fake.revokes.load(Ordering::SeqCst), 1, "the device the server made is ended there");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_approval_that_comes_back_after_sign_out_does_not_sign_the_device_in_again() {
+        let (rt, store, dir) = runtime("late-out");
+        let fake = Fake::start();
+        sign_in(&rt, &fake);
+        // A second sign-in at the same server, and the person signs out while its poll is out.
+        let answer = poll_out_while(&rt, &fake, || {
+            rt.sign_out().expect("signed out");
+        });
+        assert_eq!(answer.state, "expired");
+        assert_eq!(store.get(TOKEN_ACCOUNT).unwrap(), None, "the token is not written again");
+        assert_eq!(rt.view().state, "signed_out");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_approval_from_one_server_that_comes_back_after_a_sign_in_at_another_began_keeps_neither_link_nor_token() {
+        let (rt, store, dir) = runtime("late-other");
+        let (first, second) = (Fake::start(), Fake::start());
+        let answer = poll_out_while(&rt, &first, || {
+            rt.sign_in_cancel();
+            rt.sign_in_start(&second.origin).expect("the sign-in at the other server starts");
+        });
+        assert_eq!(answer.state, "expired");
+        assert_eq!(store.get(TOKEN_ACCOUNT).unwrap(), None);
+        assert!(!dir.join("server_link.json").exists());
+        // The sign-in the person chose is still waiting, at the server they chose.
+        let view = rt.view();
+        assert_eq!((view.state, view.url.as_str()), ("signing_in", second.origin.as_str()));
+        *second.grant.lock().unwrap() = Mode::Approved;
+        std::thread::sleep(Duration::from_millis(1100));
+        assert_eq!(rt.sign_in_poll().unwrap().state, "approved");
+        assert_eq!(rt.view().url, second.origin);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
