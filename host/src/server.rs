@@ -479,16 +479,28 @@ impl ServerRuntime {
             Ok(Poll::Expired) => Ok(SignInPoll { state: "expired", interval }),
             Ok(Poll::TooMany) => Ok(SignInPoll { state: "too_many", interval }),
             Ok(Poll::Granted { token, device_id, .. }) => match self.keep_sign_in(&pending, &token, &device_id, epoch) {
-                Ok(()) => Ok(SignInPoll { state: "approved", interval }),
-                Err(NotKept::Stale) => {
-                    // The person cancelled, signed out or started another sign-in while the request was out: a sign-in they
-                    // no longer want is not kept, and the device the server just made for it is ended there, best effort.
+                Ok(replaced) => {
+                    // A sign-in this device held before (a new sign-in at the same server) is ended on the server, best
+                    // effort, so the old device does not stay there for its idle time and count against the person's cap.
+                    if let Some((old, url)) = replaced
+                        && network_ready().is_ok()
+                    {
+                        let _ = signin::revoke_self(&url, &old);
+                    }
+                    Ok(SignInPoll { state: "approved", interval })
+                }
+                Err(why) => {
+                    // Not kept: the person cancelled, signed out or started another sign-in while the request was out, or the
+                    // keychain or the file could not take it. The device the server just made would stay there unused, so it
+                    // is ended there, best effort.
                     if network_ready().is_ok() {
                         let _ = signin::revoke_self(&pending.origin, &token);
                     }
-                    Ok(SignInPoll { state: "expired", interval })
+                    match why {
+                        NotKept::Stale => Ok(SignInPoll { state: "expired", interval }),
+                        NotKept::Failed(sentence) => Err(sentence),
+                    }
                 }
-                Err(NotKept::Failed(sentence)) => Err(sentence),
             },
             Err(SignInError::Fault(Fault::Off)) => Ok(SignInPoll { state: "off", interval }),
             Err(SignInError::Fault(Fault::Unreachable)) => {
@@ -508,17 +520,26 @@ impl ServerRuntime {
     /// Nothing is written when the sign-in of `epoch` was cancelled or replaced while its poll was out ([`NotKept::Stale`]).
     /// The check and the writes happen under the lock of the state, which a cancel, a sign-out and a new sign-in also take to
     /// end the sign-in in progress, so none of them can come between the two (the writes are local: no network call).
-    fn keep_sign_in(&self, pending: &Pending, token: &Token, device_id: &str, epoch: u64) -> Result<(), NotKept> {
+    ///
+    /// Answers the token this device held before and the address it was for, when there was one: the caller ends it on the
+    /// server. A failure puts that token back, so the device stays signed in as it was.
+    fn keep_sign_in(&self, pending: &Pending, token: &Token, device_id: &str, epoch: u64) -> Result<Option<(Token, String)>, NotKept> {
         let link = ServerLinkFile::new_with(&pending.origin, device_id, &pending.name, self.plain_loopback)
             .map_err(|e| NotKept::Failed(e.sentence().to_owned()))?;
         let mut state = lock(&self.state);
         if state.epoch != epoch || state.pending.is_some() {
             return Err(NotKept::Stale);
         }
+        // The sign-in this one replaces. A keychain that cannot be read here fails the save below.
+        let old = token_load(&*self.secrets).ok().flatten().filter(|old| old.bearer().as_str() != token.bearer().as_str());
+        let old_url = state.link.as_ref().map(|link| link.url().to_owned());
         token_save(&*self.secrets, token)
             .map_err(|e| NotKept::Failed(if is_locked(&e) { SECRETS_LOCKED.to_owned() } else { NOT_KEPT.to_owned() }))?;
         if let Err(e) = link.save(&self.dir) {
-            let _ = token_clear(&*self.secrets);
+            let _ = match &old {
+                Some(old) => token_save(&*self.secrets, old),
+                None => token_clear(&*self.secrets),
+            };
             return Err(NotKept::Failed(e.sentence().to_owned()));
         }
         state.link = Some(link);
@@ -526,7 +547,7 @@ impl ServerRuntime {
         state.pending = None;
         state.epoch += 1;
         state.seen = Seen::NONE;
-        Ok(())
+        Ok(old.zip(old_url))
     }
 
     /// Drops the sign-in in progress. Nothing was written, so nothing is undone.
@@ -598,6 +619,7 @@ pub(crate) mod fake {
         Off,
     }
 
+    #[derive(Clone)]
     pub struct Fake {
         pub origin: String,
         pub grant: Arc<Mutex<Grant>>,
@@ -611,6 +633,10 @@ pub(crate) mod fake {
         pub down: Arc<AtomicBool>,
         /// How long the answer to a poll is held back, in milliseconds: a poll that is still out while the person acts.
         pub poll_delay: Arc<AtomicU64>,
+        /// The token an approval issues; [`TOKEN`] unless a test needs a second one. Both are accepted.
+        pub issue: Arc<Mutex<String>>,
+        /// The tokens a device ended its own sign-in with, in order.
+        pub revoked: Arc<Mutex<Vec<String>>>,
     }
 
     fn respond(stream: &mut TcpStream, status: &str, extra: &str, body: &[u8]) {
@@ -633,31 +659,15 @@ pub(crate) mod fake {
                 sync_on: Arc::new(AtomicBool::new(true)),
                 down: Arc::new(AtomicBool::new(false)),
                 poll_delay: Arc::new(AtomicU64::new(0)),
+                issue: Arc::new(Mutex::new(TOKEN.to_owned())),
+                revoked: Arc::new(Mutex::new(Vec::new())),
             };
-            let (grant, accepts, requests, files, revokes, sync_on, down, poll_delay) = (
-                fake.grant.clone(),
-                fake.accepts.clone(),
-                fake.requests.clone(),
-                fake.files.clone(),
-                fake.revokes.clone(),
-                fake.sync_on.clone(),
-                fake.down.clone(),
-                fake.poll_delay.clone(),
-            );
+            let shared = fake.clone();
             thread::spawn(move || {
                 for stream in listener.incoming() {
                     let Ok(stream) = stream else { return };
-                    let (grant, accepts, requests, files, revokes, sync_on, down, poll_delay) = (
-                        grant.clone(),
-                        accepts.clone(),
-                        requests.clone(),
-                        files.clone(),
-                        revokes.clone(),
-                        sync_on.clone(),
-                        down.clone(),
-                        poll_delay.clone(),
-                    );
-                    thread::spawn(move || serve(stream, &grant, &accepts, &requests, &files, &revokes, &sync_on, &down, &poll_delay));
+                    let shared = shared.clone();
+                    thread::spawn(move || serve(stream, &shared));
                 }
             });
             fake
@@ -672,18 +682,8 @@ pub(crate) mod fake {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn serve(
-        mut stream: TcpStream,
-        grant: &Mutex<Grant>,
-        accepts: &AtomicBool,
-        requests: &Mutex<Vec<String>>,
-        files: &Mutex<BTreeMap<String, Vec<u8>>>,
-        revokes: &AtomicUsize,
-        sync_on: &AtomicBool,
-        down: &AtomicBool,
-        poll_delay: &AtomicU64,
-    ) {
+    fn serve(mut stream: TcpStream, fake: &Fake) {
+        let Fake { grant, accepts, requests, files, revokes, sync_on, down, poll_delay, issue, revoked, .. } = fake;
         let mut reader = BufReader::new(stream.try_clone().expect("clone"));
         loop {
             let mut line = String::new();
@@ -722,7 +722,11 @@ pub(crate) mod fake {
                 return;
             }
             let header = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
-            let authed = header("authorization").is_some_and(|v| v == format!("Bearer {TOKEN}")) && accepts.load(Ordering::SeqCst);
+            let bearer = header("authorization").and_then(|v| v.strip_prefix("Bearer ").map(str::to_owned));
+            let issued = issue.lock().unwrap().clone();
+            let authed = bearer.as_ref().is_some_and(|b| *b == TOKEN || *b == issued)
+                && accepts.load(Ordering::SeqCst)
+                && !revoked.lock().unwrap().contains(bearer.as_ref().unwrap());
             let mode = *grant.lock().unwrap();
             match (method.as_str(), target.as_str()) {
                 _ if mode == Grant::Off && target.starts_with("/api/device/") && !target.ends_with("/me") => respond(&mut stream, "404 Not Found", "", b""),
@@ -739,7 +743,7 @@ pub(crate) mod fake {
                         Grant::Denied => r#"{"state":"denied"}"#.to_owned(),
                         Grant::Expired => r#"{"state":"expired"}"#.to_owned(),
                         Grant::TooMany => r#"{"state":"too_many"}"#.to_owned(),
-                        Grant::Approved => format!(r#"{{"state":"approved","token":"{TOKEN}","device_id":17,"expires_at":"2027-02-10T12:00:00Z"}}"#),
+                        Grant::Approved => format!(r#"{{"state":"approved","token":"{issued}","device_id":17,"expires_at":"2027-02-10T12:00:00Z"}}"#),
                     };
                     respond(&mut stream, "200 OK", "", answer.as_bytes());
                 }
@@ -752,7 +756,7 @@ pub(crate) mod fake {
                 }
                 ("DELETE", "/api/device/me") if authed => {
                     revokes.fetch_add(1, Ordering::SeqCst);
-                    accepts.store(false, Ordering::SeqCst);
+                    revoked.lock().unwrap().extend(bearer.clone());
                     respond(&mut stream, "204 No Content", "", b"");
                 }
                 (_, path) if path.starts_with("/api/device/me") => respond(&mut stream, "401 Unauthorized", "", b""),
@@ -1034,6 +1038,64 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1100));
         assert_eq!(rt.sign_in_poll().unwrap().state, "approved");
         assert_eq!(rt.view().url, second.origin);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A second token of the shape the client requires, for a second sign-in.
+    const SECOND: &str = "hwd_secondSECOND-0123456789_abcdefghijklmnopqrs";
+
+    #[test]
+    fn a_new_sign_in_at_the_same_server_ends_the_sign_in_it_replaces_there() {
+        let (rt, store, dir) = runtime("again");
+        let fake = Fake::start();
+        sign_in(&rt, &fake);
+        *fake.issue.lock().unwrap() = SECOND.to_owned();
+        sign_in(&rt, &fake);
+        assert_eq!(store.get(TOKEN_ACCOUNT).unwrap().as_deref(), Some(SECOND), "the new token is kept");
+        assert_eq!(*fake.revoked.lock().unwrap(), vec![TOKEN.to_owned()], "the old device is ended, and only that one");
+        assert_eq!(rt.refresh().state, "signed_in");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_approval_the_keychain_cannot_take_ends_the_device_the_server_made_for_it() {
+        let (rt, store, dir) = runtime("not-kept");
+        let fake = Fake::start();
+        // The store is locked between the start and the approval: the token cannot be kept.
+        *fake.grant.lock().unwrap() = Mode::Pending;
+        rt.sign_in_start(&fake.origin).unwrap();
+        *fake.grant.lock().unwrap() = Mode::Approved;
+        store.lock(true);
+        std::thread::sleep(Duration::from_millis(1100));
+        assert_eq!(rt.sign_in_poll().unwrap_err(), SECRETS_LOCKED);
+        store.lock(false);
+        assert_eq!(*fake.revoked.lock().unwrap(), vec![TOKEN.to_owned()], "the device the server made is ended");
+        assert_eq!(store.get(TOKEN_ACCOUNT).unwrap(), None);
+        assert!(!dir.join("server_link.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_file_that_cannot_be_written_ends_the_new_device_and_keeps_the_sign_in_before_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let (rt, store, dir) = runtime("file-fails");
+        let fake = Fake::start();
+        sign_in(&rt, &fake);
+        *fake.issue.lock().unwrap() = SECOND.to_owned();
+        *fake.grant.lock().unwrap() = Mode::Pending;
+        rt.sign_in_start(&fake.origin).unwrap();
+        *fake.grant.lock().unwrap() = Mode::Approved;
+        std::thread::sleep(Duration::from_millis(1100));
+        let set = |mode: u32| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).unwrap();
+        set(0o500);
+        let polled = rt.sign_in_poll();
+        set(0o700);
+        assert!(polled.is_err(), "a file that cannot be written fails the sign-in");
+        assert_eq!(store.get(TOKEN_ACCOUNT).unwrap().as_deref(), Some(TOKEN), "the token before it is back");
+        assert!(dir.join("server_link.json").exists());
+        assert_eq!(*fake.revoked.lock().unwrap(), vec![SECOND.to_owned()], "the new device is ended, the old one is not");
+        assert_eq!(rt.refresh().state, "signed_in", "the old sign-in still works");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
