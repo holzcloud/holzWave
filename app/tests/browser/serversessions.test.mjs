@@ -90,6 +90,16 @@ async function statesCase(page, url) {
   await signOut.click();
   assert.equal(await signOut.textContent(), "Click again to sign out");
   assert.equal((await linkCalls(page, "server_sign_out")).length, 0, "the first press signs nothing out");
+  // Work elsewhere in the dialog puts it back, also outside the group `Server`.
+  await page.locator(".conns .cx-form input").first().click();
+  assert.equal(await signOut.textContent(), "Sign out", "a press in the saved connections disarms it");
+  // Escape puts it back and goes no further: the dialog stays open.
+  await signOut.click();
+  assert.equal(await signOut.textContent(), "Click again to sign out");
+  await page.keyboard.press("Escape");
+  assert.equal(await signOut.textContent(), "Sign out", "Escape disarms");
+  assert.ok(await page.locator(".dlg.conns").isVisible(), "the Escape that disarms does not close the dialog");
+  await signOut.click();
   await signOut.click();
   await page.waitForFunction(() => document.querySelector(".conns .cx-srv-state")?.textContent === "not signed in");
   assert.equal((await linkCalls(page, "server_sign_out")).length, 1);
@@ -176,6 +186,9 @@ async function actionsCase(page, url) {
   await end.click();
   assert.equal(await end.textContent(), "Click again to end");
   assert.equal((await sessionCalls(page, "server_session_end")).length, 0);
+  await page.locator(".conns .cx-form input").first().click();
+  assert.equal(await end.textContent(), "End", "a press in the saved connections disarms End");
+  await end.click();
   await end.click();
   await page.waitForFunction(() => document.querySelector('.conns .cx-sess[data-session="4"]') === null);
   assert.deepEqual(await sessionCalls(page, "server_session_end"), [{ session: 4 }]);

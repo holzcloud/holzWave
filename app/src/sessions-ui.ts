@@ -114,6 +114,8 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
   word.setAttribute("role", "status");
   const acts = el("span", "cx-srv-acts", row);
   const below = el("div", "cx-srv-below", group);
+  // An armed `Sign out` or `End` is put back by a press or the focus anywhere in the dialog, not only in this group.
+  const scope = parent.closest<HTMLElement>('[role="dialog"]') ?? group;
 
   /** Each drawing of the buttons and the list has its own signal, so the listeners of an old drawing go with it. */
   let drawn = new AbortController();
@@ -175,7 +177,7 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
       if (text === SIGN_OUT) {
         const b = el("button", "cx-sv-btn", acts);
         b.dataset.key = "signout";
-        armSignOut(b, group, drawn.signal, (result) => {
+        armSignOut(b, scope, drawn.signal, (result) => {
           if (result.ok) {
             // A read that started before the sign-out would bring the signed-in link back: its answer is dropped.
             seq++;
@@ -244,7 +246,7 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
         );
         const end = el("button", "cx-sv-btn", buttons);
         end.dataset.key = `end-${s.id}`;
-        armed(end, END, END_ARMED, group, drawn.signal, () =>
+        armed(end, END, END_ARMED, scope, drawn.signal, () =>
           act(async () => {
             await source.end(s.id);
             await refresh();

@@ -505,7 +505,8 @@ export async function signOut(): Promise<SignOutResult> {
 
 /**
  * Make `button` the `Sign out` of a row: the first press changes its words and its border (`Click again to sign out`), a press or the
- * focus anywhere else in `scope`, or Escape, puts it back, and only the second press signs out, in the manner of `Turn off` of the sync
+ * focus anywhere else in `scope` (the dialog the row is in), or Escape, puts it back (that Escape goes no further, so it does not also
+ * close the dialog), and only the second press signs out, in the manner of `Turn off` of the sync
  * popover. `finished` gets the result. It is armed by a press and never by the focus, so the first press never calls the command.
  */
 export function armSignOut(
@@ -530,7 +531,11 @@ export function armSignOut(
   document.addEventListener(
     "keydown",
     (e) => {
-      if (e.key === "Escape" && button.dataset.armed === "true") off();
+      if (e.key !== "Escape" || button.dataset.armed !== "true") return;
+      // This Escape only puts the button back: the dialog around it stays open.
+      e.preventDefault();
+      e.stopPropagation();
+      off();
     },
     { signal, capture: true },
   );
