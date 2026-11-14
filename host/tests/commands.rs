@@ -2,6 +2,9 @@
 //! the caps are, what the browser build does with a command it does not have, and that the table still describes the
 //! desktop surface as it was recorded before the table existed.
 
+// The tests that need a Unix system are cfg-gated, so on a Windows check their helpers are unused.
+#![cfg_attr(windows, allow(dead_code, unused_imports, unused_mut))]
+
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};

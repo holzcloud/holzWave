@@ -5,6 +5,9 @@
 //! Not proved here: the real system dialog, real providers (a cloud drive, a USB stick, another app) that report no size or
 //! a wrong one, and a very large file on a phone. The fake picker stands in for all of it.
 
+// The tests that need a Unix system are cfg-gated, so on a Windows check their helpers are unused.
+#![cfg_attr(windows, allow(dead_code, unused_imports, unused_mut))]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};

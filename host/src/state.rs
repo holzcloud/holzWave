@@ -4795,6 +4795,8 @@ fn write_session(
     }
 }
 
+// The tests that need a Unix system are cfg-gated, so on a Windows check their helpers are unused.
+#[cfg_attr(windows, allow(dead_code, unused_imports, unused_mut))]
 #[cfg(test)]
 mod tests {
     use super::*;

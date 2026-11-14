@@ -8,6 +8,9 @@
 //! and no connection. A connection that is `Connected` counted through a real login is proved by the table and by nothing
 //! else, and is said so.
 
+// The tests that need a Unix system are cfg-gated, so on a Windows check their helpers are unused.
+#![cfg_attr(windows, allow(dead_code, unused_imports, unused_mut))]
+
 mod support;
 
 use std::path::{Path, PathBuf};

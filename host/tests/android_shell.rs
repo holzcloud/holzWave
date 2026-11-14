@@ -5,6 +5,9 @@
 //! Not proved here: that `/system/bin/sh` of a real system is what the rules assume, and what it does with the locale
 //! variables. Those need a device or an emulator.
 
+// The tests that need a Unix system are cfg-gated, so on a Windows check their helpers are unused.
+#![cfg_attr(windows, allow(dead_code, unused_imports, unused_mut))]
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;

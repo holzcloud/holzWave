@@ -327,6 +327,8 @@ fn ensure_folder(home: &Path) -> io::Result<PathBuf> {
         Ok(meta) if meta.is_dir() => {}
         Ok(_) => return Err(io::Error::new(io::ErrorKind::InvalidInput, "the hand-over folder is not a folder")),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // `mut` is needed only for the Unix mode below.
+            #[cfg_attr(not(unix), allow(unused_mut))]
             let mut builder = DirBuilder::new();
             #[cfg(unix)]
             builder.mode(0o700);
