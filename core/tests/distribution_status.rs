@@ -154,7 +154,7 @@ fn page_with(rows: &[(&str, &str)]) -> String {
 
 /// The Android channels that the page calls `available` while it says that the Android app is not built.
 fn android_violations(page: &str) -> Vec<String> {
-    if !flat(page).contains("The Android app is not built") {
+    if !flat(page).contains("No Android release is signed or published") {
         return vec!["the page does not say that the Android app is not built".to_owned()];
     }
     let (statuses, _) = channel_statuses(page);
@@ -344,7 +344,7 @@ fn the_readme_names_a_channel_as_a_way_to_install_only_when_the_page_says_availa
 
 #[test]
 fn no_android_channel_is_available_while_the_app_is_not_built() {
-    let built = "The Android app is not built.";
+    let built = "No Android release is signed or published.";
     let ok = format!("{}\n{built}\n", page_with(&[("Obtainium", "not built"), ("F-Droid", "not built")]));
     assert!(android_violations(&ok).is_empty());
     let bad = format!("{}\n{built}\n", page_with(&[("Obtainium", "available"), ("F-Droid", "not built")]));

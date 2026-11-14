@@ -81,8 +81,9 @@ in the [Server guide](docs/server.md). This statement does not speak for the ope
 
 ## Which builds this covers
 
-This statement covers the desktop builds and the server build as they are today. The Android app does not exist yet, so this
-statement makes no claim about it. It will get its own sentences here when it exists.
+This statement covers the desktop builds and the server build as they are today. The Android app is not published: it
+has run only on emulators, so this statement makes no claim about it. It will get its own sentences here when it is
+published.
 
 A store that distributes holzWave (Flathub, the Microsoft Store, F-Droid, Obtainium's source on GitHub) has its own statement
 about the data it collects about you. This one does not cover that.

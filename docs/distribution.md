@@ -1,12 +1,13 @@
 # Where holzWave can be had, and what each channel does and does not do
 
 > [!IMPORTANT]
-> **Status, as recorded on 2026-11-06.** holzWave is a beta (`0.0.1-beta2`, and every `0.0.x` after it). Two channels are
-> `available`: the downloads on the GitHub releases page and the author's own Homebrew tap. Flathub is `not submitted`
-> (a local Flatpak build recipe exists and was never started on a Linux desktop; it is a recipe, not a listing). The
-> Microsoft Store is `on hold`. Obtainium and F-Droid are `not built`, because no Android app exists yet. Nothing was
-> handed to Flathub, the Microsoft Store, F-Droid or any other listing, and nothing was run on a Linux desktop. Nothing
-> here costs money; the page says where that limits what can be done. The list of what has not been tried is at the end
+> **Status, as recorded on 2026-11-06.** holzWave is a beta (`0.0.1-beta2`, and every `0.0.x` after it).
+> Two channels are `available`: the downloads on the GitHub releases page and the author's own Homebrew tap. Flathub is
+> `not submitted` (a local Flatpak build recipe exists and was never started on a Linux desktop; it is a recipe, not a
+> listing). The Microsoft Store is `on hold`. Obtainium and F-Droid are `not built`, because no Android release exists:
+> the app is built locally and has run only on arm64 emulators, and no release APK is signed. Nothing was handed to
+> Flathub, the Microsoft Store, F-Droid or any other listing, and nothing was run on a Linux desktop. Nothing here costs
+> money; the page says where that limits what can be done. The list of what has not been tried is at the end
 > ([Untested](#untested)).
 
 **The status words.** Each channel has exactly one, in the first cell after its name, and the README names a channel as a
@@ -34,8 +35,8 @@ current one before relying on a number here.
 | **Homebrew, own tap** | `available`. The casks in this repository, which the README names as the macOS route. Not in the official Homebrew cask repository, which cannot take the app ([homebrew.md](homebrew.md)) | Nothing | No listing on formulae.brew.sh and no `brew search` hit; the person runs `brew tap` and `brew trust` once; the app is not notarized, so the cask removes the quarantine attribute, which bypasses a macOS protection | The preview cask `holzwave@preview` follows every alpha and beta; the stable cask `holzwave` is written only for a plain version and does not exist yet | `brew upgrade --cask holzcloud/holzwave/holzwave@preview` | Ad hoc signature, no developer named, not notarized | macOS on Apple silicon (macOS 13 or newer) | A clean-machine install of the new caveats; Intel Macs are not served |
 | **Flathub** (Flatpak) | `not submitted`. Only a local build recipe exists under `packaging/flatpak/` ([flatpak.md](flatpak.md)) | Nothing on any Flathub page read; no fee is stated, as far as the author knows there is none | Nothing paid is missing. Review is by volunteers and has no deadline; the manifest must be written by the owner by hand (see [Flathub](#flathub)) | A `beta` branch builds into a separate `flathub-beta` remote. Whether a brand-new app may live only there is not stated, so the listing says beta in its text | `flatpak update` | Flathub builds the package itself and signs its own build; none of this project's signatures apply | Flathub builds x86_64 and aarch64 itself. Only an arm64 container build of the engine was run here; x86_64 was not | Never started on any machine or desktop; whether Flathub accepts it at all; the host shell inside the sandbox |
 | **Microsoft Store** (MSIX) | `on hold`. The owner has not yet tried the publisher name `holzcloud.ch` in the free Store sign-up and no publisher name is decided (recorded 2026-11-06). No package was made or uploaded; the staging scripts for the package exist and were never run on a Windows machine | No registration fee for an individual account under the new onboarding flow; a personal Microsoft account, a government ID and a selfie are needed | The Store re-signs an MSIX, so no certificate is needed, but that holds for an MSIX only. Whether the sign-up works from Switzerland and accepts the publisher name is not known until the sign-up is done | Before the first publish a private audience (people the owner names); after it package flights; a public listing has no beta label, so the description says beta | The Store updates the package | The Store signs the package with a Microsoft certificate; the project's own signatures play no part | x64 first. An ARM64 package is not built | Not built or installed: whether the app starts as a packaged app, whether the terminal, the web view and the settings folder work inside the package, how certification treats a terminal |
-| **Obtainium** (Android APK) | `not built`. The Android app does not exist yet; this channel waits for it | Nothing | The package cannot be registered with Google (see [Android](#android)): from the 2027 global rollout an unregistered app installs only through Android's advanced flow or ADB | Every `0.0.x` release is a GitHub pre-release; Obtainium shows pre-releases only if the person turns that option on for the app, as far as the author knows | Refresh the app in Obtainium; it fetches the APK from the GitHub release | The author's own key signs the APK; Obtainium installs it unchanged | arm64-v8a only, Android 12 or newer | Everything: no APK exists |
-| **F-Droid** (Android) | `not built`. Nothing was sent to F-Droid; the channel waits for the Android app | Nothing in the pages read; no fee is stated, as far as the author knows there is none | F-Droid signs with its own key unless the build is reproducible, and nobody has shown a bit-identical build for this stack. The listing carries the anti-feature `NonFreeNet`, because the cloud AI providers are in every Android build | F-Droid has no beta channel and no pre-release flag; the recipe's tag pattern decides what it builds, so the listing says beta in its text | The F-Droid client offers the new version | F-Droid's key, or the author's if the build is reproducible. With two different keys Obtainium and F-Droid installs cannot update each other: uninstall before switching, and settings on that phone are lost unless exported | arm64-v8a only, Android 12 or newer | Everything: no APK exists and nothing was sent to F-Droid |
+| **Obtainium** (Android APK) | `not built`. No signed Android release exists; the app is built locally and has run only on arm64 emulators. This channel waits for a signed release | Nothing | The package cannot be registered with Google (see [Android](#android)): from the 2027 global rollout an unregistered app installs only through Android's advanced flow or ADB | Every `0.0.x` release is a GitHub pre-release; Obtainium shows pre-releases only if the person turns that option on for the app, as far as the author knows | Refresh the app in Obtainium; it fetches the APK from the GitHub release | The author's own key signs the APK; Obtainium installs it unchanged | arm64-v8a only, Android 12 or newer | Everything on a real phone: no signed APK exists, and the app has run only on arm64 emulators |
+| **F-Droid** (Android) | `not built`. Nothing was sent to F-Droid and no build recipe exists; the channel waits for a signed Android release | Nothing in the pages read; no fee is stated, as far as the author knows there is none | F-Droid signs with its own key unless the build is reproducible, and nobody has shown a bit-identical build for this stack. The listing carries the anti-feature `NonFreeNet`, because the cloud AI providers are in every Android build | F-Droid has no beta channel and no pre-release flag; the recipe's tag pattern decides what it builds, so the listing says beta in its text | The F-Droid client offers the new version | F-Droid's key, or the author's if the build is reproducible. With two different keys Obtainium and F-Droid installs cannot update each other: uninstall before switching, and settings on that phone are lost unless exported | arm64-v8a only, Android 12 or newer | Everything: no recipe exists and nothing was sent to F-Droid |
 
 holzWave has no update check, and no build of it shows a notice that a new version exists (see [Updates](#updates)).
 Whether a channel accepts the app is up to the people who run it; this page claims none of it.
@@ -103,8 +104,9 @@ Whether a channel accepts the app is up to the people who run it; this page clai
 - **Two signers.** Obtainium installs the author's signed APK. F-Droid builds from source and signs with its own key
   unless its build matches the author's APK bit for bit. Android does not update an app across two different signing
   certificates, as far as the author knows, so a person moving from one source to the other reinstalls first.
-- **The app that does not exist.** The Android app is not built. These two channels, and the rows of the table above, wait
-  for it. The package name is `ch.holzcloud.holzwave`, the developer name `holzcloud.ch`.
+- **No release yet.** No Android release is signed or published. The app is built locally and has run only on arm64
+  emulators, never on a real phone or tablet. These two channels, and the rows of the table above, wait for a signed
+  release. The package name is `ch.holzcloud.holzwave`, the developer name `holzcloud.ch`.
 
 ## macOS
 
@@ -165,7 +167,8 @@ The builds and desktops below were not run. Where a result will be recorded is n
   anywhere. Rows L6 and L11 of Part 4, and row `ARM1`.
 - **The Store sign-up and a Store package:** the owner has not run the sign-up or built the package, so nothing is known
   about whether the Store accepts the publisher name, the app inside a package, or a terminal in certification.
-- **Android:** nothing exists to run. No row exists yet; one is added with the Android build.
+- **Android:** never run on a real phone or tablet, only on arm64 emulators, and no signed release exists. No row exists
+  yet; one is added with the Android release.
 - **Signatures:** no release has been signed with a real key and nobody has checked one on a real distribution
   ([signing.md](signing.md)).
 

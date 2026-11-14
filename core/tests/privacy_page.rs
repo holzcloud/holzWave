@@ -205,7 +205,7 @@ fn the_statement_is_scoped_to_what_exists() {
             PRIVACY,
             &[
                 "covers the desktop builds and the server build",
-                "The Android app does not exist yet",
+                "The Android app is not published",
                 "makes no claim about it",
                 "Flathub",
                 "the Microsoft Store",

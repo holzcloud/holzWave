@@ -1,12 +1,14 @@
 # holzWave on Android: the two channels, who signs, and the limits
 
 > [!IMPORTANT]
-> **Status.** **The Android app does not exist yet.** No APK has been built, nothing was run on an Android device or an
-> emulator, and nothing was sent to F-Droid or published for Obtainium. This page says what will be true when the app exists,
-> so that nobody is surprised by it. It also says up front what no money can fix: Google's developer verification. The
-> package `ch.holzcloud.holzwave` is **not registered** with it and will not be (a full account costs $25, which this project
-> does not pay). From the global rollout in 2027 an unregistered app installs only through Android's advanced flow or through
-> ADB ([the limit](#the-limit-google-developer-verification)). The channels overview is in [distribution.md](distribution.md).
+> **Status.** **No Android release exists yet.** The app is built locally and has run only on arm64
+> emulators, never on a real phone or tablet. No release APK has been signed, because the release key is not made, and
+> nothing was sent to F-Droid or published for Obtainium. This page says what will be true when a release exists, so
+> that nobody is surprised by it. It also says up front what no money can fix: Google's developer verification. The
+> package `ch.holzcloud.holzwave` is **not registered** with it and will not be (a full account costs $25, which this
+> project does not pay). From the global rollout in 2027 an unregistered app installs only through Android's advanced
+> flow or through ADB ([the limit](#the-limit-google-developer-verification)). The channels overview is in
+> [distribution.md](distribution.md).
 
 Facts that came from a web page carry its address and the day it was read, **2026-11-05** unless another day is given. What
 was not checked says "as far as the author knows". Those pages change, so read the current one before relying on a rule here.
@@ -18,8 +20,8 @@ was not checked says "as far as the author knows". Those pages change, so read t
 | **Obtainium** | An app on your phone that watches the GitHub releases page of this project and installs the APK from there. The release carries an APK signed with the author's own key | The author's key (`CN=holzcloud.ch, OU=holzWave`). Obtainium installs the file unchanged | Nothing |
 | **F-Droid** | A free app store that builds apps from their source on its own servers | F-Droid's own key. If the build is reproducible and F-Droid publishes the author's signature instead, the author's key (as far as the author knows, from <https://f-droid.org/docs/Reproducible_Builds/>) | Nothing in the pages read; no fee is stated, as far as the author knows there is none |
 
-A person gets the certificate of whoever signs. Both channels are planned together; neither can be used until the app exists.
-Google Play is not used and not planned. iOS is out of scope: there is no Apple developer account.
+A person gets the certificate of whoever signs. Both channels are planned together; neither can be used until a signed
+release exists. Google Play is not used and not planned. iOS is out of scope: there is no Apple developer account.
 
 ## Moving from one source to the other
 
@@ -49,7 +51,7 @@ Android page. Nobody spends money to remove it.
 
 ## Using Obtainium
 
-When the app exists: add the repository address `https://github.com/holzcloud/holzWave` in Obtainium (or open
+When a release exists: add the repository address `https://github.com/holzcloud/holzWave` in Obtainium (or open
 `obtainium://add/https://github.com/holzcloud/holzWave`).
 
 - Every `0.0.x` release is a GitHub pre-release, so turn on Obtainium's option to include pre-releases for this app (the name
@@ -110,12 +112,12 @@ Android SDK build tools.) A matching fingerprint says the file was signed with t
 
 The folder `packaging/android/fastlane/metadata/android/en-US/` holds a draft of the F-Droid texts (`title.txt`,
 `short_description.txt`, `full_description.txt`). It is a draft: the files cannot carry a header, because F-Droid shows their
-text. They move to `fastlane/` at the repository root together with the build recipe when the app exists. There are no
+text. They move to `fastlane/` at the repository root together with the build recipe when a release exists. There are no
 screenshots, no icon and no changelog yet; they come with the app, and they show only what is built.
 
 ## What is not covered
 
-- No Android device or emulator run of anything. The app does not exist.
-- No APK, no release script for it and no F-Droid recipe.
+- No run on a real phone or tablet; the app has run only on arm64 emulators.
+- No signed APK and no F-Droid recipe. `scripts/android-build.sh release` makes an unsigned release APK locally.
 - Google Play is not used and not planned. iOS is out.
 - The release key is not made yet, so no APK can be signed.
