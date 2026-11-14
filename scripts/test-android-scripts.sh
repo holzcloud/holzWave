@@ -97,7 +97,7 @@ mkdir -p "$HOME/.android/avd/$n.avd"; printf "hw.keyboard=yes\nhw.ramSize=2G\n" 
   printf '#!/bin/sh\ncase "$1" in -m) echo %s ;; *) exec /usr/bin/uname "$@" ;; esac\n' "${C_UNAME:-arm64}" > "$c/bin/uname"
   chmod +x "$c/bin/uname"
   cp "$here/android-env.sh" "$here/android-check.sh" "$here/android-build.sh" "$here/android-emulator.sh" "$here/android-e2e.sh" \
-    "$here/android-adb.sh" "$here/android-e2e-summary.sh" "$here/android-ssh-server.sh" "$here/android-gate.sh" "$c/repo/scripts/"
+    "$here/android-adb.sh" "$here/android-e2e-summary.sh" "$here/android-ssh-server.sh" "$here/android-gate.sh" "$here/android-repro-check.sh" "$c/repo/scripts/"
 }
 # run <script> [args...]: run a script of the fake machine; output in $out, status in $rc. $EXTRA holds more
 # NAME=value pairs for the environment (the script's environment is otherwise empty). The calls of the shims go to $ALL too.
@@ -962,6 +962,76 @@ else
   bad "the lock on a dirty tree (rc $rc): $(echo "$out" | tail -n 3)"
 fi
 
+echo "test 5x: the release smoke section refuses, cleans up and signs only a copy with the SDK debug key"
+mkcase
+rm -f "$c/bin/adb"
+run android-e2e.sh release
+[ "$rc" -eq 2 ] && nothing_left && ok "the release section without adb is exit 2" || bad "e2e release without adb (rc $rc): $out"
+mkcase
+: > "$LOG"
+run android-e2e.sh release
+if [ "$rc" -eq 1 ] && echo "$out" | grep -q 'the emulator did not boot' && nothing_left && [ "$(calls npm)" -eq 0 ] && [ "$(calls apksigner)" -eq 0 ]; then
+  ok "the release section with an emulator that does not boot is exit 1, nothing is built or signed, no temporary file is left"
+else
+  bad "e2e release with a dead emulator (rc $rc, apksigner $(calls apksigner), left: $(ls -A "$c/tmpdir")): $out"
+fi
+# The section's code, cut out by its first and last line: every signing command names the SDK debug key and writes into $tmp, the
+# original APK is only read, and the copy is removed again.
+rel=$(sed -n '/^if \[ "$SECTION" = release \]; then/,/^fi$/p' "$here/android-e2e.sh")
+if [ -z "$rel" ]; then
+  bad "the release section was not found in android-e2e.sh"
+else
+  signs=$(printf '%s\n' "$rel" | grep -v '^[[:space:]]*#' | grep -E '"\$signer" sign')
+  [ "$(printf '%s\n' "$signs" | grep -c .)" -eq 1 ] && printf '%s\n' "$rel" | grep -q 'ks="$HOME/.android/debug.keystore"' \
+    && printf '%s\n' "$rel" | grep -A1 '"\$signer" sign' | grep -q -- '--ks "\$ks" --ks-key-alias androiddebugkey' \
+    && printf '%s\n' "$rel" | grep -A1 '"\$signer" sign' | grep -q -- '--out "\$tmp/release-signed.apk" "\$tmp/release-copy.apk"' \
+    && ok "the release section signs exactly once, with ~/.android/debug.keystore, a copy in its temporary folder" \
+    || bad "the release section's signing command is not the one debug-key copy: $signs"
+  printf '%s\n' "$rel" | grep -v '^[[:space:]]*#' | grep -Eq 'keytool|jarsigner|genkey|storePassword|--ks "[^$]' \
+    && bad "the release section makes a key or uses another keystore" || ok "the release section makes no key and names no other keystore"
+  printf '%s\n' "$rel" | grep -q '\*unsigned\*) ;;' && printf '%s\n' "$rel" | grep -q 'the original.s SHA-256 is unchanged' \
+    && ok "the release section takes only an unsigned APK and checks that the original's SHA-256 did not change" \
+    || bad "the release section does not refuse a signed APK or does not compare the original's hash"
+  grep -q 'release_installed" \] && adb -s "\$SERIAL" uninstall ch.holzcloud.holzwave' "$here/android-e2e.sh" \
+    && ok "the clean-up uninstalls the signed copy on every way out" || bad "the clean-up does not uninstall the release copy"
+fi
+
+echo "test 5y: the reproducibility check builds twice from clean outputs and compares the bytes"
+mkcase
+run android-repro-check.sh extra
+[ "$rc" -eq 2 ] && [ "$(calls npm)" -eq 0 ] && ok "an argument is a usage error, exit 2, nothing built" || bad "repro usage (rc $rc): $out"
+mkcase
+: > "$LOG"
+mkdir -p "$c/repo/app/src-tauri/gen/android/app/build/stale" "$c/repo/app/dist" "$c/repo/target/aarch64-linux-android/release"
+run android-repro-check.sh
+epochs=$(grep '^npm-env ' "$LOG" | sed 's/.*SOURCE_DATE_EPOCH=\([0-9]*\).*/\1/' | sort -u)
+if [ "$rc" -eq 0 ] && echo "$out" | tail -n 1 | grep -q '^android-repro: ok [0-9a-f]\{64\}$' && [ "$(calls npm)" -eq 2 ] && [ "$epochs" = 1700000000 ] \
+  && [ ! -e "$c/repo/app/src-tauri/gen/android/app/build" ] && [ ! -e "$c/repo/app/dist" ] && [ ! -e "$c/repo/target/aarch64-linux-android/release" ] && nothing_left; then
+  ok "two identical builds: exit 0 with the SHA-256, two builds with one SOURCE_DATE_EPOCH, the outputs cleared, no temporary file left"
+else
+  bad "repro identical (rc $rc, npm $(calls npm), epochs '$epochs', left: $(ls -A "$c/tmpdir")): $(echo "$out" | tail -n 3)"
+fi
+mkcase
+: > "$LOG"
+# A stand-in build that writes different bytes each time (a counter in the fake machine's state folder): the check must fail.
+shim "$c/bin/npm" 'out=app/src-tauri/gen/android/app/build/outputs/apk/universal/release; mkdir -p "$out"
+n=$(cat "$HW_STATE/n" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$HW_STATE/n"; echo "build $n" > "$out/app-universal-release-unsigned.apk"'
+run android-repro-check.sh
+if [ "$rc" -eq 1 ] && echo "$out" | grep -q 'the two release APKs differ' && [ "$(calls npm)" -eq 2 ] && nothing_left \
+  && [ ! -e "$c/repo/app/src-tauri/gen/android/app/build" ]; then
+  ok "two different builds: exit 1 that says they differ, outputs cleared, no temporary file left"
+else
+  bad "repro differing (rc $rc, left: $(ls -A "$c/tmpdir")): $(echo "$out" | tail -n 3)"
+fi
+mkcase
+: > "$LOG"
+C_CARGO_RC=0
+shim "$c/bin/npm" 'exit 1'
+run android-repro-check.sh
+[ "$rc" -eq 1 ] && echo "$out" | grep -q 'build 1 failed' && [ "$(calls npm)" -eq 1 ] && nothing_left \
+  && ok "a failing first build is exit 1, no second build, no temporary file left" || bad "repro failing build (rc $rc): $(echo "$out" | tail -n 3)"
+if grep -Eq '^(keytool|jarsigner|apksigner) ' "$LOG"; then bad "the reproducibility check called a signing tool"; else ok "the reproducibility check signs nothing"; fi
+
 echo "test 6: nothing was installed, downloaded or signed"
 if grep -Eq '^(sdkmanager|brew|curl|wget|keytool|jarsigner|apksigner) ' "$ALL"; then
   bad "a forbidden tool was called: $(grep -E '^(sdkmanager|brew|curl|wget|keytool|jarsigner|apksigner) ' "$ALL" | head -n 3)"
@@ -973,9 +1043,11 @@ if grep '^rustup ' "$ALL" | grep -vqx 'rustup target list --installed'; then
 else
   ok "rustup was only asked for its installed targets"
 fi
-for script in android-check.sh android-build.sh android-emulator.sh android-e2e.sh android-adb.sh android-e2e-summary.sh android-ssh-server.sh android-gate.sh; do
+for script in android-check.sh android-build.sh android-emulator.sh android-e2e.sh android-adb.sh android-e2e-summary.sh android-ssh-server.sh android-gate.sh android-repro-check.sh; do
   # The commands of a script: no comment lines, no lines that only print a message.
   code=$(grep -v '^[[:space:]]*#' "$here/$script" | grep -Ev '^[[:space:]]*(echo|printf) |^[[:space:]]*"|^[[:space:]]*\*\)' || true)
+  # android-e2e.sh's release section runs the build-tools apksigner as "$signer" (one debug-key signing of a copy, proved in test 5x,
+  # and verify); that name is followed by `"`, which this pattern does not take for a call. Every other script names none of them.
   if echo "$code" | grep -Eq '(^|[[:space:];&|(])(sdkmanager|brew|curl|wget|keytool|jarsigner|apksigner)([[:space:]]|$)'; then
     bad "$script runs an installer or signing tool: $(echo "$code" | grep -E 'sdkmanager|brew|curl|wget|keytool|jarsigner|apksigner' | head -n 2)"
   else

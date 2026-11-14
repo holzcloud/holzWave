@@ -1976,6 +1976,7 @@ fn secret_store_problems(
         "KeyProperties.ENCRYPTION_PADDING_NONE",
         "setUserAuthenticationRequired(true)",
         "setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL)",
+        "setInvalidatedByBiometricEnrollment(false)",
         "setIsStrongBoxBacked(true)",
         "FEATURE_STRONGBOX_KEYSTORE",
         "BiometricPrompt.CryptoObject(cipher)",
@@ -2096,6 +2097,7 @@ fn the_secret_store_check_fails_on_bad_input() {
         ("setUserAuthenticationParameters(0,", "setUserAuthenticationParameters(30,"),
         ("BiometricPrompt.CryptoObject(cipher)", "null"),
         ("setKeySize(256)", "setKeySize(128)"),
+        ("setInvalidatedByBiometricEnrollment(false)", "setInvalidatedByBiometricEnrollment(true)"),
     ] {
         let weak = KEYSTORE_KT.replace(from, to);
         assert!(!ok(&files, &weak, PLUGIN_KT, ANDROID_MOD_RS, &gradle).is_empty(), "{from} passed");

@@ -7,6 +7,7 @@
 #   sh scripts/android-e2e.sh tls
 #   sh scripts/android-e2e.sh handover
 #   sh scripts/android-e2e.sh clipboard
+#   sh scripts/android-e2e.sh release      (the minified release, a copy signed with the SDK debug key; see its section)
 #
 # What `tracer` does, in order:
 #   1. starts the emulator when none runs (and stops it at the end only if it started it), builds the debug APK for
@@ -151,9 +152,9 @@ export ANDROID_SERIAL=$SERIAL
 PROFILE=${2:-}
 
 case "$SECTION" in
-    tracer | service | vault | tls | handover | clipboard | touch | ssh | pagesize | all | matrix) ;;
+    tracer | service | vault | tls | handover | clipboard | touch | ssh | pagesize | release | all | matrix) ;;
     *)
-        echo "usage: sh scripts/android-e2e.sh tracer|service|vault|tls|handover|clipboard|touch|ssh|pagesize|all [profile]|matrix" >&2
+        echo "usage: sh scripts/android-e2e.sh tracer|service|vault|tls|handover|clipboard|touch|ssh|pagesize|release|all [profile]|matrix" >&2
         exit 2
         ;;
 esac
@@ -189,6 +190,7 @@ cleanup() {
         adbd shell wm size reset >/dev/null 2>&1
         adbd shell wm density reset >/dev/null 2>&1
         adbd shell rm -f /data/local/tmp/webview-command-line >/dev/null 2>&1
+        [ -n "$devtools_port" ] && adbd forward --remove "tcp:$devtools_port" >/dev/null 2>&1
         adbd shell am force-stop "$PKG" >/dev/null 2>&1
     fi
     # The service section's one change of a system setting (the font scale, which makes the system relaunch the window) is put back.
@@ -212,11 +214,16 @@ cleanup() {
     # The three files and the app's own process are cleaned while the emulator is still there.
     if [ -n "$HOMEREL" ]; then
         adb -s "$SERIAL" shell run-as "$PKG" rm -f "$HOMEREL/e2e-pwd" "$HOMEREL/e2e-echo" "$HOMEREL/e2e-sh" "$HOMEREL/e2e-bg" >/dev/null 2>&1
+        adb -s "$SERIAL" shell run-as "$PKG" rmdir "$HOMEREL/e2e-cwd" >/dev/null 2>&1
     fi
+    # The release section's signed copy (in $tmp, removed below) and its install.
+    [ -n "$release_installed" ] && adb -s "$SERIAL" uninstall ch.holzcloud.holzwave >/dev/null 2>&1
     [ -n "$started_emulator" ] && sh scripts/android-emulator.sh stop >/dev/null 2>&1
     rm -rf "$tmp"
 }
 HOMEREL=
+release_installed=
+devtools_port=
 font_changed=
 stop_all_driven=
 pin_set=
@@ -435,6 +442,150 @@ echo "e2e $SECTION: api $(adbd shell getprop ro.build.version.sdk | tr -d '\r'),
 abi=$(adbd shell getprop ro.product.cpu.abi | tr -d '\r')
 [ "$abi" = arm64-v8a ] || die "the device is $abi, not arm64-v8a: only arm64 emulators are used"
 
+# ---- the release section: the minified release, a signed COPY, on the emulator -------------------------------------------------
+# The release APK is unsigned and cannot be installed. To see that the R8-minified build still starts, the section signs a COPY of it in
+# its private temporary folder with the Android SDK's public debug key (~/.android/debug.keystore, alias androiddebugkey, password
+# android: the key every SDK makes for debug builds, never a distribution key; the section never makes a key and refuses to run
+# without that file), installs the copy, and checks, one line each: the original is unsigned and passes the APK check; the app starts
+# with no crash; a first shell (`sh -l`, a child of the app) opens; on Android 13 and later the system's notification dialog shows once at
+# the first session and Allow is tapped; the foreground service runs with its notification; a command typed with the input command
+# (`sleep 3917`) becomes a child of that shell; and at the end the original's SHA-256 is unchanged and it is still unsigned. The app is
+# uninstalled and the copy removed on every way out. HOLZWAVE_E2E_SKIP_BUILD=1 reuses the release APK that is already built;
+# HOLZWAVE_E2E_RELEASE_APK names another unsigned release APK. What it does NOT prove: the tracer, vault, tls and ssh steps (the
+# self-test that drives them is not in a release build), a distribution key, any real phone.
+if [ "$SECTION" = release ]; then
+    RPKG=ch.holzcloud.holzwave
+    notrun=0
+    skipped() {
+        echo "e2e $SECTION: not run $1 ($2)"
+        report "$SECTION" "$1" not-run "$2"
+        notrun=$((notrun + 1))
+    }
+    wait_until() { # <seconds> <command...>
+        limit=$1
+        shift
+        waited=0
+        while [ "$waited" -lt "$limit" ]; do
+            if "$@"; then return 0; fi
+            sleep 1
+            waited=$((waited + 1))
+        done
+        return 1
+    }
+    sdk=$(adbd shell getprop ro.build.version.sdk | tr -d '\r')
+    signer="$ANDROID_HOME/build-tools/$HOLZWAVE_BUILD_TOOLS/apksigner"
+    ks="$HOME/.android/debug.keystore"
+    [ -x "$signer" ] || die "apksigner of build-tools $HOLZWAVE_BUILD_TOOLS is missing at $signer"
+    [ -f "$ks" ] || die "the SDK's debug key is missing at ~/.android/debug.keystore (any debug build makes it); this script never makes a key"
+    rapk=${HOLZWAVE_E2E_RELEASE_APK:-}
+    if [ -z "$rapk" ]; then
+        if [ "${HOLZWAVE_E2E_SKIP_BUILD:-}" = 1 ]; then
+            for candidate in app/src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk; do
+                [ -f "$candidate" ] && rapk=$candidate
+            done
+        else
+            rapk=$(sh scripts/android-build.sh release | tail -n 1) || die "the release build failed"
+        fi
+    fi
+    [ -f "$rapk" ] || die "no release APK ('$rapk')"
+    case "$rapk" in
+        *unsigned*) ;;
+        *) die "the release APK '$rapk' is not named unsigned: this section only signs a copy of an unsigned build" ;;
+    esac
+    echo "e2e release: apk $rapk"
+    sum() { shasum -a 256 "$1" | awk '{ print $1 }'; }
+    before=$(sum "$rapk")
+    if "$signer" verify "$rapk" >/dev/null 2>&1; then
+        check "the original release APK is unsigned" bad "the verify of build-tools accepted it"
+    else
+        check "the original release APK is unsigned (the verify of build-tools refuses it)" ok
+    fi
+    if sh scripts/android-apk-check.sh "$rapk" release >"$tmp/apk-check.log" 2>&1; then
+        check "the original passes the APK check as a release" ok
+    else
+        check "the original passes the APK check as a release" bad "$(tail -n 3 "$tmp/apk-check.log")"
+    fi
+    cp "$rapk" "$tmp/release-copy.apk" || die "the copy could not be made"
+    "$signer" sign --ks "$ks" --ks-key-alias androiddebugkey --ks-pass pass:android --key-pass pass:android \
+        --out "$tmp/release-signed.apk" "$tmp/release-copy.apk" >"$tmp/sign.log" 2>&1 \
+        || die "the copy could not be signed with the debug key: $(tail -n 2 "$tmp/sign.log")"
+    rm -f "$tmp/release-copy.apk"
+    adbd uninstall "$RPKG" >/dev/null 2>&1
+    release_installed=1
+    adbd install "$tmp/release-signed.apk" >"$tmp/install.log" 2>&1 || die "the signed copy did not install: $(tail -n 2 "$tmp/install.log")"
+    check "the copy signed with the SDK's debug key installs" ok
+
+    adbd logcat -c >/dev/null 2>&1
+    adbd shell am start -W -n "$RPKG/$ACTIVITY" >"$tmp/start.txt" 2>&1 || die "the activity did not start: $(cat "$tmp/start.txt")"
+    rpid() { adbd shell pidof "$RPKG" | tr -d '\r'; }
+    dialog_up() { adbd shell dumpsys window | grep mCurrentFocus | grep -q GrantPermissionsActivity; }
+    app_front() { adbd shell dumpsys window | grep mCurrentFocus | grep -q "$RPKG/$ACTIVITY"; }
+    # the shell: a process whose parent is the app and whose argument list is `sh -l`
+    shell_pid() {
+        app=$(rpid)
+        [ -n "$app" ] || return 1
+        adbd shell ps -A -o PID,PPID,ARGS | tr -d '\r' | awk -v app="$app" '$2 == app && $3 ~ /(^|\/)sh$/ && $4 == "-l" { print $1; exit }'
+    }
+    have_shell() { [ -n "$(shell_pid)" ]; }
+    if [ "$sdk" -ge 33 ]; then
+        if wait_until 90 dialog_up; then
+            check "the first session shows the system's notification dialog" ok
+            if ui_tap_text "id:com.android.permissioncontroller:id/permission_allow_button"; then
+                check "Allow is tapped in the dialog" ok
+            else
+                skipped "Allow in the notification dialog" "the button was not found in the uiautomator dump"
+            fi
+        else
+            check "the first session shows the system's notification dialog" bad "no GrantPermissionsActivity in front within 90 s"
+        fi
+    else
+        skipped "the system's notification dialog" "Android 12 (API $sdk) has no runtime notification permission"
+    fi
+    wait_until 60 app_front && [ -n "$(rpid)" ] && check "the minified app runs with its window in front (pid $(rpid))" ok \
+        || check "the minified app runs with its window in front" bad "$(adbd shell dumpsys window | grep mCurrentFocus | tr -d '\r')"
+    if wait_until 120 have_shell; then
+        spid=$(shell_pid)
+        check "a first shell opened: 'sh -l' (pid $spid) is a child of the app" ok
+    else
+        spid=
+        check "a first shell opened: 'sh -l' is a child of the app" bad "$(adbd shell ps -A -o PID,PPID,ARGS | tr -d '\r' | awk -v app="$(rpid)" '$2 == app' | head -n 5)"
+    fi
+    service_up() { adbd shell dumpsys activity services "$RPKG" | tr -d '\r' | awk '/ServiceRecord\{/ { on = ($0 ~ /HolzwaveService/) } on' | grep -q 'isForeground=true'; }
+    wait_until 60 service_up && check "HolzwaveService runs as a foreground service" ok || check "HolzwaveService runs as a foreground service" bad
+    note_up() { adbd shell dumpsys notification --noredact | tr -d '\r' | awk -v pkg="pkg=$RPKG " '/NotificationRecord\(/ { on = (index($0, pkg) > 0) } on' | grep -q 'android.title=String (holzWave is running)'; }
+    wait_until 20 note_up && check "its notification 'holzWave is running' is posted" ok || check "its notification 'holzWave is running' is posted" bad
+    if [ -n "$spid" ]; then
+        size=$(adbd shell wm size | tr -d '\r' | sed -n 's/.*: *\([0-9]*\)x\([0-9]*\).*/\1 \2/p' | tail -n 1)
+        width=${size% *}
+        height=${size#* }
+        adbd shell input tap $((width / 2)) $((height / 3))
+        sleep 4
+        adbd shell "input text 'sleep%s3917'"
+        sleep 1
+        adbd shell input keyevent 66
+        typed() { adbd shell ps -A -o PID,PPID,ARGS | tr -d '\r' | awk -v sh="$spid" '$2 == sh && $3 ~ /sleep$/ && $4 == "3917"' | grep -q .; }
+        wait_until 20 typed && check "a typed command ('sleep 3917') runs as a child of that shell" ok \
+            || check "a typed command ('sleep 3917') runs as a child of that shell" bad "no such child of $spid"
+    else
+        skipped "a typed command runs as a child of the shell" "there is no shell to type into"
+    fi
+    adbd logcat -d 2>/dev/null | grep -q 'FATAL EXCEPTION' && check "the log shows no crash" bad "a FATAL EXCEPTION is in the log" || check "the log shows no crash" ok
+    adbd uninstall "$RPKG" >/dev/null 2>&1 && release_installed=
+    rm -f "$tmp/release-signed.apk"
+    after=$(sum "$rapk")
+    [ "$after" = "$before" ] && check "the original's SHA-256 is unchanged ($before)" ok || check "the original's SHA-256 is unchanged" bad "$before before, $after after"
+    "$signer" verify "$rapk" >/dev/null 2>&1 && check "the original is still unsigned" bad "the verify of build-tools accepts it now" \
+        || check "the original is still unsigned" ok
+    end_time=$(date +%s)
+    echo "e2e $SECTION: $((end_time - start_time)) s"
+    if [ "$fails" -ne 0 ]; then
+        echo "e2e $SECTION: $fails check(s) failed" >&2
+        exit 1
+    fi
+    [ "$notrun" -ne 0 ] && echo "e2e $SECTION: ok ($notrun check(s) not run, named above)" || echo "e2e $SECTION: ok"
+    exit 0
+fi
+
 apk=
 if [ "${HOLZWAVE_E2E_SKIP_BUILD:-}" = 1 ]; then
     for candidate in app/src-tauri/gen/android/app/build/outputs/apk/universal/debug/*.apk; do
@@ -561,6 +712,27 @@ if [ "$SECTION" = tracer ]; then
         /system/bin/*) check "the program is the system shell $got_sh" ok ;;
         *) check "the program is the system shell" bad "wanted a path under /system/bin/, got '$got_sh'" ;;
     esac
+
+    # 6. the shell's directory as the core reads it on Android (process_cwd: the link /proc/<pid>/cwd, no OSC 7 from the system shell):
+    # the shell changes into a new folder, and the session file the core writes (debounced) must name that folder for the pane.
+    type_line 'mkdir%se2e-cwd'
+    type_line 'cd%se2e-cwd'
+    cwd_seen=
+    waited=0
+    while [ "$waited" -lt 40 ]; do
+        session_file=$(as_app 'find . -maxdepth 4 -name session.json' | head -n 1 | sed 's|^\./||')
+        if [ -n "$session_file" ] && as_app "cat $session_file" | grep -q '/home/e2e-cwd"'; then
+            cwd_seen=1
+            break
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+    if [ -n "$cwd_seen" ]; then
+        check "after cd the core reads the shell's new folder from /proc/<pid>/cwd: $session_file names $(as_app "cat $session_file" | grep -o '"[^"]*/home/e2e-cwd"' | head -n 1)" ok
+    else
+        check "after cd the core reads the shell's new folder from /proc/<pid>/cwd" bad "the session file ('${session_file:-none}') does not name .../home/e2e-cwd after 40 s: $(as_app "cat ${session_file:-/dev/null}" | head -c 300)"
+    fi
 fi
 
 if [ "$SECTION" = pagesize ]; then
@@ -670,6 +842,83 @@ if [ "$SECTION" = touch ]; then
     tap_pane
     ui_dump "$UI" || die "uiautomator could not dump the screen"
     if here "id:app" && here "id:stage"; then page_in_dump=1; fi
+
+    # (0) the system bars, measured by SystemInsets.kt and read in the page itself through the WebView's DevTools socket (the debug build
+    # is debuggable; the old WebView of the Android 12 image shows nothing to uiautomator, so the dump cannot be used here). The page's
+    # --hw-sys-top and --hw-sys-bottom times the device pixel ratio must be the heights of the status bar and the navigation bar that
+    # dumpsys window reports (within one CSS pixel: the Kotlin side rounds), and the content of the app's top bar must start below the
+    # status bar and the content of its bottom bar end above the navigation bar. A missing measurement, device pixels taken as CSS
+    # pixels, or a bar laid out under a system bar fails here. The bound to 0..512 cannot be reached with real bars and is not driven.
+    # The forward is made in this shell (not in a subshell), so that the clean-up knows its port.
+    insets_forward() {
+        apid=$(adbd shell pidof "$PKG" | tr -d '\r')
+        sock=$(adbd shell cat /proc/net/unix | tr -d '\r' | grep -o "webview_devtools_remote_$apid" | head -n 1)
+        [ -n "$sock" ] || { probe_why="no DevTools socket of the app's WebView (pid $apid)"; return 1; }
+        command -v node >/dev/null 2>&1 || { probe_why="node is missing on the Mac"; return 1; }
+        devtools_port=$(adbd forward tcp:0 "localabstract:$sock" | tr -d '\r')
+        case "$devtools_port" in "" | *[!0-9]*) devtools_port=; probe_why="adb forward gave no port"; return 1 ;; esac
+    }
+    insets_probe() {
+        cat >"$tmp/insets.mjs" <<'JS'
+const port = process.argv[2];
+const expr = `(() => { const r = document.documentElement, cs = getComputedStyle(r);
+  const g = id => { const e = document.getElementById(id); if (!e) return null; const b = e.getBoundingClientRect(), st = getComputedStyle(e);
+    return { top: b.top, bottom: b.bottom, pt: parseFloat(st.paddingTop), pb: parseFloat(st.paddingBottom) }; };
+  return JSON.stringify({ dpr: devicePixelRatio, top: parseFloat(cs.getPropertyValue('--hw-sys-top')), bottom: parseFloat(cs.getPropertyValue('--hw-sys-bottom')),
+    bar: g('phone-top'), nav: g('phone-nav') }); })()`;
+const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+const page = list.find(t => t.type === 'page' && t.webSocketDebuggerUrl);
+if (!page) { console.log('no page target'); process.exit(1); }
+const ws = new WebSocket(page.webSocketDebuggerUrl);
+const timer = setTimeout(() => { console.log('timeout'); process.exit(1); }, 10000);
+ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: { expression: expr, returnByValue: true } }));
+ws.onmessage = m => { const d = JSON.parse(m.data); if (d.id !== 1) return; clearTimeout(timer);
+  const v = d.result && d.result.result && d.result.result.value; if (!v) { console.log('no value'); process.exit(1); }
+  const o = JSON.parse(v);
+  if (!o.bar || !o.nav) { console.log('the page has no phone-top or phone-nav'); process.exit(1); }
+  console.log([o.dpr, o.top, o.bottom, o.bar.top + o.bar.pt, o.nav.bottom - o.nav.pb].join(' ')); ws.close(); process.exit(0); };
+JS
+        node "$tmp/insets.mjs" "$devtools_port"
+    }
+    adbd shell dumpsys window | tr -d '\r' >"$tmp/insets.txt"
+    sys_frame() { # <statusBars|navigationBars>: y1 y2 of the first visible source of that type
+        sed -En "s/.*InsetsSource( id=[0-9a-fx]*)? type=($1) frame=\[[0-9]+,([0-9]+)\]\[[0-9]+,([0-9]+)\].*visible=true.*/\3 \4/p" "$tmp/insets.txt" | head -n 1
+    }
+    # Android 12 writes the types as ITYPE_STATUS_BAR and ITYPE_NAVIGATION_BAR, later versions as statusBars and navigationBars.
+    sb=$(sys_frame 'statusBars|ITYPE_STATUS_BAR')
+    nb=$(sys_frame 'navigationBars|ITYPE_NAVIGATION_BAR')
+    probe_why=
+    if ! insets_forward; then
+        skipped "insets" "the page could not be read: $probe_why"
+    elif ! probe=$(insets_probe); then
+        skipped "insets" "the page could not be read: $probe"
+    elif [ -z "$sb" ] || [ -z "$nb" ]; then
+        skipped "insets" "dumpsys window shows no visible status bar ('$sb') or navigation bar ('$nb')"
+    else
+        set -- $sb
+        sb_h=$2
+        set -- $nb
+        nb_top=$1
+        nb_h=$(($2 - $1))
+        # all in device pixels, from CSS pixels times the ratio, rounded
+        set -- $probe
+        ins=$(awk -v dpr="$1" -v t="$2" -v b="$3" -v bt="$4" -v nv="$5" 'BEGIN { printf "%d %d %d %d %d", t * dpr + .5, b * dpr + .5, bt * dpr + .5, nv * dpr + .5, dpr + .999 }')
+        set -- $ins
+        css_top=$1; css_bottom=$2; content_top=$3; content_bottom=$4; one=$5
+        echo "e2e touch: insets: status bar 0..$sb_h, navigation bar $nb_top..$((nb_top + nb_h)) (dumpsys); page: ratio $(echo "$probe" | cut -d' ' -f1), --hw-sys-top $css_top px, --hw-sys-bottom $css_bottom px, top bar content from y=$content_top, bottom bar content to y=$content_bottom (device px)"
+        d1=$((css_top - sb_h)); d2=$((css_bottom - nb_h))
+        if [ "${d1#-}" -le "$one" ] && [ "${d2#-}" -le "$one" ]; then
+            check "insets-measured: the page got the status bar ($sb_h px) and the navigation bar ($nb_h px) from SystemInsets.kt in CSS pixels (--hw-sys-top x ratio = $css_top, --hw-sys-bottom x ratio = $css_bottom)" ok
+        else
+            check "insets-measured: --hw-sys-top and --hw-sys-bottom times the ratio are the system bars' heights" bad "page $css_top and $css_bottom px, system bars $sb_h and $nb_h px"
+        fi
+        if [ "$content_top" -ge $((sb_h - one)) ] && [ "$content_bottom" -le $((nb_top + one)) ]; then
+            check "insets-clear: the top bar's content starts at y=$content_top below the status bar (ends $sb_h) and the bottom bar's content ends at y=$content_bottom above the navigation bar (starts $nb_top)" ok
+        else
+            check "insets-clear: the app's bars are clear of the system bars" bad "top content from $content_top (status bar ends $sb_h), bottom content to $content_bottom (navigation bar starts $nb_top)"
+        fi
+    fi
+    [ -n "$devtools_port" ] && adbd forward --remove "tcp:$devtools_port" >/dev/null 2>&1 && devtools_port=
     if [ -z "$page_in_dump" ]; then
         for c in layout-phone layout-tablet keyrow-above-ime sticky-ctrl scroll select-copy-paste hardware-keyboard; do
             skipped "$c" "$nodes_note"
@@ -1522,7 +1771,11 @@ if [ "$SECTION" = vault ] || [ "$SECTION" = tls ] || [ "$SECTION" = handover ] |
                 if dialog_up; then
                     shown=1
                     if [ -z "$tapped" ] && [ "$button" != none ]; then
+                        # The second time the system asks, its Don't allow is the button "deny and don't ask again" (same text, other id).
                         if ui_tap_text "id:com.android.permissioncontroller:id/permission_${button}_button"; then
+                            tapped=1
+                        elif [ "$button" = deny ] && ui_center "$tmp/hw-ui.xml" "id:com.android.permissioncontroller:id/permission_deny_and_dont_ask_again_button" >/dev/null \
+                            && ui_tap_text "id:com.android.permissioncontroller:id/permission_deny_and_dont_ask_again_button"; then
                             tapped=1
                         else
                             mkdir -p "$outdir"
@@ -1595,6 +1848,30 @@ if [ "$SECTION" = vault ] || [ "$SECTION" = tls ] || [ "$SECTION" = handover ] |
         esac
         [ -n "$(adbd shell pidof "$PKG" | tr -d '\r')" ] && check "after the refusal the app is still running (no crash)" ok || check "after the refusal the app is still running (no crash)" bad "no process"
         adbd logcat -d 2>/dev/null | grep -q 'FATAL EXCEPTION' && check "the log shows no crash" bad "a FATAL EXCEPTION is in the log" || check "the log shows no crash" ok
+
+        # 4b. two "Don't allow" in a row: the system stops showing the dialog, and the next question must be answered at once with the
+        # sentence (the Kotlin side must not wait for a dialog that never comes, which would be its two-minute give-up). Step 4 was the
+        # first refusal after the revoke; a second question is answered with Don't allow again if the dialog still shows.
+        STEP_ARGS=$private_host
+        run_step_dialog localnet-ask deny 150
+        case "$line" in
+            *"localnet-ask: ok refused: "*) echo "e2e ssh: the second refusal in a row: dialog shown: ${shown:-no}" ;;
+            *) check "a second Don't allow in a row is a refusal" bad "$line (dialog shown: ${shown:-no})" ;;
+        esac
+        t0=$(date +%s)
+        run_step_dialog localnet-ask none 150
+        t1=$(date +%s)
+        STEP_ARGS=
+        case "$line" in
+            *"localnet-ask: ok refused: "*"not allowed to reach $private_host"*"Nearby devices"*)
+                if [ -z "$shown" ] && [ $((t1 - t0)) -le 15 ] && [ "$(ln_granted)" = false ]; then
+                    check "after two Don't allow the next connection fails at once with the sentence and no dialog ($((t1 - t0)) s, no two-minute wait)" ok
+                else
+                    check "after two Don't allow the next connection fails at once with the sentence and no dialog" bad "$((t1 - t0)) s, dialog shown: ${shown:-no}, granted=$(ln_granted)"
+                fi
+                ;;
+            *) check "after two Don't allow the next connection fails at once with the sentence and no dialog" bad "$line ($((t1 - t0)) s, dialog shown: ${shown:-no})" ;;
+        esac
 
         # 5. the way back: the permission allowed in the settings (pm grant does what the switch there does), and the connection is made
         adbd shell pm grant "$PKG" android.permission.ACCESS_LOCAL_NETWORK >/dev/null 2>&1

@@ -8,7 +8,8 @@
 #
 #   core  `cargo check --all-targets` of holzwave-core for x86_64-unknown-linux-gnu and x86_64-pc-windows-gnu, so
 #         every test target is compiled for both.
-#   app   `cargo check --all-targets` of holzwave-app for x86_64-pc-windows-gnu. Tauri's build script needs a
+#   app   `cargo check --all-targets` of holzwave-app and of holzwave-host (so the host crate's
+#         test code is compiled too) for x86_64-pc-windows-gnu. Tauri's build script needs a
 #         resource compiler named x86_64-w64-mingw32-windres: a temporary directory gets a symlink of that name to
 #         llvm-windres (Homebrew's llvm), is put first on PATH for that one command and removed afterwards.
 #         The app crate for Linux cannot be checked from macOS (pkg-config for GTK and WebKit): use
@@ -131,6 +132,9 @@ check_app() {
     ln -s "$windres" "$shim/x86_64-w64-mingw32-windres" || exit 2
     echo "+ PATH=$shim:\$PATH cargo check --locked --all-targets -p holzwave-app --target x86_64-pc-windows-gnu"
     PATH="$shim:$PATH" cargo check --locked --all-targets -p holzwave-app --target x86_64-pc-windows-gnu || failed=1
+    # The host crate on its own as well: the app check compiles its library, not its #[cfg(test)] code.
+    echo "+ PATH=$shim:\$PATH cargo check --locked --all-targets -p holzwave-host --target x86_64-pc-windows-gnu"
+    PATH="$shim:$PATH" cargo check --locked --all-targets -p holzwave-host --target x86_64-pc-windows-gnu || failed=1
     cleanup
     shim=
 }

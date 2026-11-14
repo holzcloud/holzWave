@@ -4275,3 +4275,237 @@ fn signing_is_never_promised() {
     }
     assert!(problems.is_empty(), "say what is signed (docs/signing.md), do not promise it:\n{}", problems.join("\n"));
 }
+
+/// The rows of `docs/test-plan.md` Part 11 that only the owner can run: pictures, hyperlinks and signed releases.
+fn pictures_links_and_signatures_row_ids() -> Vec<String> {
+    let mut ids: Vec<String> = (1..=5).map(|n| format!("GFX{n}")).collect();
+    ids.extend((1..=5).map(|n| format!("LNK{n}")));
+    ids.extend((1..=4).map(|n| format!("SIG{n}")));
+    ids
+}
+
+#[test]
+fn test_plan_has_every_picture_link_and_signature_row_exactly_once() {
+    let problems = test_plan_row_problems(&read("docs/test-plan.md"), &pictures_links_and_signatures_row_ids());
+    assert!(problems.is_empty(), "docs/test-plan.md Part 11: {problems:?}");
+}
+
+/// The rows of `docs/test-plan.md` Part 12: Linux desktops, other architectures and the Store package.
+fn desktops_architectures_and_store_row_ids() -> Vec<String> {
+    let mut ids: Vec<String> = (1..=10).map(|n| format!("DSK{n}")).collect();
+    ids.extend(["ARM1", "WAR1", "MSX1", "MSX2"].map(str::to_owned));
+    ids
+}
+
+#[test]
+fn test_plan_has_every_desktop_architecture_and_store_row_exactly_once() {
+    let problems = test_plan_row_problems(&read("docs/test-plan.md"), &desktops_architectures_and_store_row_ids());
+    assert!(problems.is_empty(), "docs/test-plan.md Part 12: {problems:?}");
+}
+
+/// The images of hyperlinks and pictures in a pane: `docs/design.md` and `README.md` name each, and each file exists.
+const LINK_AND_PICTURE_IMAGES: [&str; 3] = ["links.png", "link-ask.png", "images.png"];
+
+fn link_and_picture_image_problems(design: &str, readme: &str, exists: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let mut problems = Vec::new();
+    for name in LINK_AND_PICTURE_IMAGES {
+        if !design.contains(&format!("](design/{name})")) {
+            problems.push(format!("docs/design.md does not name {name}"));
+        }
+        if !readme.contains(&format!("](docs/design/{name})")) {
+            problems.push(format!("README.md does not name {name}"));
+        }
+        if !exists(name) {
+            problems.push(format!("docs/design/{name} does not exist"));
+        }
+    }
+    problems
+}
+
+#[test]
+fn design_md_and_the_readme_name_the_link_and_picture_images_and_the_files_exist() {
+    let exists = |name: &str| root().join("docs/design").join(name).is_file();
+    let problems = link_and_picture_image_problems(&read("docs/design.md"), &read("README.md"), &exists);
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+#[test]
+fn the_link_image_guard_reports_each_missing_name_and_file() {
+    let design = "![](design/links.png) ![](design/link-ask.png)";
+    let readme = "![](docs/design/links.png) ![](docs/design/images.png)";
+    let problems = link_and_picture_image_problems(design, readme, &|name| name != "link-ask.png");
+    assert_eq!(
+        problems,
+        [
+            "README.md does not name link-ask.png".to_owned(),
+            "docs/design/link-ask.png does not exist".to_owned(),
+            "docs/design.md does not name images.png".to_owned(),
+        ]
+    );
+}
+
+/// The rows of the deviation table of `docs/design.md` section 7: the cells of every table row below the header
+/// `| Deviation | Reason | Changed by |`, up to the first line that is not a table row.
+fn design_deviation_rows(design: &str) -> Vec<Vec<String>> {
+    let section = markdown_section(design, "## 7.");
+    let mut lines = section.lines().skip_while(|line| !line.starts_with("| Deviation | Reason | Changed by |")).skip(2);
+    let mut rows = Vec::new();
+    for line in lines.by_ref() {
+        match table_cells(line) {
+            Some(cells) => rows.push(cells),
+            None => break,
+        }
+    }
+    rows
+}
+
+/// Words that start a deviation the platforms keep on purpose, each to be found in the first cell of exactly one row.
+const DESIGN_DEVIATIONS: [&str; 22] = [
+    "**Own window frame**",
+    "**No Windows 11 snap layout flyout**",
+    "**The own frame has never been seen on a real Windows or Linux window",
+    "**Under Wayland `Auto` is the own frame",
+    "**`cmd.exe` does not report its directory**",
+    "**PowerShell is wrapped",
+    "**Kitty keyboard flags",
+    "**No middle-click paste",
+    "**Under Wayland there is no tear-off",
+    "**The UI text size follows the OS on Windows and GNOME only**",
+    "**Fonts**",
+    "**Key tables are per platform**",
+    "**The clipboard shortcuts are fixed**",
+    "**The Option row of the settings dialog exists only on macOS**",
+    "**Reveal opens the containing folder on Linux**",
+    "**The Windows installer and the macOS app are unsigned",
+    "**WebKitGTK may need a graphics workaround**",
+    "**The group `Host shell` exists only inside a Flatpak**",
+    "**Android: no window tear-off",
+    "**Android: what the phone and tablet layouts show has been run on an arm64 emulator only",
+    "**Browser: no window buttons and no title-bar drag region.**",
+    "**Browser: no tear-off.**",
+];
+
+fn design_deviation_problems(design: &str) -> Vec<String> {
+    let rows = design_deviation_rows(design);
+    let mut problems = Vec::new();
+    if rows.is_empty() {
+        problems.push("section 7 has no deviation table".to_owned());
+    }
+    for row in &rows {
+        if row.len() != 3 || row.iter().any(String::is_empty) {
+            let start: String = row.first().map(|c| c.chars().take(60).collect()).unwrap_or_default();
+            problems.push(format!("the row `{start}` does not have three filled cells"));
+        }
+    }
+    for deviation in DESIGN_DEVIATIONS {
+        let count = rows.iter().filter(|row| row.first().is_some_and(|c| c.starts_with(deviation))).count();
+        if count != 1 {
+            problems.push(format!("the deviation `{deviation}` is in {count} rows"));
+        }
+    }
+    problems
+}
+
+#[test]
+fn design_md_deviation_table_keeps_every_platform_difference_with_a_reason() {
+    let problems = design_deviation_problems(&read("docs/design.md"));
+    assert!(problems.is_empty(), "docs/design.md section 7: {problems:?}");
+}
+
+#[test]
+fn the_deviation_guard_reports_a_lost_row_and_an_empty_reason() {
+    let design = "## 7. Where\n\n| Deviation | Reason | Changed by |\n|---|---|---|\n| **Fonts**: x | | none |\n\n## 8. Next\n";
+    let problems = design_deviation_problems(design);
+    assert!(problems.contains(&"the row `**Fonts**: x` does not have three filled cells".to_owned()), "{problems:?}");
+    assert!(problems.contains(&"the deviation `**Own window frame**` is in 0 rows".to_owned()), "{problems:?}");
+    assert!(!problems.iter().any(|p| p.contains("`**Fonts**` is in")), "{problems:?}");
+}
+
+/// Every public text says, in its own words, that the own window frame has never been seen on a real Windows or Linux
+/// window, and that the Windows 11 snap layouts are not there.
+const UNVERIFIED_FRAME_TEXTS: [(&str, &[&str]); 4] = [
+    (
+        "docs/design.md",
+        &["The own frame has never been seen on a real Windows or Linux window", "No Windows 11 snap layout flyout"],
+    ),
+    ("docs/status.md", &["has never been seen on a real Windows or Linux window", "no Windows 11 snap layouts"]),
+    ("docs/roadmap.md", &["it has never been seen on a real Windows or Linux window", "the Windows 11 snap layouts are not built"]),
+    ("README.md", &["never seen on a real Windows or Linux window", "the Windows 11 snap layouts are not built"]),
+];
+
+fn flat_words(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn the_unverified_window_frame_is_stated_in_every_public_text() {
+    let mut problems = Vec::new();
+    for (file, facts) in UNVERIFIED_FRAME_TEXTS {
+        let text = flat_words(&read(file)).replace("**", "");
+        for fact in facts {
+            if !text.contains(fact) {
+                problems.push(format!("{file} does not say `{fact}`"));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{problems:?}");
+}
+
+/// The Zig version that `scripts/env.sh` pins, read from its `$HOME/.holzwave/zig-<version>` lookup.
+fn env_sh_zig_version(env_sh: &str) -> Option<String> {
+    let tail = env_sh.split("_hw_prepend \"$HOME/.holzwave/zig-").nth(1)?;
+    let version = tail.split('"').next()?;
+    (!version.is_empty() && version.chars().all(|c| c.is_ascii_digit() || c == '.')).then(|| version.to_owned())
+}
+
+#[cfg(unix)]
+#[test]
+fn env_sh_finds_the_pinned_zig_below_the_home_and_in_holzwave_zig_dir() {
+    use std::os::unix::fs::PermissionsExt;
+    let env_sh = root().join("scripts/env.sh");
+    let version = env_sh_zig_version(&read("scripts/env.sh")).expect("scripts/env.sh names $HOME/.holzwave/zig-<version>");
+    let home = std::env::temp_dir().join(format!("holzwave-env-sh-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&home);
+    let fake_zig = |dir: &Path, says: &str| {
+        fs::create_dir_all(dir).unwrap();
+        let zig = dir.join("zig");
+        fs::write(&zig, format!("#!/bin/sh\necho {says}\n")).unwrap();
+        fs::set_permissions(&zig, fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    let below_home = home.join(format!(".holzwave/zig-{version}"));
+    fake_zig(&below_home, &version);
+    let other = home.join("other-zig");
+    fake_zig(&other, "from-holzwave-zig-dir");
+    let run = |zig_dir: Option<&Path>| {
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(r#". "$1" && command -v zig && zig version"#)
+            .arg("sh")
+            .arg(&env_sh)
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin");
+        if let Some(dir) = zig_dir {
+            command.env("HOLZWAVE_ZIG_DIR", dir);
+        }
+        let out = command.output().expect("/bin/sh runs");
+        assert!(out.status.success(), "sourcing env.sh failed: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).lines().map(str::to_owned).collect::<Vec<_>>()
+    };
+    let plain = run(None);
+    let with_dir = run(Some(&other));
+    let _ = fs::remove_dir_all(&home);
+    assert_eq!(plain, [below_home.join("zig").display().to_string(), version.clone()], "the lookup below HOME");
+    assert_eq!(
+        with_dir,
+        [other.join("zig").display().to_string(), "from-holzwave-zig-dir".to_owned()],
+        "HOLZWAVE_ZIG_DIR wins over the directory below HOME"
+    );
+}
+
+#[test]
+fn the_zig_pin_is_read_from_the_lookup_line() {
+    assert_eq!(env_sh_zig_version("_hw_prepend \"$HOME/.holzwave/zig-0.17.1\"\n").as_deref(), Some("0.17.1"));
+    assert_eq!(env_sh_zig_version("_hw_prepend \"$HOME/.holzwave/zig-$V\"\n"), None);
+}

@@ -839,3 +839,163 @@ fn the_keystore_script_and_its_test_carry_no_label_of_the_planning_tree() {
         assert!(!text.contains(".planning/"), "{name} names a path of the private planning tree");
     }
 }
+
+const ENV_PS1: &str = include_str!("../../../scripts/env.ps1");
+const ENV_SH: &str = include_str!("../../../scripts/env.sh");
+const RELEASE_WINDOWS: &str = include_str!("../../../scripts/release-windows.ps1");
+
+/// The lines of a PowerShell script without its comment lines (a line whose first non-blank character is `#`).
+fn ps_code(text: &str) -> String {
+    text.lines().filter(|l| !l.trim_start().starts_with('#')).collect::<Vec<_>>().join("\n")
+}
+
+/// The body of the PowerShell function `name`, from its `function` line to the next line that starts a function at
+/// column 0 (or the end), or an empty string when it is not there.
+fn ps_function<'a>(code: &'a str, name: &str) -> &'a str {
+    let head = format!("function {name}");
+    let Some(start) = code.find(&head) else { return "" };
+    let rest = &code[start..];
+    let end = rest[head.len()..].find("\nfunction ").map(|i| i + head.len()).unwrap_or(rest.len());
+    &rest[..end]
+}
+
+/// What is wrong with env.ps1: Zig is pinned to exactly one version and compared with `-eq` only, the download's sha256
+/// is checked before anything is unpacked, and a sourced run never reaches `exit`.
+fn env_ps1_problems(script: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    let code = ps_code(script);
+    // The exact version, the same one the Unix side pins.
+    let pin = code
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("$HolzwaveZigVersion = '").and_then(|r| r.strip_suffix('\'')))
+        .unwrap_or("");
+    if pin.is_empty() || !pin.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) || pin.split('.').count() != 3 {
+        problems.push(format!("env.ps1 does not pin one exact Zig version: {pin:?}"));
+    }
+    if !ENV_SH.contains(&format!("exactly {pin}")) {
+        problems.push(format!("env.sh does not require exactly {pin} as env.ps1 does"));
+    }
+    let find = ps_function(&code, "Find-HolzwaveZig");
+    if !find.contains("if ($version -eq $HolzwaveZigVersion) { return $dir }") {
+        problems.push("Find-HolzwaveZig does not accept only a Zig whose version equals the pin".into());
+    }
+    for loose in ["-ge $HolzwaveZigVersion", "-gt $HolzwaveZigVersion", "-like", "-match $HolzwaveZigVersion", "[version]"] {
+        if code.contains(loose) {
+            problems.push(format!("env.ps1 compares the Zig version loosely: {loose}"));
+        }
+    }
+    // The sha256 before the unpacking, and a mismatch returns before it.
+    let install = ps_function(&code, "Install-HolzwaveZig");
+    let check = install.find("if (-not (Test-HolzwaveSha256 $archive $entry.Sha))");
+    let unpack = install.find("ExtractToDirectory(");
+    match (check, unpack) {
+        (Some(c), Some(u)) if c < u => {
+            if !install[c..u].contains("return $false") {
+                problems.push("a sha256 mismatch does not stop before the unpacking".into());
+            }
+        }
+        _ => problems.push("Install-HolzwaveZig does not check the sha256 before it unpacks".into()),
+    }
+    if !ps_function(&code, "Test-HolzwaveSha256").contains("Get-FileHash -Algorithm SHA256") {
+        problems.push("Test-HolzwaveSha256 does not hash with SHA256".into());
+    }
+    // `exit` only behind the not-sourced flag, and the session's strict mode and error preference are left alone.
+    let exits: Vec<&str> = code
+        .lines()
+        .filter(|l| l.split(|c: char| !c.is_ascii_alphanumeric() && c != '-').any(|w| w.eq_ignore_ascii_case("exit")))
+        .collect();
+    if exits != ["if ($HolzwaveRun) { exit $HolzwaveExit }"] {
+        problems.push(format!("env.ps1 calls exit elsewhere than behind the not-sourced flag: {exits:?}"));
+    }
+    if !code.contains("$HolzwaveSourced = ($MyInvocation.InvocationName -eq '.')") || !code.contains("$HolzwaveRun = -not $HolzwaveSourced") {
+        problems.push("env.ps1 does not derive its exit flag from being run rather than sourced".into());
+    }
+    for session in ["Set-StrictMode", "$ErrorActionPreference ="] {
+        if code.contains(session) {
+            problems.push(format!("env.ps1 changes the session: {session}"));
+        }
+    }
+    problems
+}
+
+#[test]
+fn the_windows_environment_script_pins_zig_checks_the_download_first_and_never_exits_when_sourced() {
+    assert_eq!(env_ps1_problems(ENV_PS1), Vec::<String>::new());
+    // Each fact removed fails.
+    for (from, to) in [
+        ("$HolzwaveZigVersion = '0.17.1'", "$HolzwaveZigVersion = '0.17'"),
+        ("if ($version -eq $HolzwaveZigVersion) { return $dir }", "if ($version -ge $HolzwaveZigVersion) { return $dir }"),
+        ("if (-not (Test-HolzwaveSha256 $archive $entry.Sha)) {", "if ($false) {"),
+        ("-Algorithm SHA256", "-Algorithm MD5"),
+        ("if ($HolzwaveRun) { exit $HolzwaveExit }", "exit $HolzwaveExit"),
+        ("$HolzwaveRun = -not $HolzwaveSourced", "$HolzwaveRun = $true"),
+    ] {
+        assert!(ENV_PS1.contains(from), "env.ps1 no longer says {from}");
+        let bad = ENV_PS1.replace(from, to);
+        assert!(!env_ps1_problems(&bad).is_empty(), "passed without: {from}");
+    }
+    // The unpacking moved before the check.
+    let moved = ENV_PS1.replace(
+        "        $archive = Join-Path $work 'zig.zip'\n",
+        "        $archive = Join-Path $work 'zig.zip'\n        [System.IO.Compression.ZipFile]::ExtractToDirectory($archive, $work)\n",
+    );
+    assert_ne!(moved, ENV_PS1);
+    assert!(!env_ps1_problems(&moved).is_empty(), "an unpacking before the sha256 check passed");
+    let strict = format!("Set-StrictMode -Version Latest\n{ENV_PS1}");
+    assert!(!env_ps1_problems(&strict).is_empty(), "a strict-mode change passed");
+}
+
+/// What is wrong with the Windows ARM64 build: the script's -Arch arm64, its Rust target and installer name, the ARM64
+/// tools check in env.ps1, and the build guide's statement that the build was never run.
+fn windows_arm64_problems(release: &str, env: &str, doc: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    let code = ps_code(release);
+    for needed in [
+        "[ValidateSet('x64', 'arm64')][string]$Arch = 'x64'",
+        "if ($Arch -eq 'arm64') { $triple = 'aarch64-pc-windows-msvc' }",
+        "$env:HOLZWAVE_WINDOWS_ARCH = $Arch",
+        "$targetArgs = @('--target', $triple)",
+        "$name = \"holzWave_${Version}_${Arch}-setup.exe\"",
+    ] {
+        if !code.contains(needed) {
+            problems.push(format!("release-windows.ps1 does not say {needed}"));
+        }
+    }
+    let env_code = ps_code(env);
+    if !env_code.contains("if ($env:HOLZWAVE_WINDOWS_ARCH -eq 'arm64')")
+        || !ps_function(&env_code, "Find-HolzwaveArm64Tools").contains("-requires 'Microsoft.VisualStudio.Component.VC.Tools.ARM64'")
+    {
+        problems.push("env.ps1 does not check the VC.Tools.ARM64 component for an ARM64 build".into());
+    }
+    for needed in [
+        "## The ARM64 build (never run)",
+        "that build was never run and its result is untried",
+        "holzWave_<version>_arm64-setup.exe",
+        "aarch64-pc-windows-msvc",
+        "**Not run:** the ARM64 build on any machine",
+    ] {
+        if !doc.contains(needed) {
+            problems.push(format!("docs/build-windows.md does not say {needed}"));
+        }
+    }
+    problems
+}
+
+#[test]
+fn the_windows_release_script_builds_arm64_built_only_and_says_so() {
+    assert_eq!(windows_arm64_problems(RELEASE_WINDOWS, ENV_PS1, BUILD_WINDOWS_DOC), Vec::<String>::new());
+    for (from, to) in [
+        ("'aarch64-pc-windows-msvc'", "'x86_64-pc-windows-msvc'"),
+        ("$name = \"holzWave_${Version}_${Arch}-setup.exe\"", "$name = \"holzWave_${Version}-setup.exe\""),
+        ("[ValidateSet('x64', 'arm64')]", "[ValidateSet('x64')]"),
+        ("$targetArgs = @('--target', $triple)", "$targetArgs = @()"),
+    ] {
+        assert!(RELEASE_WINDOWS.contains(from), "release-windows.ps1 no longer says {from}");
+        let bad = RELEASE_WINDOWS.replace(from, to);
+        assert!(!windows_arm64_problems(&bad, ENV_PS1, BUILD_WINDOWS_DOC).is_empty(), "passed without: {from}");
+    }
+    let no_tools = ENV_PS1.replace("-requires 'Microsoft.VisualStudio.Component.VC.Tools.ARM64'", "-requires 'Other'");
+    assert!(!windows_arm64_problems(RELEASE_WINDOWS, &no_tools, BUILD_WINDOWS_DOC).is_empty(), "no ARM64 tools check passed");
+    let ran = BUILD_WINDOWS_DOC.replace("## The ARM64 build (never run)", "## The ARM64 build");
+    assert!(!windows_arm64_problems(RELEASE_WINDOWS, ENV_PS1, &ran).is_empty(), "a guide without `never run` passed");
+}

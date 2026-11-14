@@ -343,6 +343,27 @@ mod tests {
         }
 
         #[test]
+        fn a_hung_helper_leaves_no_process_behind_after_the_timeout() {
+            // The shell writes its own process id to a file and then becomes `sleep` (exec keeps the id), so the
+            // id in the file is the hung helper's. After the timeout it must be killed and reaped: `kill -0` on it
+            // fails once neither a live process nor a zombie has that id.
+            let file = std::env::temp_dir().join(format!("holzwave-textscale-pid-{}-{:?}", std::process::id(), Instant::now()));
+            let script = format!("echo $$ > '{}'; exec /bin/sleep 30", file.display());
+            assert_eq!(output_within(child("/bin/sh", &["-c", &script]), Duration::from_millis(300)), None);
+            let pid = std::fs::read_to_string(&file).expect("the helper wrote its process id").trim().to_owned();
+            let _ = std::fs::remove_file(&file);
+            assert!(pid.parse::<u32>().is_ok(), "not a process id: {pid:?}");
+            let alive = || {
+                Command::new("/bin/kill").args(["-0", &pid]).stderr(Stdio::null()).status().expect("kill runs").success()
+            };
+            let start = Instant::now();
+            while alive() {
+                assert!(start.elapsed() < Duration::from_secs(5), "the hung helper {pid} is still there after the timeout");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        #[test]
         fn output_beyond_4_kib_is_cut_and_a_helper_that_never_stops_is_not_waited_for() {
             let start = Instant::now();
             let out = output_within(child("/usr/bin/yes", &[]), Duration::from_secs(5)).expect("the first kibibytes arrive");
