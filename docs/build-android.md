@@ -636,11 +636,14 @@ The target SDK is printed and not judged: what minimum a store such as F-Droid a
 
 ## The release is unsigned
 
-`sh scripts/android-build.sh release` builds `app-universal-release-unsigned.apk`. No script of the repository signs, creates a key
-or reads a keystore password, and the Gradle project has no signing configuration. Signing is the owner's own step, with the owner's
-own key kept outside the repository, when a release is published. An unsigned APK cannot be installed. To see that the minified release (R8 is on) still works, a **copy** of the release APK is signed by hand,
-outside the repository, with the Android SDK's public debug key (`~/.android/debug.keystore`, alias `androiddebugkey`, password `android`;
-never a distribution key), installed on the Android 17 arm64 emulator and run, and then the copy is deleted and the app uninstalled. The
+`sh scripts/android-build.sh release` builds `app-universal-release-unsigned.apk`. No script of the repository creates a key or
+reads a keystore password, the Gradle project has no signing configuration, and no script signs a release for distribution. Signing
+a release is the owner's own step, with the owner's own key kept outside the repository, when a release is published. An unsigned APK
+cannot be installed. The one exception is the smoke test of the minified release (R8 is on): `sh scripts/android-e2e.sh release` signs
+a **copy** of the release APK in a temporary folder with the Android SDK's public debug key (`~/.android/debug.keystore`, alias
+`androiddebugkey`, password `android`; never a distribution key, and no other key is accepted), installs it on the Android 17 arm64
+emulator and runs it, and then deletes the copy and uninstalls the app. `HOLZWAVE_E2E_RELEASE_APK` names another unsigned release APK
+to test. The section is not part of `all` or `matrix`; it runs only on its own. The
 original is never signed: its SHA-256 and its unsigned state were the same before and after, and `android-apk-check.sh <apk> release`
 still passes it and still fails a release APK that holds `holzwave_selftest` (the stand-in test proves that failing case in the dex
 files and in the native library).
@@ -663,6 +666,10 @@ the minified build is only shown to keep the code they call; their behaviour was
 Every build sets `SOURCE_DATE_EPOCH` (the date of the last commit, or the value already in the environment), replaces `RUSTFLAGS` by
 `--remap-path-prefix` flags for the repository folder, the Cargo home and the NDK folder, and passes `--locked` to Cargo; it prints
 the NDK path and the Rust version it used. The Gradle project leaves the commit and Google's dependency block out of the APK.
+
+`sh scripts/android-repro-check.sh` makes this measurement: it fixes `SOURCE_DATE_EPOCH` once, clears the build outputs, builds the
+unsigned release twice and compares the two APKs byte for byte (it names the archive entries that differ when they do). It clears the
+outputs, the debug APK included, at the end unless `HOLZWAVE_REPRO_KEEP=1` is set.
 
 **Measured:** two builds of the unsigned release, one after the other, in the same folder, on the same machine, with the same
 `SOURCE_DATE_EPOCH`, with `app/src-tauri/gen/android/app/build`, `app/dist` and the whole `target/aarch64-linux-android/release`
