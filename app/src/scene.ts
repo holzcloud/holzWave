@@ -229,16 +229,25 @@ export function applyView(v: View): void {
  * Forget what the page knows of the worker it talked to, for a socket that opened again after a loss. The socket may now reach a
  * new worker (after a restart of the server or of the worker): it starts a pane only on `start_pane` and numbers its views from 1
  * again, so the page drops the number of the last view it showed, the sizes it told (every pane, shown or not, so a hidden tab's
- * panes are started when they are shown), the panes it saw exit (a new worker's view may list one again) and the panes that wait
- * for a full frame. The next view then starts and asks for a full frame of every pane, as after a reload. On the same worker
- * `start_pane` of a running pane does nothing, and one full frame per pane is the whole cost. The mirrors stay: the full frame
- * that answers replaces each of them, so the last screen is shown until then.
+ * panes are started when they are shown), the panes it saw exit (a new worker's view may list one again), the panes that wait
+ * for a full frame, and the latch of older lines (an ask lost with the connection would keep it closed while the pane stays at
+ * the top). The next view then starts and asks for a full frame of every pane, as after a reload. On the same worker
+ * `start_pane` of a running pane does nothing, and one full frame per pane is the whole cost.
+ *
+ * Kept, because none of it can stop a pane of the new worker:
+ * - the mirrors in `state.frames`: the full frame that answers replaces each one, so the last screen is shown until then;
+ * - the titles and directories: the worker tells them again when the window attaches, and a new one replaces each;
+ * - `state.away`: a pane leaves it when a view shows it, and its size was dropped when it moved;
+ * - the panes marked as leaving: a mark only lets go of a pane a view no longer shows, and it lapses by itself;
+ * - the motion effects and the selection cache: both follow the next frame of a pane, and a full frame ends a slide;
+ * - the attention marks: they follow the panes each view shows.
  */
 export function forgetWorker(): void {
   shownRev = 0;
   state.sizes.clear();
   state.exited.clear();
   waiting.clear();
+  older = new OlderLatch();
 }
 
 /** The panes this page has let go of by a gesture and that no layout has confirmed gone yet. */
@@ -317,7 +326,7 @@ export function fit(): void {
 const waiting = new Set<number>();
 
 /** When a pane that shows a session of a server asks for older lines (docs/design.md 6.34): once per arrival at the top. */
-const older = new OlderLatch();
+let older = new OlderLatch();
 
 /**
  * Ask the server for older lines when the person has scrolled a session's pane to the top of what the page holds. It draws no
