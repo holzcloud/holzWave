@@ -16,7 +16,7 @@ mod fake_device;
 
 use std::time::{Duration, Instant};
 
-use fake_device::{FakeDevice, Got, PATIENCE};
+use fake_device::{FakeDevice, Got, PATIENCE, SERVER_WORDS};
 use holzwave_core::remote::hub::{Cause, Hub, HubError, HubOptions, SubEvent, Subscription};
 use holzwave_core::remote::proto::{self, Answer, ErrorWord, Event, MAX_ATTACHED, MAX_CHUNK, MAX_LISTED, Op, Request, SessionEntry, WriterView};
 use holzwave_core::server_link::Fault;
@@ -217,6 +217,43 @@ fn a_refused_upgrade_is_one_fixed_fault_by_its_status_and_is_not_tried_again() {
         assert!(device.accept_within(Duration::from_millis(400)).is_none(), "a refused token is never retried");
         // Only a 401 tells the keeper of the token that the server refused it, once per refusal.
         assert_eq!(device.endpoint.refusals(), if status == 401 { 2 } else { 0 }, "{status}");
+    }
+}
+
+#[test]
+fn an_upgrade_a_proxy_answers_502_503_504_or_429_is_unreachable_and_tried_again() {
+    for status in [502u16, 503, 504, 429] {
+        let device = FakeDevice::start();
+        let hub = hub_with(&device, |o| o.reconnect = Reconnect { attempts: 3, delay: Duration::from_millis(30) });
+        // A call whose upgrade is answered with the status: the server cannot be reached right now.
+        let h = hub.clone();
+        let call = std::thread::spawn(move || h.list());
+        device.refuse_for(status, Duration::from_millis(300));
+        let error = call.join().unwrap().expect_err("the upgrade was not accepted");
+        assert_eq!(error, HubError::Fault(Fault::Unreachable), "{status}");
+        let shown = format!("{error} {error:?}");
+        assert!(!shown.contains(SERVER_WORDS), "{status}: {shown}");
+
+        // An attached subscription whose connection is cut and whose every try is answered with it: the tries, then the
+        // wait for a retry, never the end of the subscription.
+        let (sub, conn) = attach_plain(&device, &hub, 3, b"");
+        conn.cut();
+        device.refuse_for(status, Duration::from_millis(600));
+        let events = events_until(&sub, |e| e.contains(&SubEvent::GaveUp) || is_lost(e));
+        assert!(!is_lost(&events), "{status}: {events:?}");
+        let tries = events.iter().filter(|e| matches!(e, SubEvent::Reconnecting { .. })).count();
+        assert_eq!(tries, 3, "{status}: {events:?}");
+        assert_eq!(events.last(), Some(&SubEvent::GaveUp), "{status}");
+        assert_eq!(device.endpoint.refusals(), 0, "{status}: the token was not refused");
+
+        // The server is back: one retry attaches the stream again.
+        sub.handle().retry().unwrap();
+        let mut conn = device.accept();
+        let request = conn.request();
+        assert_eq!(request.op, Op::Attach { session: 3, tail: None });
+        conn.attached(request.id, 3, 80, 24, WriterView::Writing, false, 0);
+        let events = events_until(&sub, |e| !e.is_empty());
+        assert!(matches!(events[0], SubEvent::Attached { again: true, .. }), "{status}: {events:?}");
     }
 }
 

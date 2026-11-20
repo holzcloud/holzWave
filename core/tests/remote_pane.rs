@@ -17,7 +17,7 @@ mod fake_device;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use fake_device::{Conn, FakeDevice, Got, PATIENCE};
+use fake_device::{Conn, FakeDevice, Got, PATIENCE, SERVER_WORDS};
 use holzwave_core::GhosttyEngine;
 use holzwave_core::conn::{ConnState, RemoteState};
 use holzwave_core::engine::{DomKey, TerminalEngine};
@@ -290,6 +290,40 @@ fn when_the_tries_are_used_the_pane_fails_waits_for_enter_drops_what_is_typed_an
     pane.close();
     assert!(pane.join(PATIENCE), "closing the pane ends the wait");
     assert_eq!(probe.exits().len(), 1);
+}
+
+#[test]
+fn a_server_gone_behind_a_proxy_that_answers_502_is_unreachable_the_pane_waits_for_enter_and_never_ends() {
+    let device = FakeDevice::start();
+    let hub = hub_with(&device, fast());
+    let mut session = Session::new(80, 24);
+    session.print("prompt$ ");
+    let (pane, probe, conn) = attached_pane(&device, &hub, 4, &mut session, WriterView::Writing, None, "prompt$");
+    conn.cut();
+    // The proxy is there and its server is gone: every try is answered 502.
+    device.refuse_for(502, Duration::from_millis(500));
+    wait_state(&pane, |s| *s == ConnState::Failed);
+    wait_text(&pane, NOTICE_UNREACHABLE);
+    let text = screen(&pane);
+    assert_eq!(count(&text, NOTICE_RECONNECTING), 1, "one Reconnecting line for the whole loss: {text:?}");
+    assert_eq!(count(&text, NOTICE_UNREACHABLE), 1, "{text:?}");
+    assert!(!text.contains(Fault::Refused.sentence()), "a proxy's 502 is not a refusal: {text:?}");
+    assert!(!text.contains(SERVER_WORDS), "nothing the proxy wrote is shown: {text:?}");
+    // The pane is still there and waits: it was neither held nor ended, so no status was given.
+    assert!(probe.held().is_empty() && probe.exits().is_empty(), "the pane did not end");
+    assert_eq!(pane.conn_state(), ConnState::Failed);
+
+    // The server is back: Enter attaches the pane again and the session's text appears.
+    enter(&pane);
+    let mut conn = device.accept();
+    let request = conn.request();
+    session.print("back after the restart$ ");
+    session.serve(&mut conn, &request, WriterView::Writing, 100);
+    wait_text(&pane, "back after the restart$");
+    wait_state(&pane, |s| *s == ConnState::Connected);
+    assert!(probe.exits().is_empty(), "the pane stayed open all the time");
+    pane.close();
+    assert!(pane.join(PATIENCE));
 }
 
 #[test]

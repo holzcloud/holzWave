@@ -11,7 +11,7 @@
 //!   at most [`WsLimits::max_frame`] (the library checks a frame's announced length before it reads or allocates the payload),
 //!   a masked frame from the server is a protocol error, a text message that is not UTF-8 is one too, and every wait has a
 //!   bound: the connect, the handshake, a write and a read.
-//! * **What an error says.** A refused upgrade is one of the three faults of [`crate::server_link::Fault`] by its status alone.
+//! * **What an error says.** A refused upgrade is one of the faults of [`crate::server_link::Fault`] by its status alone.
 //!   No error holds a text the server wrote, and the token is never in one: it is read once, into the header value of the
 //!   upgrade request, and not kept by [`WsClient`].
 //!
@@ -507,8 +507,9 @@ impl WsClient {
     /// The platform's local-network gate is asked first (it returns at once where there is none). `tls` is the configuration
     /// of a `wss` address; `None` is the platform's ([`platform_tls`]), and a caller passes another configuration only to
     /// trust a particular certificate, never to skip the check. The upgrade request carries the token in `Authorization` and
-    /// no `Origin`. A refused upgrade is [`Fault::SignedOut`] (401), [`Fault::Off`] (404) or [`Fault::Refused`] (any other
-    /// status, a redirect included).
+    /// no `Origin`. A refused upgrade is [`Fault::SignedOut`] (401), [`Fault::Off`] (404), [`Fault::Unreachable`] (502, 503
+    /// and 504 from a reverse proxy whose server restarts or is gone, and 429, a limit that passes: the hub tries again) or
+    /// [`Fault::Refused`] (any other status, a redirect and an error of the server itself included).
     pub fn connect(
         url: &WsUrl,
         token: &Token,

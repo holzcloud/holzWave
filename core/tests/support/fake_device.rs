@@ -20,6 +20,9 @@ use tungstenite::{Message, WebSocket, http};
 /// How long a helper waits for the client before it fails the test.
 pub const PATIENCE: Duration = Duration::from_secs(15);
 
+/// What the peer writes in the body of a refused upgrade: it must never come back in an error, a notice or a sentence.
+pub const SERVER_WORDS: &str = "server-words-that-must-not-be-echoed";
+
 /// What the peer saw of one upgrade request.
 #[derive(Clone, Debug, Default)]
 pub struct Seen {
@@ -156,6 +159,27 @@ impl FakeDevice {
             Err(response)
         });
         assert!(refused.is_err(), "the peer refused the upgrade");
+    }
+
+    /// Accepts connections and answers the upgrade of each with `status`, for `wait`: a reverse proxy whose server is gone
+    /// (502, 503, 504) or a server at its limit (429). The body of every answer is [`SERVER_WORDS`], which no error of the
+    /// client may carry.
+    pub fn refuse_for(&self, status: u16, wait: Duration) {
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline {
+            let Some(stream) = self.accept_stream(Duration::from_millis(20)) else { continue };
+            let seen = self.seen.clone();
+            let _ = tungstenite::accept_hdr(stream, |request: &HttpRequest, _: Response| {
+                seen.lock().unwrap().push(Seen {
+                    authorization: request.headers().get("authorization").and_then(|v| v.to_str().ok()).map(str::to_owned),
+                    has_origin: request.headers().contains_key("origin"),
+                    path: request.uri().path().to_owned(),
+                });
+                let response: ErrorResponse =
+                    http::Response::builder().status(status).body(Some(SERVER_WORDS.to_owned())).expect("a response");
+                Err(response)
+            });
+        }
     }
 
     /// Accepts connections and drops each at once, for `wait`: a server that is there and does not speak.

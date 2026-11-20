@@ -78,9 +78,11 @@ pub enum Fault {
     SignedOut,
     /// The server has the feature switched off (or does not have it at all).
     Off,
-    /// The server could not be reached: no connection, no answer in time, or a connection that broke.
+    /// The server could not be reached: no connection, no answer in time, a connection that broke, a reverse proxy whose
+    /// server is gone (502, 503, 504) or a limit that passes (429).
     Unreachable,
-    /// The server answered, but refused: any other status than the two above.
+    /// The server answered, but refused: a status that is neither one of the two above nor one that passes (see
+    /// [`Fault::of_status`]).
     Refused,
     /// The server sent something this client does not accept: a frame, an answer or a text outside the rules.
     Protocol,
@@ -102,11 +104,15 @@ impl Fault {
     }
 
     /// The fault of the status of an answer that is neither a success nor a case the caller names itself: 401 is a sign-in
-    /// that ended, 404 a feature that is off, anything else a refusal.
+    /// that ended and 404 a feature that is off. 502, 503 and 504 are what a reverse proxy answers while the server behind it
+    /// restarts or is gone, and 429 is a limit that passes, so all four are a server that cannot be reached right now, which
+    /// a caller may try again. Every other status (an error of the server itself, a redirect, any 4xx) is a refusal that
+    /// another try does not change.
     pub fn of_status(status: u16) -> Fault {
         match status {
             401 => Fault::SignedOut,
             404 => Fault::Off,
+            429 | 502 | 503 | 504 => Fault::Unreachable,
             _ => Fault::Refused,
         }
     }
@@ -515,7 +521,20 @@ mod tests {
             assert_eq!(Error::from(fault).to_string(), fault.sentence());
             assert!(!format!("{fault:?}").to_lowercase().contains("canary"));
         }
-        assert_eq!((Fault::of_status(401), Fault::of_status(404), Fault::of_status(403), Fault::of_status(500)), (Fault::SignedOut, Fault::Off, Fault::Refused, Fault::Refused));
+    }
+
+    #[test]
+    fn a_status_is_signed_out_off_unreachable_for_a_proxy_or_a_limit_and_a_refusal_for_the_rest() {
+        assert_eq!(Fault::of_status(401), Fault::SignedOut);
+        assert_eq!(Fault::of_status(404), Fault::Off);
+        // A reverse proxy whose server restarts or is gone, and a limit that passes: the server cannot be reached right now.
+        for status in [502, 503, 504, 429] {
+            assert_eq!(Fault::of_status(status), Fault::Unreachable, "{status}");
+        }
+        // Every other status, an error of the server and a redirect included, is a refusal that another try does not change.
+        for status in [400, 403, 418, 500, 501, 505, 302] {
+            assert_eq!(Fault::of_status(status), Fault::Refused, "{status}");
+        }
     }
 
     // ---- the token ----
