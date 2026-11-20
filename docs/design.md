@@ -365,7 +365,7 @@ A chat pane on a phone is the screen, with a sheet from the bottom edge for the 
 
 **Layout classes.** Android has two classes, and the page picks one from the window width and the short side of the screen, never from a user agent: the tablet layout when the window is at least 840 px wide and the short side of the screen is at least 480 px, the phone layout otherwise. The short side keeps a landscape phone, whose keyboard leaves little height, on the phone layout; a 7 inch tablet held upright and a window narrower than 840 px in split screen get the phone layout too. The class is decided again when the width changes and never when the on-screen keyboard changes the height, so the layout does not jump while a person types. Desktop and browser windows never take either class: the rule applies on Android only (the page reads the platform name `android`), so a narrow desktop window is unchanged.
 
-**Phone layout.** One pane fills the screen. The top strip keeps the workspace diamond, the workspace name and the name of the tab or pane as in the picture above, then one empty place for a status chip, then the buttons `✦` and `⌘`; the empty place is kept so that nothing moves when a chip appears. A tab with more than one pane shows `2/3` after its name (the second of three panes), and the sheet lists the panes of the shown tab under the tabs: one row for each pane, 44 px high, with the state dot (filled when the pane has the focus, hollow otherwise, as in 6.8), the pane's name and its context in mono, dim; the pane with the focus also has the rose wash and a 2 px bar on its left, so the focus is not told by colour alone. Tapping a row focuses that pane and closes the sheet. The panes that are not shown keep running, so a person does not lose a build by looking at another pane.
+**Phone layout.** One pane fills the screen. The top strip keeps the workspace diamond, the workspace name and the name of the tab or pane as in the picture above, then one empty place for a status chip, then the button `✦`; the empty place is kept so that nothing moves when a chip appears. The strip has no palette button: on a phone the palette opens only with its chord from a hardware keyboard (section 7), and what a phone needs without a keyboard is a row of the sheet (the groups of the sheet, below). A tab with more than one pane shows `2/3` after its name (the second of three panes), and the sheet lists the panes of the shown tab under the tabs: one row for each pane, 44 px high, with the state dot (filled when the pane has the focus, hollow otherwise, as in 6.8), the pane's name and its context in mono, dim; the pane with the focus also has the rose wash and a 2 px bar on its left, so the focus is not told by colour alone. Tapping a row focuses that pane and closes the sheet. The panes that are not shown keep running, so a person does not lose a build by looking at another pane.
 
 **Groups of the sheet.** After the panes the sheet has the groups that other parts of the app add, each a caption in the label style and rows of 44 px in the shape of the pane rows, and it keeps them in this order whatever order they are added in: `Connections` with the one row `Connections…`, which closes the sheet and opens the Connections view of 6.34 as the full-screen sheet with the server row, `Sign in…` and the sessions (on a phone without a hardware keyboard this row is the one way to it), and on Android `Files` with the two rows of the file hand-over (below). The rows are drawn on the phone only; the tablet and the desktop have no sheet.
 
@@ -407,7 +407,7 @@ A chat pane on a phone is the screen, with a sheet from the bottom edge for the 
 
 **Notification.** The notification that Android requires while shells or connections run reads `holzWave is running` with the text `3 shells, 1 connection` (the counts, with the singular at 1; `No shells or connections` is never shown, because the service stops then) and one action `Stop all`, which ends every shell and connection and removes the notification. It is on a low-importance channel named `Running sessions`, with no sound and no badge. Android draws it, so the spec fixes the words only.
 
-![File hand-over: the sheet with its two rows, the palette with its two entries, the confirmation and refusal lines, and the notification](design/phone-handover.png)
+![File hand-over: the sheet with the Connections row and then its two rows, the palette with its two entries, the confirmation and refusal lines, and the notification](design/phone-handover.png)
 
 ### 6.7 Platforms
 
@@ -1876,8 +1876,8 @@ that changes something has no palette entry: it is a button of a row or of the C
 card come with it. A tool that is not installed keeps its entries, and the block they open says so and offers the path field.
 The entries come from the core's list of tools, so a tool added later brings its own and nothing is drawn for it here. Two
 actions, `integration.context` (`Show the Context section`) and `integration.profiles` (`Integration profiles…`), are in the
-palette and in the key binding editor with no default chord, so a person can give them one. A phone has neither the palette
-nor these entries.
+palette and in the key binding editor with no default chord, so a person can give them one. On a phone the palette opens
+only with its chord from a hardware keyboard (6.6); Android lists none of these entries, and the phone's sheet has no row for them.
 
 **The pane.** Header `pods` (the id of the shown view, with underscores as spaces, in the label style: `contexts`, `nodes`,
 `machine status`), context in mono `Kubernetes · prod · payments · 10 s`: the tool, the selection of this pane and, for a
@@ -2106,8 +2106,8 @@ Secret values are kept in the keychain and travel only inside the encrypted secr
 program of a tool, a configuration folder) is never part of a profile. The dialog says so in one note under the groups.
 
 **Way in.** The hairline button `Profiles…` in the head of the sidebar's Context section (6.11), left of `↻`. It is not drawn
-at 640 px and narrower, and a phone has no Context section, so the dialog has no way in on a phone yet; the palette
-entry comes with the palette (it has no chord). One dialog at a time; a second ask while it is open changes nothing. `Escape`,
+at 640 px and narrower, and a phone has no Context section, so the dialog has no way in on a phone yet: Android lists no
+palette entry for it and the phone's sheet has no row for it. One dialog at a time; a second ask while it is open changes nothing. `Escape`,
 `Close` and a press on the backdrop close it, and the keyboard goes back to the terminal.
 
 **Box.** The box of the Settings dialog and the providers dialog (a floating layer: hairline, 8 px radius, the one shadow), 40 rem
@@ -2955,7 +2955,7 @@ On attach the server sends the current screen and a bounded tail of the scrollba
 
 ![Server pane states](design/server-pane-states.png)
 
-![Server sessions on a phone](design/server-sessions-phone.png)
+![Server sessions on a phone: the sheet with the row Connections… before Files, the sessions sheet, and a pane that watches](design/server-sessions-phone.png)
 
 **The words.** One table; a unit test compares the page with it.
 

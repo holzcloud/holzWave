@@ -278,6 +278,8 @@ async function check(file) {
   if (lockPhones !== 7) failures.push(`#phones-lock holds ${lockPhones} phones, not 7`);
   const handoverPhones = await page.$$eval('#phones-handover .ph1', (n) => n.length);
   if (handoverPhones !== 4) failures.push(`#phones-handover holds ${handoverPhones} phones, not 4`);
+  const serverPhones = await page.$$eval('#phones-server .ph1', (n) => n.length);
+  if (serverPhones !== 3) failures.push(`#phones-server holds ${serverPhones} phones, not 3`);
   const chips = await page.$$eval('#phones-lock > div:first-child .lk-chip', (ns) =>
     ns.map((n) => ({ state: n.dataset.state, label: n.textContent.trim(), glyph: n.querySelector('svg[data-glyph]')?.dataset.glyph, shape: n.querySelector('svg')?.innerHTML, border: getComputedStyle(n).borderTopStyle })),
   );
@@ -289,8 +291,9 @@ async function check(file) {
     if (chips[2].border !== 'dashed') failures.push('the chip Not protected has no dashed border');
     if (chips[0].border === 'dashed' || chips[1].border === 'dashed') failures.push('a chip other than Not protected has a dashed border');
   }
-  // Every touch target of both rows is 22 px at the half scale of the mock; the unlock sheet's Unlock button, the chip, the switch and both hand-over rows are among them.
-  for (const [row, wanted] of [['phones-lock', ['.lk-chip', '.lk-sw', '.lk-btn']], ['phones-handover', ['.ho-row', '.ho-ent']]]) {
+  // Every touch target of these rows is 22 px at the half scale of the mock; the unlock sheet's Unlock button, the chip, the switch, both
+  // hand-over rows and the sheet's Connections row are among them.
+  for (const [row, wanted] of [['phones-lock', ['.lk-chip', '.lk-sw', '.lk-btn']], ['phones-handover', ['.ho-row', '.ho-ent', '.sh-row']], ['phones-server', ['.sh-row']]]) {
     const small = await page.$$eval(`#${row} [data-target]`, (ns) => ns.map((n) => n.getBoundingClientRect()).filter((r) => r.width < 21.5 || r.height < 21.5).map((r) => `${Math.round(r.width)} by ${Math.round(r.height)}`));
     if (small.length > 0) failures.push(`#${row} draws ${small.length} touch targets under 22 px (${small.join(', ')})`);
     for (const sel of wanted) if ((await page.$$eval(`#${row} ${sel}[data-target]`, (n) => n.length)) === 0) failures.push(`#${row} draws no ${sel} target`);
@@ -326,6 +329,20 @@ async function check(file) {
   }
   if ((await page.$$eval('#phones-handover .ho-row[data-target]', (n) => n.length)) !== 2) failures.push('#phones-handover does not draw exactly two sheet rows');
   if ((await page.$$eval('#phones-handover .ho-ent[data-target]', (n) => n.length)) !== 2) failures.push('#phones-handover does not draw exactly two palette entries');
+  // The sheet's groups (docs/design.md 6.6): Connections with its one row Connections…, before Files, in each phone that draws the sheet's added groups.
+  for (const row of ['phones-handover', 'phones-server']) {
+    const groups = await page.$eval(`#${row}`, (n) => {
+      const ph = [...n.querySelectorAll('.ph1')].find((p) => p.querySelector('.sh-row'));
+      if (!ph) return null;
+      return { caps: [...ph.querySelectorAll('.cap')].map((c) => c.textContent.trim()), rows: [...ph.querySelectorAll('.sh-row')].map((r) => r.textContent.trim()) };
+    });
+    if (!groups) failures.push(`#${row} draws no sheet with the group Connections`);
+    else {
+      const at = groups.caps.indexOf('Connections');
+      if (at < 0 || groups.caps.indexOf('Files') !== at + 1) failures.push(`#${row}: the sheet's groups are ${groups.caps.join('|')}, not Connections before Files`);
+      if (groups.rows.join('|') !== 'Connections…') failures.push(`#${row}: the group Connections has the rows ${groups.rows.join('|')}, not Connections…`);
+    }
+  }
   // The words of the spec, each in the spec and in the page, so the two stay in step. No password field anywhere (the app only starts the system prompt).
   const spec = fs.readFileSync(path.join(__dirname, '..', 'design.md'), 'utf8');
   const lockText = (await page.$eval('#phones-lock', (n) => n.textContent)).replace(/\s+/g, ' ');
@@ -343,6 +360,7 @@ async function check(file) {
       'Copy a file into the shell folder', 'Copy a file out of the shell folder', 'Copied report.pdf (1.2 MB) to ~/handover/report.pdf', 'Copied report.pdf (1.2 MB) to ~/handover/report-2.pdf', 'Copied report.pdf (1.2 MB) out',
       'report.pdf is 612 MB; the limit is 256 MB', 'Could not copy the file', 'File to copy out, from the shell folder',
       'holzWave is running', '3 shells, 1 connection', 'Stop all',
+      'Connections…',
     ],
   };
   const specText = spec.replace(/\s+/g, ' ');
@@ -360,7 +378,7 @@ async function check(file) {
   }
   failures.push(...problems.filter((p) => !failures.includes(p)));
   await browser.close();
-  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} + ${approvalPhones} + ${writePhones} + ${commandPhones} + ${sidePhones} + ${actionPhones} + ${wshPhones} + ${attnPhones} + ${keyPhones} + ${selectPhones} + ${lockPhones} + ${handoverPhones} phones, ${refused.length} requests refused (the web font host)`);
+  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} + ${approvalPhones} + ${writePhones} + ${commandPhones} + ${sidePhones} + ${actionPhones} + ${wshPhones} + ${attnPhones} + ${keyPhones} + ${selectPhones} + ${lockPhones} + ${handoverPhones} + ${serverPhones} phones, ${refused.length} requests refused (the web font host)`);
   if (failures.length > 0) {
     for (const f of failures) console.error(`FAIL ${f}`);
     process.exit(1);

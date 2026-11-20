@@ -705,7 +705,7 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .sy-acts{flex-wrap:nowrap;gap:3px}.sy-acts .lk-btn{padding:0 5px}
 .lk-set{display:flex;align-items:center;justify-content:space-between;gap:6px;min-height:22px}
 .lk-pause{display:inline-block;margin-right:3px;font-weight:700}
-.ho-row{min-height:22px;padding:2px 14px;font-size:8px;white-space:normal;align-items:center}
+.ho-row,.sh-row{min-height:22px;padding:2px 14px;font-size:8px;white-space:normal;align-items:center}
 .ho-ent{min-height:22px;padding:2px 10px;font-size:8px;white-space:normal;align-items:center}
 .lk-sys{--sys-bg:#E8E5EA;--sys-ink:#1C1B1F;--sys-dim:#625D66;margin:6px 4px 0;padding:8px 10px;border-radius:14px;background:var(--sys-bg);color:var(--sys-ink);box-shadow:0 1px 5px rgba(0,0,0,.45);font:400 8px/1.4 var(--sys-font,system-ui,sans-serif)}
 .lk-sys .h{display:flex;align-items:center;gap:4px;color:var(--sys-dim);font-size:7px;margin-bottom:3px}.lk-sys .h i{width:8px;height:8px;border-radius:2px;background:var(--sys-dim)}
@@ -940,11 +940,11 @@ td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
   <div class="phones" id="phones-lock"></div>
 
   <h2>File hand-over and the notification</h2>
-  <p class="lead">Two sheet rows and two palette entries hand over one file at a time between the phone and the shell's own folder. The lines after a copy and the refusal of a file over 256 MiB are shown, and the notification that Android requires while shells or connections run. The notification is drawn by Android; the product fixes only its words and its action. Shown at the scale of the mock (about half).</p>
+  <p class="lead">Two sheet rows and two palette entries hand over one file at a time between the phone and the shell's own folder. In the sheet the group Files follows the group Connections. The lines after a copy and the refusal of a file over 256 MiB are shown, and the notification that Android requires while shells or connections run. The notification is drawn by Android; the product fixes only its words and its action. Shown at the scale of the mock (about half).</p>
   <div class="phones" id="phones-handover"></div>
 
   <h2>Server sessions on a phone</h2>
-  <p class="lead">The Connections view is the screen: the server row, its sessions and every button are at least 44 px high (22 px at the scale of the mock). A session row says its title and whether it is free or held and wraps the rest. In the pane the writer label and Take over sit in the top strip; the name of the pane is cut first. Left, the sessions sheet; right, a pane that watches. A drawing of the design: nothing of it was run on a phone.</p>
+  <p class="lead">The Connections view is the screen: the server row, its sessions and every button are at least 44 px high (22 px at the scale of the mock). A session row says its title and whether it is free or held and wraps the rest. In the pane the writer label and Take over sit in the top strip; the name of the pane is cut first. Left, the phone's sheet: its group Connections, before Files, has the row Connections…, which opens the view and is the one way to it without a hardware keyboard. In the middle, the sessions sheet; right, a pane that watches. A drawing of the design: nothing of it was run on a phone.</p>
   <div class="phones" id="phones-server"></div>
 
   <h2>Features and where they live</h2>
@@ -1932,7 +1932,7 @@ addEventListener('resize',fit);
 /* Handys */
 const ph=(top,body,bot,o={})=>`<div><div class="ph1"><div class="t">${top}</div><div class="fill ${o.raw?'col':'pre'}" style="${o.raw?'overflow:hidden':'padding:8px 10px;overflow:hidden'}">${body}</div>${bot}${o.over||''}</div></div>`;
 $('#phones').innerHTML=
- ph('<span class="wd">◆</span> main <span class="dim">· 1 shell</span><span class="ro" style="margin-left:auto">✦ ⌘</span>',`<span class="ro">❯</span> cargo test
+ ph('<span class="wd">◆</span> main <span class="dim">· 1 shell</span>',`<span class="ro">❯</span> cargo test
 test layout ... <span class="ok">ok</span>
 test unicode ... <span class="ok">ok</span>
 test result: <span class="ok">ok</span>
@@ -2043,7 +2043,7 @@ $('#phones-attn').innerHTML=
 const phc=(cap,...a)=>ph(...a).replace(/<\/div>$/,`<div class="cap">${cap}</div></div>`);
 const KEYROW=(ctrl='',alt='')=>`<div class="acc"><span>esc</span><span>tab</span><span data-key="ctrl" class="${ctrl}">ctrl</span><span data-key="alt" class="${alt}">alt</span><span>↑</span><span>↓</span></div>`;
 const BN=`<div class="bn"><span class="on">shell</span><span>kube</span><span>notes</span><span>＋</span></div>`;
-const KEYTOP='<span class="wd">◆</span> main <span class="dim">· 1 shell</span><span class="ro" style="margin-left:auto">✦ ⌘</span>';
+const KEYTOP='<span class="wd">◆</span> main <span class="dim">· 1 shell</span>';
 const KEYTXT=`<span class="ro">❯</span> cargo test
 test layout ... <span class="ok">ok</span>
 test unicode ... <span class="ok">ok</span>
@@ -2061,11 +2061,11 @@ NAME     STATUS
 talos-1  <span class="ok">Ready</span>
 talos-3  <span class="SEL">NotReady</span>
 <span class="ro">❯</span> <span class="cur"></span></div>`;
-const SELTOP='<span class="wd">◆</span> main <span class="dim">· 2 holzkube 2/3</span><span class="ro" style="margin-left:auto">✦ ⌘</span>';
+const SELTOP='<span class="wd">◆</span> main <span class="dim">· 2 holzkube 2/3</span>';
 const pnRow=(on,hollow,state,name,ctx)=>`<div class="it ${on?'on':''}"><span class="sm-pn"><i class="dot ${hollow?'o ':''}${state}"></i>${name}</span><span class="dim">${ctx}</span></div>`;
 $('#phones-select').innerHTML=
  phc('Selection: two handles and the menu',SELTOP,KUBE(10).replace('SEL','sel'),KEYROW()+BN,{over:`<div class="sm-menu float" style="left:46px;top:57px"><span>Copy</span><span>Paste</span></div><div class="sm-h s" style="left:53px;top:98px"></div><div class="sm-h e" style="left:101px;top:98px"></div>`})
-+phc('Pinch: the label and the larger text','<span class="wd">◆</span> main<span class="chip sm-scale">UI scale 125 %</span><span class="ro" style="margin-left:8px">✦ ⌘</span>',KUBE(12.5).replace('SEL','sel'),KEYROW()+BN,{over:`<svg class="sm-fingers" viewBox="0 0 200 400" aria-hidden="true"><line x1="62" y1="262" x2="138" y2="198" stroke="var(--ink3)" stroke-width="1" stroke-dasharray="3 3"/><circle cx="62" cy="262" r="9" fill="none" stroke="var(--ink3)"/><circle cx="138" cy="198" r="9" fill="none" stroke="var(--ink3)"/></svg>`})
++phc('Pinch: the label and the larger text','<span class="wd">◆</span> main<span class="chip sm-scale">UI scale 125 %</span>',KUBE(12.5).replace('SEL','sel'),KEYROW()+BN,{over:`<svg class="sm-fingers" viewBox="0 0 200 400" aria-hidden="true"><line x1="62" y1="262" x2="138" y2="198" stroke="var(--ink3)" stroke-width="1" stroke-dasharray="3 3"/><circle cx="62" cy="262" r="9" fill="none" stroke="var(--ink3)"/><circle cx="138" cy="198" r="9" fill="none" stroke="var(--ink3)"/></svg>`})
 +phc('Sheet: the panes of a tab',`<span class="lbl">Workspaces</span>`,`<div class="fill" style="padding:10px"><div class="row" style="gap:6px;flex-wrap:wrap"><div class="ws on" style="font-size:10px">◆ main</div><div class="ws" style="font-size:10px">◇ infra</div><div class="ws" style="font-size:10px">◇ docs</div></div>
  <div class="cap" style="margin-top:12px">Tabs in main</div><div class="it"><span>1 shell</span></div><div class="it on"><span>2 holzkube <span class="cy">⌁</span> 2/3</span></div><div class="it"><span>3 notes.md</span></div>
  <div class="cap" style="margin-top:12px">Panes in holzkube</div>${pnRow(0,1,'wa','holzkube','ssh · talos-2')}${pnRow(1,0,'','logs','ssh · talos-2')}${pnRow(0,1,'in','system','local')}</div>`,`<div class="bn"><span class="on">Sheet</span></div>`,{raw:1});
@@ -2082,7 +2082,7 @@ const tbViews={tablet:()=>`<div class="titlebar row tb-bar">${tbT('<span class="
 /* Lock, notice and preferences (docs/design.md 6.6). The glyph of the chip is its own svg, one for each state, so the states differ by shape and by word. */
 const LKG={closed:'<path d="M3 6V4a3 3 0 0 1 6 0v2"/>',open:'<path d="M3 6V4a3 3 0 0 1 6 0"/>',barred:'<path d="M3 6V4a3 3 0 0 1 6 0v2"/><line x1="0.5" y1="13.5" x2="11.5" y2="0.5"/>'};
 const lkChip=(state)=>{const [g,w]={locked:['closed','LOCKED'],open:['open','OPEN'],none:['barred','NO LOCK']}[state];return `<span class="lk-chip" data-target data-state="${state}"><svg data-glyph="${g}" viewBox="0 0 12 14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1" y="6" width="10" height="7" rx="1.2"/>${LKG[g]}</svg>${w}</span>`};
-const lkTop=(state)=>`<span class="wd">◆</span> main${lkChip(state)}<span class="ro">✦ ⌘</span>`;
+const lkTop=(state)=>`<span class="wd">◆</span> main${lkChip(state)}`;
 const lkBtn=(t,c='')=>`<span class="lk-btn ${c}" data-target>${t}</span>`;
 const lkStrip=(state,cap)=>`<div class="lk-strip"><div class="cap">${cap}</div><div class="t">${lkTop(state)}</div></div>`;
 const lkSheet=`<div class="scrim" style="border-radius:22px"></div><div class="c-sheet float lk-box" style="border-radius:12px 12px 0 0;padding-bottom:12px"><b>Secrets are locked</b><p>Unlock with your fingerprint, face or screen lock to use saved passwords, keys and the AI key.</p><div class="lk-acts">${lkBtn('Unlock','p')}${lkBtn('Not now','q')}</div><span class="lk-quiet">Not unlocked</span></div>`;
@@ -2100,9 +2100,11 @@ $('#phones-lock').innerHTML=
 
 /* File hand-over and the notification (docs/design.md 6.6). */
 const hoRow=(t)=>`<div class="it ho-row" data-target><span>${t}</span></div>`;
+/* The group Connections of the sheet (docs/design.md 6.6): one row, before Files, the one way to the Connections view without a keyboard. */
+const shConn=`<div class="cap" style="margin-top:12px">Connections</div><div class="it sh-row" data-target><span>Connections…</span></div>`;
 const hoNote=(cap,t,tone)=>`<div class="cap" style="margin:0 0 2px;font-size:8px">${cap}</div><div class="float lk-note"${tone?` data-tone="${tone}"`:''}>${t}</div>`;
 $('#phones-handover').innerHTML=
- phc('Sheet rows','<span class="lbl">Workspaces</span>',`<div class="fill" style="padding:10px"><div class="row" style="gap:6px;flex-wrap:wrap"><div class="ws on" style="font-size:10px">◆ main</div><div class="ws" style="font-size:10px">◇ infra</div></div><div class="cap" style="margin-top:12px">Tabs in main</div><div class="it on"><span>1 shell</span></div><div class="it"><span>2 holzkube</span></div><div class="cap" style="margin-top:12px">Files</div>${hoRow('Copy a file into the shell folder')}${hoRow('Copy a file out of the shell folder')}</div>`,`<div class="bn"><span class="on">Sheet</span></div>`,{raw:1})
+ phc('Sheet rows','<span class="lbl">Workspaces</span>',`<div class="fill" style="padding:10px"><div class="row" style="gap:6px;flex-wrap:wrap"><div class="ws on" style="font-size:10px">◆ main</div><div class="ws" style="font-size:10px">◇ infra</div></div><div class="cap" style="margin-top:12px">Tabs in main</div><div class="it on"><span>1 shell</span></div><div class="it"><span>2 holzkube</span></div>${shConn}<div class="cap" style="margin-top:12px">Files</div>${hoRow('Copy a file into the shell folder')}${hoRow('Copy a file out of the shell folder')}</div>`,`<div class="bn"><span class="on">Sheet</span></div>`,{raw:1})
 +phc('Palette entries',lkTop('open'),KEYTXT,BN,{over:`<div class="scrim" style="border-radius:22px"></div><div class="ov float" style="left:8px;right:8px;top:38px;border-radius:10px"><div class="row" style="padding:6px 8px;gap:6px;border-bottom:1px solid var(--edge);font-size:8px"><span class="ro">❯</span>copy a file<span class="cur"></span></div><div class="grp lbl" style="font-size:8px">Files</div><div class="it on ho-ent" data-target><span>Copy a file into the shell folder</span></div><div class="it ho-ent" data-target><span>Copy a file out of the shell folder</span></div></div><div class="ov float" style="left:8px;right:8px;top:190px;border-radius:10px"><div class="cap" style="margin:4px 8px 0;font-size:8px">Out asks for the path first</div><div class="row" style="padding:6px 8px;gap:6px;font-size:8px"><span class="ro">❯</span><span class="dim">File to copy out, from the shell folder</span></div></div>`})
 +phc('Lines after a copy',lkTop('open'),`<div style="padding:8px">${hoNote('Into the shell folder','Copied report.pdf (1.2 MB) to ~/handover/report.pdf')}${hoNote('The name was taken','Copied report.pdf (1.2 MB) to ~/handover/report-2.pdf')}${hoNote('Out of the shell folder','Copied report.pdf (1.2 MB) out')}${hoNote('Too large','report.pdf is 612 MB; the limit is 256 MB','warn')}${hoNote('Any other failure','Could not copy the file','warn')}</div>`,'',{raw:1})
 +phc('Drawn by Android',`<span class="dim">12:41</span><span class="dim" style="margin-left:auto">87 %</span>`,`<div style="padding:8px 6px"><div class="lk-sys"><div class="h"><i></i><span>holzWave · now</span></div><b>holzWave is running</b><div>3 shells, 1 connection</div><span class="a" data-target>Stop all</span></div><div class="cap" style="margin:8px 4px 0;font-size:8px">Channel: Running sessions. No sound, no badge. Shaded and rounded because the system draws it.</div></div>`,'',{raw:1});
@@ -2110,15 +2112,16 @@ $('#phones-handover').innerHTML=
 /* Server sessions on a phone (docs/design.md 6.34): the Connections view as the screen, and a pane that watches. A phone is drawn at half scale, so 22 px here stand for 44 px. */
 const svPSess=(title,meta,held)=>`<div class="sv-psess"><div class="sv-ptx"><span class="sv-pt">${title}</span><span class="sv-pm">${meta}</span></div><span class="sv-wr">${svSq(held?'w':'f')}${held?'held':'free'}</span><span class="sv-pb" data-target role="button">Attach</span><span class="sv-pb" data-target role="button">End</span></div>`;
 const svPSheet=`<div class="sv-sheet"><div class="grp lbl" style="padding:0 0 2px;font-size:7.5px">Server</div><div class="sv-srv" role="row">${svDot('in')}<span class="sv-name">${SV_HOST}</span><span class="sv-addr">https://${SV_HOST}</span><span class="sv-stw">signed in</span><span class="sv-acts">${svBtn('Sign out')}${svBtn('New session')}</span></div><p class="sv-help">${SV_HELP}</p>${svPSess('cargo build','~/holzWave · 120×40 · 14:02 · 1 attached',1)}${svPSess('Session 2','~/holzWave/core · 80×24 · Mon 09:40 · 0 attached',0)}</div>`;
-const svPTop=w=>`<span class="wd">◆</span><span class="sv-pn">cargo build</span>${svChip(w)}${w==='writing'?'':svTake}<span class="ro">✦ ⌘</span>`;
+const svPTop=w=>`<span class="wd">◆</span><span class="sv-pn">cargo build</span>${svChip(w)}${w==='writing'?'':svTake}`;
 $('#phones-server').innerHTML=
- phc('Connections: the sessions sheet','<span class="lbl">Connections</span>',svPSheet,'',{raw:1})
+ phc('Sheet: Connections… opens the view','<span class="lbl">Workspaces</span>',`<div class="fill" style="padding:10px"><div class="row" style="gap:6px;flex-wrap:wrap"><div class="ws on" style="font-size:10px">◆ main</div><div class="ws" style="font-size:10px">◇ infra</div></div><div class="cap" style="margin-top:12px">Tabs in main</div><div class="it on"><span>1 shell</span></div><div class="it"><span>2 holzkube</span></div>${shConn}<div class="cap" style="margin-top:12px">Files</div>${hoRow('Copy a file into the shell folder')}${hoRow('Copy a file out of the shell folder')}</div>`,`<div class="bn"><span class="on">Sheet</span></div>`,{raw:1})
++phc('Connections: the sessions sheet','<span class="lbl">Connections</span>',svPSheet,'',{raw:1})
 +phc('A remote pane that watches',svPTop('watching'),`<span class="ro">❯</span> cargo build --release
 <span class="dim">   Compiling holzwave-core</span>
 <span class="dim">   Compiling holzwave-server</span>
 <span class="ok">    Finished</span> release
 <span class="ro">❯</span> <span class="cur"></span>`,BN);
-$('#phones-server').querySelectorAll('.ph1 .t')[1].classList.add('sv-top');
+$('#phones-server').querySelectorAll('.ph1 .t')[2].classList.add('sv-top');
 
 /* Feature list */
 const B='<span class="ph-tag built">built</span>',pl=n=>`<span class="ph-tag">Phase ${n}</span>`;
