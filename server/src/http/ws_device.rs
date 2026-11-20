@@ -537,9 +537,12 @@ impl Machine<'_> {
     }
 }
 
-/// How often a device socket is pinged, for the configured `limits.ping_interval`.
+/// How often a device socket is pinged, for the configured `limits.ping_interval`: that interval, but never longer than
+/// [`proto::PING_SECONDS`]. An app treats [`proto::SILENCE_SECONDS`] in which it heard nothing as a dead link and counts on a
+/// ping at least this often, so a quiet but healthy socket is never taken for a dead one. The page's socket keeps the
+/// configured interval.
 fn device_ping(configured: Duration) -> Duration {
-    configured
+    configured.min(Duration::from_secs(proto::PING_SECONDS))
 }
 
 async fn drive<T: Transport>(m: &mut Machine<'_>, transport: &mut T, rx: &mut SocketRx, started: Instant) -> Exit {
