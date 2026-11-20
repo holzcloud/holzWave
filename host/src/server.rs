@@ -655,7 +655,13 @@ pub(crate) mod fake {
         TooMany,
         /// The feature is off: every route is a 404.
         Off,
+        /// The start of a grant is answered with this status and a body of words the client must never show: a reverse proxy
+        /// whose server is gone (502, 503, 504), or the server's limit on sign-in starts (429).
+        Start(u16),
     }
+
+    /// What the fake writes in the body of an answer that is not a success.
+    pub const SERVER_WORDS: &str = "server-words-that-must-not-be-echoed";
 
     #[derive(Clone)]
     pub struct Fake {
@@ -768,6 +774,10 @@ pub(crate) mod fake {
             let mode = *grant.lock().unwrap();
             match (method.as_str(), target.as_str()) {
                 _ if mode == Grant::Off && target.starts_with("/api/device/") && !target.ends_with("/me") => respond(&mut stream, "404 Not Found", "", b""),
+                ("POST", "/api/device/code") if matches!(mode, Grant::Start(_)) => {
+                    let Grant::Start(status) = mode else { unreachable!() };
+                    respond(&mut stream, &format!("{status} Status"), "", SERVER_WORDS.as_bytes());
+                }
                 ("POST", "/api/device/code") => {
                     let started = format!(
                         r#"{{"device_code":"{CODE}","user_code":"BCDF-GHJK","verification_uri":"https://hw.example/","verification_uri_complete":"https://hw.example/#device=BCDF-GHJK","expires_in":600,"interval":1}}"#
@@ -777,7 +787,7 @@ pub(crate) mod fake {
                 ("POST", "/api/device/token") => {
                     thread::sleep(std::time::Duration::from_millis(poll_delay.load(Ordering::SeqCst)));
                     let answer = match mode {
-                        Grant::Pending | Grant::Off => r#"{"state":"pending"}"#.to_owned(),
+                        Grant::Pending | Grant::Off | Grant::Start(_) => r#"{"state":"pending"}"#.to_owned(),
                         Grant::Denied => r#"{"state":"denied"}"#.to_owned(),
                         Grant::Expired => r#"{"state":"expired"}"#.to_owned(),
                         Grant::TooMany => r#"{"state":"too_many"}"#.to_owned(),
@@ -847,7 +857,7 @@ pub(crate) mod fake {
 
 #[cfg(test)]
 mod tests {
-    use super::fake::{CODE, Fake, Grant as Mode, TOKEN};
+    use super::fake::{CODE, Fake, Grant as Mode, SERVER_WORDS, TOKEN};
     use super::*;
     use holzwave_core::secrets::MemoryStore;
     use holzwave_core::server_link::TOKEN_ACCOUNT;
@@ -1219,6 +1229,31 @@ mod tests {
         assert_eq!(fake.revokes.load(Ordering::SeqCst), 0);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn a_start_a_proxy_answers_502_to_504_cannot_reach_the_server_a_429_is_too_many_and_nothing_is_kept() {
+        let (rt, store, dir) = runtime("start-status");
+        let fake = Fake::start();
+        let unreachable = Fault::Unreachable.sentence();
+        let too_many = "Too many devices or requests. Try again later.";
+        for (status, said) in [(502u16, unreachable), (503, unreachable), (504, unreachable), (429, too_many)] {
+            *fake.grant.lock().unwrap() = Mode::Start(status);
+            let error = rt.sign_in_start(&fake.origin).expect_err("the start was not answered");
+            assert_eq!(error, said, "{status}");
+            assert_ne!(error, Fault::Refused.sentence(), "{status}");
+            assert!(!error.contains(SERVER_WORDS), "{status}: {error}");
+            // Nothing is written and the keychain is not touched.
+            assert!(!dir.join("server_link.json").exists(), "{status}");
+            assert_eq!(store.get(TOKEN_ACCOUNT).unwrap(), None, "{status}");
+            assert_eq!(rt.view().state, "signed_out", "{status}");
+        }
+        // The server answers again: the next start works.
+        *fake.grant.lock().unwrap() = Mode::Pending;
+        let started = rt.sign_in_start(&fake.origin).expect("a sign-in starts");
+        assert_eq!(started.code, "BCDF-GHJK");
+        assert_eq!(rt.view().state, "signing_in");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

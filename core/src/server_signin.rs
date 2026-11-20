@@ -58,6 +58,9 @@ const MAX_LIFE: u64 = 3600;
 /// The longest text of a member that is only shown or kept, in bytes.
 const MAX_TEXT: usize = 128;
 
+/// The sentence of [`SignInError::TooMany`]: the words of the state `too many` of the second screen in the design record.
+const TOO_MANY: &str = "Too many devices or requests. Try again later.";
+
 /// The platform word of this build, for the grant (the server shows it to the person who approves).
 pub fn platform() -> &'static str {
     if cfg!(target_os = "macos") {
@@ -84,6 +87,9 @@ pub enum SignInError {
     Invalid,
     /// The link to the server failed, as one of the closed set of faults.
     Fault(Fault),
+    /// The server's limit on sign-in starts from one address was reached (a `429` to the start): the words of the state `too
+    /// many` of the design record, since it passes and is not a refusal.
+    TooMany,
 }
 
 impl SignInError {
@@ -91,7 +97,7 @@ impl SignInError {
     pub fn fault(&self) -> Option<Fault> {
         match self {
             SignInError::Fault(fault) => Some(*fault),
-            _ => None,
+            SignInError::Address(_) | SignInError::Blocked(_) | SignInError::Invalid | SignInError::TooMany => None,
         }
     }
 
@@ -102,6 +108,7 @@ impl SignInError {
             SignInError::Blocked(text) => text.clone(),
             SignInError::Invalid => "The device name or platform is not valid.".to_owned(),
             SignInError::Fault(fault) => fault.sentence().to_owned(),
+            SignInError::TooMany => TOO_MANY.to_owned(),
         }
     }
 }
@@ -311,11 +318,14 @@ impl fmt::Debug for Client {
     }
 }
 
-/// The fault of a status that is not a success.
+/// The fault of a status that is not a success. 502, 503 and 504 (a reverse proxy whose server restarts or is gone) and 429
+/// (a limit that passes) are a server that cannot be reached right now, as on the device socket ([`Fault::of_status`]); any
+/// other redirect or error of the server is an answer outside the rules.
 fn fault_of(status: u16) -> Fault {
     match status {
         401 => Fault::SignedOut,
         404 => Fault::Off,
+        429 | 502 | 503 | 504 => Fault::Unreachable,
         300..=399 | 500..=599 => Fault::Protocol,
         _ => Fault::Refused,
     }
@@ -384,8 +394,11 @@ impl Client {
         }
         let body = serde_json::to_vec(&serde_json::json!({ "name": name, "platform": platform })).map_err(|_| SignInError::Invalid)?;
         let answer = self.call("POST", "/api/device/code", None, Some(&body))?;
-        if answer.status != 200 {
-            return Err(fault_of(answer.status).into());
+        match answer.status {
+            200 => {}
+            // The server's limit on sign-in starts: said as such, not as a server that cannot be reached.
+            429 => return Err(SignInError::TooMany),
+            status => return Err(fault_of(status).into()),
         }
         let mut raw: StartAnswer = serde_json::from_slice(&answer.body).map_err(|_| Fault::Protocol)?;
         let device_code = DeviceCode::parse(&raw.device_code)?;
@@ -807,7 +820,10 @@ mod tests {
             ("a life of a year", http("200 OK", "", &user_change("\"expires_in\":600", "\"expires_in\":31536000")), Fault::Protocol),
             ("an answer over the bound", http("200 OK", "", &"x".repeat(MAX_ANSWER as usize + 1)), Fault::Protocol),
             ("a redirect", http("302 Found", "Location: https://evil.example/\r\n", ""), Fault::Protocol),
-            ("a server error", http("503 Service Unavailable", "", "server-words-that-must-not-be-echoed"), Fault::Protocol),
+            ("a server error", http("500 Internal Server Error", "", "server-words-that-must-not-be-echoed"), Fault::Protocol),
+            ("a proxy whose server is gone", http("502 Bad Gateway", "", "server-words-that-must-not-be-echoed"), Fault::Unreachable),
+            ("a server that restarts", http("503 Service Unavailable", "", "server-words-that-must-not-be-echoed"), Fault::Unreachable),
+            ("a proxy that waited in vain", http("504 Gateway Timeout", "", "server-words-that-must-not-be-echoed"), Fault::Unreachable),
             ("a refusal", http("403 Forbidden", "", "server-words-that-must-not-be-echoed"), Fault::Refused),
             ("a closed feature", http("404 Not Found", "", "server-words-that-must-not-be-echoed"), Fault::Off),
             ("nothing at all", Vec::new(), Fault::Unreachable),
@@ -819,6 +835,49 @@ mod tests {
             quiet(&error);
             assert!(!error.to_string().contains("server-words"), "{what}");
         }
+        // The server's limit on sign-in starts is said in the words of the record, and is not a refusal.
+        let peer = Peer::answering(http("429 Too Many Requests", "Retry-After: 30\r\n", "server-words-that-must-not-be-echoed"));
+        let error = quick(&peer.origin()).start("n", "linux").expect_err("the limit");
+        assert_eq!(error, SignInError::TooMany);
+        assert_eq!(error.sentence(), "Too many devices or requests. Try again later.");
+        assert_eq!(error.to_string(), error.sentence());
+        assert_eq!(error.fault(), None);
+        quiet(&error);
+        assert!(!format!("{error} {error:?}").contains("server-words"));
+    }
+
+    #[test]
+    fn the_sentence_of_too_many_sign_in_starts_is_the_words_of_the_design_record() {
+        let design = include_str!("../../docs/design.md");
+        let row = design.lines().find(|l| l.starts_with("| too many |")).expect("the row too many of the states of the second screen");
+        let words = row.split('|').nth(3).expect("a third cell").trim().trim_matches('`');
+        assert_eq!(SignInError::TooMany.sentence(), words);
+    }
+
+    #[test]
+    fn a_proxy_status_on_a_poll_who_am_i_or_sign_out_is_unreachable_and_a_429_on_a_poll_still_slows_down() {
+        for status in ["502 Bad Gateway", "503 Service Unavailable", "504 Gateway Timeout"] {
+            let peer = Peer::answering(http(status, "", "server-words-that-must-not-be-echoed"));
+            let (client, mut grant, t0) = a_grant_at(&peer);
+            let error = client.poll_at(&mut grant, t0 + Duration::from_secs(5)).expect_err(status);
+            assert_eq!(error, SignInError::Fault(Fault::Unreachable), "{status}");
+            assert!(!error.to_string().contains("server-words"), "{status}");
+        }
+        for status in ["502 Bad Gateway", "503 Service Unavailable", "504 Gateway Timeout", "429 Too Many Requests"] {
+            let peer = Peer::answering(http(status, "", "server-words-that-must-not-be-echoed"));
+            let me = quick(&peer.origin()).me(&token()).expect_err(status);
+            let out = quick(&peer.origin()).revoke_self(&token()).expect_err(status);
+            for error in [me, out] {
+                assert_eq!(error, SignInError::Fault(Fault::Unreachable), "{status}");
+                quiet(&error);
+                assert!(!error.to_string().contains("server-words"), "{status}");
+            }
+        }
+        // The server's own throttle on a poll is still a slow down that lengthens the interval.
+        let peer = Peer::answering(http("429 Too Many Requests", "", "server-words-that-must-not-be-echoed"));
+        let (client, mut grant, t0) = a_grant_at(&peer);
+        assert!(matches!(client.poll_at(&mut grant, t0 + Duration::from_secs(5)).unwrap(), Poll::SlowDown));
+        assert_eq!(grant.interval(), 10);
     }
 
     #[test]

@@ -566,6 +566,25 @@ mod tests {
     }
 
     #[test]
+    fn a_proxy_status_or_a_limit_is_a_server_that_cannot_be_reached_so_the_next_run_tries_again() {
+        let fake = fake();
+        let backend = fake.backend();
+        for status in [502, 503, 504, 429] {
+            fake.set(Mode::Status(status));
+            for e in [
+                backend.ensure("").unwrap_err(),
+                backend.list("files").unwrap_err(),
+                backend.get("meta.json").unwrap_err(),
+                backend.put("files/a.hwx", b"x", &Cond::Any).unwrap_err(),
+            ] {
+                let text = text_of(e);
+                assert_eq!(text, Fault::Unreachable.sentence(), "{status}");
+                assert!(!text.contains(SERVER_WORDS), "{status}");
+            }
+        }
+    }
+
+    #[test]
     fn a_redirect_is_not_followed_and_is_a_refusal() {
         let target = fake();
         let fake = fake();
