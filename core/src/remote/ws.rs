@@ -474,6 +474,8 @@ pub struct WsClient {
     read_timeout: Option<Duration>,
     /// The code the connection ended with, once it has ended.
     closed: Option<u16>,
+    /// When the last frame of the peer was read (a message, a ping, a pong or a close), or the handshake ended.
+    heard: Instant,
 }
 
 impl fmt::Debug for WsClient {
@@ -553,7 +555,7 @@ impl WsClient {
             Ok((mut ws, _response)) => {
                 ws.get_mut().sock_mut().end_budget().map_err(|_| Fault::Unreachable)?;
                 // The read timeout on the socket is whatever the budget left: the first wait sets its own.
-                Ok(WsClient { ws, limits, read_timeout: None, closed: None })
+                Ok(WsClient { ws, limits, read_timeout: None, closed: None, heard: Instant::now() })
             }
             Err(HandshakeError::Failure(e)) => Err(map_error(e)),
             // A blocking stream that ran out of time in the handshake.
@@ -566,6 +568,13 @@ impl WsClient {
         self.closed.is_some()
     }
 
+    /// When the peer was last heard: the last frame [`WsClient::recv`] read, of any kind (pings and pongs included), or the
+    /// end of the handshake when nothing was read since. A network can keep the TCP connection open and pass nothing; this is
+    /// how the caller tells.
+    pub fn heard(&self) -> Instant {
+        self.heard
+    }
+
     fn set_read_timeout(&mut self, wait: Duration) -> Result<(), WsError> {
         let wait = wait.max(Duration::from_millis(1));
         if self.read_timeout != Some(wait) {
@@ -575,9 +584,10 @@ impl WsClient {
         Ok(())
     }
 
-    /// The next message, waiting at most `wait`. Pings and pongs are answered by the library and not delivered. A message
-    /// over the limits ends the connection with [`WsError::TooLarge`], a rule broken by the peer with
-    /// [`Fault::Protocol`]. After a [`Recv::Timeout`] the connection is as usable as before.
+    /// The next message, waiting at most `wait`. Pings and pongs are answered by the library and not delivered, but they are
+    /// counted: every frame read moves [`WsClient::heard`]. A message over the limits ends the connection with
+    /// [`WsError::TooLarge`], a rule broken by the peer with [`Fault::Protocol`]. After a [`Recv::Timeout`] the connection is
+    /// as usable as before.
     pub fn recv(&mut self, wait: Duration) -> Result<Recv, WsError> {
         if let Some(code) = self.closed {
             return Ok(Recv::Closed(code));
@@ -585,7 +595,11 @@ impl WsClient {
         let deadline = Instant::now() + wait;
         loop {
             self.set_read_timeout(deadline.saturating_duration_since(Instant::now()))?;
-            match self.ws.read() {
+            let read = self.ws.read();
+            if read.is_ok() {
+                self.heard = Instant::now();
+            }
+            match read {
                 Ok(Message::Text(text)) => return Ok(Recv::Text(text.as_str().to_owned())),
                 Ok(Message::Binary(bytes)) => return Ok(Recv::Binary(bytes.to_vec())),
                 Ok(Message::Close(frame)) => {

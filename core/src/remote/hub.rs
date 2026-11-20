@@ -29,6 +29,14 @@
 //! they are not tried again. Once the tries are used, a pane's Enter, a call (`list`, `new`, `end`) or a new attach makes one
 //! more try, and on success every waiting subscription is attached again; with no subscription left the hub simply connects
 //! on the next request.
+//!
+//! **Silence.** A network can keep the TCP connection open and pass nothing (a proxy that froze, a NAT that forgot the
+//! connection): no error and no close ever comes. The server pings a device socket at least every
+//! [`proto::PING_SECONDS`], and an attached client's beat is answered too, so a connection on which nothing at all was heard
+//! (no message, no ping, no pong) for [`HubOptions::silence`] ([`proto::SILENCE_SECONDS`]) is dropped as a broken one: no
+//! close frame is written into it (a write into a dead link may wait), the subscriptions go to `Reconnecting` and the tries,
+//! a call that waits fails as unreachable, and an idle hub is down and connects again on the next request. What was typed
+//! between the moment the link went silent and the moment the hub noticed is lost.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -1314,6 +1322,11 @@ impl Core {
 
     fn housekeeping(&mut self) {
         let now = Instant::now();
+        // A link that passes nothing at all is broken, even when the TCP connection says nothing of it.
+        if self.ws.as_ref().is_some_and(|ws| now.saturating_duration_since(ws.heard()) >= self.options.silence) {
+            self.drop_connection(None);
+            return;
+        }
         // Answers that never came.
         let late: Vec<u64> = self.pending.iter().filter(|(_, (_, deadline))| now >= *deadline).map(|(id, _)| *id).collect();
         for id in late {
