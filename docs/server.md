@@ -371,9 +371,13 @@ screen and in its scrollback when an app attaches again.
 A session ends when its program ends, when a person presses `End`, and when the person's worker ends: after
 `workers.idle_timeout` (a day by default) with no socket of the person attached (a browser tab or an app counts), when the
 account is disabled or deleted, and **when the server stops or restarts. A restart ends every session**, as it ends every pane;
-the workers do not survive it. A session counts against `workers.max_panes` (64) together with the panes of the person's
-browser window, and the socket of an app against `limits.sockets_per_person` (8) together with the page's sockets: the ninth
-socket of a person is closed with 1013.
+the workers do not survive it. The number of a session is never used again for the same person, across a restart of the server
+and of the person's worker, so an app or a browser tab that still shows a pane of an ended session is told that the session is
+gone and never opens another one under its number. The worker records the next number in `.holzwave/session_numbers.json` in
+the person's home before it hands one out; when that record is damaged it is put aside as `session_numbers.json.bad` and the
+numbers go on from 2147483648, and when it cannot be written a new session is refused. A session counts against
+`workers.max_panes` (64) together with the panes of the person's browser window, and the socket of an app against
+`limits.sockets_per_person` (8) together with the page's sockets: the ninth socket of a person is closed with 1013.
 
 **One writer.** A session has one writer and any number of watchers; what a watcher types is dropped. The app that makes a
 session writes to it. The writer keeps the right while it says it is alive (an attached app does so every 10 seconds); after
@@ -423,7 +427,10 @@ real session including a cut of the network (`server/tests/remote_client.rs`, `s
 panes (`server/tests/session_local.rs`, `server/tests/session_web.rs`) and a real browser against the real server
 (`app/tests/web/sessions.test.mjs`). **Never run:** a real phone or desktop against a real server over a real network, a real
 reverse proxy in front of the device socket, two real people, Android with the hand-back from its system browser and its secret
-vault, Android's Doze or the end of a background app, and a server restart under a real workload.
+vault, Android's Doze or the end of a background app, and a server restart under a real workload. That session numbers go on
+across a restart was tested with the real server restarted inside one test process (`server/tests/remote_sessions.rs`); the
+restart in Docker on one computer that found numbers starting at 1 again was not repeated after the change, and a restart under
+a real workload over a real network was never run.
 
 ## The audit log
 
