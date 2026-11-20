@@ -537,9 +537,15 @@ impl Machine<'_> {
     }
 }
 
+/// How often a device socket is pinged, for the configured `limits.ping_interval`.
+fn device_ping(configured: Duration) -> Duration {
+    configured
+}
+
 async fn drive<T: Transport>(m: &mut Machine<'_>, transport: &mut T, rx: &mut SocketRx, started: Instant) -> Exit {
     let settings = *m.settings;
-    let mut ping = interval_at(started + settings.ping, settings.ping);
+    let every = device_ping(settings.ping);
+    let mut ping = interval_at(started + every, every);
     ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut recheck = interval_at(started + settings.recheck, settings.recheck);
     recheck.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -586,5 +592,31 @@ async fn drive<T: Transport>(m: &mut Machine<'_>, transport: &mut T, rx: &mut So
         if let Err(exit) = step {
             return exit;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Sessions;
+    use crate::limits::Limits;
+
+    #[test]
+    fn a_device_socket_is_pinged_at_least_every_ping_seconds_whatever_the_configuration_says() {
+        let cap = Duration::from_secs(proto::PING_SECONDS);
+        assert_eq!(cap, Duration::from_secs(25));
+        // A configured interval up to the cap is kept.
+        for secs in [1u64, 10, 24, 25] {
+            assert_eq!(device_ping(Duration::from_secs(secs)), Duration::from_secs(secs), "{secs} s");
+        }
+        // A longer one is not: an app treats a minute of silence as a dead link.
+        for configured in [Duration::from_secs(26), Duration::from_secs(60), Duration::from_secs(600), Duration::MAX] {
+            assert_eq!(device_ping(configured), cap, "{configured:?}");
+        }
+        // The page's socket keeps what the configuration says: its settings are not changed.
+        let limits = Limits { ping_interval: Duration::from_secs(600), ..Limits::DEFAULT };
+        let settings = SocketSettings::from_limits(&limits, Sessions::default());
+        assert_eq!(settings.ping, Duration::from_secs(600));
+        assert_eq!(SocketSettings::from_limits(&Limits::DEFAULT, Sessions::default()).ping, Duration::from_secs(25));
     }
 }

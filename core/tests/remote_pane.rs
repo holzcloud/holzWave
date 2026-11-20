@@ -293,6 +293,59 @@ fn when_the_tries_are_used_the_pane_fails_waits_for_enter_drops_what_is_typed_an
 }
 
 #[test]
+fn a_network_that_goes_silent_shows_reconnecting_within_the_bound_then_unreachable_and_what_is_typed_after_it_is_never_sent() {
+    let device = FakeDevice::start();
+    let silence = Duration::from_millis(300);
+    let hub = hub_with(&device, |o| {
+        o.silence = silence;
+        o.reconnect = Reconnect { attempts: 3, delay: Duration::from_millis(30) };
+    });
+    let mut session = Session::new(80, 24);
+    session.print("prompt$ ");
+    let (pane, probe, silent) = attached_pane(&device, &hub, 4, &mut session, WriterView::Writing, None, "prompt$");
+    assert_eq!(pane.conn_state(), ConnState::Connected);
+    assert_eq!(pane.remote_view().unwrap().writer, WriterView::Writing);
+
+    // The link freezes: the TCP connection stays open and nothing passes either way. No error and no close ever comes.
+    let started = Instant::now();
+    wait_state(&pane, |s| matches!(s, ConnState::Reconnecting { .. }));
+    let waited = started.elapsed();
+    assert!(waited <= silence + Duration::from_millis(700), "the silence was noticed after {waited:?}");
+    // The header's label follows the state of the connection: while it is made again the pane no longer says it writes.
+    assert!(matches!(pane.conn_state(), ConnState::Reconnecting { attempt: 1, of: 3, .. }), "{:?}", pane.conn_state());
+    wait_text(&pane, NOTICE_RECONNECTING);
+    // Typed after the bound: not sent, not kept.
+    pane.text("late".into()).unwrap();
+
+    // The server is there and does not speak: every try fails, and the pane waits for Enter.
+    device.drop_connections_for(Duration::from_millis(500));
+    wait_state(&pane, |s| *s == ConnState::Failed);
+    wait_text(&pane, NOTICE_UNREACHABLE);
+    let text = screen(&pane);
+    assert_eq!(count(&text, NOTICE_RECONNECTING), 1, "one Reconnecting line for the whole loss: {text:?}");
+    assert_eq!(count(&text, NOTICE_UNREACHABLE), 1, "{text:?}");
+    assert!(probe.held().is_empty() && probe.exits().is_empty(), "the pane did not end");
+    pane.text("later".into()).unwrap();
+    assert_eq!(pane.conn_state(), ConnState::Failed);
+
+    // Enter is one fresh try and the server answers: nothing typed after the bound reaches it.
+    enter(&pane);
+    let mut conn = device.accept();
+    let request = conn.request();
+    session.print("back$ ");
+    session.serve(&mut conn, &request, WriterView::Writing, 100);
+    wait_text(&pane, "back$");
+    wait_state(&pane, |s| *s == ConnState::Connected);
+    let got = conn.drain(Duration::from_millis(300));
+    assert!(!got.iter().any(|g| matches!(g, Got::Input { .. })), "{got:?}");
+    assert!(!screen(&pane).contains("late"), "typed bytes are not kept while the connection is down");
+    assert!(probe.exits().is_empty(), "the pane stayed open all the time");
+    drop(silent);
+    pane.close();
+    assert!(pane.join(PATIENCE));
+}
+
+#[test]
 fn a_server_gone_behind_a_proxy_that_answers_502_is_unreachable_the_pane_waits_for_enter_and_never_ends() {
     let device = FakeDevice::start();
     let hub = hub_with(&device, fast());
