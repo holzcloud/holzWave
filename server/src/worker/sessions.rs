@@ -1223,3 +1223,224 @@ fn housekeeping(shared: &Shared, inbox: &Receiver<Event>) {
         shared.sweep(shared.clock.now_ms());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::sync::atomic::AtomicUsize;
+
+    use super::*;
+
+    /// A folder for one test, removed at the end.
+    struct Folder(PathBuf);
+
+    impl Folder {
+        fn new(tag: &str) -> Folder {
+            static COUNTER: AtomicUsize = AtomicUsize::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let mut random = [0u8; 6];
+            getrandom::fill(&mut random).expect("random bytes");
+            let random: String = random.iter().map(|b| format!("{b:02x}")).collect();
+            let path = std::env::temp_dir().join(format!("hw-numbers-{tag}-{}-{n}-{random}", std::process::id()));
+            fs::create_dir(&path).expect("a new folder");
+            Folder(path)
+        }
+
+        fn record(&self) -> PathBuf {
+            self.0.join(NUMBERS_FILE)
+        }
+
+        fn bad(&self) -> PathBuf {
+            persist::bad_path(&self.record())
+        }
+
+        fn recorded(&self) -> String {
+            fs::read_to_string(self.record()).expect("the record is there")
+        }
+    }
+
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A spawner that runs a shell that waits, and counts the places it gave and the programs it was asked to start.
+    struct Shells {
+        places: Arc<AtomicUsize>,
+        started: AtomicUsize,
+    }
+
+    struct Held(Arc<AtomicUsize>);
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl Shells {
+        fn new() -> Arc<Shells> {
+            Arc::new(Shells { places: Arc::new(AtomicUsize::new(0)), started: AtomicUsize::new(0) })
+        }
+
+        fn places(&self) -> usize {
+            self.places.load(Ordering::SeqCst)
+        }
+
+        fn started(&self) -> usize {
+            self.started.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Spawner for Shells {
+        fn spec(&self, cols: u16, rows: u16) -> PaneSpec {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            PaneSpec::new("/bin/sh", cols, rows).args(["-c", "sleep 60"])
+        }
+
+        fn take_place(&self) -> Option<Place> {
+            self.places.fetch_add(1, Ordering::SeqCst);
+            Some(Box::new(Held(self.places.clone())))
+        }
+    }
+
+    /// An attachment that takes everything and keeps nothing.
+    struct Quiet;
+
+    impl Attachment for Quiet {
+        fn snapshot_chunk(&self, _: u32, _: u32, _: &[u8]) -> bool {
+            true
+        }
+        fn live(&self, _: u32, _: u32, _: &[u8]) -> bool {
+            true
+        }
+        fn writer(&self, _: u32, _: WriterState) {}
+        fn size(&self, _: u32, _: u16, _: u16) {}
+        fn exited(&self, _: u32, _: Option<u32>) {}
+        fn resync(&self, _: u32) {}
+    }
+
+    fn quiet() -> Arc<dyn Attachment> {
+        Arc::new(Quiet)
+    }
+
+    fn host_in(folder: &Folder, shells: &Arc<Shells>, log: &WorkerLog) -> SessionHost {
+        SessionHost::with_numbers(
+            shells.clone(),
+            HostSettings::default(),
+            Arc::new(MonotonicClock::new()),
+            SessionNumbers::in_folder(&folder.0, log),
+        )
+    }
+
+    fn silent() -> WorkerLog {
+        WorkerLog::new(Some(Arc::new(Mutex::new(Vec::new()))))
+    }
+
+    #[test]
+    fn a_missing_session_number_record_starts_at_one_and_a_second_host_on_the_same_folder_goes_on() {
+        let folder = Folder::new("absent");
+        let shells = Shells::new();
+        let host = host_in(&folder, &shells, &silent());
+        assert_eq!(host.create(1, quiet(), 80, 24), Ok(1), "the first number of a person");
+        assert_eq!(folder.recorded(), r#"{"version":1,"next":2}"#, "recorded before it was handed out");
+        assert_eq!(host.create(1, quiet(), 80, 24), Ok(2));
+        drop(host);
+
+        // The worker ended by its idle limit and started again on the same home.
+        let again = host_in(&folder, &shells, &silent());
+        assert_eq!(again.create(1, quiet(), 80, 24), Ok(3), "the numbers go on, never from 1");
+        assert_eq!(folder.recorded(), r#"{"version":1,"next":4}"#);
+    }
+
+    #[test]
+    fn a_damaged_session_number_record_is_put_aside_and_the_numbers_go_on_from_two_to_the_thirty_first() {
+        let secret = "hw-content-7f3a";
+        let damaged: Vec<(&str, Box<dyn Fn(&Path)>)> = vec![
+            ("not json", Box::new(move |p: &Path| fs::write(p, format!("{secret} not json")).expect("write"))),
+            ("another version", Box::new(|p: &Path| fs::write(p, r#"{"version":2,"next":5}"#).expect("write"))),
+            ("an unknown member", Box::new(|p: &Path| fs::write(p, r#"{"version":1,"next":5,"x":1}"#).expect("write"))),
+            ("next 0", Box::new(|p: &Path| fs::write(p, r#"{"version":1,"next":0}"#).expect("write"))),
+            ("next beyond u32", Box::new(|p: &Path| fs::write(p, r#"{"version":1,"next":4294967296}"#).expect("write"))),
+            (
+                "more than 256 bytes",
+                Box::new(|p: &Path| fs::write(p, format!(r#"{{"version":1,"next":5}}{}"#, " ".repeat(240))).expect("write")),
+            ),
+            ("1 MiB", Box::new(|p: &Path| fs::write(p, vec![b'1'; 1024 * 1024]).expect("write"))),
+            ("a directory", Box::new(|p: &Path| fs::create_dir(p).expect("a directory"))),
+            ("a link", Box::new(|p: &Path| {
+                let target = p.with_file_name("elsewhere.json");
+                fs::write(&target, r#"{"version":1,"next":5}"#).expect("write");
+                symlink(&target, p).expect("a link");
+            })),
+        ];
+        for (what, make) in damaged {
+            let folder = Folder::new("damaged");
+            make(&folder.record());
+            let lines = Arc::new(Mutex::new(Vec::new()));
+            let log = WorkerLog::new(Some(lines.clone()));
+            let numbers = SessionNumbers::in_folder(&folder.0, &log);
+            assert_eq!(numbers.next(), NUMBERS_AFTER_DAMAGE, "{what}: the numbers go on from 2^31");
+            assert_eq!(NUMBERS_AFTER_DAMAGE, 2_147_483_648);
+            assert!(fs::symlink_metadata(folder.bad()).is_ok(), "{what}: the damaged record is put aside, not deleted");
+            assert_eq!(folder.recorded(), r#"{"version":1,"next":2147483648}"#, "{what}: the start is recorded at once");
+            let lines = lines.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            assert_eq!(lines.len(), 1, "{what}: one line: {lines:?}");
+            let line = &lines[0];
+            assert!(line.contains(NUMBERS_DAMAGED_EVENT), "{what}: {line}");
+            assert!(!line.contains(secret) && !line.contains("elsewhere"), "{what}: nothing of the content: {line}");
+            assert!(!line.contains(&*folder.0.to_string_lossy()), "{what}: no path but the file name: {line}");
+            // The record is now whole: a second host reads it and goes on.
+            let shells = Shells::new();
+            let host = host_in(&folder, &shells, &silent());
+            assert_eq!(host.create(1, quiet(), 80, 24), Ok(NUMBERS_AFTER_DAMAGE), "{what}");
+        }
+    }
+
+    #[test]
+    fn an_unwritable_session_number_record_refuses_the_session_and_hands_out_no_number() {
+        let folder = Folder::new("unwritable");
+        let shells = Shells::new();
+        let host = host_in(&folder, &shells, &silent());
+        assert_eq!(host.create(1, quiet(), 80, 24), Ok(1));
+        assert_eq!((host.len(), shells.places(), shells.started()), (1, 1, 1));
+
+        fs::set_permissions(&folder.0, fs::Permissions::from_mode(0o500)).expect("read-only");
+        let refused = host.create(1, quiet(), 80, 24);
+        assert_eq!(refused, Err(SesError::Refused));
+        assert_eq!(refused.map_err(SesError::word), Err("refused"), "the fixed word");
+        assert_eq!(host.len(), 1, "no session was added");
+        assert_eq!(shells.places(), 1, "the place it took is given back");
+        assert_eq!(shells.started(), 1, "no program was started");
+        assert_eq!(folder.recorded(), r#"{"version":1,"next":2}"#, "the record is as it was");
+
+        fs::set_permissions(&folder.0, fs::Permissions::from_mode(0o700)).expect("writable again");
+        assert_eq!(host.create(1, quiet(), 80, 24), Ok(2), "the number that was never handed out");
+        assert_eq!(folder.recorded(), r#"{"version":1,"next":3}"#);
+    }
+
+    #[test]
+    fn a_session_number_record_at_the_top_of_the_range_refuses_with_too_many_and_stays_as_it_was() {
+        let folder = Folder::new("top");
+        let top = format!(r#"{{"version":1,"next":{}}}"#, u32::MAX);
+        fs::write(folder.record(), &top).expect("write");
+        let shells = Shells::new();
+        let host = host_in(&folder, &shells, &silent());
+        assert_eq!(host.create(1, quiet(), 80, 24), Err(SesError::TooMany));
+        assert_eq!((host.len(), shells.places(), shells.started()), (0, 0, 0), "nothing taken, nothing started");
+        assert_eq!(folder.recorded(), top, "the record is as it was");
+        assert!(fs::symlink_metadata(folder.bad()).is_err(), "a record at the top is not damaged");
+    }
+
+    #[test]
+    fn session_numbers_in_memory_start_at_one_for_every_host_a_test_builds() {
+        let numbers = SessionNumbers::memory();
+        assert_eq!((numbers.take(), numbers.take(), numbers.next()), (Ok(1), Ok(2), 3));
+        let shells = Shells::new();
+        let host = SessionHost::start(shells.clone(), HostSettings::default(), Arc::new(MonotonicClock::new()));
+        assert_eq!(host.create(1, quiet(), 80, 24), Ok(1));
+        assert_eq!(host.create(1, quiet(), 80, 24), Ok(2));
+    }
+}
