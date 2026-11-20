@@ -28,7 +28,9 @@ use crate::worker::dispatch::{self, Dispatcher, Outbound, Pin, Pushed, ServerSin
 use crate::worker::lease::WriterState;
 pub use crate::worker::secretstore::DATA_DIR;
 use crate::worker::secretstore::SecretsHandle;
-use crate::worker::sessions::{Attachment, Place, SesError, SessionHost, SessionLimits, Spawner};
+use crate::worker::sessions::{
+    Attachment, HostSettings, MonotonicClock, Place, SesError, SessionHost, SessionLimits, SessionNumbers, Spawner,
+};
 
 /// The command a page sends when it is ready for the state of the window; the events it causes are for that page alone.
 pub const REPLAY_COMMAND: &str = "window_ready";
@@ -502,6 +504,8 @@ fn start(
     if !dir.is_dir() {
         DirBuilder::new().mode(0o700).create(&dir).ok()?;
     }
+    // The ids of the person's sessions go on from the record in the data folder, so none is handed out twice across a restart.
+    let numbers = SessionNumbers::in_folder(&dir, log);
     // The spawn helper names the temporary directory (`$HOME/.tmp`) in the environment and makes nothing; the person's own
     // worker makes it, private, so that a shell's `$TMPDIR` is a directory that is there.
     if !env.tmp.is_dir() {
@@ -528,7 +532,12 @@ fn start(
         Dispatcher::start(&core, &sink, queue, hooks.rows.clone(), hooks.probe.clone(), log.clone(), REPLAY_COMMAND);
     let files = Files::new(&core, queue, &env.home, hooks.files.clone(), log.clone());
     sink.set_observer(files.observer());
-    let sessions = Arc::new(SessionHost::new(Arc::new(CoreSpawner::new(core.clone())), session_limits));
+    let sessions = Arc::new(SessionHost::with_numbers(
+        Arc::new(CoreSpawner::new(core.clone())),
+        HostSettings { limits: session_limits, ..HostSettings::default() },
+        Arc::new(MonotonicClock::new()),
+        numbers,
+    ));
     local.bind(&sessions);
     {
         // The sessions count with the layout's panes in what the supervisor is told.

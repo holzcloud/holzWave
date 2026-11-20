@@ -15,6 +15,11 @@
 //! The ids of sessions are a key in this host's own table, and a host is one person's. Another person's session id is an id
 //! this host has not made: it is `not found`, the same answer as an id that never existed.
 //!
+//! An id is never used again for the person, across a restart of the worker and of the server: the worker's host records the
+//! next id in the person's data folder ([`SessionNumbers`], `session_numbers.json`) before it hands one out, and refuses a new
+//! session when it cannot. An id from before a restart therefore names no session, also after new ones were made, and a
+//! client that still holds it is told `not found` instead of reaching a new, unrelated session.
+//!
 //! # Threads
 //!
 //! One housekeeping thread per host: it frees leases whose holder was silent for the whole time, ends sessions whose program
@@ -25,18 +30,27 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use holzwave_core::Error as PaneError;
+use holzwave_core::persist;
 use holzwave_core::layout::PaneId;
 use holzwave_core::pane::{
     MAX_DIM, MAX_RAW_BACKLOG, MAX_TAPS, MIN_COLS, MIN_ROWS, PaneEvent, PaneHandle, PaneSpec, RAW_BACKLOG_FULL, TapEnd, TapId,
     TapMsg, TapReceiver,
 };
 
+use rustix::fs::{Mode, OFlags};
+use serde::{Deserialize, Serialize};
+
+use crate::log::Level;
+use crate::worker::dispatch::WorkerLog;
 use crate::worker::lease::{Changes, Input, Lease, Refused, Who, WriterState};
 use crate::worker::paste::PasteGate;
 
@@ -236,6 +250,145 @@ pub trait Spawner: Send + Sync {
     fn take_place(&self) -> Option<Place>;
 }
 
+// ---- the numbers of sessions -------------------------------------------------------------------------------------------------
+
+/// The name of the record of the next session number, in the worker's data folder.
+pub const NUMBERS_FILE: &str = "session_numbers.json";
+
+/// The most bytes of the record that are read. A whole record (`{"version":1,"next":4294967295}`) is 31 bytes; anything
+/// longer than this is damaged and is never read whole.
+pub const NUMBERS_MAX_BYTES: u64 = 256;
+
+/// Where the numbers go on when the record was damaged: 2^31.
+///
+/// A damaged record cannot say which numbers were handed out. Every number below this one was handed out only if the person
+/// made two billion sessions, so starting here does not bring a number back in practice. A second damage would start here
+/// again and could bring back the numbers handed out since the first one; that is the one case this rule does not cover.
+pub const NUMBERS_AFTER_DAMAGE: u32 = 1 << 31;
+
+/// The event the worker logs when the record was damaged and put aside. It carries the file name and the number the
+/// numbers go on from, and nothing of the record's content.
+pub const NUMBERS_DAMAGED_EVENT: &str = "session_numbers_damaged";
+
+/// The record on disk: the number the next session gets.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NumbersRecord {
+    version: u32,
+    next: u64,
+}
+
+/// What a read of the record found.
+enum Recorded {
+    /// No record: a person who never had a session.
+    Absent,
+    /// The number the next session gets.
+    Next(u32),
+    /// Anything else: not a regular file, too long, not the record of version 1, a number out of range.
+    Damaged,
+}
+
+/// The record of the next session number of one person: a number is written here before it is handed out, so a number
+/// is never handed out twice, across a restart of the worker or of the server. A host for a test keeps it in memory.
+pub struct SessionNumbers {
+    state: Mutex<NumbersState>,
+}
+
+struct NumbersState {
+    next: u32,
+    /// The record on disk; `None` in memory.
+    file: Option<PathBuf>,
+}
+
+impl SessionNumbers {
+    /// Numbers that start at 1 and are kept in memory only: for a host whose numbers end with it.
+    pub fn memory() -> SessionNumbers {
+        SessionNumbers { state: Mutex::new(NumbersState { next: 1, file: None }) }
+    }
+
+    /// The numbers recorded in `dir` (the worker's data folder). An absent record starts at 1. A damaged one is moved aside
+    /// (`session_numbers.json.bad`), the numbers go on from [`NUMBERS_AFTER_DAMAGE`], that start is recorded at once, and
+    /// `log` gets the fixed event [`NUMBERS_DAMAGED_EVENT`].
+    pub fn in_folder(dir: &Path, log: &WorkerLog) -> SessionNumbers {
+        let path = dir.join(NUMBERS_FILE);
+        let next = match read_numbers(&path) {
+            Recorded::Absent => 1,
+            Recorded::Next(next) => next,
+            Recorded::Damaged => {
+                let bad = persist::bad_path(&path);
+                // An older copy that is a file or a link gives way; anything else stays, and then the rename fails and so
+                // does every write below: sessions are refused, a number is never guessed.
+                let _ = fs::remove_file(&bad);
+                let _ = fs::rename(&path, &bad);
+                // A failed write here is tried again before the first number is handed out.
+                let _ = write_numbers(&path, NUMBERS_AFTER_DAMAGE);
+                log.event(
+                    Level::Warn,
+                    NUMBERS_DAMAGED_EVENT,
+                    &[("file", NUMBERS_FILE), ("next", &NUMBERS_AFTER_DAMAGE.to_string())],
+                );
+                NUMBERS_AFTER_DAMAGE
+            }
+        };
+        SessionNumbers { state: Mutex::new(NumbersState { next, file: Some(path) }) }
+    }
+
+    /// The number the next session gets.
+    pub fn next(&self) -> u32 {
+        lock(&self.state).next
+    }
+
+    /// The next number, recorded before it is handed out. `too_many` at the top of the range (the last number is never
+    /// handed out, so the record never needs a number beyond it), `refused` when the record cannot be written; in both cases
+    /// nothing changes and no number is handed out.
+    fn take(&self) -> Result<u32, SesError> {
+        let mut state = lock(&self.state);
+        let id = state.next;
+        let after = id.checked_add(1).ok_or(SesError::TooMany)?;
+        if let Some(path) = &state.file {
+            write_numbers(path, after).map_err(|_| SesError::Refused)?;
+        }
+        state.next = after;
+        Ok(id)
+    }
+}
+
+/// Reads the record at `path`, bounded to [`NUMBERS_MAX_BYTES`] and strictly: a regular file (a link is not followed), the
+/// record of version 1, a number from 1 to `u32::MAX`.
+fn read_numbers(path: &Path) -> Recorded {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Recorded::Absent,
+        Err(_) => return Recorded::Damaged,
+        Ok(meta) if !meta.file_type().is_file() || meta.len() > NUMBERS_MAX_BYTES => return Recorded::Damaged,
+        Ok(_) => {}
+    }
+    // Opened without following a link and without waiting on a pipe, in case the file was swapped since the look above.
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let Ok(fd) = rustix::fs::open(path, flags, Mode::empty()) else { return Recorded::Damaged };
+    let file = fs::File::from(fd);
+    if !file.metadata().is_ok_and(|meta| meta.is_file()) {
+        return Recorded::Damaged;
+    }
+    let mut bytes = Vec::with_capacity(64);
+    let read = file.take(NUMBERS_MAX_BYTES + 1).read_to_end(&mut bytes);
+    if read.is_err() || u64::try_from(bytes.len()).map_or(true, |len| len > NUMBERS_MAX_BYTES) {
+        return Recorded::Damaged;
+    }
+    match serde_json::from_slice::<NumbersRecord>(&bytes) {
+        Ok(NumbersRecord { version: 1, next }) => match u32::try_from(next) {
+            Ok(next) if next >= 1 => Recorded::Next(next),
+            _ => Recorded::Damaged,
+        },
+        _ => Recorded::Damaged,
+    }
+}
+
+/// Writes the record atomically and private to the person.
+fn write_numbers(path: &Path, next: u32) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(&NumbersRecord { version: 1, next: u64::from(next) }).map_err(std::io::Error::other)?;
+    persist::write_atomic_private(path, &bytes)
+}
+
 // ---- the host ----------------------------------------------------------------------------------------------------------------
 
 /// What a pane told, kept apart from the session so that the pane's own thread never needs the session's lock.
@@ -365,8 +518,6 @@ struct Session {
 #[derive(Default)]
 struct Table {
     sessions: BTreeMap<u32, Arc<Mutex<Session>>>,
-    /// The next session id; ids are never reused while the host lives.
-    next_id: u32,
     /// The next attachment identity of the lease.
     next_who: u64,
 }
@@ -375,6 +526,8 @@ type CountHook = Box<dyn Fn(usize) + Send + Sync>;
 
 struct Shared {
     table: Mutex<Table>,
+    /// The ids of sessions, never reused for the person (see [`SessionNumbers`]).
+    numbers: SessionNumbers,
     spawner: Arc<dyn Spawner>,
     limits: SessionLimits,
     tap_queue_bytes: usize,
@@ -426,11 +579,23 @@ impl SessionHost {
         SessionHost::start(spawner, HostSettings { limits, ..HostSettings::default() }, Arc::new(MonotonicClock::new()))
     }
 
-    /// A host with its own clock and settings, which is how a test steps time.
+    /// A host with its own clock and settings, which is how a test steps time. Its numbers live in memory and start at 1.
     pub fn start(spawner: Arc<dyn Spawner>, settings: HostSettings, clock: Arc<dyn Clock>) -> SessionHost {
+        SessionHost::with_numbers(spawner, settings, clock, SessionNumbers::memory())
+    }
+
+    /// A host whose session ids come from `numbers`: the worker's own host takes the record in its data folder, so that an id
+    /// is never handed out twice for the person.
+    pub fn with_numbers(
+        spawner: Arc<dyn Spawner>,
+        settings: HostSettings,
+        clock: Arc<dyn Clock>,
+        numbers: SessionNumbers,
+    ) -> SessionHost {
         let (events, inbox) = mpsc::channel();
         let shared = Arc::new(Shared {
-            table: Mutex::new(Table { sessions: BTreeMap::new(), next_id: 1, next_who: 1 }),
+            table: Mutex::new(Table { sessions: BTreeMap::new(), next_who: 1 }),
+            numbers,
             spawner,
             limits: settings.limits,
             tap_queue_bytes: settings.tap_queue_bytes,
@@ -696,13 +861,13 @@ impl Shared {
 
     fn create(&self, client: u64, att: Arc<dyn Attachment>, cols: u16, rows: u16) -> Result<u32, SesError> {
         let place = self.spawner.take_place().ok_or(SesError::TooMany)?;
-        let (id, who) = {
+        // The id is recorded before it is handed out; when it cannot be, the place goes back with the error and nothing starts.
+        let id = self.numbers.take()?;
+        let who = {
             let mut table = lock(&self.table);
-            let id = table.next_id;
-            table.next_id = id.checked_add(1).ok_or(SesError::TooMany)?;
             let who = Who(table.next_who);
             table.next_who += 1;
-            (id, who)
+            who
         };
         let (cols, rows) = (cols.clamp(MIN_COLS, MAX_DIM), rows.clamp(MIN_ROWS, MAX_DIM));
         let mut spec = self.spawner.spec(cols, rows);

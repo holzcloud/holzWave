@@ -103,7 +103,11 @@ pub struct WsEnv {
     pub gate: Option<Arc<SupervisorGate>>,
     task: Option<JoinHandle<()>>,
     der: CertificateDer<'static>,
-    _scratch: Scratch,
+    /// The folder of the people's homes. A restarted environment holds the same one, as a real server keeps its data folder
+    /// across a restart; it is removed when the last environment that holds it is gone.
+    homes: Arc<Scratch>,
+    /// The certificate and key of this listener.
+    _tls: Scratch,
 }
 
 impl Drop for WsEnv {
@@ -123,21 +127,23 @@ impl WsEnv {
 
     /// An environment with the given options.
     pub async fn start_with(options: WsOptions) -> WsEnv {
-        WsEnv::start_on(TestApp::new(), options).await
+        WsEnv::start_on(TestApp::new(), options, Arc::new(Scratch::new("ws"))).await
     }
 
     /// The server restarted: this one stops (its listener and every worker end, as at a shutdown), and a new one starts over
-    /// the same store with a new supervisor, new workers and a new listener. What only lived in memory is gone.
+    /// the same store and the same homes of the people with a new supervisor, new workers and a new listener. What only lived
+    /// in memory is gone; what a worker keeps in a person's home stays, as on a real server, whose data folder outlives a
+    /// restart.
     pub async fn restarted(&self, options: WsOptions) -> WsEnv {
         self.shutdown.trigger();
         self.supervisor.shutdown().await;
-        WsEnv::start_on(self.test.reopened(), options).await
+        WsEnv::start_on(self.test.reopened(), options, self.homes.clone()).await
     }
 
-    async fn start_on(test: TestApp, options: WsOptions) -> WsEnv {
-        let scratch = Scratch::new("ws");
+    async fn start_on(test: TestApp, options: WsOptions, homes: Arc<Scratch>) -> WsEnv {
+        let scratch = Scratch::new("ws-tls");
         let shell = ShellSpec::new("/bin/sh", &[]);
-        let launcher = Arc::new(InProcessLauncher::new(scratch.path().to_path_buf(), shell).with_hooks(options.hooks.clone()));
+        let launcher = Arc::new(InProcessLauncher::new(homes.path().to_path_buf(), shell).with_hooks(options.hooks.clone()));
         let supervisor_clock = Arc::new(ManualClock::new(SUPERVISOR_START));
         let supervisor_clock_dyn: Arc<dyn Clock> = supervisor_clock.clone();
         let supervisor = Supervisor::new(launcher.clone(), options.supervisor.unwrap_or_default(), supervisor_clock_dyn);
@@ -239,7 +245,8 @@ impl WsEnv {
             gate,
             task: Some(task),
             der: made.cert.der().clone(),
-            _scratch: scratch,
+            homes,
+            _tls: scratch,
         }
     }
 

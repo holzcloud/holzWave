@@ -105,7 +105,11 @@ pub struct Signed {
 
 /// The application under test.
 pub struct TestApp {
-    _scratch: Scratch,
+    /// This application's own folder: its audit log, and the store too unless it was reopened.
+    _scratch: Arc<Scratch>,
+    /// The folder of the store. A reopened application holds the same one as the application it was reopened from, so a
+    /// server restarted twice still finds its store; it is removed when the last application that holds it is gone.
+    store_home: Arc<Scratch>,
     pub store: Arc<Store>,
     pub clock: Arc<ManualClock>,
     pub sessions: Arc<SessionManager>,
@@ -156,12 +160,13 @@ impl TestApp {
     /// A new application over the store of this one, as a server that restarts finds it on disk: the accounts, the
     /// sessions and the devices are kept, everything held in memory is new. The clock starts where this one stands.
     pub fn reopened(&self) -> TestApp {
-        TestApp::with_store_at(Options::default(), Some(self._scratch.path()), self.clock.unix())
+        TestApp::with_store_at(Options::default(), Some(self.store_home.clone()), self.clock.unix())
     }
 
-    fn with_store_at(options: Options, store_dir: Option<&std::path::Path>, now: i64) -> TestApp {
-        let scratch = Scratch::new("edge");
-        let store = Arc::new(Store::open(store_dir.unwrap_or(scratch.path())).expect("open the store"));
+    fn with_store_at(options: Options, store_home: Option<Arc<Scratch>>, now: i64) -> TestApp {
+        let scratch = Arc::new(Scratch::new("edge"));
+        let store_home = store_home.unwrap_or_else(|| scratch.clone());
+        let store = Arc::new(Store::open(store_home.path()).expect("open the store"));
         let clock = Arc::new(ManualClock::new(now));
         let dyn_clock: Arc<dyn Clock> = clock.clone();
         let audit = Arc::new(Audit::open(scratch.path(), dyn_clock.clone()).expect("open the audit log"));
@@ -191,7 +196,7 @@ impl TestApp {
             &server_key(),
         );
         let router = router::build(app.clone(), options.parts);
-        TestApp { _scratch: scratch, store, clock, sessions, audit_dir, view, app, router }
+        TestApp { _scratch: scratch, store_home, store, clock, sessions, audit_dir, view, app, router }
     }
 
     /// Makes an account.

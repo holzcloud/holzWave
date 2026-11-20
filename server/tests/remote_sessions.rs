@@ -968,3 +968,98 @@ async fn a_server_restart_ends_every_remote_session_and_an_old_session_number_is
         assert_eq!(device.err(op).await, ErrorWord::NotFound, "{} of the old session", op.name());
     }
 }
+
+/// Every operation that names a session and must answer `not_found` for a number that is not a live session of the asker.
+fn named(session: u32) -> [Op; 3] {
+    [Op::Attach { session, tail: None }, Op::Takeover { session }, Op::End { session }]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_made_after_a_restart_never_takes_a_number_an_earlier_server_handed_out() {
+    let env = env().await;
+    let alice = env.person("alice");
+    let laptop = mint(&env, &alice, "laptop");
+    let mut device = Device::connect(&env, &laptop.token).await;
+    let first = device.new_session().await;
+    let second = device.new_session().await;
+    assert_ne!(first, second);
+    let mut old = vec![first, second];
+
+    let again = env.restarted(WsOptions { real_gate: true, ..WsOptions::default() }).await;
+    remote(&again, true);
+    let mut device = Device::connect(&again, &laptop.token).await;
+    assert_eq!(device.ok(Op::List).await, Answer::List(vec![]), "no session outlived the restart");
+    let fresh = device.new_session().await;
+    assert!(old.iter().all(|n| fresh > *n), "the number after the restart ({fresh}) goes on from the earlier ones ({old:?})");
+    // The old numbers name nothing, also now that a new session exists.
+    for &session in &old {
+        for op in named(session) {
+            assert_eq!(device.err(op).await, ErrorWord::NotFound, "{} of the old session {session}", op.name());
+        }
+    }
+    device.attach(fresh, None).await;
+    device.ok(Op::Takeover { session: fresh }).await;
+    device.type_into(fresh, SUM.as_bytes()).await;
+    device.until_live(fresh, "hw-42", SHELL).await;
+    old.push(fresh);
+
+    // A second restart: the numbers go on again, and every older number stays ended.
+    let third = again.restarted(WsOptions { real_gate: true, ..WsOptions::default() }).await;
+    remote(&third, true);
+    let mut device = Device::connect(&third, &laptop.token).await;
+    let last = device.new_session().await;
+    assert!(old.iter().all(|n| last > *n), "the number after the second restart ({last}) goes on from {old:?}");
+    for &session in &old {
+        for op in named(session) {
+            assert_eq!(device.err(op).await, ErrorWord::NotFound, "{} of the old session {session}", op.name());
+        }
+    }
+    let Answer::List(listed) = device.ok(Op::List).await else { panic!("a list") };
+    assert_eq!(listed.iter().map(|s| s.id).collect::<Vec<_>>(), vec![last], "only the new session is listed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn after_a_restart_each_person_counts_their_own_numbers_and_reaches_only_their_own_sessions() {
+    let env = env().await;
+    let alice = env.person("alice");
+    let bob = env.person("bob");
+    let laptop = mint(&env, &alice, "laptop");
+    let phone = mint(&env, &bob, "phone");
+    let mut a = Device::connect(&env, &laptop.token).await;
+    let hers_before = vec![a.new_session().await, a.new_session().await];
+
+    let again = env.restarted(WsOptions { real_gate: true, ..WsOptions::default() }).await;
+    remote(&again, true);
+    let mut a = Device::connect(&again, &laptop.token).await;
+    let mut b = Device::connect(&again, &phone.token).await;
+    let his = b.new_session().await;
+    let hers = a.new_session().await;
+    assert!(hers_before.iter().all(|n| hers > *n), "Alice's numbers go on ({hers} after {hers_before:?})");
+
+    // Bob sees and reaches only his own session.
+    let Answer::List(listed) = b.ok(Op::List).await else { panic!("a list") };
+    assert_eq!(listed.iter().map(|s| s.id).collect::<Vec<_>>(), vec![his], "only his own session is listed");
+    b.attach(his, None).await;
+    b.ok(Op::Takeover { session: his }).await;
+    b.type_into(his, b"echo hw-his$((3+4))\r").await;
+    b.until_live(his, "hw-his7", SHELL).await;
+    // Alice's numbers, old and new, that are not his own answer not_found to him, as before the restart.
+    for target in hers_before.iter().copied().chain([hers]).filter(|n| *n != his) {
+        for op in named(target) {
+            assert_eq!(b.err(op).await, ErrorWord::NotFound, "{} of Alice's {target} by Bob", op.name());
+        }
+    }
+    // And his number is not a session of hers unless her own counting made it one; her list holds only her new session.
+    let Answer::List(alices) = a.ok(Op::List).await else { panic!("a list") };
+    assert_eq!(alices.iter().map(|s| s.id).collect::<Vec<_>>(), vec![hers], "only her new session is listed");
+    if his != hers {
+        for op in named(his) {
+            assert_eq!(a.err(op).await, ErrorWord::NotFound, "{} of Bob's {his} by Alice", op.name());
+        }
+    }
+    // Her own new session is hers to use.
+    a.attach(hers, None).await;
+    a.ok(Op::Takeover { session: hers }).await;
+    a.type_into(hers, SUM.as_bytes()).await;
+    a.until_live(hers, "hw-42", SHELL).await;
+}
