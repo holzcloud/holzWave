@@ -9,6 +9,7 @@ import { state } from "./state.js";
 import { isLockedFailure, lockedAnswer } from "./vaultstate.js";
 import { connSummary, opensHere, paneConns, readConnections, readPaneConns, setPaneConns } from "./connstate.js";
 import { setTakeoverHandler } from "./panehead.js";
+import { addSheetRow } from "./phone.js";
 import { MAX_SENTENCE, plain } from "./serverstate.js";
 import { showNotice } from "./status.js";
 import type { Connection } from "./connstate.js";
@@ -26,6 +27,13 @@ const dynamicIds = new Set<string>();
 export function connections(): readonly Connection[] {
   return saved;
 }
+
+/**
+ * The words of the way to the Connections view (docs/design.md 6.34, "The words"): the palette entry and the row of the phone's
+ * sheet have one title, and the row sits in its own group of the sheet.
+ */
+export const CONNECTIONS_TITLE = "Connections…";
+export const CONNECTIONS_GROUP = "Connections";
 
 /** The words of the palette entry that opens a connection. */
 export function connectTitle(c: Connection): string {
@@ -114,7 +122,9 @@ export async function initConnections(
 ): Promise<void> {
   applyView = apply;
   onChange = changed;
-  registerAction({ id: "connections.open", title: "Connections…", run: open });
+  registerAction({ id: "connections.open", title: CONNECTIONS_TITLE, run: open });
+  // A phone with a touchscreen only has no palette: the sheet's row runs the same open (it draws nothing outside the phone layout).
+  addSheetRow(CONNECTIONS_GROUP, CONNECTIONS_TITLE, open);
   // The one explicit act that puts `wsh` on the host of the focused SSH pane. The page names the pane and never a host; the
   // core resolves the saved connection, says the result as a line on the pane, and refuses what is not an SSH pane. A call
   // that fails is ignored: the sentence is already on the pane's screen.

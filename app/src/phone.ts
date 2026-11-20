@@ -193,8 +193,21 @@ interface SheetRow {
 const extraRows: SheetRow[] = [];
 
 /**
+ * The order of the added groups in the sheet (docs/design.md 6.6, the groups of the sheet). The modules that add rows start at
+ * different times (the file hand-over is fetched on its own after the start), so the order is fixed here and not by who came first;
+ * a caption that is not named comes after these, in the order it was added.
+ */
+const GROUP_ORDER: readonly string[] = ["Connections", "Files"];
+
+/** The place of a caption in `GROUP_ORDER`, or after every named one. */
+function groupRank(caption: string): number {
+  const at = GROUP_ORDER.indexOf(caption);
+  return at < 0 ? GROUP_ORDER.length : at;
+}
+
+/**
  * Add a row to the sheet, in the group named `caption` (the first row of a caption makes the group, after the panes and before
- * the footer). A tap closes the sheet and then runs `run`; the focus is left where it is, because what runs may open a system
+ * the footer, in the place `GROUP_ORDER` gives it). A tap closes the sheet and then runs `run`; the focus is left where it is, because what runs may open a system
  * dialog. The sheet exists on the phone only and is made again when the class changes, so the rows are kept here and put in each
  * time it is made. Nothing is drawn on a tablet or a desktop.
  */
@@ -208,7 +221,9 @@ function mountExtraRows(g: Ui): void {
   for (const node of g.extra) node.remove();
   g.extra = [];
   const lists = new Map<string, HTMLElement>();
-  for (const row of extraRows) {
+  // A stable sort: the rows of one group, and the groups the order does not name, keep the order they were added in.
+  const ordered = [...extraRows].sort((a, b) => groupRank(a.caption) - groupRank(b.caption));
+  for (const row of ordered) {
     let list = lists.get(row.caption);
     if (!list) {
       const cap = el("div", "label phone-cap");
