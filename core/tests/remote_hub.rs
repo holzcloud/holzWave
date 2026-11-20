@@ -9,7 +9,8 @@
 //!   a length that is far too large, a frame with an unknown tag) ends that stream or the connection with a fixed fault,
 //!   allocates nothing beyond the bounds and never makes the client panic;
 //! - a client that does not read is attached again from a fresh snapshot and its queue never passes its bound;
-//! - the beat, the reconnect with a fresh token and the final faults.
+//! - the beat, the reconnect with a fresh token and the final faults;
+//! - a connection that stays open and passes nothing is dropped after the silence bound, and pings alone keep it.
 
 #[path = "support/fake_device.rs"]
 mod fake_device;
@@ -742,6 +743,94 @@ fn a_close_code_of_a_revoked_token_is_final_and_is_not_tried_again_but_a_busy_se
     let mut conn = device.accept();
     let request = conn.request();
     assert_eq!(request.op, Op::Attach { session: 3, tail: None });
+}
+
+/// The silence bound of the tests below, and how much later than the bound the hub may notice it.
+const SILENCE: Duration = Duration::from_millis(300);
+const MARGIN: Duration = Duration::from_millis(700);
+
+fn silent_hub(device: &FakeDevice) -> Hub {
+    hub_with(device, |o| {
+        o.silence = SILENCE;
+        o.reconnect = Reconnect { attempts: 3, delay: Duration::from_millis(30) };
+    })
+}
+
+/// The time until the first `Reconnecting` of `sub`, with the events that came before it.
+fn time_to_reconnecting(sub: &Subscription) -> (Duration, Vec<SubEvent>) {
+    let started = Instant::now();
+    let events = events_until(sub, |e| e.iter().any(|e| matches!(e, SubEvent::Reconnecting { .. })));
+    (started.elapsed(), events)
+}
+
+#[test]
+fn a_connection_that_stays_open_and_passes_nothing_is_dropped_after_the_silence_bound_and_made_again() {
+    let device = FakeDevice::start();
+    let hub = silent_hub(&device);
+    let (sub, silent) = attach_plain(&device, &hub, 3, b"snap");
+    // The peer keeps the TCP connection open and neither sends nor reads anything: a proxy that froze.
+    let (waited, events) = time_to_reconnecting(&sub);
+    assert!(matches!(events.last(), Some(SubEvent::Reconnecting { attempt: 1, of: 3, .. })), "{events:?}");
+    assert!(!is_lost(&events), "a silent link is not a final fault: {events:?}");
+    assert!(waited <= SILENCE + MARGIN, "the silence was noticed after {waited:?}");
+    // The next try finds the server, and the stream is attached again from a fresh snapshot.
+    let mut conn = device.accept();
+    let request = conn.request();
+    assert_eq!(request.op, Op::Attach { session: 3, tail: None });
+    conn.attached(request.id, 3, 80, 24, WriterView::Writing, false, 0);
+    let events = events_until(&sub, |e| !e.is_empty());
+    assert!(matches!(events[0], SubEvent::Attached { again: true, .. }), "{events:?}");
+    assert_eq!(hub.stats().connects, 2);
+    drop(silent);
+}
+
+#[test]
+fn pings_alone_keep_a_quiet_connection_and_when_they_stop_the_silence_is_noticed_within_the_bound() {
+    let device = FakeDevice::start();
+    let hub = silent_hub(&device);
+    let (sub, mut conn) = attach_plain(&device, &hub, 3, b"");
+    // Only pings, far more often than the bound, for three times the bound: the connection is healthy.
+    let until = Instant::now() + SILENCE * 3;
+    let mut quiet = Vec::new();
+    while Instant::now() < until {
+        conn.ping();
+        quiet.extend(events_for(&sub, Duration::from_millis(50)));
+    }
+    assert!(quiet.is_empty(), "a connection that hears pings was dropped: {quiet:?}");
+    assert_eq!(hub.stats().connects, 1);
+    // The pings stop: the link is dropped within the bound.
+    let (waited, events) = time_to_reconnecting(&sub);
+    assert!(matches!(events.last(), Some(SubEvent::Reconnecting { attempt: 1, .. })), "{events:?}");
+    assert!(waited <= SILENCE + MARGIN, "the silence was noticed after {waited:?}");
+    drop(conn);
+}
+
+#[test]
+fn a_call_waiting_on_a_connection_that_went_silent_ends_as_unreachable_and_never_hangs() {
+    let device = FakeDevice::start();
+    // The call's own deadline is far beyond the silence bound, so only the silence can end it early.
+    let hub = hub_with(&device, |o| {
+        o.silence = SILENCE;
+        o.call_timeout = Duration::from_secs(5);
+    });
+    let h = hub.clone();
+    let started = Instant::now();
+    let call = std::thread::spawn(move || h.list());
+    let mut conn = device.accept();
+    let request = conn.request();
+    assert_eq!(request.op, Op::List);
+    // No answer, and nothing else either.
+    assert_eq!(call.join().unwrap(), Err(HubError::Fault(Fault::Unreachable)));
+    let waited = started.elapsed();
+    assert!(waited < Duration::from_secs(3), "the call waited {waited:?}");
+    // The hub is down, not stuck: the next call connects again.
+    let h = hub.clone();
+    let call = std::thread::spawn(move || h.list());
+    let mut again = device.accept();
+    let request = again.request();
+    again.answer(request.id, Answer::List(vec![]));
+    assert_eq!(call.join().unwrap(), Ok(vec![]));
+    drop(conn);
 }
 
 #[test]

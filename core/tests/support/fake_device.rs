@@ -328,6 +328,11 @@ impl Conn {
         let _ = self.ws.flush();
     }
 
+    /// Sends one WebSocket ping, as a server does to say that it is there.
+    pub fn ping(&mut self) {
+        self.send(Message::Ping(Vec::new().into()));
+    }
+
     /// Drops the connection without a close frame, as a network that failed does.
     pub fn cut(self) {
         let _ = self.ws.get_ref().shutdown(std::net::Shutdown::Both);

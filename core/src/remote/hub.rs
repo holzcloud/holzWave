@@ -117,6 +117,8 @@ pub struct HubOptions {
     pub idle_poll: Duration,
     /// How long a connection with no subscription and no call stays open.
     pub idle_close: Duration,
+    /// How long the connection may hear nothing at all (no message, no ping, no pong) before it is treated as broken.
+    pub silence: Duration,
 }
 
 impl Default for HubOptions {
@@ -132,6 +134,7 @@ impl Default for HubOptions {
             resting_after: Duration::from_secs(1),
             idle_poll: Duration::from_millis(25),
             idle_close: Duration::from_secs(60),
+            silence: Duration::from_secs(proto::SILENCE_SECONDS),
         }
     }
 }
@@ -151,6 +154,7 @@ impl HubOptions {
             resting_after: self.resting_after.clamp(Duration::from_millis(10), Duration::from_secs(60)),
             idle_poll: self.idle_poll.clamp(Duration::from_millis(1), Duration::from_secs(1)),
             idle_close: self.idle_close.clamp(Duration::from_millis(100), Duration::from_secs(3600)),
+            silence: self.silence.clamp(Duration::from_millis(50), Duration::from_secs(3600)),
         }
     }
 }
@@ -1493,5 +1497,27 @@ impl Core {
             Pushed::Gone => self.forget(session),
             Pushed::Full => self.overflow(session),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_silence_bound_is_twice_the_ping_and_one_beat() {
+        assert_eq!((proto::PING_SECONDS, proto::BEAT_SECONDS), (25, 10));
+        assert_eq!(proto::SILENCE_SECONDS, 2 * proto::PING_SECONDS + proto::BEAT_SECONDS);
+        assert_eq!(proto::SILENCE_SECONDS, 60);
+        let defaults = HubOptions::default();
+        assert_eq!(defaults.silence, Duration::from_secs(proto::SILENCE_SECONDS));
+        assert_eq!(defaults.clamped().silence, Duration::from_secs(60));
+        // The short bounds of the tests pass; zero, and anything that would turn the bound off, do not.
+        let with = |silence: Duration| HubOptions { silence, ..HubOptions::default() }.clamped().silence;
+        assert_eq!(with(Duration::from_millis(300)), Duration::from_millis(300));
+        assert_eq!(with(Duration::ZERO), Duration::from_millis(50));
+        assert_eq!(with(Duration::MAX), Duration::from_secs(3600));
+        // The bound is longer than the beat, so an attached client that hears its beats answered is never taken for dead.
+        assert!(defaults.silence > defaults.beat * 2);
     }
 }

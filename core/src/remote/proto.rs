@@ -58,6 +58,13 @@ pub const MAX_SIZE: u16 = MAX_DIM;
 pub const MAX_LISTED: usize = 1024;
 /// How often a client attached to a session says that it is alive, in seconds.
 pub const BEAT_SECONDS: u64 = 10;
+/// The longest a server leaves an open device socket without a ping, in seconds, whatever its own configuration says. The
+/// client counts on it: a quiet but healthy connection always hears something within [`SILENCE_SECONDS`].
+pub const PING_SECONDS: u64 = 25;
+/// How long a client may hear nothing at all on its device socket (no message, no ping, no pong, no close) before it treats the
+/// connection as broken, in seconds: twice the server's longest ping interval ([`PING_SECONDS`]) and one beat
+/// ([`BEAT_SECONDS`]). A network that keeps the TCP connection open and passes nothing is noticed within this bound.
+pub const SILENCE_SECONDS: u64 = 2 * PING_SECONDS + BEAT_SECONDS;
 
 /// A server to client binary frame: a chunk of the screen at the time of the attach.
 pub const TAG_SNAPSHOT: u8 = 0x01;
