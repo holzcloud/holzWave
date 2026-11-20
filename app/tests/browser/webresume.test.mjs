@@ -3,7 +3,8 @@
 // view number 40, pane 2 watching a session of the server. A blip (close 1006) reaches the same worker again; a restart
 // (close 1001) reaches a new one, which numbers its views from 1, has started no pane until the page sends `start_pane`, and
 // lists the restored remote pane as ended once it is started, with the host's last words on its screen. A reload is the
-// reference: the open tab has to end up where a reload would.
+// reference: the open tab has to end up where a reload would. Nothing else of the old worker may block the new one: a pane that
+// asked for older lines asks again, and a pane that waited for a full frame takes the new worker's frames from sequence 1.
 import assert from "node:assert/strict";
 
 export const backends = ["ws"];
@@ -102,6 +103,13 @@ export default async function ({ page, url, errors }) {
  * for a running pane, and nothing else again. The headers stay as they were.
  */
 async function aBlipReachesTheSameWorker(page) {
+  // Pane 2 is scrolled to the top of a session with older lines: it asks once, and a held scroll does not ask again. The answer
+  // is lost with the connection, so the core never shows a phase that would open the latch.
+  await emitFrame(page, frameOf(2, 2, { full: false, total: 100 }));
+  await emitFrame(page, frameOf(2, 3, { full: false, total: 100 }));
+  await until(page, "the frames of pane 2 at the top", () => window.__state.frames.get(2)?.seq === 3);
+  assert.equal((await callsOf(page, "pane_load_older")).length, 1, "the pane at the top asks for older lines once");
+
   const starts = (await callsOf(page, "start_pane")).length;
   const fulls = (await callsOf(page, "request_full")).length;
   const layouts = (await callsOf(page, "get_layout")).length;
@@ -122,7 +130,14 @@ async function aBlipReachesTheSameWorker(page) {
   assert.deepEqual([...again], [], "nothing else is sent again after a blip");
   for (const pane of [1, 2, 3, 4]) assert.equal(await head(page, pane).count(), 1, `pane ${pane} has one header`);
   assert.equal(await head(page, 2).locator(".ph-writer").textContent(), "WATCHING", "the header is as before");
-  assert.deepEqual(await page.evaluate(() => [1, 2, 3, 4].map((p) => window.__state.frames.get(p)?.seq)), [1, 1, 1, 1], "the screens stay");
+  assert.deepEqual(await page.evaluate(() => [1, 2, 3, 4].map((p) => window.__state.frames.get(p)?.seq)), [1, 3, 1, 1], "the screens stay");
+
+  // After the reconnect the pane at the top of a session with older lines asks again, once; a held scroll still asks once.
+  await emitFrame(page, frameOf(2, 4, { full: false, total: 100 }));
+  await until(page, "older lines asked for again", () => window.__MOCK__.callsOf("pane_load_older").length === 2);
+  await emitFrame(page, frameOf(2, 5, { full: false, total: 100 }));
+  await until(page, "the next frame of pane 2", () => window.__state.frames.get(2)?.seq === 5);
+  assert.equal((await callsOf(page, "pane_load_older")).length, 2, "a held scroll asks once");
 }
 
 /**
@@ -139,6 +154,11 @@ async function aRestartReachesANewWorker(page) {
   await until(page, "the exits of panes 3 and 4", () => window.__state.exited.has(3) && window.__state.exited.has(4));
   await page.evaluate((v) => window.__MOCK__.emit("layout", v), viewOf(42, "before the restart", [1, 2], 2));
   await until(page, "the old worker's view 42", () => window.__state.view?.rev === 42);
+
+  // Pane 1 sees a gap and waits for a full frame that the old worker never sends.
+  const asked = (await callsOf(page, "request_full")).length;
+  await emitFrame(page, frameOf(1, 9, { full: false }));
+  await until(page, "the full frame asked for after the gap", (n) => window.__MOCK__.callsOf("request_full").length === n + 1, asked);
 
   const starts = (await callsOf(page, "start_pane")).length;
   const fulls = (await callsOf(page, "request_full")).length;
@@ -176,6 +196,9 @@ async function aRestartReachesANewWorker(page) {
     LAST_WORDS,
   );
   assert.equal(await page.evaluate(() => window.__state.frames.get(1)?.seq), 1, "the new worker's full frame replaced the old screen");
+  // The new worker counts its frames from 1: the pane that waited takes the next one, it does not wait for ever.
+  await emitFrame(page, frameOf(1, 2, { full: false, text: "new worker" }));
+  await until(page, "the new worker's next frame of pane 1", () => window.__state.frames.get(1)?.seq === 2);
   assert.equal(await head(page, 3).count(), 0, "the exited pane stays forgotten");
 
   // A key in the focused plain pane reaches the new worker.
