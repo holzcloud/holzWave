@@ -35,7 +35,7 @@ import { initPhone } from "./phone.js";
 import { initPalette } from "./palette.js";
 import { initDragDrop, initDragDropEvents } from "./dragdrop.js";
 import { initPointer } from "./pointer.js";
-import { applyView, fit, focusCanvas, initEvents, initScene, schedule } from "./scene.js";
+import { applyView, fit, focusCanvas, forgetWorker, initEvents, initScene, schedule } from "./scene.js";
 import { initSearch } from "./search-ui.js";
 import { change, watch as watchSettings } from "./settings.js";
 import { initSelection } from "./selection.js";
@@ -112,10 +112,16 @@ async function main() {
   if (backend === "web") (await import("./web.js")).initWeb();
   fit();
   applyView(await call("get_layout"));
-  // A connection to a server that came back may have missed a layout change: ask again and draw what is there. An error
-  // is ignored, the next event or the next reconnect repairs it. On the desktop this never fires.
+  // A connection to a server that came back may have missed a layout change, and it may reach a new worker (after a restart
+  // of the server or of the worker), which starts a pane only on `start_pane` and numbers its views from 1. So the page
+  // forgets what it knew of the old worker and asks for the layout again: the view that answers starts every pane and asks
+  // for a full frame of each, as a reload does. On the same worker `start_pane` of a running pane does nothing, and one full
+  // frame per pane is the whole cost. An error is ignored, the next event or the next reconnect repairs it. On the desktop
+  // this never fires.
   onConnection((info) => {
-    if (info.state === "open" && info.resumed) void call("get_layout").then(applyView, () => {});
+    if (info.state !== "open" || !info.resumed) return;
+    forgetWorker();
+    void call("get_layout").then(applyView, () => {});
   });
   focusCanvas();
   // The browser build asks its server once what the session is and shows the marks of it in the status line; a no-op on the desktop.

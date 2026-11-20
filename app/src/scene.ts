@@ -225,6 +225,22 @@ export function applyView(v: View): void {
   schedule();
 }
 
+/**
+ * Forget what the page knows of the worker it talked to, for a socket that opened again after a loss. The socket may now reach a
+ * new worker (after a restart of the server or of the worker): it starts a pane only on `start_pane` and numbers its views from 1
+ * again, so the page drops the number of the last view it showed, the sizes it told (every pane, shown or not, so a hidden tab's
+ * panes are started when they are shown), the panes it saw exit (a new worker's view may list one again) and the panes that wait
+ * for a full frame. The next view then starts and asks for a full frame of every pane, as after a reload. On the same worker
+ * `start_pane` of a running pane does nothing, and one full frame per pane is the whole cost. The mirrors stay: the full frame
+ * that answers replaces each of them, so the last screen is shown until then.
+ */
+export function forgetWorker(): void {
+  shownRev = 0;
+  state.sizes.clear();
+  state.exited.clear();
+  waiting.clear();
+}
+
 /** The panes this page has let go of by a gesture and that no layout has confirmed gone yet. */
 const leaving = new Leaving();
 
