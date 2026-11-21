@@ -1244,7 +1244,7 @@
   "app_info": {
     "hostname": "holz-mac.local",
     "os": "macos",
-    "version": "0.0.1-beta2"
+    "version": "0.0.1-beta3"
   },
   "commands": {
     "ai_ask_answer": [

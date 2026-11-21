@@ -55,6 +55,11 @@
   -->
   <!-- Every release so far is a pre-release, so each one is marked as a development release. -->
   <releases>
+    <release version="0.0.1-beta3" date="2026-11-21" type="development">
+      <description>
+        <p>Preview release. It adds the server as a sync target with remote sessions, pictures and hyperlinks in the terminal and the app's own window frame. The Linux packages of this release have not been started on a desktop.</p>
+      </description>
+    </release>
     <release version="0.0.1-beta2" date="2026-11-01" type="development">
       <description>
         <p>Preview release. The terminal engine moved to Ghostty 1.4 and keeps all the scrollback lines it is given. The Linux packages were built on a runner and have not been started on a desktop.</p>

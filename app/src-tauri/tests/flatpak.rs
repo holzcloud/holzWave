@@ -890,8 +890,8 @@ fn the_metainfo_names_the_developer_the_links_the_brand_colours_and_the_releases
     assert!(xml.contains("<content_rating type=\"oars-1.1\"/>"), "OARS");
     // Releases: every one has a date and notes; a beta is a development release; none is invented.
     let releases = xml.split("<releases>").nth(1).and_then(|r| r.split("</releases>").next()).expect("releases");
-    assert_eq!(releases.matches("<release ").count(), 3, "the three releases that exist: {releases}");
-    for version in ["0.0.1-beta2", "0.0.1-beta1", "0.0.1-alpha3"] {
+    assert_eq!(releases.matches("<release ").count(), 4, "the four releases that exist: {releases}");
+    for version in ["0.0.1-beta3", "0.0.1-beta2", "0.0.1-beta1", "0.0.1-alpha3"] {
         let entry = releases.split(&format!("<release version=\"{version}\"")).nth(1).unwrap_or_else(|| panic!("release {version}"));
         let tag = entry.split('>').next().expect("a tag");
         assert!(tag.contains("date=\"2026-"), "{version} has a date: {tag}");

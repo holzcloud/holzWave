@@ -2674,7 +2674,7 @@ dependencies = [
 
 [[package]]
 name = "holzwave-app"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "holzwave-apple-ai",
  "holzwave-core",
@@ -2694,7 +2694,7 @@ dependencies = [
 
 [[package]]
 name = "holzwave-apple-ai"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "holzwave-core",
  "swift-rs",
@@ -2702,7 +2702,7 @@ dependencies = [
 
 [[package]]
 name = "holzwave-core"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "allocator-api2",
  "ammonia",
@@ -2738,7 +2738,7 @@ dependencies = [
 
 [[package]]
 name = "holzwave-host"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "holzwave-core",
  "holzwave-ipc",
@@ -2748,7 +2748,7 @@ dependencies = [
 
 [[package]]
 name = "holzwave-ipc"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "getrandom 0.4.3",
  "interprocess",
@@ -2758,14 +2758,14 @@ dependencies = [
 
 [[package]]
 name = "holzwave-local-network"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "swift-rs",
 ]
 
 [[package]]
 name = "holzwave-server"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "argon2 0.6.0",
  "axum",
@@ -2809,7 +2809,7 @@ dependencies = [
 
 [[package]]
 name = "holzwave-spawn-helper"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "rustix",
  "serde",
@@ -2818,7 +2818,7 @@ dependencies = [
 
 [[package]]
 name = "holzwave-spike"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "holzwave-core",
 ]
@@ -8291,7 +8291,7 @@ dependencies = [
 
 [[package]]
 name = "wsh"
-version = "0.0.1-beta2"
+version = "0.0.1-beta3"
 dependencies = [
  "holzwave-ipc",
 ]

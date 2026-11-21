@@ -4,7 +4,7 @@
 
 <br>
 
-[![Status](https://img.shields.io/badge/status-0.0.1--beta2%20in%20development-FF8FB8?style=for-the-badge)](docs/roadmap.md)
+[![Status](https://img.shields.io/badge/status-0.0.1--beta3%20in%20development-FF8FB8?style=for-the-badge)](docs/roadmap.md)
 [![License](https://img.shields.io/github/license/holzcloud/holzwave?style=for-the-badge&color=4B5563)](LICENSE)
 [![Rust](https://img.shields.io/badge/core-Rust-8D3F63?style=for-the-badge&logo=rust&logoColor=white)](docs/architecture.md)
 
@@ -17,7 +17,7 @@ Nextcloud or your own holzWave server, and an AI chat that sees your terminal on
 **completely offline**, on the device, with no account and no key. Website: [holzcloud.ch/holzwave](https://holzcloud.ch/holzwave).
 
 > [!WARNING]
-> **Beta preview.** holzWave is at `0.0.1-beta2`: a preview build. The Windows installer and the macOS app are unsigned (no Authenticode, no
+> **Beta preview.** holzWave is at `0.0.1-beta3`: a preview build. The Windows installer and the macOS app are unsigned (no Authenticode, no
 > Developer ID, no notarisation). The Linux packages can carry a minisign signature, but none of the releases made so far carries one
 > ([what is signed and what is not](docs/signing.md)).
 > The author has run it on macOS (Apple Silicon) and Windows. The Linux packages of `0.0.1-beta2` were built on a GitHub runner
@@ -177,7 +177,7 @@ Built and tested by the author on macOS and Windows, and on Linux up to `0.0.1-b
 | File browser, previews (Markdown, text, image, video, audio, PDF) and code editor, local and over SFTP | built, tested against a test server, not yet against real hosts |
 | Encrypted Nextcloud/WebDAV sync (XChaCha20-Poly1305, Argon2id) | built, tested against a test server, not yet against a real Nextcloud |
 | The same encrypted sync through your own holzWave server, one target at a time; apps that sign in to the server as a device through your browser, and the lists to revoke a device | built, off on every server until an administrator turns it on, tested against the real server in one process on the author's Mac; never run on a real phone or a real desktop against a real server over a real network, with a real passkey or single sign-on approving a device, with two real people, or on Android ([Server guide](docs/server.md), [sync](docs/sync.md)) |
-| **Remote sessions:** shells that your holzWave server keeps running, shown in a pane of the desktop app, the Android app or the browser window, with one writer at a time and `Take over` | built, off on every server until an administrator turns it on, tested against the real server in one process and in real browsers against the real server on the author's Mac; never run on a real phone or a real desktop against a real server over a real network, with a real passkey or single sign-on approving a device, behind a real reverse proxy for the device socket, with two real people, on Android (the hand-back from the system browser, the secret vault, Doze and the end of a background app), or across a server restart under a real workload. A server restart ends every remote session, and so does the server's idle limit (a day by default) with nobody connected; the 64 panes and 8 sockets of a person are shared with the browser window, and in the browser all tabs share a session's pane and its right to write ([Server guide](docs/server.md#remote-sessions)) |
+| **Remote sessions:** shells that your holzWave server keeps running, shown in a pane of the desktop app, the Android app or the browser window, with one writer at a time and `Take over` | built, off on every server until an administrator turns it on, tested against the real server in one process and in real browsers against the real server on the author's Mac; never run on a real phone or a real desktop against a real server over a real network, with a real passkey or single sign-on approving a device, behind a real reverse proxy for the device socket, with two real people, on Android (the hand-back from the system browser, the secret vault, Doze and the end of a background app), or across a server restart under a real workload. The one exception was a test run on the author's Mac, all in local containers, that put the server behind Caddy with Keycloak single sign-on and restarted it; the faults it found are fixed, and that run was not repeated after the fixes. A server restart ends every remote session, and so does the server's idle limit (a day by default) with nobody connected; the 64 panes and 8 sockets of a person are shared with the browser window, and in the browser all tabs share a session's pane and its right to write ([Server guide](docs/server.md#remote-sessions)) |
 | `wsh` CLI (`view`, `edit`, `setmeta title`, `ai`, the history hooks) over a private local socket | built; the macOS, Windows and Linux packages made by the release scripts carry it beside the app (not the Flatpak) |
 | `wsh` on a Linux host over SSH (`view`, `edit`, `setmeta title` and `ping`; never the AI or the history) | built, tested against a test server and a real OpenSSH on loopback, not yet on a real Linux host. It needs three things: tick `Use wsh on this host` for the saved connection, choose `Install wsh on this host` in its pane (it uploads the bundled build to `~/.holzwave/bin`), and a server that allows Unix socket forwarding |
 | Sidebar with hosts, history search and widgets (described by a JSON Schema), a `^R` binding for the history | built, tested against test servers |
@@ -236,8 +236,9 @@ real accounts and Macs (Part 7 of the [test plan](docs/test-plan.md)). The nativ
 CLI, GAM7) are built and tested against fake tools and recorded fixtures; their rows for real clusters and accounts and for
 Windows and Linux hardware are open (Part 9 of the test plan). The web build (a server in one container, with the same window in a browser) is built and tested in containers; its rows for a real cluster, identity provider, authenticators, certificate authority, proxy and browsers are open (Part 10 of the test plan). The server as a sync target and remote sessions on it are built and tested against the real server on the author's Mac, and were never run with real devices against a real server. Mobile is Android only: it is built and was run on arm64 emulators, never on a phone or a tablet, and its rows for what only a phone shows are open (Part 13 of the test plan).
 Pictures and hyperlinks in the terminal, a recorded performance baseline with a guard, and the signing of the Linux packages by minisign are built too: the first two are tested against the engine, a real server and two browsers and not against real programs, and no release has been signed yet (Windows and macOS stay unsigned); what nobody has tried is listed in Part 11 of the test plan.
-Versions go `0.0.1-alpha3`, `0.0.1-beta1`, `0.0.1-beta2` (now), `0.0.1`. `0.0.1-beta2` added the native integrations, the web build and
-libghostty on Ghostty 1.4 (Zig 0.17) with a fix for the scrollback limit.
+Versions go `0.0.1-alpha3`, `0.0.1-beta1`, `0.0.1-beta2`, `0.0.1-beta3` (now), `0.0.1`. `0.0.1-beta2` added the native integrations, the web build and
+libghostty on Ghostty 1.4 (Zig 0.17) with a fix for the scrollback limit. `0.0.1-beta3` adds the Android app (run on emulators only), the server as a
+sync target with remote sessions, pictures and hyperlinks in the terminal, and the app's own window frame.
 Full plan: [docs/roadmap.md](docs/roadmap.md).
 
 ## Documentation

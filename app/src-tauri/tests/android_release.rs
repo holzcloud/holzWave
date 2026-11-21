@@ -297,10 +297,12 @@ fn version_code_check_fails_on_bad_input() {
     assert!(!version_code_problems(&tauri, &json("{}")).is_empty());
     assert!(!version_code_problems(&json(r#"{"version":"0.0.1-gamma1"}"#), &android).is_empty());
     assert!(!version_code_problems(&json("{}"), &android).is_empty());
-    // A bump of the version without the code is the failure this test exists for.
+    // A bump of the version without the code is the failure this test exists for. A fixed pair is used, so the next
+    // release does not have to edit this test.
+    let at_beta2 = json(r#"{"bundle":{"android":{"versionCode":1202}}}"#);
     let bumped = json(r#"{"version":"0.0.1-beta3"}"#);
-    assert!(!version_code_problems(&bumped, &android).is_empty());
-    assert!(version_code_problems(&json(r#"{"version":"0.0.1-beta2"}"#), &android).is_empty());
+    assert!(!version_code_problems(&bumped, &at_beta2).is_empty());
+    assert!(version_code_problems(&json(r#"{"version":"0.0.1-beta2"}"#), &at_beta2).is_empty());
     // The code is an integer in the file, not a string.
     assert!(
         !version_code_problems(
