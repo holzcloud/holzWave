@@ -504,7 +504,8 @@ fn the_socket_has_no_door_to_a_decision() {
 fn the_page_file_loads_only_its_own_files() {
     let found = page_problems(INDEX_HTML);
     assert!(found.is_empty(), "the page file loads or runs something that is not its own:\n  {}", found.join("\n  "));
-    assert!(INDEX_HTML.contains("<script type=\"module\" src=\"/main.js\">"), "the scan did not see the page's own script");
+    // The page's one script is the boot script, which loads the application module `/main.js` itself (app/src/floor.ts).
+    assert!(INDEX_HTML.contains("<script src=\"/floor.js\">"), "the scan did not see the page's own script");
 }
 
 #[test]
