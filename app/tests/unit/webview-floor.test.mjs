@@ -328,3 +328,18 @@ test("the_words_of_the_notice_are_the_words_of_the_design_record", () => {
     assert.ok(js.includes(words), `dist/floor.js says ${words}`);
   }
 });
+
+test("the_notice_stylesheet_uses_no_feature_of_the_table_and_only_the_tokens_of_the_record", () => {
+  const path = join(APP, "src", "floor.css");
+  assert.ok(existsSync(path), "app/src/floor.css is missing");
+  const css = stripCss(readFileSync(path, "utf8"));
+  // It must draw on the WebView it is meant for, so it uses nothing a WebView below the floor may lack.
+  for (const row of FEATURES) if (row.css) assert.doesNotMatch(css, row.css, `floor.css uses ${row.name}`);
+  assert.doesNotMatch(css, /#[0-9a-f]{3,8}\b|\b(rgba?|hsla?|hwb|lab|lch|oklab|oklch)\(/i, "floor.css has a colour literal");
+  assert.doesNotMatch(css, /:\s*(white|black|red|gray|grey|transparent)\b/i, "floor.css has a named colour");
+  for (const [, name] of css.matchAll(/var\((--[a-z0-9-]+)/g)) assert.match(name, /^--hw-/, `floor.css reads ${name}, not a --hw- token`);
+  for (const [, name] of css.matchAll(/(--[a-z0-9-]+)\s*:/g)) assert.match(name, /^--hw-/, `floor.css sets ${name}, not a --hw- token`);
+  // Sizes in rem so the UI scale moves them; the one pixel size is the hairline. Nothing moves.
+  for (const [length] of css.matchAll(/\b\d*\.?\d+(px|em|vh|vw|pt|%)\b/g)) assert.equal(length, "1px", `floor.css sizes something in ${length}`);
+  assert.doesNotMatch(css, /transition|animation|@keyframes|box-shadow|gradient|filter/, "the notice is flat and still");
+});
