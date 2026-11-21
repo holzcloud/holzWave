@@ -208,6 +208,42 @@ async function check(file) {
   if (commandPhones !== 2) failures.push(`#phones-command holds ${commandPhones} phones, not 2`);
   const sidePhones = await page.$$eval('#phones-side .ph1', (n) => n.length);
   if (sidePhones !== 2) failures.push(`#phones-side holds ${sidePhones} phones, not 2`);
+  // The AI button of a phone strip (docs/design.md 6.6) is drawn only while calls wait, so always with its count, and it is a touch
+  // target: 22 px at the half scale of the mock, which stands for 44 px.
+  const stripButtons = await page.$$eval('.phones .ph1 .t .ro', (ns) =>
+    ns.filter((n) => n.textContent.trim().startsWith('✦ AI')).map((n) => {
+      const r = n.getBoundingClientRect();
+      return { row: n.closest('.phones').id, count: n.querySelector(':scope > .ax-n')?.textContent ?? null, w: r.width, h: r.height };
+    }),
+  );
+  for (const b of stripButtons) if (b.count === null || !/^· \d+$/.test(b.count)) failures.push(`#${b.row} draws the AI button of a phone strip without a count`);
+  for (const row of ['phones-approval', 'phones-command', 'phones-strip']) {
+    const mine = stripButtons.filter((b) => b.row === row);
+    if (mine.length === 0) failures.push(`#${row} draws no AI button with a count in its phone strip`);
+    for (const b of mine) if (b.w < 21.5 || b.h < 21.5) failures.push(`the AI button of #${row} is ${Math.round(b.w)} by ${Math.round(b.h)}, under 22 px`);
+  }
+  // A full strip: the lock chip, the writer label with Take over and the count all fit; the label keeps its word for assistive technology
+  // and draws only its shape.
+  const stripPhones = await page.$$eval('#phones-strip .ph1', (n) => n.length);
+  if (stripPhones !== 1) failures.push(`#phones-strip holds ${stripPhones} phones, not 1`);
+  const full = await page.$eval('#phones-strip .ph1 .t', (t) => {
+    const box = t.getBoundingClientRect();
+    const parts = ['.sv-chip', '.sv-take', '.lk-chip', '.ro:has(> .ax-n)'].map((s) => t.querySelector(s));
+    const word = t.querySelector('.sv-chip .st-word');
+    return {
+      present: parts.every((n) => n !== null),
+      inside: parts.every((n) => n === null || (n.getBoundingClientRect().left >= box.left - 0.5 && n.getBoundingClientRect().right <= box.right + 0.5)),
+      word: word?.textContent ?? null, wordDrawn: word ? word.getBoundingClientRect().width > 1 : null, shape: t.querySelector('.sv-chip .sv-sq') !== null,
+      count: t.querySelector('.ax-n')?.textContent ?? null,
+    };
+  }).catch(() => null);
+  if (!full) failures.push('#phones-strip draws no top strip');
+  else {
+    if (!full.present) failures.push('#phones-strip lacks the writer label, Take over, the lock chip or the count');
+    if (!full.inside) failures.push('#phones-strip: an item of the full strip is outside it');
+    if (full.word !== 'WATCHING' || full.wordDrawn !== false || !full.shape) failures.push('#phones-strip: the writer label does not keep its word undrawn beside its shape');
+    if (full.count !== '· 2') failures.push(`#phones-strip: the count is ${full.count}, not · 2`);
+  }
   const actionPhones = await page.$$eval('#phones-actions .ph1', (n) => n.length);
   if (actionPhones !== 2) failures.push(`#phones-actions holds ${actionPhones} phones, not 2`);
   const wshPhones = await page.$$eval('#phones-wsh .ph1', (n) => n.length);
@@ -392,7 +428,7 @@ async function check(file) {
   }
   failures.push(...problems.filter((p) => !failures.includes(p)));
   await browser.close();
-  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} + ${approvalPhones} + ${writePhones} + ${commandPhones} + ${sidePhones} + ${actionPhones} + ${wshPhones} + ${attnPhones} + ${keyPhones} + ${selectPhones} + ${lockPhones} + ${handoverPhones} + ${serverPhones} + ${webviewPhones} phones, ${refused.length} requests refused (the web font host)`);
+  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} + ${approvalPhones} + ${writePhones} + ${commandPhones} + ${sidePhones} + ${actionPhones} + ${wshPhones} + ${attnPhones} + ${keyPhones} + ${selectPhones} + ${lockPhones} + ${handoverPhones} + ${serverPhones} + ${stripPhones} + ${webviewPhones} phones, ${refused.length} requests refused (the web font host)`);
   if (failures.length > 0) {
     for (const f of failures) console.error(`FAIL ${f}`);
     process.exit(1);
