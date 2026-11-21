@@ -405,10 +405,15 @@ function builtFloor() {
 }
 
 /** The public texts that state the floor, by path from the repository root. */
-const FLOOR_TEXTS = ["docs/build-android.md"];
+const FLOOR_TEXTS = [
+  "docs/build-android.md",
+  "README.md",
+  "docs/status.md",
+  "packaging/android/fastlane/metadata/android/en-US/full_description.txt",
+];
 
 /** The public texts that may name WebView 91, each of which must call it below the floor where it does. */
-const WEBVIEW_91_TEXTS = ["docs/build-android.md"];
+const WEBVIEW_91_TEXTS = [...FLOOR_TEXTS, "docs/test-plan.md"];
 
 const repoText = (path) => readFileSync(join(REPO, path), "utf8");
 
@@ -422,6 +427,16 @@ test("the_floor_check_of_the_texts_fails_on_a_missing_phrase_and_on_another_numb
   assert.equal(webview91Problems("bad", "| `api31` | 12 | 91.0.4472.114 |\n").length, 1, "a table row with WebView 91 and no `below the floor` fails");
   assert.equal(webview91Problems("bad", "Intro.\n\n- WebView 91 was seen.\n- A WebView below the floor.\n").length, 1, "each list item stands on its own");
   assert.deepEqual(webview91Problems("quoted", "> It has WebView 91, which is below the\n> floor.\n"), [], "a phrase broken across a quoted line is found");
+});
+
+test("a_text_with_another_floor_fails_and_the_failure_names_the_file", () => {
+  const floor = builtFloor();
+  const texts = FLOOR_TEXTS.map((path) => [path, repoText(path)]);
+  for (const [path, text] of texts) {
+    const changed = text.split(floorPhrase(floor)).join(floorPhrase(floor - 1));
+    const problems = floorProblems(path, changed, floor);
+    assert.ok(problems.length > 0 && problems.every((p) => p.startsWith(path)), `a copy of ${path} with another floor fails and names ${path}`);
+  }
 });
 
 test("the_public_texts_name_the_floor_of_the_boot_check", () => {
