@@ -413,7 +413,7 @@ const FLOOR_TEXTS = [
 ];
 
 /** The public texts that may name WebView 91, each of which must call it below the floor where it does. */
-const WEBVIEW_91_TEXTS = [...FLOOR_TEXTS, "docs/test-plan.md"];
+const WEBVIEW_91_TEXTS = [...FLOOR_TEXTS, "docs/test-plan.md", "docs/design.md", "app/src/app.css"];
 
 const repoText = (path) => readFileSync(join(REPO, path), "utf8");
 
@@ -456,4 +456,57 @@ test("the_android_12_row_of_the_emulator_table_names_webview_91_below_the_floor"
   const rows = repoText("docs/build-android.md").split("\n").filter((l) => l.startsWith("| `api31` |") && l.includes("91.0.4472.114"));
   assert.equal(rows.length, 1, "docs/build-android.md has one row of the Android 12 image with its WebView 91.0.4472.114");
   assert.match(rows[0], /below the floor/, "the Android 12 row says its WebView is below the floor");
+});
+
+// ---- the notice on the Android 12 image: run with its counts, or `not run:` with a reason, and never claimed as seen -----------
+// The Android 12 emulator image is the one image whose WebView (91) is below the floor, so it is where the notice can be seen on a
+// real WebView. The build guide and the status page say either what a run of the emulator gate printed for it (its counts, `ok`)
+// or `not run:` and the reason; the README and the store description never say that it was seen.
+
+/** The sentences of a text, after its line breaks and block-quote marks are folded. */
+const sentencesOf = (text) => flatText(text).split(/(?<=[.!?])\s+(?=[A-Z`*(\[])/);
+
+/** A sentence about the notice on the Android 12 image. */
+const aboutNotice12 = (s) => /\bnotice\b/i.test(s) && /\bAndroid 12\b/.test(s);
+
+/** Whether a sentence records the run: `not run:` and a reason of a few words after it, or the counts of a run (`N ok`). */
+const recordsRun = (s) => /not run: \S+( \S+){2,}/.test(s) || /\b\d+ `?ok`?\b/.test(s);
+
+function noticeRunProblems(name, text) {
+  const about = sentencesOf(text).filter(aboutNotice12);
+  if (about.length === 0) return [`${name} has no sentence about the notice on the Android 12 image`];
+  return about.some(recordsRun) ? [] : [`${name}: no sentence about the notice on the Android 12 image says \`not run:\` with a reason or gives the counts of a run`];
+}
+
+function noticeSeenClaims(name, text) {
+  return sentencesOf(text)
+    .filter((s) => aboutNotice12(s) && !/not run/.test(s) && /\b(seen|saw|showed|was shown|ran|was run|passed|checked|verified)\b/i.test(s))
+    .map((s) => `${name} claims the notice ran on the Android 12 image: "${s.slice(0, 160)}"`);
+}
+
+/** The texts that record the run of the notice on the Android 12 image, and the texts that must not claim it. */
+const NOTICE_RUN_TEXTS = ["docs/build-android.md", "docs/status.md"];
+const NOTICE_CLAIM_FREE_TEXTS = ["README.md", "packaging/android/fastlane/metadata/android/en-US/full_description.txt"];
+
+test("the_notice_run_check_needs_a_reason_or_counts_and_catches_a_claim", () => {
+  const notRun = "The notice on the Android 12 image: not run: the app with the boot check was not built for Android.";
+  assert.deepEqual(noticeRunProblems("a", notRun), []);
+  assert.deepEqual(noticeRunProblems("b", "The notice on the Android 12 image ran: floor 6 ok."), []);
+  assert.equal(noticeRunProblems("c", "The notice on the Android 12 image is expected.").length, 1, "neither a reason nor counts fails");
+  assert.equal(noticeRunProblems("d", "The notice on the Android 12 image: not run:.").length, 1, "`not run:` without a reason fails");
+  assert.equal(noticeRunProblems("e", "Nothing about it.").length, 1, "a text with no such sentence fails");
+  assert.equal(noticeSeenClaims("f", "The notice was seen on the Android 12 image.").length, 1);
+  assert.deepEqual(noticeSeenClaims("g", "On Android 12 the notice was not run on an emulator."), []);
+});
+
+test("the_build_guide_and_the_status_page_record_the_notice_on_the_android_12_image", () => {
+  const problems = [];
+  for (const path of NOTICE_RUN_TEXTS) problems.push(...noticeRunProblems(path, repoText(path)));
+  assert.deepEqual(problems, []);
+});
+
+test("the_readme_and_the_store_description_never_claim_the_notice_ran_on_the_android_12_image", () => {
+  const problems = [];
+  for (const path of [...NOTICE_CLAIM_FREE_TEXTS, ...NOTICE_RUN_TEXTS, "docs/test-plan.md"]) problems.push(...noticeSeenClaims(path, repoText(path)));
+  assert.deepEqual(problems, []);
 });
