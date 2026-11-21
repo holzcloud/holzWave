@@ -50,6 +50,8 @@ interface Ui {
   workspace: HTMLElement;
   tab: HTMLElement;
   count: HTMLElement;
+  /** The right end of the top strip, which holds the items of `addStripItem`. */
+  end: HTMLElement;
   nav: HTMLElement;
   navTabs: HTMLElement;
   navPlus: HTMLButtonElement;
@@ -115,6 +117,10 @@ function build(): Ui {
   // The place of a status chip: empty now, kept so that nothing moves when a later feature fills it.
   const chip = el("span", "", top);
   chip.id = "phone-chip";
+  // The right end of the strip, after the place of the chip: what other modules put there with `addStripItem` (the waiting count of
+  // the AI chat, docs/design.md 6.6). Empty, it takes no room.
+  const end = el("span", "", top);
+  end.id = "phone-end";
   app.prepend(top);
 
   const nav = el("nav", "", app);
@@ -174,11 +180,32 @@ function build(): Ui {
   navSheet.addEventListener("click", () => openSheet(navSheet));
 
   const made: Ui = {
-    top, title, workspace, tab, count, nav, navTabs, navPlus, navSheet, scrim, sheet, pills, pillPlus, tabsCap, tabsList,
+    top, title, workspace, tab, count, end, nav, navTabs, navPlus, navSheet, scrim, sheet, pills, pillPlus, tabsCap, tabsList,
     panesCap, panesList, sheetClose, navItems: [], pillItems: [], tabRows: [], paneRows: [], shownTab: -1, extra: [],
   };
   mountExtraRows(made);
+  mountStripItems(made);
   return made;
+}
+
+// ---- items that a later module puts at the right end of the top strip --------------------------------------------------
+
+/** The makers of the strip's items, in the order they were added. */
+const stripItems: (() => HTMLElement)[] = [];
+
+/**
+ * Put an item at the right end of the top strip, after the place of the status chip (docs/design.md 6.6). `make` is called each
+ * time the strip is made, so the item comes back after a change of the class; it may hand back the same element every time. The strip
+ * exists on the phone only, so nothing is drawn on a tablet or a desktop, and `make` is never called there.
+ */
+export function addStripItem(make: () => HTMLElement): void {
+  stripItems.push(make);
+  if (ui) mountStripItems(ui);
+}
+
+/** Fill the strip's right end again from the makers, so an item added after the strip was made shows and none shows twice. */
+function mountStripItems(g: Ui): void {
+  g.end.replaceChildren(...stripItems.map((make) => make()));
 }
 
 // ---- rows that a later module adds to the sheet -----------------------------------------------------

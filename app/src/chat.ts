@@ -47,6 +47,7 @@ import { onOverlayRender, renderOverlay } from "./overlay.js";
 import { DEVICE_OFF, readDevice, withDevice } from "./ondevice.js";
 import type { DeviceView } from "./ondevice.js";
 import { paneLabel } from "./panehead.js";
+import { addStripItem, layoutNow } from "./phone.js";
 import { appendSafe } from "./safehtml.js";
 import { applyView } from "./scene.js";
 import { state } from "./state.js";
@@ -188,6 +189,8 @@ const parked = new IntentSlot();
 /** The call of `openWithIntent` that is on its way. */
 let intending: Promise<string | null> | null = null;
 let button: HTMLButtonElement | null = null;
+/** The phone's button at the right end of its top strip (docs/design.md 6.6): made when a strip is first made, shown while calls wait. */
+let phoneButton: HTMLButtonElement | null = null;
 /** The profile chosen last in this window: a new chat starts with it. */
 let lastChoice: string | null = null;
 /** The state of `Auto` chosen last in this window: a new chat starts with it. A reload starts it on; nothing is stored. */
@@ -291,26 +294,46 @@ function sessionFor(conversation: string): Session {
   return s;
 }
 
-/** The title-bar button says how many calls wait for a decision, over every chat of this window. */
+/**
+ * The title-bar button, and on a phone the button of the top strip, say how many calls wait for a decision, over every chat of this
+ * window. Both are drawn from the one sum here, so they never disagree; the phone's button is shown only while a call waits.
+ */
 function updateBadge(): void {
   // The marks of the bar follow what waits: an approval card appeared or was decided (design 6.23).
   attention.changed();
-  if (button === null) return;
+  const n = waitingTotal();
+  if (button !== null) showCount(button, n);
+  if (phoneButton !== null) showPhoneCount(phoneButton, n);
+}
+
+/** How many calls wait for a decision, over every chat of this window. */
+function waitingTotal(): number {
   let n = 0;
   for (const s of sessions.values()) n += s.approvals.waiting();
-  let count = button.querySelector<HTMLElement>(":scope > .ai-count");
+  return n;
+}
+
+/** The phone's button: the count as on the title-bar button, and shown only while a call waits. */
+function showPhoneCount(target: HTMLButtonElement, n: number): void {
+  showCount(target, n);
+  target.hidden = n === 0;
+}
+
+/** Write the count `n` on an AI button: the words of 6.15 in a span of their own (the number is the cue), the name and `data-waiting`. */
+function showCount(target: HTMLButtonElement, n: number): void {
+  let count = target.querySelector<HTMLElement>(":scope > .ai-count");
   if (n > 0) {
     if (count === null) {
-      count = el("span", "ai-count", button);
+      count = el("span", "ai-count", target);
     }
     const words = waitingLabel(n);
     if (count.textContent !== words) count.textContent = words;
-    button.dataset.waiting = String(n);
-    button.setAttribute("aria-label", waitingName(n));
+    target.dataset.waiting = String(n);
+    target.setAttribute("aria-label", waitingName(n));
   } else {
     count?.remove();
-    button.removeAttribute("data-waiting");
-    button.removeAttribute("aria-label");
+    target.removeAttribute("data-waiting");
+    target.removeAttribute("aria-label");
   }
 }
 
@@ -1545,17 +1568,24 @@ function shownChatPane(): number | null {
 /**
  * Open the chat. Without `newChat`, in this order: show the chat of the sidebar column whose tool call waits for a decision
  * (a decision is brought to the person), focus the chat pane of the shown tab, turn a shown sidebar column into the chat;
- * otherwise (and always with `newChat`) make a new conversation and open it as a pane to the right of the focused pane.
+ * otherwise (and always with `newChat`) make a new conversation and open it as a pane to the right of the focused pane. A phone
+ * draws no column: there a waiting chat is shown as its pane or opened as one, and the column is never turned into the chat.
  * Answers null when done, else one sentence.
  */
 export async function openChat(newChat: boolean): Promise<string | null> {
   if (opener === null) return "the chat is not started";
   opened = null;
   if (!newChat) {
-    for (const s of sessions.values()) {
-      if (s.approvals.waiting() > 0 && sidebar?.reveal(s.id) === true) {
-        opened = s.id;
-        return null;
+    if (layoutNow() === "phone") {
+      // A phone has no sidebar column (docs/design.md 6.6): the waiting chat is shown as its pane, or opened as one.
+      const waiting = [...sessions.values()].find((s) => s.approvals.waiting() > 0);
+      if (waiting !== undefined) return showWaitingPane(waiting.id);
+    } else {
+      for (const s of sessions.values()) {
+        if (s.approvals.waiting() > 0 && sidebar?.reveal(s.id) === true) {
+          opened = s.id;
+          return null;
+        }
       }
     }
     const pane = shownChatPane();
@@ -1571,7 +1601,8 @@ export async function openChat(newChat: boolean): Promise<string | null> {
       opened = paneBlocks.get(pane)?.path ?? null;
       return null;
     }
-    if (sidebar !== null && sidebar.columnShown()) {
+    // A phone draws no column, so a column that is shown in its state is never turned into the chat there.
+    if (sidebar !== null && sidebar.columnShown() && layoutNow() !== "phone") {
       const reason = await sidebar.open();
       if (reason === null) opened = sidebar.conversation();
       return reason;
@@ -1589,6 +1620,38 @@ export async function openChat(newChat: boolean): Promise<string | null> {
   if (reason !== null) wantFocus.delete(id);
   else opened = id;
   return reason;
+}
+
+/**
+ * On a phone, bring the chat `conversation`, whose call waits, to the screen: focus its chat pane (the core shows the pane's tab and
+ * workspace with it, and the focused pane fills the screen), or open it as a chat pane when no pane holds it (the chat of a sidebar
+ * column, which a phone does not draw). Nothing is decided here: the card's own buttons stay the only way to decide. Answers null,
+ * or one sentence.
+ */
+async function showWaitingPane(conversation: string): Promise<string | null> {
+  if (opener === null) return "the chat is not started";
+  let pane: number | null = null;
+  for (const [id, block] of paneBlocks) {
+    if (block.kind === "chat" && block.path === conversation) {
+      pane = id;
+      break;
+    }
+  }
+  if (pane === null) {
+    wantFocus.add(conversation);
+    const reason = await opener("chat", "local", conversation, "right");
+    if (reason !== null) wantFocus.delete(conversation);
+    else opened = conversation;
+    return reason;
+  }
+  try {
+    if (state.view?.focus !== pane) applyView(await call<View>("focus_pane", { pane }));
+  } catch (e) {
+    return faultText(e);
+  }
+  for (const view of sessions.get(conversation)?.views ?? []) if (view.pane() === pane) view.focus();
+  opened = conversation;
+  return null;
 }
 
 /**
@@ -1748,6 +1811,19 @@ export async function initChat(open: BlockOpener, host?: ChatHost): Promise<void
     // Before the sidebar button, which is added after this one.
     info.append(button);
   }
+  // The phone has no title bar: while calls wait, its top strip ends with the same button and the count (docs/design.md 6.6). It
+  // runs the same order as the title-bar button, and the order has the phone's branch. Made only when a phone strip is made.
+  addStripItem(() => {
+    if (phoneButton === null) {
+      phoneButton = el("button", "ai-btn label phone-ai");
+      phoneButton.type = "button";
+      phoneButton.textContent = "✦ AI";
+      phoneButton.hidden = true;
+      phoneButton.addEventListener("click", () => run(false));
+    }
+    showPhoneCount(phoneButton, waitingTotal());
+    return phoneButton;
+  });
   registerAction({ id: "ai.open", title: "AI chat", run: () => run(false) });
   registerAction({ id: "ai.new_chat", title: "New AI chat", run: () => run(true) });
   await listen<unknown>("ai", onAi);

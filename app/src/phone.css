@@ -41,13 +41,16 @@
   transform: rotate(45deg);
 }
 .phone-ws, .phone-tab, .phone-count { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.phone-ws { flex: 0 1 auto; font-weight: 700; }
+/* The workspace name gives way only after the name of the tab or pane is cut away (a tiny shrink factor; 6.6). */
+.phone-ws { flex: 0 .01 auto; font-weight: 700; }
 .phone-sep { flex: none; color: var(--hw-dim); }
 .phone-tab { flex: 0 1 auto; min-width: 0; color: var(--hw-ink-2); }
 .phone-count { flex: none; color: var(--hw-ink-2); }
 .phone-count[hidden] { display: none; }
-/* The place of a status chip: it takes the free width, empty, so nothing moves when a chip is put in. */
-#phone-chip { display: flex; align-items: center; justify-content: flex-end; flex: 1 1 0; min-width: 0; }
+/* The place of a status chip: it takes the free width, empty, so nothing moves when a chip is put in. It never shrinks below what it
+   holds: when the strip is full, the title gives the room, and the name of the tab or pane in it is cut first (docs/design.md 6.6). */
+#phone-chip { display: flex; align-items: center; justify-content: flex-end; flex: 1 0 auto; min-width: auto; }
+#phone-top button.phone-title { overflow: hidden; }
 
 /* ---- bottom bar ------------------------------------------------------------------------------------------- */
 

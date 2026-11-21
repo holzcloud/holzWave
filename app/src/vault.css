@@ -24,7 +24,7 @@
 #vault-chip.vault-chip:active { background: var(--hw-rose-wash); }
 .vault-glyph { flex: none; width: .75rem; height: .833rem; }
 /* The chip of the phone sits at the right end of the strip, with room to its right edge. */
-#phone-chip #vault-chip.vault-chip { margin-right: .167rem; }
+#phone-chip #vault-chip.vault-chip { margin-right: .167rem; font-size: calc(11rem / 12); } /* the label size: the strip's button rule sets the font */
 
 /* ---- the sheet and the dialogs ------------------------------------------------------------------------ */
 

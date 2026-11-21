@@ -143,7 +143,7 @@ const shows = (page) =>
 /** Open a chat the way `✦ AI` does (the action `ai.open`; the phone has no title bar) and wait for its composer. */
 async function openChat(page) {
   await page.evaluate(() => window.__registry.runAction("ai.open"));
-  await page.waitForSelector(".block-chat textarea.chat-input");
+  await page.waitForSelector(".block-chat:not(.side-chat) textarea.chat-input");
   await page.waitForFunction(() => window.__MOCK__.callsOf("ai_profiles").length >= 1);
 }
 
@@ -252,11 +252,11 @@ async function sideCase(page, url) {
   await page.waitForFunction(() => document.documentElement.classList.contains("layout-phone"));
   await page.waitForFunction(() => document.querySelector("#phone-top button.phone-ai")?.dataset.waiting === "1");
   assert.equal(await shows(page), true, "the strip made for the phone shows the count");
-  assert.equal(await page.locator(".block-chat").count(), 0, "the chat has no pane");
+  assert.equal(await page.locator(".block-chat:not(.side-chat)").count(), 0, "the chat has no pane");
 
   const from = await callCount(page);
   await phoneButton(page).click();
-  await page.waitForSelector('.block-chat section.chat-approval[data-call="call_1"]');
+  await page.waitForSelector('.block-chat:not(.side-chat) section.chat-approval[data-call="call_1"]');
   const sent = await sentSince(page, from);
   const names = sent.map(([cmd]) => cmd);
   const opened = sent.filter(([cmd]) => cmd === "block_open").map(([, args]) => args);
@@ -265,6 +265,12 @@ async function sideCase(page, url) {
   for (const bad of ["ai_decide", "ai_conversation_new"]) assert.ok(!names.includes(bad), `the tap sent ${bad}: ${names}`);
   const focus = await page.evaluate(() => window.__MOCK__.view().focus);
   assert.equal(focus, await page.evaluate(() => window.__BLOCKS.at(-1).pane), "the new chat pane has the focus");
+
+  // The column stays shown in its saved state, but a phone never draws it: `ai.open` there opens a chat pane, not the hidden column.
+  await boot(page, url);
+  assert.equal(await page.evaluate(() => localStorage.length > 0), true, "the saved state of the column is kept");
+  await openChat(page);
+  assert.equal(await page.locator('#sidebar[data-form="chat"]').count(), 0, "the hidden column did not become the chat");
 }
 
 /** The colour `token` resolves to on this page, read through an element as the browser computes it. */
@@ -325,8 +331,15 @@ async function cuesCase(page, url, engine) {
     await page.emulateMedia({ forcedColors: "none" });
   }
 
-  // The keyboard reaches the button in the strip's visual order and shows the 2 px ring.
-  const option = engine === "webkit" && process.platform === "darwin"; // WebKit on macOS visits buttons with Option+Tab only
+  // The button is a stop of the tab order after the title and the place of the chip.
+  const stop = await phoneButton(page).evaluate((n) => ({
+    tabIndex: n.tabIndex, afterTitle: (document.querySelector("#phone-top .phone-title").compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+  }));
+  assert.deepEqual(stop, { tabIndex: 0, afterTitle: true }, "the button follows the title in the tab order");
+  // The keyboard reaches it in the strip's visual order and shows the 2 px ring. WebKit on macOS makes buttons tab stops only with the
+  // system's full keyboard access, and Option+Tab is a chord the terminal reads, so the walk runs in Chromium, the engine of the
+  // Android WebView.
+  if (engine !== "chromium") return;
   await page.locator("#phone-top .phone-title").focus();
   const seen = [];
   for (let i = 0; i < 8; i++) {
@@ -337,7 +350,7 @@ async function cuesCase(page, url, engine) {
     seen.push(at);
     if (at.cls.includes("phone-ai")) break;
     assert.ok(at.inStrip, `the focus left the strip before the button (${seen.map((s) => s.cls).join(" | ")})`);
-    await page.keyboard.press(option ? "Alt+Tab" : "Tab");
+    await page.keyboard.press("Tab");
   }
   assert.ok(seen.at(-1).cls.includes("phone-ai"), `Tab reaches the button (${seen.map((s) => s.cls).join(" | ")})`);
   for (let i = 1; i < seen.length; i++) assert.ok(seen[i].x >= seen[i - 1].x, `Tab goes left to right (${seen.map((s) => `${s.cls}@${s.x}`).join(" | ")})`);
@@ -365,13 +378,19 @@ async function fitCase(page, url) {
       const r = n.getBoundingClientRect();
       return { s, left: r.left, right: r.right, top: r.top, bottom: r.bottom, w: r.width, h: r.height, whole: n.scrollWidth <= n.clientWidth + 1 };
     };
-    const order = ["#phone-top .phone-title", "#vault-chip", "#phone-chip .ph-writer", "#phone-chip .ph-take", "#phone-top button.phone-ai"].map(box);
+    const order = ["#phone-top .phone-title", "#vault-chip", "#phone-chip .ph-writer", "#phone-chip .ph-take", "#phone-top button.phone-ai"]
+      .map(box)
+      .sort((a, b) => a.left - b.left);
     const name = document.querySelector("#phone-top .phone-tab");
     const ws = document.querySelector("#phone-top .phone-ws");
+    const writer = document.querySelector("#phone-chip .ph-writer");
+    const word = writer.querySelector(".ph-writer-word");
+    const shape = writer.querySelector(".ph-sq").getBoundingClientRect();
     return {
       order, top: [top.left, top.right, top.top, top.bottom],
+      writer: { text: writer.textContent, role: writer.getAttribute("role"), wordDrawn: word.getBoundingClientRect().width > 1, shape: shape.width > 0 },
       overflow: document.scrollingElement.scrollWidth > innerWidth || document.getElementById("phone-top").scrollWidth > document.getElementById("phone-top").clientWidth + 1,
-      nameCut: name.scrollWidth > name.clientWidth, wsWhole: ws.scrollWidth <= ws.clientWidth + 1,
+      nameCut: name.scrollWidth > name.clientWidth, nameWidth: name.getBoundingClientRect().width, wsWhole: ws.scrollWidth <= ws.clientWidth + 1,
     };
   });
   const detail = JSON.stringify(fit);
@@ -383,13 +402,18 @@ async function fitCase(page, url) {
   for (let i = 1; i < fit.order.length; i++) {
     assert.ok(fit.order[i].left >= fit.order[i - 1].right - 0.5, `${fit.order[i].s} does not overlap ${fit.order[i - 1].s}: ${detail}`);
   }
+  assert.equal(fit.order[0].s, "#phone-top .phone-title", `the title is first: ${detail}`);
+  assert.equal(fit.order.at(-1).s, "#phone-top button.phone-ai", `the button is last: ${detail}`);
   for (const b of fit.order.slice(1)) assert.ok(b.whole, `${b.s} is not cut: ${detail}`);
+  // With the count in the strip the writer label shows its shape; its word stays in the status region for assistive technology.
+  assert.deepEqual(fit.writer, { text: "WATCHING", role: "status", wordDrawn: false, shape: true }, `the writer label: ${detail}`);
   for (const s of ["#phone-top .phone-title", "#vault-chip", "#phone-chip .ph-take", "#phone-top button.phone-ai"]) {
     const b = fit.order.find((o) => o.s === s);
     assert.ok(b.h >= 44 && b.w >= 44, `${s} keeps its 44 px target (${b.w} by ${b.h})`);
   }
   assert.equal(fit.nameCut, true, `the name of the tab or pane is what is cut: ${detail}`);
-  assert.equal(fit.wsWhole, true, `the workspace name is not cut: ${detail}`);
+  // The workspace name gives way only after the name of the tab or pane is cut away.
+  assert.ok(fit.wsWhole || fit.nameWidth <= 1, `the workspace name is cut only after the tab's: ${detail}`);
 }
 
 async function elsewhereCase(page, url) {

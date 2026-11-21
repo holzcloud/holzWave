@@ -13,6 +13,22 @@
 .ai-btn[aria-pressed="true"] { color: var(--hw-ink); background: var(--hw-rose-wash); border-color: var(--hw-rose); }
 .ai-btn:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
 
+/* ---- the phone's button: the waiting count at the right end of the top strip (docs/design.md 6.6) ------------------- */
+
+/* The strip's right end (phone.ts), after the place of the status chip; empty, it takes no room. The button is a 44 px target in the
+   label style, rose as the picture draws it (an action), the number in the warn tone from approval.css; the 2 px focus ring and the
+   44 px minimum come from the strip's own button rule (phone.css). Shown only while a call waits. */
+#phone-end { display: flex; align-items: center; flex: none; }
+#phone-top button.phone-ai { flex: none; margin: 0; padding: 0 .667rem; border: 1px solid transparent; border-radius: 0;
+                             color: var(--hw-rose); font-size: calc(11rem / 12); letter-spacing: .1em; text-transform: uppercase;
+                             white-space: nowrap; }
+#phone-top button.phone-ai[hidden] { display: none; }
+/* While the button is in the strip, the writer label of a remote pane (6.34) shows its shape without its word, so the lock chip, the
+   label with Take over and the button fit a phone 360 px wide. The word stays in the label for assistive technology. */
+#phone-top:has(button.phone-ai:not([hidden])) #phone-chip .ph-writer-word {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+
 /* ---- the pane: a column of bar, picker, transcript, status line and composer ------------------------------------- */
 
 .block-chat { min-height: 0; }
@@ -148,4 +164,6 @@
   :root .chat-bar .chat-chip, :root .chat-bar .chat-setup { outline: 2px solid Highlight; outline-offset: -2px; }
   :root .chat-picker .chat-choice[aria-checked="true"] { outline: 2px solid Highlight; outline-offset: -2px; }
   :root .ai-btn[aria-pressed="true"] { outline: 2px solid Highlight; outline-offset: -2px; }
+  /* The phone's button keeps a frame of its own; its words and the number are text and stay. */
+  :root #phone-top button.phone-ai { border-color: ButtonText; }
 }

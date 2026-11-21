@@ -101,7 +101,8 @@ const texts = (page, selector) => page.locator(selector).allTextContents();
 /** Every control of the strips and the sheet that is drawn, with its size. */
 const targets = (page) =>
   page.evaluate(() =>
-    [...document.querySelectorAll("#phone-top button, #phone-nav button, #phone-sheet button, [role=button], [role=tab], [role=option]")].map(
+    // A control that is not drawn (the AI count of the strip while no call waits, docs/design.md 6.6) is no target.
+    [...document.querySelectorAll("#phone-top button, #phone-nav button, #phone-sheet button, [role=button], [role=tab], [role=option]")].filter((n) => n.getClientRects().length > 0).map(
       (n) => {
         const r = n.getBoundingClientRect();
         return { name: n.className || n.tagName, width: r.width, height: r.height };
