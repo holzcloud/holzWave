@@ -708,6 +708,9 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 .ho-row,.sh-row{min-height:22px;padding:2px 14px;font-size:8px;white-space:normal;align-items:center}
 .ho-ent{min-height:22px;padding:2px 10px;font-size:8px;white-space:normal;align-items:center}
 .lk-sys{--sys-bg:#E8E5EA;--sys-ink:#1C1B1F;--sys-dim:#625D66;margin:6px 4px 0;padding:8px 10px;border-radius:14px;background:var(--sys-bg);color:var(--sys-ink);box-shadow:0 1px 5px rgba(0,0,0,.45);font:400 8px/1.4 var(--sys-font,system-ui,sans-serif)}
+/* Web view too old (docs/design.md 6.6): the notice of the boot script in place of the app, a flat hairline box; the label in the warn tone with the ! mark and an underline. */
+.wv-box{border:1px solid var(--edge);border-radius:8px;padding:8px 9px;font-size:8px;line-height:1.4;color:var(--ink2);background:var(--ground)}
+.wv-box .wv-lbl{color:var(--warn);text-decoration:underline;font-size:7.5px;margin:0 0 6px}.wv-box .wv-mk{font-weight:700;margin-right:5px}.wv-box p{margin:0 0 4px}.wv-box p:last-child{margin:0}
 .lk-sys .h{display:flex;align-items:center;gap:4px;color:var(--sys-dim);font-size:7px;margin-bottom:3px}.lk-sys .h i{width:8px;height:8px;border-radius:2px;background:var(--sys-dim)}
 .lk-sys b{display:block;font-size:9px}
 .lk-sys .a{display:inline-flex;align-items:center;min-height:22px;margin-top:3px;font-weight:700;color:#7B2D55;text-transform:uppercase;letter-spacing:.05em;font-size:7.5px}
@@ -946,6 +949,10 @@ td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
   <h2>Server sessions on a phone</h2>
   <p class="lead">The Connections view is the screen: the server row, its sessions and every button are at least 44 px high (22 px at the scale of the mock). A session row says its title and whether it is free or held and wraps the rest. In the pane the writer label and Take over sit in the top strip; the name of the pane is cut first. Left, the phone's sheet: its group Connections, before Files, has the row Connections…, which opens the view and is the one way to it without a hardware keyboard. In the middle, the sessions sheet; right, a pane that watches. A drawing of the design: nothing of it was run on a phone.</p>
   <div class="phones" id="phones-server"></div>
+
+  <h2>Web view too old</h2>
+  <p class="lead">On Android, when the system WebView lacks a feature the app uses, the window shows only this notice on the ground colour and nothing of the app: the label with the ! mark in the warn tone and underlined, the version the app needs and the one the phone has, and what to do. There is no button, because nothing in the app can update the WebView. The numbers are an example: the app names its floor and the version the WebView reports. The check runs only on Android. Shown at the scale of the mock (about half).</p>
+  <div class="phones" id="phones-webview"></div>
 
   <h2>Features and where they live</h2>
   <div class="tblwrap"><table id="cov"></table></div>
@@ -2122,6 +2129,10 @@ $('#phones-server').innerHTML=
 <span class="ok">    Finished</span> release
 <span class="ro">❯</span> <span class="cur"></span>`,BN);
 $('#phones-server').querySelectorAll('.ph1 .t')[2].classList.add('sv-top');
+
+/* Web view too old (docs/design.md 6.6): the system status bar above, nothing of the app, the notice alone. */
+$('#phones-webview').innerHTML=
+ phc('Web view too old',`<span class="dim">12:41</span><span class="dim" style="margin-left:auto">87 %</span>`,`<div style="padding:16px 10px"><div class="wv-box" role="alert"><div class="wv-lbl lbl"><span class="wv-mk" aria-hidden="true">!</span>Web view too old</div><p>holzWave needs Android System WebView 125 or later. This phone has version 91.</p><p>Update Android System WebView in the Play Store, then open holzWave again.</p></div></div>`,'',{raw:1});
 
 /* Feature list */
 const B='<span class="ph-tag built">built</span>',pl=n=>`<span class="ph-tag">Phase ${n}</span>`;

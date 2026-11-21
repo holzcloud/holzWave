@@ -1,0 +1,28 @@
+/* The notice of the boot script (floor.ts, docs/design.md section 6.6, rule Web view too old). The boot script links this file
+   only when it shows the notice, on an Android WebView below the floor, so it must draw there: it uses nothing of the feature
+   table in tests/unit/webview-floor.test.mjs (no :is or :has, no inset, no gap, no color-mix, no new units, no media feature
+   newer than the floor's oldest reader), and a unit test holds it to that. app.css is the document's own stylesheet and is
+   already loaded; it gives the ground colour, the mono face, the tokens and the label style. chrome.css, which defines the
+   hairline token for the application, is not loaded on this path, so the token is defined here the same way.
+
+   Every colour is a `--hw-*` token and every size is in rem, so the UI scale moves it; the one pixel size is the hairline.
+   Flat and hairline: a box with a 1 px line, no shadow, no gradient. The label is in the warn tone and is told apart by the `!`
+   mark and an underline as well, which forced colours keep (they recolour the border and the text and leave both cues).
+   Nothing moves, so there is nothing for reduced motion to remove. */
+
+:root { --hw-line: var(--hw-edge); }
+:root.contrast-high { --hw-line: var(--hw-ink-3); }
+
+.floor-page {
+  box-sizing: border-box; height: 100%; overflow-y: auto;
+  padding: calc(2rem + var(--hw-inset-top)) calc(1rem + var(--hw-inset-right)) calc(2rem + var(--hw-inset-bottom))
+    calc(1rem + var(--hw-inset-left));
+}
+.floor {
+  box-sizing: border-box; max-width: 32rem; margin: 0 auto; padding: 1rem 1.167rem;
+  border: 1px solid var(--hw-line); border-radius: .667rem; background: var(--hw-ground);
+}
+.floor-label { margin: 0 0 .75rem; color: var(--hw-warn); text-decoration: underline; }
+.floor-mark { margin-right: .5rem; font-weight: 700; }
+.floor-line { margin: 0; color: var(--hw-ink-2); font-size: calc(14rem / 12); line-height: 1.4; overflow-wrap: break-word; }
+.floor-line + .floor-line { margin-top: .5rem; }

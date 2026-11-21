@@ -280,6 +280,20 @@ async function check(file) {
   if (handoverPhones !== 4) failures.push(`#phones-handover holds ${handoverPhones} phones, not 4`);
   const serverPhones = await page.$$eval('#phones-server .ph1', (n) => n.length);
   if (serverPhones !== 3) failures.push(`#phones-server holds ${serverPhones} phones, not 3`);
+  // Web view too old (docs/design.md 6.6): one phone, the notice alone with the record's words, its hairline, the ! mark and the underline, and no button.
+  const webviewPhones = await page.$$eval('#phones-webview .ph1', (n) => n.length);
+  if (webviewPhones !== 1) failures.push(`#phones-webview holds ${webviewPhones} phones, not 1`);
+  const webview = await page.$eval('#phones-webview', (n) => {
+    const box = n.querySelector('.wv-box'), label = n.querySelector('.wv-lbl');
+    return { text: n.textContent.replace(/\s+/g, ' '), border: box && getComputedStyle(box).borderTopWidth, deco: label && getComputedStyle(label).textDecorationLine, mark: n.querySelector('.wv-lbl > .wv-mk')?.textContent, targets: n.querySelectorAll('[data-target], button').length };
+  }).catch(() => null);
+  if (!webview) failures.push('#phones-webview draws nothing');
+  else {
+    for (const words of ['Web view too old', 'holzWave needs Android System WebView 125 or later. This phone has version 91.', 'Update Android System WebView in the Play Store, then open holzWave again.']) if (!webview.text.includes(words)) failures.push(`#phones-webview does not say ${words}`);
+    if (webview.border !== '1px') failures.push('the notice of #phones-webview has no 1 px hairline');
+    if (!/underline/.test(webview.deco ?? '') || webview.mark !== '!') failures.push('the label of #phones-webview lacks the underline or the ! mark');
+    if (webview.targets !== 0) failures.push('#phones-webview draws a button; the notice has none');
+  }
   const chips = await page.$$eval('#phones-lock > div:first-child .lk-chip', (ns) =>
     ns.map((n) => ({ state: n.dataset.state, label: n.textContent.trim(), glyph: n.querySelector('svg[data-glyph]')?.dataset.glyph, shape: n.querySelector('svg')?.innerHTML, border: getComputedStyle(n).borderTopStyle })),
   );
@@ -378,7 +392,7 @@ async function check(file) {
   }
   failures.push(...problems.filter((p) => !failures.includes(p)));
   await browser.close();
-  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} + ${approvalPhones} + ${writePhones} + ${commandPhones} + ${sidePhones} + ${actionPhones} + ${wshPhones} + ${attnPhones} + ${keyPhones} + ${selectPhones} + ${lockPhones} + ${handoverPhones} + ${serverPhones} phones, ${refused.length} requests refused (the web font host)`);
+  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} + ${approvalPhones} + ${writePhones} + ${commandPhones} + ${sidePhones} + ${actionPhones} + ${wshPhones} + ${attnPhones} + ${keyPhones} + ${selectPhones} + ${lockPhones} + ${handoverPhones} + ${serverPhones} + ${webviewPhones} phones, ${refused.length} requests refused (the web font host)`);
   if (failures.length > 0) {
     for (const f of failures) console.error(`FAIL ${f}`);
     process.exit(1);
