@@ -161,7 +161,10 @@ The server speaks TLS 1.3 only, with HTTP/2 for the page and HTTP/1.1 for the We
 - `proxy`: the server listens for plain HTTP from the addresses in `tls.trusted_proxies` only, and a reverse proxy or ingress
   controller ends TLS. The server believes `X-Forwarded-For` and `X-Forwarded-Proto` from those addresses and from no one else,
   and the proxy must pass the WebSocket upgrades for `/ws` (the page) and `/ws/device` (the apps' remote sessions) and keep
-  them open. Row SRV-R1 is a real proxy; the device socket was never run through one.
+  them open. Row SRV-R1 is a real proxy. The device socket was run through one once: Caddy 2 on one computer, with a private
+  certificate authority, which found the two faults described under "The device socket" (a network that goes silent, and a
+  proxy that answers for a server that is gone). After the fix it was tested against a scripted server only: never again
+  through a proxy, never over a real network and never with a certificate of a public authority.
 
 ## Sign-in methods and single sign-on
 
@@ -403,6 +406,16 @@ within `limits.session_recheck` otherwise), 1001 the feature was turned off or t
 a write that made no progress, 1012 the worker ended, 1008 a flood of requests or too many broken rules, 1009 a message over
 its size, 1003 a message of a kind the socket does not take. No terminal byte and no token reaches a log, the audit files or the database.
 
+The server pings a device socket at least every 25 seconds (`limits.ping_interval`, or 25 seconds when that is longer). An app
+that hears nothing at all on its socket for 60 seconds (no message, no ping and no pong: twice the ping time and the 10 seconds
+of its beat) treats the connection as broken, even when the network keeps it open, and does what it does after a lost
+connection: the pane says `Reconnecting…`, then `Server unreachable. Press Enter to try again.` when the tries are used. What
+was typed between the moment the network went silent and the moment the app noticed is lost, and typing after that is neither
+sent nor kept. While the link was silent the server may have given the right to write away after its own 30 seconds, so the
+pane can come back `FREE`; `Take over` takes the right back. A reverse proxy that answers the upgrade with 502, 503 or 504 (the
+server is restarting or gone), and a 429, are read as a server that cannot be reached and are tried again the same way; any
+other refusal of the upgrade is final and is not tried again.
+
 **The browser window.** The window in a browser lists the server it was loaded from as `This server` in the Connections view,
 with `New session`, the person's sessions, `Attach` and `End`. A pane of the browser window that shows a session is one more
 client of the same session in the person's worker, so one writer rule covers the browser and every app. Two things differ from
@@ -425,9 +438,11 @@ Tested against the real server in one process, with real shells on real pseudo t
 the writer rules, revocation, the switch and the shared socket cap (`server/tests/remote_sessions.rs`), an app's pane against a
 real session including a cut of the network (`server/tests/remote_client.rs`, `server/tests/remote_host.rs`), the browser's
 panes (`server/tests/session_local.rs`, `server/tests/session_web.rs`) and a real browser against the real server
-(`app/tests/web/sessions.test.mjs`). **Never run:** a real phone or desktop against a real server over a real network, a real
-reverse proxy in front of the device socket, two real people, Android with the hand-back from its system browser and its secret
-vault, Android's Doze or the end of a background app, and a server restart under a real workload. That session numbers go on
+(`app/tests/web/sessions.test.mjs`). The silence rule and the proxy's answers are tested against a scripted server
+(`core/tests/remote_hub.rs`, `core/tests/remote_pane.rs`). **Never run:** a real phone or desktop against a real server over a
+real network, a real reverse proxy in front of the device socket after the two faults it found were fixed (the one run, through
+Caddy 2 on one computer with a private certificate authority, is described under the `proxy` mode), two real people, Android
+with the hand-back from its system browser and its secret vault, Android's Doze or the end of a background app, and a server restart under a real workload. That session numbers go on
 across a restart was tested with the real server restarted inside one test process (`server/tests/remote_sessions.rs`); the
 restart in Docker on one computer that found numbers starting at 1 again was not repeated after the change, and a restart under
 a real workload over a real network was never run.
@@ -484,9 +499,10 @@ A reverse proxy in front of the server may compress the page files; the WebSocke
   person's worker ends after `workers.idle_timeout` with no tab and no app attached.
 - The device features (the sync target, remote sessions and the sign-in of apps) were never run on a real phone or a real
   desktop against a real server over a real network, with a real passkey or single sign-on approving a device, behind a real
-  reverse proxy in front of the device socket, with two real people, on Android (with the hand-back from the system browser,
-  the secret vault, Doze and the end of a background app), or across a server restart under a real workload. Everything was
-  run against the real server in one process, over the loopback address, on the author's Mac.
+  reverse proxy in front of the device socket (it was run once through Caddy 2 on one computer before two faults were fixed,
+  and never since), with two real people, on Android (with the hand-back from the system browser, the secret vault, Doze and
+  the end of a background app), or across a server restart under a real workload. Everything was run against the real server
+  in one process, over the loopback address, on the author's Mac.
 - A device token is not bound to the device: whoever holds it can use it until it is revoked or has been unused for
   `devices.idle`. Approving a device can be phished (see [Device sign-in and devices](#device-sign-in-and-devices)).
 - A browser tab left open keeps the right to write of a session shown in its window until somebody presses `Take over`, and

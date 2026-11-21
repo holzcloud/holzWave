@@ -1363,7 +1363,7 @@ contradicts itself is refused (`max_connections_per_address` above `max_connecti
 | `limits.sockets_per_person` | 8 | 1 to 64 | The most sockets one person may have open at once. |
 | `limits.commands_per_second` | 400 | 1 to 100000 | The commands per second one socket may send over a longer time. |
 | `limits.command_burst` | 800 | 1 to 1000000 | The commands one socket may send in a burst before the rate applies. |
-| `limits.ping_interval` | 25s | 1s to 10m | How often the server pings an open socket. |
+| `limits.ping_interval` | 25s | 1s to 10m | How often the server pings an open socket. A device socket (`/ws/device`) is pinged at least every 25 seconds whatever this says, because the apps count on it: an app that hears nothing for 60 seconds treats its connection as broken. |
 | `limits.session_recheck` | 30s | 1s to 10m | How often the server checks that the session behind an open socket is still valid. |
 | `limits.ws_violations` | 8 | 1 to 10000 | The violations (a malformed message, an unknown command, a message over the cap of its command) one socket may commit within the violation window; the next one closes the socket. |
 | `limits.ws_violation_window` | 1m | 1s to 1h | The span the violations of one socket are counted in. |
