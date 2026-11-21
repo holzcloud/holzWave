@@ -278,7 +278,9 @@ test("the_entry_document_has_no_inline_script_or_style", () => {
 
 test("the_application_document_names_its_files_from_the_root_like_the_login_document", () => {
   const html = readFileSync(join(DIST, "index.html"), "utf8");
-  assert.deepEqual([...html.matchAll(/<script\b[^>]*>/g)].map((m) => m[0]), ['<script type="module" src="/main.js">']);
+  // The one script is the boot script: it loads the application module `/main.js` only where the WebView has what the page needs.
+  assert.deepEqual([...html.matchAll(/<script\b[^>]*>/g)].map((m) => m[0]), ['<script src="/floor.js">']);
+  assert.ok(existsSync(join(DIST, "main.js")), "the application module is still a file of the build");
   assert.doesNotMatch(html, /<style\b|\sstyle=|\son[a-z]+=|javascript:/i);
   // The server answers this document at `/` and at `/index.html`; a name relative to the document would be wrong for the next route
   // that serves it deeper, the blank page that the login document had under `/auth/oidc/callback`.
