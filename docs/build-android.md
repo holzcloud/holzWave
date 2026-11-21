@@ -12,8 +12,14 @@ here costs money. The toolchain, the SDK, the NDK, the emulator and the system i
 > earlier full runs failed in places), and several checks ended `not run`: [What ran and what did not](#what-ran-and-what-did-not) says which. Everything that only a real phone or tablet shows is
 > **not run**: see [what was not tried](#what-was-not-tried) and Part 13 of [test-plan.md](test-plan.md). Two defects found on an
 > emulator are [fixed, and were checked on emulators only](#what-the-three-images-showed).
+>
+> **The app needs Android System WebView 125 or later.** Android updates the WebView through the Play Store, apart from the Android
+> version, and the minimum Android version stays 12 (API 31). On an older WebView the app shows only the notice `Web view too old`
+> and nothing else runs ([the WebView floor](#the-webview-floor)). The Android 12 emulator image has WebView 91, which is below the
+> floor: the runs on that image that this guide reports used the app from before the floor was set.
 
-Contents: [What to install](#what-to-install-all-free) · [arm64 only](#arm64-only-and-why) · [Check it](#check-it) ·
+Contents: [What to install](#what-to-install-all-free) · [arm64 only](#arm64-only-and-why) · [The WebView floor](#the-webview-floor) ·
+[Check it](#check-it) ·
 [Compile the Rust code](#compile-the-rust-code-for-android) · [Build the APK](#build-the-debug-apk) · [The emulator](#the-emulator) ·
 [The end to end check](#the-end-to-end-check) · [The whole set](#the-whole-set-on-three-images) ·
 [The committed project](#the-committed-project) · [The version code](#the-version-code) · [The manifest](#what-the-manifest-decides) ·
@@ -56,7 +62,8 @@ act: an agent or a script must not accept them for you.
    The package ids were read from the SDK manager's own list on 2026-11-05 and again on 2026-11-06. `sdkmanager --list` is the
    authority and the ids move, so read it if one is refused. The two Android 37 images are the current platform: one with 4 KiB
    pages and one with 16 KiB pages (`ps16k`), which Android 15 and later may use. The Android 31 image is the lowest version the
-   app supports (Android 12).
+   app supports (Android 12). Its WebView (91) is below the floor of [the WebView floor](#the-webview-floor), so on that image
+   the app shows only its notice.
 5. **The Rust target:**
 
    ```sh
@@ -82,6 +89,24 @@ The app is built for **arm64-v8a only**, which is the Rust target `aarch64-linux
 
 So every build command passes the target explicitly, and the check script requires `aarch64-linux-android` and says it is
 unused if you have installed another Android Rust target. System images of other ABIs are not used either.
+
+## The WebView floor
+
+The page runs in the Android System WebView, which Android updates through the Play Store, apart from the Android version: an
+Android 12 phone may carry an old WebView or a current one. **The app needs Android System WebView 125 or later.** The PDF.js build
+that the file preview ships states Chrome 125 and later; the page's own newest features need WebView 111 (`color-mix()`) and 108
+(the `dvh` unit). The minimum Android version stays 12 (API 31).
+
+The page's one script, `app/src/floor.ts`, runs before anything of the app: on Android it reads the WebView's version and tests the
+features, and only then loads the app. On an older WebView it shows only the notice `Web view too old`, with the version the app
+needs and the version the phone has and a line to update the WebView in the Play Store ([design.md](design.md) section 6.6), and
+nothing else of the app runs. A unit test (`app/tests/unit/webview-floor.test.mjs`) computes the floor from the built page and
+holds the boot script, this guide, the README, the status page and the store description to the same number.
+
+The floor was set after the emulator runs of this guide. The Android 12 image has WebView 91, which is below the floor: the runs on
+it used the app from before the floor was set, and on that WebView the app's Connections view threw `Object.hasOwn is not a
+function`. With the floor in place, that image can only show the notice. The notice and the floor have never run on a real phone,
+and no WebView between 91 and 125 was tried.
 
 ## Check it
 
@@ -171,7 +196,7 @@ There are three profiles, each an arm64-v8a image and a virtual device of its ow
 | Profile | Virtual device | System image | What it is for |
 |---|---|---|---|
 | `api37` (the default) | `holzwave-arm64` | `system-images;android-37.0;default;arm64-v8a` | the newest Android, 4 KB pages |
-| `api31` | `holzwave-arm64-api31` | `system-images;android-31;default;arm64-v8a` | Android 12, the oldest version the app installs on (minimum API 31) |
+| `api31` | `holzwave-arm64-api31` | `system-images;android-31;default;arm64-v8a` | Android 12, the oldest version the app installs on (minimum API 31); its WebView 91 is below the floor, so the app shows only its notice there |
 | `16k` | `holzwave-arm64-16k` | `system-images;android-37.0;google_apis_ps16k;arm64-v8a` | the 16 KB memory page size that new devices ship with |
 
 `create` **refuses** an image that is not arm64-v8a (also when `HOLZWAVE_ANDROID_IMAGE` names one) and a host that is not arm64, and
@@ -271,13 +296,16 @@ A sixth full run was made by `sh scripts/android-gate.sh --emulator` after the f
 | Image | Android | WebView | Page size | Sections | Not run |
 |---|---|---|---|---|---|
 | `api37` | 17 (API 37) | 145.0.7632.218 | 4096 | tracer, service, vault, tls, handover, clipboard, touch, ssh, pagesize | the hardware-keyboard rule, the pinch, text composed by a soft keyboard |
-| `api31` | 12 (API 31) | 91.0.4472.114 | 4096 | tracer, service, vault, pagesize | the foreground service type (it is read from Android 14), the notification permission and its dialog (they start with Android 13) |
+| `api31` | 12 (API 31) | 91.0.4472.114, below the floor (125); these runs used the app from before the floor | 4096 | tracer, service, vault, pagesize | the foreground service type (it is read from Android 14), the notification permission and its dialog (they start with Android 13) |
 | `16k` | 17 (API 37, Google APIs) | 145.0.7632.218 | **16384** | tracer, service, pagesize | none |
 
-Two things the Android 12 image showed. Both are fixed, and both were checked on emulators only.
+Two things the Android 12 image showed. Both are fixed, and both were checked on emulators only. Both runs used an app from
+before the WebView floor was set: the image's WebView 91 is below the floor, and on it that app's Connections view threw
+`Object.hasOwn is not a function` (seen later, when the view was opened in code; the phone layout gave no way to it). With the
+floor in place the app shows only its notice on this image, so the image now proves the notice and nothing else.
 
 - **The page's bottom bar under the system buttons (fixed).** On that image the system starts with the three-button navigation bar,
-  and its old WebView (91) does not tell the page the height of that bar as a safe area, so the page's bottom bar (the tab row with the
+  and its old WebView (91, below the floor that was set later) does not tell the page the height of that bar as a safe area, so the page's bottom bar (the tab row with the
   "+") was drawn under the system buttons, and its top strip under the status bar. The Android shell now measures the system bars
   (`WindowInsets`, status bar, navigation bar and display cutout) and writes the four heights in CSS pixels into the page as
   `--hw-sys-top`, `-right`, `-bottom` and `-left` on the root element; the page uses the larger of those and its own
@@ -685,6 +713,8 @@ registry paths of the form `/cargo-home/registry/...`; whether those stay the sa
 
 ## What was not tried
 
+- A real phone with any WebView, an Android 12 device with an updated WebView (125 or later, the only way the app runs on Android
+  12 now), and any WebView between 91 and the floor (125): the floor and its notice were never seen on one.
 - Any real phone or tablet: the soft keyboard and hardware keyboards, biometrics and the hardware keystore, background kills, the
   limit on background processes, real storage providers, mobile networks, touch feel, the WebView version of a phone, and the system
   shell of a phone maker.
@@ -709,7 +739,7 @@ phone or tablet. `not run` means the check could not be made and was not proved.
 **What ran.** On Android 17 (API 37, the default image, 4 KB pages, WebView 145): the tracer (the page loads in the real web view, a
 pane starts the system shell in the app's own folder, keys from the Android input path reach it), the service, the secret store, HTTPS,
 the hand-over through the real document dialog, the clipboard, the touch page driven in the real web view, a saved SSH connection
-against a throwaway server on this computer's loopback address, and the page size check. On Android 12 (API 31, WebView 91): the tracer,
+against a throwaway server on this computer's loopback address, and the page size check. On Android 12 (API 31, WebView 91, which is below the floor; these runs used the app from before the floor was set): the tracer,
 the service (three checks `not run`), the secret store and the page size check in the closing matrix, and the HTTPS, hand-over and
 clipboard sections in their own runs. On the 16 KB image (API 37, Google APIs, page size 16384): the tracer, the service and the page
 size check, with every mapping of the app's library aligned to 16384 bytes. The release APK was built, passes the APK check and is
@@ -747,7 +777,8 @@ an empty result:
 7. **Touch feel.** Long-press selection with `Copy` and `Paste`, scrolling by a drag and the phone and tablet layouts were seen in the
    real web view. The timing of a long press, the precision of the handles, a pinch together with a scroll, a palm, a stylus, foldables
    and multi-window are untested, and the pinch itself never ran.
-8. **Real web views, graphics and memory.** WebView 145 and WebView 91 were each seen on one image. Updates of the system web view,
+8. **Real web views, graphics and memory.** WebView 145 and WebView 91 were each seen on one image; 91 is below the floor and was
+   seen with the app from before the floor. Updates of the system web view,
    canvas speed, thermal throttling during output floods and memory kills are untested.
 9. **A 16 KB-page device from a vendor.** The emulator image showed the app, its shell and its library mappings on 16 KB pages; a
    vendor's phone was not tried. x86_64 and 32-bit builds are refused by design.
@@ -772,7 +803,8 @@ These are the facts a listing, a store form or an update checker asks for, as th
 anywhere: no package has been signed for use and no channel exists.
 
 - **Application id:** `ch.holzcloud.holzwave` (`ch.holzcloud.holzwave.debug` for a debug build). **One ABI:** `arm64-v8a`; no other
-  ABI is built or listed. **Android versions:** minimum 31 (Android 12), target 37.
+  ABI is built or listed. **Android versions:** minimum 31 (Android 12), target 37. **WebView:** Android System WebView 125 or
+  later; on an older one the app shows only a notice.
 - **Version code:** explicit, from `sh scripts/android-version-code.sh <version>` (the scheme is in [the version code](#the-version-code));
   `0.0.1-beta2` is 1202. A build for a listing comes from `sh scripts/android-build.sh release`, which builds the APK **unsigned**.
 - **Permissions** (the one list, `app/src-tauri/android-permissions.txt`): the network (`INTERNET`), the foreground service

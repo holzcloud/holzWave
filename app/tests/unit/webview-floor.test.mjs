@@ -391,6 +391,8 @@ function passages(text) {
 
 function webview91Problems(name, text) {
   return passages(text)
+    // The lines of a passage are joined by spaces, so the marks of a block quote stand alone between words; they are dropped.
+    .map((p) => p.replace(/(^|\s)>(?=\s|$)/g, " ").replace(/\s+/g, " "))
     .filter((p) => WEBVIEW_91.test(p) && !/below the floor/.test(p))
     .map((p) => `${name}: a passage names WebView 91 and does not say it is below the floor: "${p.replace(/\s+/g, " ").trim().slice(0, 160)}"`);
 }
@@ -419,6 +421,7 @@ test("the_floor_check_of_the_texts_fails_on_a_missing_phrase_and_on_another_numb
   assert.deepEqual(webview91Problems("ok", "| `api31` | 12 | 91.0.4472.114, below the floor |\n"), []);
   assert.equal(webview91Problems("bad", "| `api31` | 12 | 91.0.4472.114 |\n").length, 1, "a table row with WebView 91 and no `below the floor` fails");
   assert.equal(webview91Problems("bad", "Intro.\n\n- WebView 91 was seen.\n- A WebView below the floor.\n").length, 1, "each list item stands on its own");
+  assert.deepEqual(webview91Problems("quoted", "> It has WebView 91, which is below the\n> floor.\n"), [], "a phrase broken across a quoted line is found");
 });
 
 test("the_public_texts_name_the_floor_of_the_boot_check", () => {
