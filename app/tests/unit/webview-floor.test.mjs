@@ -343,3 +343,99 @@ test("the_notice_stylesheet_uses_no_feature_of_the_table_and_only_the_tokens_of_
   for (const [length] of css.matchAll(/\b\d*\.?\d+(px|em|vh|vw|pt|%)\b/g)) assert.equal(length, "1px", `floor.css sizes something in ${length}`);
   assert.doesNotMatch(css, /transition|animation|@keyframes|box-shadow|gradient|filter/, "the notice is flat and still");
 });
+
+// ---- the public texts name the floor that the boot check holds ----------------------------------------------------------------
+// Every text that describes the Android app says in one fixed phrase which Android System WebView it needs, and the number in that
+// phrase is the FLOOR of dist/floor.js. Wherever a text names the WebView 91 of the Android 12 emulator image, the same passage says
+// that it is below the floor, so no reader takes it for a WebView the app runs on.
+
+/** The fixed phrase every public text uses for the floor. */
+const floorPhrase = (n) => `Android System WebView ${n} or later`;
+
+/** The text with block-quote marks and line breaks folded into single spaces, so a phrase broken across lines is still found. */
+const flatText = (text) => text.replace(/\n[ \t]*>[ \t]?/g, "\n").replace(/\s+/g, " ");
+
+/** What is wrong with `text` (shown as `name`) against the floor: the phrase is missing, or it names another number. */
+function floorProblems(name, text, floor) {
+  const problems = [];
+  const flat = flatText(text);
+  if (!flat.includes(floorPhrase(floor))) problems.push(`${name} does not say "${floorPhrase(floor)}"`);
+  for (const m of flat.matchAll(/Android System WebView (\d+) or later/g)) {
+    if (Number(m[1]) !== floor) problems.push(`${name} says "${m[0]}", the boot check holds ${floor}`);
+  }
+  return problems;
+}
+
+/** A mention of the Android 12 image's WebView 91. */
+const WEBVIEW_91 = /\bWebView \(?91\b|\bweb view \(?91\b|91\.0\.4472/i;
+
+/**
+ * The passages of a Markdown or plain text: each table row, each list item and each paragraph on its own. A passage that names
+ * WebView 91 must say `below the floor` in itself.
+ */
+function passages(text) {
+  const out = [];
+  for (const block of text.split(/\n[ \t>]*\n/)) {
+    let current = [];
+    for (const line of block.split("\n")) {
+      if (/^[ \t>]*(\||- |\* |\d+\. )/.test(line) && current.length) {
+        out.push(current.join(" "));
+        current = [];
+      }
+      current.push(line);
+    }
+    if (current.length) out.push(current.join(" "));
+  }
+  return out;
+}
+
+function webview91Problems(name, text) {
+  return passages(text)
+    .filter((p) => WEBVIEW_91.test(p) && !/below the floor/.test(p))
+    .map((p) => `${name}: a passage names WebView 91 and does not say it is below the floor: "${p.replace(/\s+/g, " ").trim().slice(0, 160)}"`);
+}
+
+/** The FLOOR that the built boot script declares. */
+function builtFloor() {
+  const declared = floorJs().match(/\bFLOOR = (\d+);/);
+  assert.ok(declared, "dist/floor.js declares FLOOR");
+  return Number(declared[1]);
+}
+
+/** The public texts that state the floor, by path from the repository root. */
+const FLOOR_TEXTS = ["docs/build-android.md"];
+
+/** The public texts that may name WebView 91, each of which must call it below the floor where it does. */
+const WEBVIEW_91_TEXTS = ["docs/build-android.md"];
+
+const repoText = (path) => readFileSync(join(REPO, path), "utf8");
+
+test("the_floor_check_of_the_texts_fails_on_a_missing_phrase_and_on_another_number", () => {
+  const good = "It needs Android System WebView 125 or\n> later; on an older one it shows only a notice.";
+  assert.deepEqual(floorProblems("good", good, 125), [], "the phrase broken across a quoted line is found");
+  assert.equal(floorProblems("other", good.replace("125", "124"), 125).length, 2, "another number fails twice: no phrase with the floor, and a phrase with another number");
+  assert.equal(floorProblems("none", "It needs a recent WebView.", 125).length, 1, "a text without the phrase fails");
+  assert.equal(floorProblems("both", `${good} Earlier it needed Android System WebView 91 or later.`, 125).length, 1, "a second phrase with another number fails");
+  assert.deepEqual(webview91Problems("ok", "| `api31` | 12 | 91.0.4472.114, below the floor |\n"), []);
+  assert.equal(webview91Problems("bad", "| `api31` | 12 | 91.0.4472.114 |\n").length, 1, "a table row with WebView 91 and no `below the floor` fails");
+  assert.equal(webview91Problems("bad", "Intro.\n\n- WebView 91 was seen.\n- A WebView below the floor.\n").length, 1, "each list item stands on its own");
+});
+
+test("the_public_texts_name_the_floor_of_the_boot_check", () => {
+  const floor = builtFloor();
+  const problems = [];
+  for (const path of FLOOR_TEXTS) problems.push(...floorProblems(path, repoText(path), floor));
+  assert.deepEqual(problems, []);
+});
+
+test("every_passage_that_names_webview_91_says_it_is_below_the_floor", () => {
+  const problems = [];
+  for (const path of WEBVIEW_91_TEXTS) problems.push(...webview91Problems(path, repoText(path)));
+  assert.deepEqual(problems, []);
+});
+
+test("the_android_12_row_of_the_emulator_table_names_webview_91_below_the_floor", () => {
+  const rows = repoText("docs/build-android.md").split("\n").filter((l) => l.startsWith("| `api31` |") && l.includes("91.0.4472.114"));
+  assert.equal(rows.length, 1, "docs/build-android.md has one row of the Android 12 image with its WebView 91.0.4472.114");
+  assert.match(rows[0], /below the floor/, "the Android 12 row says its WebView is below the floor");
+});
