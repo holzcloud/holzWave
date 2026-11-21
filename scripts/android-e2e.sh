@@ -1,6 +1,7 @@
 #!/bin/sh
 # The end to end proof on an arm64 emulator: the page, the bridge, the core, a pseudo terminal and the system shell.
 #
+#   sh scripts/android-e2e.sh floor
 #   sh scripts/android-e2e.sh tracer
 #   sh scripts/android-e2e.sh service
 #   sh scripts/android-e2e.sh vault
@@ -8,6 +9,19 @@
 #   sh scripts/android-e2e.sh handover
 #   sh scripts/android-e2e.sh clipboard
 #   sh scripts/android-e2e.sh release      (the minified release, a copy signed with the SDK debug key; see its section)
+#
+# What `floor` does (it starts like `vault`: emulator, debug APK, fresh install; it waits for the app's window and not for a shell,
+# because below the floor no shell starts) is read the page itself through the WebView's DevTools socket (the debug build is
+# debuggable; the way the touch section reads the insets) and compare it with the floor that the page's boot script holds
+# (`FLOOR` in app/src/floor.ts, which the APK carries built). The WebView's version is the one its user agent names:
+#   below the floor: the page shows the notice of the boot check: its label `Web view too old`, the line that names the floor and
+#      the WebView's version (`holzWave needs Android System WebView N or later. This phone has version M.`) and the line to update
+#      it; the application module /main.js was not inserted, the application's root and chrome are not there, and no shell of the
+#      app runs;
+#   at or above the floor: the application runs: /main.js was inserted, the application drew its chrome and no notice is there.
+# A user agent with no version is `not run` (the boot check then decides by its feature tests alone, which this section does not
+# model). What it does NOT prove: any real phone, and any WebView other than the image's own (no WebView between the Android 12
+# image's 91 and the floor was tried).
 #
 # What `tracer` does, in order:
 #   1. starts the emulator when none runs (and stops it at the end only if it started it), builds the debug APK for
@@ -152,9 +166,9 @@ export ANDROID_SERIAL=$SERIAL
 PROFILE=${2:-}
 
 case "$SECTION" in
-    tracer | service | vault | tls | handover | clipboard | touch | ssh | pagesize | release | all | matrix) ;;
+    floor | tracer | service | vault | tls | handover | clipboard | touch | ssh | pagesize | release | all | matrix) ;;
     *)
-        echo "usage: sh scripts/android-e2e.sh tracer|service|vault|tls|handover|clipboard|touch|ssh|pagesize|release|all [profile]|matrix" >&2
+        echo "usage: sh scripts/android-e2e.sh tracer|service|vault|tls|handover|clipboard|touch|ssh|pagesize|floor|release|all [profile]|matrix" >&2
         exit 2
         ;;
 esac
@@ -193,6 +207,8 @@ cleanup() {
         [ -n "$devtools_port" ] && adbd forward --remove "tcp:$devtools_port" >/dev/null 2>&1
         adbd shell am force-stop "$PKG" >/dev/null 2>&1
     fi
+    # The floor section's forward to the WebView's DevTools socket.
+    [ "$SECTION" = floor ] && [ -n "$devtools_port" ] && adbd forward --remove "tcp:$devtools_port" >/dev/null 2>&1
     # The service section's one change of a system setting (the font scale, which makes the system relaunch the window) is put back.
     [ -n "$font_changed" ] && adbd shell settings put system font_scale 1.0 >/dev/null 2>&1
     # The throwaway SSH server of the ssh section, its forward, and the sealed key (and the passphrase file, if a step did not already
@@ -331,16 +347,19 @@ ui_tap_text() { # <text, or id:resource-id>: tap the centre of the first node th
 }
 
 # ---- all and matrix: the sections one after the other, each on the emulator that is up, and one table of what they said ----------
-# `all [profile]` runs tracer, service, vault, tls, handover, clipboard, touch, ssh and pagesize on the emulator that is up (or one
-# it starts for the profile and stops at the end). `matrix` runs `all` on the newest image, then tracer, service, vault and pagesize
-# on the Android 12 image, then tracer, service and pagesize on the 16 KB page image, one emulator at a time, each stopped before the
-# next starts. Every section is a process of its own (the same script, one section), writes its result lines to a file, and the table
+# `all [profile]` runs floor, tracer, service, vault, tls, handover, clipboard, touch, ssh and pagesize on the emulator that is up (or
+# one it starts for the profile and stops at the end). `matrix` runs `all` on the newest image, then floor and vault on the Android 12
+# image, then floor, tracer, service and pagesize on the 16 KB page image, one emulator at a time, each stopped before the next
+# starts. The Android 12 image's WebView (91) is below the floor of the page's boot check, so there the app shows only its notice:
+# `floor` checks that notice, `vault` runs (its self-test is driven by intents and needs no page), and the sections that need the page
+# (tracer, service and pagesize, which wait for the shell the page starts) are listed in its table as `not run` with that reason.
+# Every section is a process of its own (the same script, one section), writes its result lines to a file, and the table
 # of scripts/android-e2e-summary.sh is made from them: a section that ends with a non-zero status and no FAIL line of its own, or
 # with no result line at all, is a FAIL here, because nothing that did not report is a pass. HOLZWAVE_E2E_SECTION_CMD names the
 # command that runs one section (the stand-in tests put a fake there); HOLZWAVE_E2E_SKIP_BUILD=1 skips the one build at the start.
 if [ "$SECTION" = all ] || [ "$SECTION" = matrix ]; then
     SECTION_CMD=${HOLZWAVE_E2E_SECTION_CMD:-sh scripts/android-e2e.sh}
-    ALL_SECTIONS='tracer service vault tls handover clipboard touch ssh pagesize'
+    ALL_SECTIONS='floor tracer service vault tls handover clipboard touch ssh pagesize'
     tab=$(printf '\t')
     case "$PROFILE" in
         "" | api37 | api31 | 16k) ;;
@@ -358,10 +377,13 @@ if [ "$SECTION" = all ] || [ "$SECTION" = matrix ]; then
         }
         echo "e2e $SECTION: the debug APK is built once; every section reuses it"
     fi
-    # one_image <profile> <sections>: the emulator of the profile, the sections, the table, the emulator stopped again.
+    # one_image <profile> <sections> [<sections not run> <reason>]: the emulator of the profile, the sections, the table, the emulator
+    # stopped again. The sections not run are written into the table as `not run` with the reason, so the table names them.
     one_image() {
         prof=${1:-api37}
         secs=$2
+        skipped_secs=${3:-}
+        skipped_why=${4:-}
         results="$tmp/results-$prof"
         : >"$results"
         echo "e2e $SECTION: ==== image $prof: $secs ===="
@@ -398,6 +420,10 @@ e2e $SECTION: $prof: FAIL (the emulator did not boot)"
                 printf 'result\t%s\t%s\t%s\t%s\n' "$sec" "the section reported a result" FAIL "it ended with status 0 and printed no result line" >>"$results"
             fi
         done
+        for sec in $skipped_secs; do
+            echo "e2e $SECTION: [$prof] ---- section $sec: not run ($skipped_why) ----"
+            printf 'result\t%s\t%s\t%s\t%s\n' "$sec" "the section on this image" not-run "$skipped_why" >>"$results"
+        done
         echo "e2e $SECTION: [$prof] ---- table ----"
         sh scripts/android-e2e-summary.sh <"$results"
         status=$?
@@ -412,8 +438,8 @@ e2e $SECTION: $prof: ${last#e2e summary: }"
     }
     if [ "$SECTION" = matrix ]; then
         one_image api37 "$ALL_SECTIONS"
-        one_image api31 'tracer service vault pagesize'
-        one_image 16k 'tracer service pagesize'
+        one_image api31 'floor vault' 'tracer service pagesize' 'WebView 91 is below the floor'
+        one_image 16k 'floor tracer service pagesize'
         echo "e2e matrix: result per image:$final_lines"
     else
         one_image "${PROFILE:-api37}" "$ALL_SECTIONS"
@@ -606,7 +632,8 @@ if [ "$(adbd shell getprop ro.build.version.sdk | tr -d '\r')" -ge 33 ]; then
     adbd shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS || die "the notification permission could not be granted"
 fi
 
-if [ "$SECTION" != vault ] && [ "$SECTION" != tls ] && [ "$SECTION" != handover ] && [ "$SECTION" != clipboard ] && [ "$SECTION" != ssh ]; then
+if [ "$SECTION" != vault ] && [ "$SECTION" != tls ] && [ "$SECTION" != handover ] && [ "$SECTION" != clipboard ] && [ "$SECTION" != ssh ] \
+    && [ "$SECTION" != floor ]; then
 # 2. start the app and wait for its window
 # The touch section reads the page through uiautomator. A WebView hands its content to the accessibility tree only when it is asked to,
 # which this debug-image-only file does for the next start of the WebView (the file is read because the image is a userdebug build;
@@ -766,6 +793,143 @@ if [ "$SECTION" = pagesize ]; then
     else
         check "the app's process executes code mapped from the APK (the library)" bad "no executable mapping of base.apk in /proc/$pid/maps (read with run-as)"
     fi
+fi
+
+if [ "$SECTION" = floor ]; then
+    notrun=0
+    # The floor the page's boot script holds. The APK carries the built copy of this file; the unit tests hold the two to one number.
+    floor=$(sed -n 's/^ *var FLOOR = \([0-9][0-9]*\);.*/\1/p' app/src/floor.ts | head -n 1)
+    [ -n "$floor" ] || die "app/src/floor.ts declares no FLOOR"
+    command -v node >/dev/null 2>&1 || die "node is missing on the Mac: the page is read through the WebView's DevTools socket with it"
+    echo "e2e floor: the boot check holds Android System WebView $floor or later"
+    echo "e2e floor: webview $(adbd shell dumpsys webviewupdate | tr -d '\r' | grep -E 'Current WebView package|Current WebView provider' | head -n 1 | sed 's/^ *//')"
+    # The app and its window; no shell is waited for, because below the floor the application never starts one. The start is tried
+    # again after a broken pipe, as in the other sections.
+    start_tries=0
+    until adbd shell am start -W -n "$PKG/$ACTIVITY" >"$tmp/start.txt" 2>&1 && ! grep -qE 'Failure calling service|Error type|Exception' "$tmp/start.txt"; do
+        start_tries=$((start_tries + 1))
+        [ "$start_tries" -lt 3 ] || die "the activity did not start: $(cat "$tmp/start.txt")"
+        sleep 5
+    done
+    waited=0
+    focused=
+    while [ "$waited" -lt 90 ]; do
+        pid=$(adbd shell pidof "$PKG" | tr -d '\r')
+        if [ -n "$pid" ] && adbd shell dumpsys window 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp' | grep -q "$PKG"; then
+            focused=1
+            break
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+    [ -n "$focused" ] || die "the app has no process or no focused window after 90 s"
+    check "the app's process $pid exists and its window has the focus" ok
+    # The WebView's DevTools socket appears when the WebView is made; the forward is made in this shell, so the clean-up knows its port.
+    waited=0
+    sock=
+    while [ "$waited" -lt 30 ]; do
+        sock=$(adbd shell cat /proc/net/unix | tr -d '\r' | grep -o "webview_devtools_remote_$pid" | head -n 1)
+        [ -n "$sock" ] && break
+        sleep 1
+        waited=$((waited + 1))
+    done
+    [ -n "$sock" ] || die "no DevTools socket of the app's WebView (pid $pid) after 30 s"
+    devtools_port=$(adbd forward tcp:0 "localabstract:$sock" | tr -d '\r')
+    case "$devtools_port" in "" | *[!0-9]*) devtools_port=; die "adb forward gave no port for the WebView's DevTools socket" ;; esac
+    # The page, read until it has decided: the notice is drawn or the application drew its chrome (60 s at most). The expression is
+    # written for the oldest WebView it meets (no optional chaining). Eight lines: the state, the version the user agent names (0 for
+    # none), the label, the two lines of the notice, how many /main.js scripts were inserted, whether the application's root is
+    # there, and whether the application drew its chrome (the phone's top strip or the window bar's content).
+    cat >"$tmp/floor.mjs" <<'JS'
+const port = process.argv[2];
+const expr = `(function () {
+  var text = function (s) { var e = document.querySelector(s); return e ? e.textContent : ""; };
+  var lines = Array.prototype.map.call(document.querySelectorAll(".floor-line"), function (e) { return e.textContent; });
+  var bar = document.getElementById("bar");
+  var m = /\\bChrome\\/(\\d+)\\./.exec(navigator.userAgent);
+  return JSON.stringify({ version: m ? Number(m[1]) : 0, label: text(".floor-label"), lines: lines,
+    main: document.querySelectorAll('script[src="/main.js"]').length, app: document.getElementById("app") ? 1 : 0,
+    chrome: (document.getElementById("phone-top") || (bar && bar.children.length > 0)) ? 1 : 0 });
+})()`;
+const deadline = Date.now() + 60000;
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+function evaluate(url) {
+  return new Promise((resolve) => {
+    const ws = new WebSocket(url);
+    const timer = setTimeout(() => { try { ws.close(); } catch {} resolve(null); }, 10000);
+    ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression: expr, returnByValue: true } }));
+    ws.onerror = () => { clearTimeout(timer); resolve(null); };
+    ws.onmessage = (m) => {
+      const d = JSON.parse(m.data);
+      if (d.id !== 1) return;
+      clearTimeout(timer);
+      ws.close();
+      const v = d.result && d.result.result && d.result.result.value;
+      resolve(v ? JSON.parse(v) : null);
+    };
+  });
+}
+let last = null;
+while (Date.now() < deadline) {
+  try {
+    const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+    const page = list.find((t) => t.type === "page" && t.webSocketDebuggerUrl);
+    if (page) last = await evaluate(page.webSocketDebuggerUrl);
+  } catch {}
+  if (last && (last.label || last.chrome)) break;
+  await pause(1000);
+}
+if (!last) { console.log("none"); process.exit(1); }
+const state = last.label ? "notice" : last.chrome ? "app" : "none";
+const one = (s) => String(s || "").replace(/\s+/g, " ").trim();
+console.log([state, last.version, one(last.label), one(last.lines[0]), one(last.lines[1]), last.main, last.app, last.chrome].join("\n"));
+JS
+    node "$tmp/floor.mjs" "$devtools_port" >"$tmp/floor.txt" 2>"$tmp/floor.err"
+    line_of() { sed -n "${1}p" "$tmp/floor.txt"; }
+    state=$(line_of 1)
+    version=$(line_of 2)
+    label=$(line_of 3)
+    need=$(line_of 4)
+    update=$(line_of 5)
+    mains=$(line_of 6)
+    root=$(line_of 7)
+    chrome=$(line_of 8)
+    echo "e2e floor: the page says: state '$state', WebView $version, label '$label', main.js scripts $mains, root $root, chrome $chrome"
+    case "$version" in "" | *[!0-9]*) version= ;; esac
+    if [ -z "$version" ] || [ "$state" = none ] || [ -z "$state" ]; then
+        die "the page could not be read through the DevTools socket within 60 s: $(head -c 300 "$tmp/floor.err") $(head -c 200 "$tmp/floor.txt")"
+    elif [ "$version" -eq 0 ]; then
+        echo "e2e floor: not run floor (the WebView names no version in its user agent; the boot check then decides by its feature tests alone)"
+        report "$SECTION" "floor" not-run "the WebView names no version in its user agent; the boot check then decides by its feature tests alone"
+        notrun=$((notrun + 1))
+    elif [ "$version" -lt "$floor" ]; then
+        echo "e2e floor: WebView $version is below the floor $floor: the notice is expected and nothing of the application"
+        case "$label" in
+            *"Web view too old"*) check "floor-notice: the page shows the label 'Web view too old' (WebView $version, below the floor $floor)" ok ;;
+            *) check "floor-notice: the page shows the label 'Web view too old'" bad "state '$state', label '$label'" ;;
+        esac
+        want_need="holzWave needs Android System WebView $floor or later. This phone has version $version."
+        [ "$need" = "$want_need" ] && check "floor-versions: the notice names the floor and the WebView's version: '$need'" ok \
+            || check "floor-versions: the notice names the floor and the WebView's version" bad "wanted '$want_need', got '$need'"
+        want_update="Update Android System WebView in the Play Store, then open holzWave again."
+        [ "$update" = "$want_update" ] && check "floor-update: the notice says how to update the WebView" ok \
+            || check "floor-update: the notice says how to update the WebView" bad "got '$update'"
+        [ "$mains" = 0 ] && [ "$root" = 0 ] && [ "$chrome" = 0 ] \
+            && check "floor-no-app: the application script /main.js was not loaded, its root is gone and it drew nothing" ok \
+            || check "floor-no-app: the application script /main.js was not loaded" bad "main.js scripts $mains, root $root, chrome $chrome"
+        sleep 5
+        if as_app ps -A | grep -qw sh; then
+            check "floor-no-shell: no shell of the app runs below the floor" bad "the app has a shell process"
+        else
+            check "floor-no-shell: no shell of the app runs below the floor" ok
+        fi
+    else
+        echo "e2e floor: WebView $version is at or above the floor $floor: the application is expected and no notice"
+        [ "$state" = app ] && [ "$mains" = 1 ] && [ "$root" = 1 ] && [ -z "$label" ] \
+            && check "floor-app: the application runs (WebView $version, at or above the floor $floor): /main.js loaded, the chrome drawn, no notice" ok \
+            || check "floor-app: the application runs at or above the floor" bad "state '$state', main.js scripts $mains, root $root, label '$label'"
+    fi
+    adbd forward --remove "tcp:$devtools_port" >/dev/null 2>&1 && devtools_port=
 fi
 
 if [ "$SECTION" = touch ]; then

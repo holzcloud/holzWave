@@ -714,17 +714,17 @@ runner_run() { # <extra env> <args...>
   EXTRA=
 }
 none_running() { [ ! -f "$c/state/up" ] && ! pgrep -f 'sleep 4714' >/dev/null 2>&1; }
-ALL9="tracer service vault tls handover clipboard touch ssh pagesize"
+ALL10="floor tracer service vault tls handover clipboard touch ssh pagesize"
 runner_case
 runner_run "" all
 order=$(awk '{ printf "%s ", $2 }' "$c/order.log")
-if [ "$rc" -eq 0 ] && [ "$order" = "$ALL9 " ] && echo "$out" | tail -n 1 | grep -qx 'e2e all: ok'; then
-  ok "all runs tracer, service, vault, tls, handover, clipboard, touch, ssh, pagesize in that order and ends ok"
+if [ "$rc" -eq 0 ] && [ "$order" = "$ALL10 " ] && echo "$out" | tail -n 1 | grep -qx 'e2e all: ok'; then
+  ok "all runs floor, tracer, service, vault, tls, handover, clipboard, touch, ssh, pagesize in that order and ends ok"
 else
   bad "all (rc $rc, order '$order'): $(echo "$out" | tail -n 8)"
 fi
-if echo "$out" | grep -q '^total  *9  *1  *0$' && echo "$out" | grep -q 'vault: a check -- no | pipe' && echo "$out" | grep -q 'e2e summary: ok, not run: 1'; then
-  ok "all prints one table: nine sections, the not run named with its reason (and counted)"
+if echo "$out" | grep -q '^total  *10  *1  *0$' && echo "$out" | grep -q 'vault: a check -- no | pipe' && echo "$out" | grep -q 'e2e summary: ok, not run: 1'; then
+  ok "all prints one table: ten sections, the not run named with its reason (and counted)"
 else
   bad "the table of all: $(echo "$out" | grep -A14 'table')"
 fi
@@ -733,24 +733,30 @@ runner_case
 runner_run "" matrix
 order=$(awk '{ printf "%s:%s ", $1, $2 }' "$c/order.log")
 want=""
-for sec in $ALL9; do want="${want}holzwave-arm64:$sec "; done
-for sec in tracer service vault pagesize; do want="${want}holzwave-arm64-api31:$sec "; done
-for sec in tracer service pagesize; do want="${want}holzwave-arm64-16k:$sec "; done
+for sec in $ALL10; do want="${want}holzwave-arm64:$sec "; done
+for sec in floor vault; do want="${want}holzwave-arm64-api31:$sec "; done
+for sec in floor tracer service pagesize; do want="${want}holzwave-arm64-16k:$sec "; done
 if [ "$rc" -eq 0 ] && [ "$order" = "$want" ]; then
-  ok "matrix runs all on the newest image, then tracer service vault pagesize on Android 12, then tracer service pagesize on the 16 KB image"
+  ok "matrix runs all on the newest image, then floor and vault on Android 12 (its WebView is below the floor), then floor tracer service pagesize on the 16 KB image"
 else
   bad "matrix (rc $rc): order '$order'"
 fi
 [ "$(echo "$out" | grep -c '^section  *ok  *not run  *FAIL$')" -eq 3 ] && ok "matrix prints one table per image" || bad "tables: $(echo "$out" | grep -c '^section')"
-if echo "$out" | grep -q '^e2e matrix: holzwave-arm64\|^e2e matrix: api37: ok, not run: 1' && echo "$out" | grep -q '^e2e matrix: api31: ok, not run: 1' && echo "$out" | grep -q '^e2e matrix: 16k: ok, not run: 0'; then
+if echo "$out" | grep -q '^e2e matrix: holzwave-arm64\|^e2e matrix: api37: ok, not run: 1' && echo "$out" | grep -q '^e2e matrix: api31: ok, not run: 4' && echo "$out" | grep -q '^e2e matrix: 16k: ok, not run: 0'; then
   ok "matrix ends with one result line per image"
 else
   bad "the final lines: $(echo "$out" | tail -n 6)"
 fi
+missing_reason=
+for sec in tracer service pagesize; do
+  echo "$out" | grep -q "^  $sec: the section on this image -- WebView 91 is below the floor$" || missing_reason="$missing_reason $sec"
+done
+[ -z "$missing_reason" ] && ok "the Android 12 table lists tracer, service and pagesize as not run because WebView 91 is below the floor" \
+  || bad "the Android 12 table does not name as not run:$missing_reason"
 [ "$(grep -c '^adb -s emulator-5554 emu kill' "$LOG")" -eq 3 ] && none_running && ok "matrix starts three emulators, one at a time, and stops each of them" \
   || { bad "emulators started/stopped: kills $(grep -c 'emu kill' "$LOG")"; pkill -f 'sleep 4714' 2>/dev/null; }
 runner_case
-runner_run "FAKE_FAIL=holzwave-arm64-api31:service" matrix
+runner_run "FAKE_FAIL=holzwave-arm64-api31:vault" matrix
 order=$(awk '{ printf "%s:%s ", $1, $2 }' "$c/order.log")
 case "$order" in *"holzwave-arm64-16k:pagesize "*) later=yes ;; *) later=no ;; esac
 if [ "$rc" -eq 1 ] && [ "$later" = yes ] && echo "$out" | grep -q '^e2e matrix: api31: FAIL: 1' && echo "$out" | grep -q '^e2e matrix: 16k: ok' && none_running; then

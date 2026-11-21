@@ -765,7 +765,7 @@ image at a time and ends with one table per image. **Only one full run of the ma
   driver now drives again when the dialog is still in front, and it cannot be said that the retry made it pass.
 - **Android 12 (API 31, default image, WebView 91):** tracer 6 ok, service 20 ok and 3 not run, vault 22, page size 5. Total 53 ok, 3 not
   run. These results were recorded before the WebView floor was set; WebView 91 is below the floor (125), so with the floor the app is
-  meant to show only its notice on this image. The hand-over, clipboard and TLS sections were run on Android 12 as part of their own runs and passed there; the closing matrix
+  meant to show only its notice on this image, which was not run. The hand-over, clipboard and TLS sections were run on Android 12 as part of their own runs and passed there; the closing matrix
   runs them on the newest image only.
 - **16 KB page image (API 37, Google APIs, page size 16384):** tracer 6 ok, service 25, page size 5. Total 36 ok. Every mapping of the
   app's library is aligned to 16384 bytes.

@@ -16,7 +16,8 @@ here costs money. The toolchain, the SDK, the NDK, the emulator and the system i
 > **The app needs Android System WebView 125 or later.** Android updates the WebView through the Play Store, apart from the Android
 > version, and the minimum Android version stays 12 (API 31). On an older WebView the app shows only the notice `Web view too old`
 > and nothing else runs ([the WebView floor](#the-webview-floor)). The Android 12 emulator image has WebView 91, which is below the
-> floor: the runs on that image that this guide reports used the app from before the floor was set.
+> floor: the runs on that image that this guide reports used the app from before the floor was set. The notice on the Android 12
+> image is not run: the app with the boot check has not been built for Android yet.
 
 Contents: [What to install](#what-to-install-all-free) · [arm64 only](#arm64-only-and-why) · [The WebView floor](#the-webview-floor) ·
 [Check it](#check-it) ·
@@ -105,8 +106,9 @@ holds the boot script, this guide, the README, the status page and the store des
 
 The floor was set after the emulator runs of this guide. The Android 12 image has WebView 91, which is below the floor: the runs on
 it used the app from before the floor was set, and on that WebView the app's Connections view threw `Object.hasOwn is not a
-function`. With the floor in place, that image can only show the notice. The notice and the floor have never run on a real phone,
-and no WebView between 91 and 125 was tried.
+function`. With the floor in place, that image can only show the notice, and the emulator gate checks the notice there (the
+`floor` section below). The notice on the Android 12 image is not run: the app with the boot check has not been built for Android yet. The notice and the floor have never run on a real
+phone, and no WebView between 91 and 125 was tried.
 
 ## Check it
 
@@ -246,10 +248,13 @@ sh scripts/android-e2e.sh all [profile]   # every section below on one image
 sh scripts/android-e2e.sh matrix          # the three images, one emulator at a time
 ```
 
-`all` runs the sections `tracer`, `service`, `vault`, `tls`, `handover`, `clipboard`, `touch`, `ssh` and `pagesize` in that order on the
-emulator that is up (or on one it starts for the profile and stops again). It builds the debug APK once. `matrix` runs `all` on the
-newest image (`api37`), then `tracer service vault pagesize` on Android 12 (`api31`), then `tracer service pagesize` on the 16 KB
-page image (`16k`), and stops each emulator, and waits until it has left the list of devices, before the next starts. Each section is
+`all` runs the sections `floor`, `tracer`, `service`, `vault`, `tls`, `handover`, `clipboard`, `touch`, `ssh` and `pagesize` in that order
+on the emulator that is up (or on one it starts for the profile and stops again). It builds the debug APK once. `matrix` runs `all` on
+the newest image (`api37`), then `floor vault` on Android 12 (`api31`), then `floor tracer service pagesize` on the 16 KB page image
+(`16k`), and stops each emulator, and waits until it has left the list of devices, before the next starts. The WebView of the Android
+12 image (91) is below the floor, so the app shows only its notice there: `floor` checks the notice, `vault` runs because its
+self-test is started by intents and needs no page, and `tracer`, `service` and `pagesize`, which wait for the shell that the page
+starts, are listed in that image's table as `not run: WebView 91 is below the floor`. Each section is
 a process of its own; the run ends with **one table per image**: the sections, how many checks were `ok`, `not run` and `FAIL`, every
 check that was **not run** with its reason, and every failure with its reason. A check that could not be made is `not run`, counted on
 its own and named: it is never `ok`, and a section that ends with a failure status and no result line is a `FAIL`. Exit 0 means no
@@ -280,6 +285,14 @@ copied reached the shell). Three checks are reported as **not run**, with their 
 input command could not make the page see a hardware keyboard; the page's unit tests hold the rule), the pinch (the input command has no
 two-finger gesture), and text composed by a soft keyboard (`input text` sends key events; Gboard is a real-device row).
 
+**The `floor` section.** It starts the app, waits for its window (not for a shell) and reads the page through the WebView's DevTools
+socket (the debug build is debuggable), as the touch section reads the insets. It compares the WebView's version, as its user agent
+names it, with `FLOOR` in `app/src/floor.ts`. Below the floor it requires the notice: the label `Web view too old`, the line
+`holzWave needs Android System WebView 125 or later. This phone has version 91.` (with the image's own version), the line to update
+the WebView, no `/main.js` inserted, nothing of the app drawn, and no shell of the app. At or above the floor it requires the app to
+run: `/main.js` inserted, the app's chrome drawn and no notice. A user agent with no version is `not run`. This section has not run
+on any image yet: it was written after the last emulator runs, and the app with the boot check has not been built for Android yet.
+
 **The `pagesize` section.** It reads the page size of the image (`getconf PAGE_SIZE`) and checks, from `/proc/<pid>/maps`, that the
 app's native library is mapped from the APK with every mapping aligned to the page size and the `base.apk` mapped executable. On the 16 KB image
 the page size is 16384, on the other two 4096.
@@ -302,7 +315,8 @@ A sixth full run was made by `sh scripts/android-gate.sh --emulator` after the f
 Two things the Android 12 image showed. Both are fixed, and both were checked on emulators only. Both runs used an app from
 before the WebView floor was set: the image's WebView 91 is below the floor, and on it that app's Connections view threw
 `Object.hasOwn is not a function` (seen later, when the view was opened in code; the phone layout gave no way to it). With the
-floor in place the app shows only its notice on this image, so the image now proves the notice and nothing else.
+floor in place the app is meant to show only its notice on this image, so the image can now prove the notice and nothing else. The
+notice on the Android 12 image is not run: the app with the boot check has not been built for Android yet.
 
 - **The page's bottom bar under the system buttons (fixed).** On that image the system starts with the three-button navigation bar,
   and its old WebView (91, below the floor that was set later) does not tell the page the height of that bar as a safe area, so the page's bottom bar (the tab row with the
@@ -715,6 +729,7 @@ registry paths of the form `/cargo-home/registry/...`; whether those stay the sa
 
 - A real phone with any WebView, an Android 12 device with an updated WebView (125 or later, the only way the app runs on Android
   12 now), and any WebView between 91 and the floor (125): the floor and its notice were never seen on one.
+- The notice of the boot check on the Android 12 emulator image, and the `floor` section on any image: not run: the app with the boot check has not been built for Android yet.
 - Any real phone or tablet: the soft keyboard and hardware keyboards, biometrics and the hardware keystore, background kills, the
   limit on background processes, real storage providers, mobile networks, touch feel, the WebView version of a phone, and the system
   shell of a phone maker.
@@ -749,7 +764,8 @@ unsigned. The whole workspace test run, the page tests and the stand-in tests of
 never made the page see a hardware keyboard; unit tests hold the rule), the two-finger pinch (the input command has no two-finger
 gesture), text composed by a soft keyboard (the input command sends key events), the foreground service type `specialUse` on Android 12
 (Android reads it from Android 14) and the notification permission that was revoked, and its system dialog, on Android 12 (they start
-with Android 13). The app switcher picture was looked at on Android 17 and Android 12 only (below), never on a phone.
+with Android 13), and the notice of the boot check on the Android 12 image with the `floor` section (not run: the app with the boot check has not been built for Android yet). The app switcher
+picture was looked at on Android 17 and Android 12 only (below), never on a phone.
 
 **The app switcher picture while the vault is protected.** On Android 13 and later the app hides it whenever the app is not in
 front, locked or unlocked, and the emulator image of Android 17 showed a blank placeholder in place of the app's picture. Screenshots
