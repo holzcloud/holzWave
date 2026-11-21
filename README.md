@@ -20,8 +20,9 @@ Nextcloud or your own holzWave server, and an AI chat that sees your terminal on
 > **Beta preview.** holzWave is at `0.0.1-beta3`: a preview build. The Windows installer and the macOS app are unsigned (no Authenticode, no
 > Developer ID, no notarisation). The Linux packages can carry a minisign signature, but none of the releases made so far carries one
 > ([what is signed and what is not](docs/signing.md)).
-> The author has run it on macOS (Apple Silicon) and Windows. `0.0.1-beta3` has no Linux packages; the Linux packages of
-> `0.0.1-beta2` were built on a GitHub runner and were not started on a Linux desktop (earlier alphas and betas were run on Linux). The window in the images below is the
+> The author has run it on macOS (Apple Silicon) and Windows. The Linux x86_64 packages of `0.0.1-beta3` were built on a GitHub
+> runner, its first Linux arm64 packages in an arm64 container on the Mac; none of them was started on a Linux desktop or on ARM
+> hardware by the author (earlier alphas and betas were run on Linux). The window in the images below is the
 > design for the release; the table [What works today](#what-works-today) says what is built and what is tested.
 > The own window bar of Windows and Linux has never been seen on a real Windows or Linux window ([docs/status.md](docs/status.md)).
 >
@@ -59,7 +60,7 @@ Every [release](https://github.com/holzcloud/holzWave/releases) carries the pack
   checked a signature on a real distribution; the scripts were tested with stand-ins and once with a throwaway key in a container.
 
 The Windows installer is built on a Mac as a GNU-ABI cross build (not the MSVC build); the author ran earlier ones, not the one of
-`0.0.1-beta3`. `0.0.1-beta3` has no Linux packages. The Linux packages of `0.0.1-beta2` were built once on a GitHub runner (Ubuntu 24.04, amd64, in the repository's build container; a manual workflow) because Zig 0.17
+`0.0.1-beta3`. The Linux x86_64 packages of `0.0.1-beta2` and `0.0.1-beta3` were built on a GitHub runner (Ubuntu 24.04, amd64, in the repository's build container; a manual workflow) because Zig 0.17
 crashes in the Mac's emulated container; they were not started on a Linux desktop. Reports of what breaks are the point of the preview.
 
 ## Install (server, Docker or Kubernetes)
