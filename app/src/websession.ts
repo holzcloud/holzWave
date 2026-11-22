@@ -234,8 +234,11 @@ export function initWebSession(onChange: () => void): Promise<void> {
       known = true;
       const next = fromInfo(model, info, Date.now());
       setModel(storeFromEvent ? { ...next, store: model.store } : next);
-      // The person is here and the page knows it: the request that came with the address is theirs to decide.
-      if (deviceCode !== null && info.state === "signed_in") void openDeviceCode();
+      // The person is here and the page knows it: the request that came with the address is theirs to decide. Any live session
+      // may decide it, whether the secrets are open (`signed_in`) or not (`locked`: single sign-on, a passkey without PRF, a password
+      // that does not key the store). Approving a device does not read or open the secret store, and the server takes the lookup,
+      // the approval and the refusal from a locked session as well.
+      if (deviceCode !== null && info.state !== "anonymous") void openDeviceCode();
     },
     () => {
       // A failed lookup leaves the page as it is.

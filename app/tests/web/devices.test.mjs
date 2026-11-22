@@ -113,6 +113,74 @@ await runTest("devices", {}, async ({ harness, open }) => {
     equal(new URL(p.url()).hash, "", "a malformed code is taken out of the address as well");
     await p.close();
   }
+  // ---- a person whose secrets stay locked decides a device from the link as well -------------------------------------------------------
+  // Approving a device does not read or open the secret store, and the server takes lookup, approve and deny from any live session.
+  const sessionState = async (opened) => (await (await opened.context.request.get(`${harness.origin}/api/session`)).json()).state;
+  {
+    const locked = await harness.account({ role: "member", name: "dv-lock-a", locked: true });
+    const context = await open();
+    const signed = await context.context.newPage();
+    await signIn(signed, harness, locked);
+    equal(await sessionState(context), "locked", "the person's session says locked: the secrets stay closed after the sign-in");
+    const grant = await native.start("Locked laptop", "linux");
+    equal(grant.status, 200, "a grant for the person whose secrets are locked");
+    // The link is loaded as a fresh document of a page that is signed in (what Open again in the app does).
+    const fresh = await context.context.newPage();
+    const seenRequests = [];
+    fresh.on("request", (r) => seenRequests.push(`${r.method()} ${new URL(r.url()).pathname}`));
+    await fresh.goto(`${harness.origin}/#device=${grant.userCode}`);
+    const d = fresh.getByRole("dialog", { name: "Authorize device" });
+    await d.waitFor({ timeout: 8_000 });
+    await poll(async () => ((await d.locator(".dev-kv").count()) > 0 ? true : undefined), "a locked person's dialog shows who asks");
+    const rows = await d.locator(".dev-kv").evaluate((dl) => Array.from(dl.children).map((c) => c.textContent));
+    equal(`${rows[0]} | ${rows[1]} | ${rows[2]} | ${rows[3]} | ${rows[4]}`, "Device | Locked laptop | Platform | Linux | Address", "the rows of the dialog for a locked person");
+    equal((await d.locator(".dev-code").innerText()).trim(), grant.userCode, "the code to compare with the app");
+    check(seenRequests.includes("POST /api/device/lookup"), `the page looked the code up (${seenRequests.join(", ")})`);
+    equal(new URL(fresh.url()).hash, "", "the fragment is not in the address bar");
+    equal(await sessionState(context), "locked", "the secrets are still locked: approving a device opened nothing");
+    await d.getByRole("button", { name: "Approve" }).click();
+    await poll(async () => ((await d.locator(".dev-status").innerText()).includes("Device approved.") ? true : undefined), "the dialog says Device approved. for a locked person");
+    const got = await native.poll(grant.deviceCode);
+    equal(got.state, "approved", "the app of a locked person gets its token");
+    check(/^hwd_[A-Za-z0-9_-]{43}$/.test(got.token ?? ""), "the token has the form of the record");
+    equal((await native.me(got.token)).status, 200, "the token signs the device in");
+    equal(await sessionState(context), "locked", "the secrets are still locked after the approval");
+    // The device ends its own sign-in, so the lists counted below hold what they held before this block.
+    equal((await native.call("DELETE", "/api/device/me", { token: got.token })).status, 204, "the device ends its own sign-in");
+    context.expectClean("the context of the locked person who was signed in");
+  }
+  {
+    // The first sign-in from the link: the sign-in page hands the code to the main page, which sees a locked session.
+    const locked = await harness.account({ role: "member", name: "dv-lock-b", locked: true });
+    const context = await open();
+    const page = await context.context.newPage();
+    const grant = await native.start("Locked phone", "android");
+    await signIn(page, harness, locked, `/#device=${grant.userCode}`);
+    equal(await sessionState(context), "locked", "the session of the first sign-in says locked");
+    const d = page.getByRole("dialog", { name: "Authorize device" });
+    await d.waitFor({ timeout: 8_000 });
+    await poll(async () => ((await d.locator(".dev-kv").count()) > 0 ? true : undefined), "the dialog shows who asks after the first sign-in of a locked person");
+    equal(new URL(page.url()).hash, "", "the fragment is not in the address bar after the first sign-in");
+    await d.getByRole("button", { name: "Deny" }).click();
+    await poll(async () => ((await d.locator(".dev-status").innerText()).includes("Request denied.") ? true : undefined), "the dialog says Request denied.");
+    const denied = await native.poll(grant.deviceCode);
+    equal(denied.state, "denied", "the app gets its refusal");
+    equal(denied.token, undefined, "a denied request has no token");
+    context.expectClean("the context of the locked person who signed in from the link");
+  }
+  {
+    // Control: nobody who is not signed in is asked anything.
+    const grant = await native.start("Nobody's laptop", "linux");
+    const context = await open();
+    const page = await context.context.newPage();
+    await page.goto(`${harness.origin}/#device=${grant.userCode}`);
+    await page.waitForSelector(".lg-box");
+    await page.waitForTimeout(500);
+    equal(await page.getByRole("dialog", { name: "Authorize device" }).count(), 0, "a page that is not signed in opens no dialog");
+    equal((await native.poll(grant.deviceCode)).state, "pending", "and nothing was decided");
+    context.expectClean("the context of the anonymous page");
+  }
+
   // ---- the lists: a person sees and ends their own devices only, an administrator everybody's -------------------------------------------
   const ana = await harness.account({ role: "member", name: "dv-ana" });
   const ben = await harness.account({ role: "member", name: "dv-ben" });
