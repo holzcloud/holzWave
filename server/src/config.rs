@@ -509,10 +509,13 @@ pub struct Oidc {
     pub client_id: String,
     /// The file that holds the client secret; the secret is never a value in this file.
     pub client_secret_file: PathBuf,
-    /// If not empty, only addresses at these domains may sign in.
+    /// The domains that admit a new identity: a verified e-mail address at one of them is enough. The two lists are joined by OR: a new
+    /// identity is admitted when its verified e-mail domain is in this list or it is in one of `allowed_groups`. With both lists empty
+    /// no new identity is admitted (the server says so at start). An identity linked earlier keeps signing in whatever the lists say.
     #[serde(default)]
     pub allowed_domains: Vec<String>,
-    /// If not empty, only members of these groups may sign in.
+    /// The groups that admit a new identity: being a member of one of them is enough. Joined with `allowed_domains` by OR; see there for
+    /// the two empty lists and for identities that are already linked.
     #[serde(default)]
     pub allowed_groups: Vec<String>,
     /// The claim that holds the groups; `groups` when not given.

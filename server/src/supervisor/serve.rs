@@ -35,7 +35,7 @@ use crate::auth::password::ArgonGate;
 use crate::auth::session::SessionManager;
 use crate::auth::signin::SignIn;
 use crate::clock::{Clock, SystemClock};
-use crate::config::{Auth, Prepared, Refusal, TlsSetup, Upload};
+use crate::config::{Auth, Oidc, Prepared, Refusal, TlsSetup, Upload};
 use crate::http::app::{App, AppInit, Edge, PublicOrigin, Shutdown, Timing};
 use crate::http::features::DeviceSettings;
 use crate::http::health::{self, Readiness};
@@ -350,6 +350,25 @@ fn certificates(prepared: &Prepared, clock: &Arc<dyn Clock>) -> Result<Certifica
     }
 }
 
+/// The name of the line at the start for a provider that admits no new person.
+const OIDC_ADMITS_NO_NEW_PEOPLE: &str = "serve.oidc_admits_no_new_people";
+
+/// The ids of the providers whose `allowed_domains` and `allowed_groups` are both empty, in the order of the configuration. A new
+/// identity is admitted by one list or the other, so such a provider admits no new person; an identity linked earlier still signs
+/// in, which is a setup of its own (new accounts frozen) and is not refused.
+fn oidc_admits_no_new_people(providers: &[Oidc]) -> Vec<&str> {
+    providers
+        .iter()
+        .filter(|provider| provider.allowed_domains.is_empty() && provider.allowed_groups.is_empty())
+        .map(|provider| provider.id.as_str())
+        .collect()
+}
+
+/// The fields of that line: the id of the provider and nothing else of its configuration (no issuer, client id or secret path).
+fn oidc_admits_no_new_people_fields(id: &str) -> [(&'static str, &str); 1] {
+    [("provider", id)]
+}
+
 /// The single sign-on service over the given client, or over the product's when there is none.
 fn single_sign_on(
     auth: &Auth,
@@ -386,6 +405,11 @@ fn single_sign_on(
         clock.clone(),
         http,
     )?;
+    // The server goes on, as it did before: a provider with both lists empty is a legitimate way to stop new accounts. It is said once
+    // per provider, so that an operator who left the lists out believing they were optional reads it in the log.
+    for id in oidc_admits_no_new_people(&auth.oidc) {
+        log::event(Level::Warn, OIDC_ADMITS_NO_NEW_PEOPLE, &oidc_admits_no_new_people_fields(id));
+    }
     Ok(Some(Arc::new(service)))
 }
 
@@ -608,4 +632,50 @@ pub async fn run(prepared: Prepared) -> Result<(), Refusal> {
     }
     running.trigger();
     running.join().await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::SystemTime;
+
+    use super::*;
+
+    fn provider(id: &str, domains: &[&str], groups: &[&str]) -> Oidc {
+        Oidc {
+            id: id.to_owned(),
+            name: "Company".to_owned(),
+            issuer: "https://idp.example.test".to_owned(),
+            client_id: "client-id-of-the-test".to_owned(),
+            client_secret_file: PathBuf::from("/run/secrets/the-secret-file-of-the-test"),
+            allowed_domains: domains.iter().map(|d| (*d).to_owned()).collect(),
+            allowed_groups: groups.iter().map(|g| (*g).to_owned()).collect(),
+            groups_claim: None,
+        }
+    }
+
+    #[test]
+    fn a_provider_with_both_lists_empty_is_named_once_and_one_with_either_list_is_not() {
+        let providers = [
+            provider("none", &[], &[]),
+            provider("by-domain", &["example.org"], &[]),
+            provider("by-group", &[], &["staff"]),
+            provider("both", &["example.org"], &["staff"]),
+            provider("also-none", &[], &[]),
+        ];
+        assert_eq!(oidc_admits_no_new_people(&providers), vec!["none", "also-none"], "in the order of the configuration, and no other");
+        assert!(oidc_admits_no_new_people(&providers[1..4]).is_empty(), "a list of either kind, or both, admits someone");
+        assert!(oidc_admits_no_new_people(&[]).is_empty());
+    }
+
+    #[test]
+    fn the_warning_line_names_the_provider_and_nothing_else_of_the_configuration() {
+        let configured = provider("corp", &[], &[]);
+        let line = log::line(SystemTime::UNIX_EPOCH, Level::Warn, OIDC_ADMITS_NO_NEW_PEOPLE, &oidc_admits_no_new_people_fields(&configured.id));
+        assert!(line.contains(" warn serve.oidc_admits_no_new_people provider=corp"), "{line}");
+        assert!(line.ends_with("provider=corp"), "no other field follows: {line}");
+        for secret in [&configured.issuer, &configured.client_id, &configured.client_secret_file.display().to_string(), &configured.name] {
+            assert!(!line.contains(secret.as_str()), "the line holds {secret}: {line}");
+        }
+    }
 }

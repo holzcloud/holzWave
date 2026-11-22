@@ -1393,12 +1393,16 @@ Each entry of `auth.oidc` has these keys:
 | `auth.oidc[].issuer` | none, required | an `https://` address | The issuer. The server fetches the provider's discovery document from it. |
 | `auth.oidc[].client_id` | none, required | not empty | The client id the provider gave the server. |
 | `auth.oidc[].client_secret_file` | none, required | a readable file | The file that holds the client secret. The secret is never a value in this file. |
-| `auth.oidc[].allowed_domains` | none | a list of domains | If not empty, only a verified e-mail address in one of these domains may sign in. |
-| `auth.oidc[].allowed_groups` | none | a list of groups | If not empty, only members of one of these groups may sign in. |
+| `auth.oidc[].allowed_domains` | none | a list of domains | Admits a new identity by its domain: a verified e-mail address in one of these domains is enough. Either list is enough, so the two are joined by OR. With both lists empty the provider admits no new person, and the server warns at start; people already linked keep signing in. |
+| `auth.oidc[].allowed_groups` | none | a list of groups | Admits a new identity by its group: being a member of one of these groups is enough. Joined with `allowed_domains` by OR, so one list is enough; see there for two empty lists. |
 | `auth.oidc[].groups_claim` | `groups` | a claim name | The claim of the ID token that holds the groups. |
 
 A person who signs in through a provider gets a member account the first time, and is matched by the issuer and the
 subject of the ID token, never by the e-mail address.
+The two lists decide only who gets a new account. A person who is already linked (the issuer and the subject of the ID token
+were seen before) keeps signing in after a list changes or is emptied, and a provider with both lists empty makes no new
+account at all; the server writes one warning line at start for each such provider and does not refuse to start, because
+emptying both lists is a way to stop new accounts while the linked people keep signing in.
 
 ### Examples
 
@@ -1567,8 +1571,8 @@ server believes their forwarded address and scheme.
 }
 ```
 
-One provider entry for the `auth.oidc` list of any of the files above. The client secret is in a file, and only people at
-the listed domain who belong to the listed group may sign in.
+One provider entry for the `auth.oidc` list of any of the files above. The client secret is in a file, and a new person is
+admitted at the listed domain or in the listed group.
 
 <!-- example: server/oidc.json -->
 ```json

@@ -179,8 +179,9 @@ Switch on at least one of `auth.passkey`, `auth.password_totp` and `auth.oidc`; 
      and note the issuer, the client id and the client secret.
   2. Put the client secret in a file the server user can read (one line, no other text) and mount it. The secret is never a value in the
      configuration.
-  3. Add an entry under `auth.oidc` (the example `server/oidc.json` in [config.md](config.md#examples)), with `allowed_domains`
-     or `allowed_groups` set so that not everyone at the provider gets in.
+  3. Add an entry under `auth.oidc` (the example `server/oidc.json` in [config.md](config.md#examples)), and set `allowed_domains`
+     or `allowed_groups`: either list admits a new person, and with both empty nobody new gets in (the server warns at start).
+     People who are already linked keep signing in whatever the lists say.
   4. Restart the server and look for the provider's button on the sign-in page.
 
   The first sign-in makes a member account, matched later by the issuer and the subject of the ID token and never by the e-mail

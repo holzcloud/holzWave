@@ -1002,6 +1002,41 @@ fn process_serve_refuses_an_unsafe_start_with_one_sentence_and_no_listener() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn process_serve_says_once_per_provider_that_admits_no_new_person_and_still_starts() {
+    let mut site = Site::new();
+    let port = free_port();
+    site.set("listen", json!(format!("127.0.0.1:{port}")));
+    let secret = site.scratch.write_file("oidc-secret", format!("{SECRET}\n").as_bytes(), 0o600);
+    let provider = |id: &str, lists: Value| {
+        let mut entry = json!({"id": id, "name": "Company", "issuer": ISSUER, "client_id": CLIENT_ID, "client_secret_file": secret});
+        entry.as_object_mut().expect("an object").extend(lists.as_object().expect("an object").clone());
+        entry
+    };
+    site.set(
+        "auth.oidc",
+        json!([
+            provider("frozen", json!({})),
+            provider("by-domain", json!({"allowed_domains": ["example.org"]})),
+            provider("by-group", json!({"allowed_groups": ["staff"]})),
+            provider("frozen-too", json!({"allowed_domains": [], "allowed_groups": []})),
+        ]),
+    );
+    // No refusal: the server starts and answers its health check.
+    let mut process = spawn_server(&site, true);
+    wait_healthy(&site, &mut process);
+    let _ = process.child.kill();
+    let _ = process.child.wait();
+    let all = process.stderr.lock().expect("lock").clone();
+    let lines: Vec<&str> = all.lines().filter(|line| line.contains("serve.oidc_admits_no_new_people")).collect();
+    assert_eq!(lines.len(), 2, "one line for each provider with both lists empty, and none for the others: {all}");
+    assert!(lines[0].contains(" warn ") && lines[0].ends_with("provider=frozen"), "{}", lines[0]);
+    assert!(lines[1].contains(" warn ") && lines[1].ends_with("provider=frozen-too"), "{}", lines[1]);
+    for secret_text in [ISSUER, CLIENT_ID, SECRET, "oidc-secret"] {
+        assert!(!all.contains(secret_text), "the log holds {secret_text}: {all}");
+    }
+}
+
 #[test]
 fn the_usage_text_names_serve() {
     let output = Command::new(env!("CARGO_BIN_EXE_holzwave-server")).env_clear().output().expect("the server runs");

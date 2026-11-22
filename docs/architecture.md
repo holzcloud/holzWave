@@ -1194,7 +1194,8 @@ the extension and `transport.compression` accepts only `off`. The proof is `serv
 Three methods can be switched on: passkeys (user verification required, discoverable credentials preferred, the PRF extension
 passed through when the browser returns it), a password with a six-digit code of an authenticator app, and any number of
 OpenID Connect providers (authorization code with PKCE, `state` and `nonce`, a strict check of the ID token, an account matched
-by issuer and subject and never by e-mail, `allowed_domains` and `allowed_groups` as the only gate). A server with no account
+by issuer and subject and never by e-mail, `allowed_domains` and `allowed_groups` as the only gate for a new identity: either list
+admits one, two empty lists admit none, and an identity linked earlier keeps signing in). A server with no account
 prints a one-time `hwb_` token on standard output at every start; it makes exactly one first administrator and expires after
 an hour. Administrators invite people with `hwi_` links that live seven days. A session is a 43-character token whose hash
 alone is stored; it ends after `sessions.idle` without input or `sessions.absolute` in total, and a change of a credential
