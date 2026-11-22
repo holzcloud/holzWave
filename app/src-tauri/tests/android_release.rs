@@ -826,8 +826,35 @@ fn backup_check_fails_on_bad_input() {
 
 const DEBUG_SOURCE_SET: &str = "app/src/debug/";
 
-/// Cleartext, and everything that allows it, exists only in the debug source set; there it is allowed to the emulator's alias
-/// of the host machine and to nothing else.
+/// The least number of hosts the copy of the verifier's revocation-list hosts holds (upstream's list has several hundred); a
+/// shorter list is a truncated copy.
+const CRL_HOSTS_MIN: usize = 50;
+
+/// Whether `host` is a plain DNS name with at least one dot: letters, digits and hyphens in labels, no wildcard, no IP literal
+/// (an IPv4 address has a numeric last label, an IPv6 one has a colon), and not a name of the machine itself.
+fn is_plain_dns_name(host: &str) -> bool {
+    if host.is_empty() || host.contains('*') || host.contains(':') || host == "localhost" || host.ends_with(".localhost") {
+        return false;
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() < 2 {
+        return false;
+    }
+    if labels.last().is_some_and(|last| last.chars().all(|c| c.is_ascii_digit())) {
+        return false;
+    }
+    labels.iter().all(|label| {
+        !label.is_empty()
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    })
+}
+
+/// Cleartext, and everything that allows it, is configured in two places only. The main source set has no network security
+/// config and no cleartext setting: the release gets the verifier component's own config through the manifest merge, which
+/// allows plain HTTP to the hosts of the certificate authorities' revocation lists. The debug source set replaces that config by
+/// a copy of it (same list) and adds one block for the emulator's alias of the host machine, without subdomains. Nothing else.
 fn cleartext_problems(files: &[(String, String)]) -> Vec<String> {
     let mut problems = Vec::new();
     for (path, text) in files {
@@ -856,6 +883,9 @@ fn cleartext_problems(files: &[(String, String)]) -> Vec<String> {
                 }
             }
         }
+        if !in_debug && path.ends_with("res/xml/network_security_config.xml") {
+            problems.push(format!("{path} is a network security config outside the debug source set: the release uses the one of the verifier component"));
+        }
         if !is_xml && text.contains("usesCleartextTraffic") {
             problems.push(format!("{path} mentions usesCleartextTraffic: cleartext is configured in the debug source set only"));
         }
@@ -869,7 +899,8 @@ fn cleartext_problems(files: &[(String, String)]) -> Vec<String> {
             }
         }
     }
-    // The debug source set: a manifest overlay names the config, and the config permits cleartext to 10.0.2.2 only.
+    // The debug source set: a manifest overlay names the config; the config permits cleartext to the revocation-list hosts and to
+    // 10.0.2.2 without subdomains, in two blocks, and refuses it by default.
     let overlay = files
         .iter()
         .find(|(path, _)| path == "app/src/debug/AndroidManifest.xml");
@@ -886,9 +917,9 @@ fn cleartext_problems(files: &[(String, String)]) -> Vec<String> {
                 problems.push(format!("the debug manifest names {named:?} as its network security config, not @xml/network_security_config"));
             }
             let all = tags(config);
-            let mut allowed_domains = Vec::new();
+            // The domains of every block that permits cleartext, as (host, includeSubdomains).
+            let mut permitting: Vec<Vec<(String, String)>> = Vec::new();
             let mut in_permitting = false;
-            let mut permitting_blocks = 0;
             for tag in &all {
                 match tag.name.as_str() {
                     "base-config" => {
@@ -900,23 +931,37 @@ fn cleartext_problems(files: &[(String, String)]) -> Vec<String> {
                     "domain-config" => {
                         in_permitting = tag.attr("cleartextTrafficPermitted") == Some("true");
                         if in_permitting {
-                            permitting_blocks += 1;
+                            permitting.push(Vec::new());
                         }
                     }
                     "domain" if in_permitting => {
-                        allowed_domains.push((
-                            tag.text.clone(),
-                            tag.attr("includeSubdomains").unwrap_or("false").to_owned(),
-                        ));
+                        if let Some(block) = permitting.last_mut() {
+                            block.push((tag.text.clone(), tag.attr("includeSubdomains").unwrap_or("false").to_owned()));
+                        }
                     }
                     _ => {}
                 }
             }
-            if permitting_blocks != 1 {
-                problems.push(format!("the debug network security config has {permitting_blocks} domain configs that permit cleartext, not one"));
+            if permitting.len() != 2 {
+                problems.push(format!("the debug network security config has {} domain configs that permit cleartext, not two (the revocation-list hosts and the emulator's alias)", permitting.len()));
             }
-            if allowed_domains != [("10.0.2.2".to_owned(), "false".to_owned())] {
-                problems.push(format!("cleartext is permitted to {allowed_domains:?}, not to exactly 10.0.2.2 without subdomains"));
+            let emulator = [("10.0.2.2".to_owned(), "false".to_owned())];
+            let emulator_blocks = permitting.iter().filter(|block| block.as_slice() == emulator).count();
+            if emulator_blocks != 1 {
+                problems.push(format!("{emulator_blocks} blocks permit cleartext to exactly 10.0.2.2 without subdomains, not one"));
+            }
+            for block in permitting.iter().filter(|block| block.as_slice() != emulator) {
+                if block.len() < CRL_HOSTS_MIN {
+                    problems.push(format!("a block that permits cleartext holds {} hosts: the revocation-list hosts are at least {CRL_HOSTS_MIN}", block.len()));
+                }
+                for (host, _) in block {
+                    if !is_plain_dns_name(host) {
+                        problems.push(format!("cleartext is permitted to {host:?}, which is not a plain DNS name of a revocation-list host (no IP literal, no wildcard, no machine name)"));
+                    }
+                    if host == "10.0.2.2" {
+                        problems.push("the emulator's alias is in the revocation-list block: it has a block of its own".into());
+                    }
+                }
             }
         }
         _ => problems.push(
@@ -927,8 +972,53 @@ fn cleartext_problems(files: &[(String, String)]) -> Vec<String> {
 }
 
 #[test]
-fn cleartext_exists_in_the_debug_source_set_only_and_only_to_the_emulator_host() {
+fn cleartext_exists_for_the_revocation_list_hosts_and_in_debug_for_the_emulator_host_only() {
     assert_none("cleartext", cleartext_problems(&project_text()));
+}
+
+/// The text of the emulator's block as the debug config writes it.
+const EMULATOR_BLOCK: &str = "  <domain-config cleartextTrafficPermitted=\"true\">\n    <domain includeSubdomains=\"false\">10.0.2.2</domain>\n  </domain-config>\n";
+
+/// The crate version that the header comment of the debug copy says it was copied from, and the problems with it: the comment
+/// names `rustls-platform-verifier-android <version>`, and the package of that name in the lock has that version.
+fn crl_copy_version_problems(config: &str, lock: &str) -> Vec<String> {
+    const MARKER: &str = "rustls-platform-verifier-android ";
+    let mut problems = Vec::new();
+    let Some(at) = config.find(MARKER) else {
+        return vec![format!("the debug network security config does not name {MARKER:?}<version> as the source of its list")];
+    };
+    let named: String = config[at + MARKER.len()..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '+')
+        .collect();
+    let named = named.trim_end_matches('.').to_owned();
+    let locked = lock_versions(lock, "rustls-platform-verifier-android");
+    match locked.as_slice() {
+        [one] if *one == named => {}
+        [one] => problems.push(format!("the copy of the revocation-list hosts names version {named:?} but Cargo.lock holds {one:?}: copy the list again from the component of the locked version")),
+        other => problems.push(format!("Cargo.lock holds {} packages named rustls-platform-verifier-android, not one", other.len())),
+    }
+    problems
+}
+
+#[test]
+fn the_debug_copy_of_the_crl_hosts_names_the_locked_verifier_version() {
+    let files = project_text();
+    let config = find(&files, "app/src/debug/res/xml/network_security_config.xml");
+    assert_none("the copy of the revocation-list hosts", crl_copy_version_problems(config, CARGO_LOCK));
+}
+
+#[test]
+fn the_copy_version_check_fails_on_bad_input() {
+    let lock = "[[package]]\nname = \"rustls-platform-verifier-android\"\nversion = \"0.2.0\"\n";
+    assert!(crl_copy_version_problems("<!-- a copy of rustls-platform-verifier-android 0.2.0 (the hosts) -->", lock).is_empty());
+    assert!(crl_copy_version_problems("<!-- a copy of rustls-platform-verifier-android 0.2.0. -->", lock).is_empty());
+    assert!(!crl_copy_version_problems("<!-- a copy of rustls-platform-verifier-android 0.2.1 -->", lock).is_empty(), "another version passed");
+    assert!(!crl_copy_version_problems("<!-- a copy of rustls-platform-verifier-android 0.2.00 -->", lock).is_empty());
+    assert!(!crl_copy_version_problems("<!-- a copy of the verifier's list -->", lock).is_empty(), "no version passed");
+    assert!(!crl_copy_version_problems("<!-- rustls-platform-verifier-android 0.2.0 -->", "").is_empty(), "a lock without the package passed");
+    let two = format!("{lock}{lock}");
+    assert!(!crl_copy_version_problems("<!-- rustls-platform-verifier-android 0.2.0 -->", &two).is_empty());
 }
 
 #[test]
@@ -969,41 +1059,34 @@ fn cleartext_check_fails_on_bad_input() {
         );
     }
     let config_text = find(&files, config).to_owned();
-    assert!(
-        !cleartext_problems(&with(
-            config,
-            config_text.replace("10.0.2.2", "192.168.1.5")
-        ))
-        .is_empty(),
-        "another host passed"
+    assert!(config_text.contains(EMULATOR_BLOCK), "the emulator's block is not written as the test expects");
+    let bad = |text: String| !cleartext_problems(&with(config, text)).is_empty();
+    // The revocation-list block: an IP literal, a wildcard, a machine name, a name without a dot and a truncated list fail.
+    assert!(bad(config_text.replace("abitabdv.crl.certum.pl", "192.168.1.5")), "an IP literal in the list passed");
+    assert!(bad(config_text.replace("abitabdv.crl.certum.pl", "10.0.2.2")), "the emulator's alias in the list passed");
+    assert!(bad(config_text.replace("abitabdv.crl.certum.pl", "*.certum.pl")), "a wildcard passed");
+    assert!(bad(config_text.replace("abitabdv.crl.certum.pl", "localhost")), "localhost passed");
+    assert!(bad(config_text.replace("abitabdv.crl.certum.pl", "intranet")), "a name without a dot passed");
+    assert!(bad(config_text.replace("abitabdv.crl.certum.pl", "::1")), "an IPv6 literal passed");
+    let truncated = format!(
+        "<network-security-config><base-config cleartextTrafficPermitted=\"false\" /><domain-config cleartextTrafficPermitted=\"true\"><domain includeSubdomains=\"true\">c.pki.goog</domain></domain-config>{EMULATOR_BLOCK}</network-security-config>"
     );
+    assert!(bad(truncated), "a truncated list passed");
+    // The emulator's block: missing, another address, with subdomains.
+    assert!(bad(config_text.replace(EMULATOR_BLOCK, "")), "a missing emulator block passed");
+    assert!(bad(config_text.replace("10.0.2.2", "192.168.1.5")), "another host in the emulator block passed");
+    assert!(bad(config_text.replace("includeSubdomains=\"false\">10.0.2.2", "includeSubdomains=\"true\">10.0.2.2")), "10.0.2.2 with subdomains passed");
+    // A third permitting block, in any shape.
     assert!(
-        !cleartext_problems(&with(
-            config,
-            config_text.replace("includeSubdomains=\"false\"", "includeSubdomains=\"true\"")
-        ))
-        .is_empty()
+        bad(config_text.replace("</network-security-config>", "<domain-config cleartextTrafficPermitted=\"true\"><domain includeSubdomains=\"true\">example.org</domain></domain-config></network-security-config>")),
+        "a third permitting block passed"
     );
-    assert!(!cleartext_problems(&with(config, config_text.replace("<domain-config cleartextTrafficPermitted=\"true\">", "<domain-config cleartextTrafficPermitted=\"true\"><domain includeSubdomains=\"true\">example.org</domain>"))).is_empty());
-    assert!(
-        !cleartext_problems(&with(
-            config,
-            config_text.replace(
-                "<base-config cleartextTrafficPermitted=\"false\" />",
-                "<base-config cleartextTrafficPermitted=\"true\" />"
-            )
-        ))
-        .is_empty(),
-        "a blanket base config passed"
-    );
+    assert!(bad(config_text.replace(
+        "<base-config cleartextTrafficPermitted=\"false\" />",
+        "<base-config cleartextTrafficPermitted=\"true\" />"
+    )), "a blanket base config passed");
     // No base config at all is fine: the default of this target SDK refuses cleartext.
-    assert!(
-        cleartext_problems(&with(
-            config,
-            config_text.replace("<base-config cleartextTrafficPermitted=\"false\" />", "")
-        ))
-        .is_empty()
-    );
+    assert!(!bad(config_text.replace("<base-config cleartextTrafficPermitted=\"false\" />", "")));
     let overlay_text = find(&files, overlay).to_owned();
     assert!(
         !cleartext_problems(&with(
@@ -1023,10 +1106,13 @@ fn cleartext_check_fails_on_bad_input() {
         .is_empty(),
         "a blanket allow in the debug overlay passed"
     );
-    // A release-side config file (any other source set) is refused.
+    // A release-side config file (any other source set) is refused, even one that refuses everything.
     let mut moved = files.clone();
     moved.push(("app/src/release/res/xml/network_security_config.xml".into(), "<network-security-config><base-config cleartextTrafficPermitted=\"true\" /></network-security-config>".into()));
     assert!(!cleartext_problems(&moved).is_empty());
+    let mut strict = files.clone();
+    strict.push(("app/src/main/res/xml/network_security_config.xml".into(), "<network-security-config><base-config cleartextTrafficPermitted=\"false\" /></network-security-config>".into()));
+    assert!(!cleartext_problems(&strict).is_empty(), "a config of our own in the main source set passed");
     // Without the debug files the check says so instead of passing.
     let none: Vec<_> = files
         .iter()

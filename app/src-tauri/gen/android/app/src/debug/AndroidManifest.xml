@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Debug build only: the emulator's tests reach the Mac over plain HTTP at the host alias 10.0.2.2, and nothing else.
-         The release build has neither this attribute nor the file. -->
+    <!-- Debug build only: names the network security config of this source set, which replaces the one of the verifier component
+         (same file name). It holds the same list of revocation-list hosts, plus the emulator's alias 10.0.2.2, which the
+         emulator's tests use to reach the Mac over plain HTTP. The release build has no file of this name: it gets the
+         component's own. -->
     <application android:networkSecurityConfig="@xml/network_security_config" />
 </manifest>

@@ -319,7 +319,7 @@ fn manifest_problems(manifest: &str, allowed: &[&str]) -> Vec<String> {
 
 /// The release build type is not debuggable and does not allow cleartext; the debug build type is debuggable; and the main
 /// manifest neither allows cleartext nor names a network security config (both belong to the debug source set, where the
-/// text tests of `android_release` read them).
+/// text tests of `android_release` read them) nor removes the one of the verifier component (the release keeps it).
 fn build_type_problems(gradle: &str, manifest: &str) -> Vec<String> {
     let mut problems = Vec::new();
     match block_after(gradle, "getByName(\"release\")") {
@@ -341,15 +341,16 @@ fn build_type_problems(gradle: &str, manifest: &str) -> Vec<String> {
         _ => problems.push("the debug build type is not debuggable (run-as and the emulator proof need it)".into()),
     }
     // The Kotlin component of the platform certificate verifier brings a network security config of its own, which allows plain
-    // HTTP to the hosts of the revocation lists. The main manifest takes that attribute out, and the marker that does it is the
-    // one place the word may appear; naming a config (setting the attribute) stays in the debug source set.
+    // HTTP to the hosts of the certificate authorities' revocation lists and refuses it everywhere else. Android's revocation check
+    // fails hard for a certificate without an OCSP address unless that list can be fetched, so the main manifest must not take the
+    // attribute out. The attribute reaches the release only through the merged manifest of the component: the main manifest names
+    // no config of its own and sets no blanket cleartext either (a config of our own belongs to the debug source set).
     const REMOVE_MARKER: &str = "tools:remove=\"android:networkSecurityConfig\"";
-    if !manifest.contains(REMOVE_MARKER) {
-        problems.push(format!("the main manifest does not carry {REMOVE_MARKER}: the verifier component's own network security config would reach the release"));
+    if manifest.contains(REMOVE_MARKER) {
+        problems.push(format!("the main manifest carries {REMOVE_MARKER}: the verifier could not fetch a revocation list and every certificate without an OCSP address would be refused"));
     }
-    let without_marker = manifest.replace(REMOVE_MARKER, "");
     for needle in ["usesCleartextTraffic", "networkSecurityConfig"] {
-        if without_marker.contains(needle) {
+        if manifest.contains(needle) {
             problems.push(format!("the main manifest names {needle}: it belongs to the debug source set only"));
         }
     }
@@ -506,10 +507,10 @@ fn build_type_check_fails_on_bad_input() {
     assert!(!build_type_problems(APP_GRADLE, &in_main).is_empty());
     let netsec = MANIFEST.replace("<application", "<application android:networkSecurityConfig=\"@xml/network_security_config\"");
     assert!(!build_type_problems(APP_GRADLE, &netsec).is_empty());
-    let kept_marker = MANIFEST.replace("<application", "<application android:networkSecurityConfig=\"@xml/network_security_config\"");
-    assert!(!build_type_problems(APP_GRADLE, &kept_marker).is_empty(), "the marker does not excuse an attribute that sets a config");
-    let no_marker = MANIFEST.replace("tools:remove=\"android:networkSecurityConfig\"", "");
-    assert!(!build_type_problems(APP_GRADLE, &no_marker).is_empty(), "without the marker the verifier's own config reaches the release");
+    let with_marker = MANIFEST.replace("<application", "<application tools:remove=\"android:networkSecurityConfig\"");
+    assert!(!build_type_problems(APP_GRADLE, &with_marker).is_empty(), "removing the verifier component's config must fail");
+    let marker_and_own = with_marker.replace("<application", "<application android:networkSecurityConfig=\"@xml/network_security_config\"");
+    assert!(!build_type_problems(APP_GRADLE, &marker_and_own).is_empty(), "the marker does not excuse an attribute that sets a config");
 }
 
 #[test]
