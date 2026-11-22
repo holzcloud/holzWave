@@ -154,6 +154,28 @@ test("each state of the link shows the record's word, dot and buttons", () => {
   assert.deepEqual([failed.word, failed.dot, failed.buttons, failed.list], ["unreachable", "down", [SIGN_OUT], false], "a list that cannot be read");
 });
 
+test("the row says off, and draws the list, the help line and New session, only from an answer of the server since the view opened or the sign-in ended", () => {
+  const plan = (view, fresh) => rowPlan({ ...VIEW, ...view }, false, false, fresh);
+  // Not asked yet and the switch reads false: neither the off line nor anything under the row, only Sign out.
+  const unknownOff = plan({ remoteOn: false }, false);
+  assert.deepEqual([unknownOff.off, unknownOff.list, unknownOff.help, unknownOff.buttons], [false, false, false, [SIGN_OUT]]);
+  assert.equal(unknownOff.word, "signed in", "the state and its word are still drawn");
+  assert.equal(plan({ remoteOn: false }, true).off, true, "an answer that says off draws the off line");
+  // Not asked yet and the switch reads true (an old answer): still no list, no help line, no New session.
+  const unknownOn = plan({ remoteOn: true }, false);
+  assert.deepEqual([unknownOn.off, unknownOn.list, unknownOn.help, unknownOn.buttons], [false, false, false, [SIGN_OUT]]);
+  const asked = plan({ remoteOn: true }, true);
+  assert.deepEqual([asked.off, asked.list, asked.help, asked.buttons], [false, true, true, [SIGN_OUT, NEW_SESSION]]);
+  // Other states do not depend on it.
+  assert.deepEqual(plan({ state: "signed_out" }, false).buttons, [SIGN_IN_LINK]);
+  assert.deepEqual(plan({ state: "unreachable" }, false).buttons, [SIGN_OUT]);
+  // A call without the argument behaves as before: the browser build's row and every older caller.
+  assert.deepEqual(rowPlan({ ...VIEW, remoteOn: false }, false), plan({ remoteOn: false }, true));
+  assert.deepEqual(rowPlan({ ...VIEW }, false), plan({}, true));
+  const on = rowPlan(webView(true), false, true);
+  assert.deepEqual([on.buttons, on.list, on.help, on.off], [[NEW_SESSION], true, true, false]);
+});
+
 test("the row of the browser build is signed in by the page, has no sign-in and no sign-out, and reads off from the host's sentence", () => {
   const on = rowPlan(webView(true), false, true);
   assert.deepEqual([on.word, on.dot, on.buttons, on.list, on.help, on.off], ["signed in", "in", [NEW_SESSION], true, true, false]);

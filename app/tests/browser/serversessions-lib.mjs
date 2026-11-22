@@ -11,23 +11,25 @@ export const ROWS = [
 /**
  * Load the page against the stub with the link `view` and the sessions `rows`. Every case registers a complete init script: an
  * earlier case's script stays and runs first, so each one sets everything it relies on. `polls`, `interval` and `switches` are the
- * stub's knobs for a sign-in from the row (see the header of tauri-mock.js).
+ * stub's knobs for a sign-in from the row, and `hold` keeps the answer of `server_refresh` back until the test releases it (see the
+ * header of tauri-mock.js).
  */
-export async function open(page, url, { view = SIGNED_IN, rows = ROWS, fails = {}, polls = [], interval = 5, switches = null } = {}) {
+export async function open(page, url, { view = SIGNED_IN, rows = ROWS, fails = {}, polls = [], interval = 5, switches = null, hold = false } = {}) {
   await page.addInitScript(
-    ([v, r, f, p, i, sw]) => {
+    ([v, r, f, p, i, sw, h]) => {
       const link = window.__MOCK__.serverLink;
       link.reset();
       link.set(v);
       link.polls = p;
       link.setInterval(i);
       link.switches = sw;
+      if (h) link.holdRefresh();
       const sessions = window.__MOCK__.remoteSessions;
       sessions.reset();
       sessions.set(r);
       for (const [command, text] of Object.entries(f)) sessions.fails(command, text);
     },
-    [view, rows, fails, polls, interval, switches],
+    [view, rows, fails, polls, interval, switches, hold],
   );
   await page.goto(`${url}index.html?renderer=canvas`);
   await page.waitForSelector(".divider");

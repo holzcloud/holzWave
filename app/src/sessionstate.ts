@@ -202,15 +202,20 @@ export interface RowPlan {
  * sign-in is the credential, so the row is always signed in (or unreachable when the list cannot be read) and has neither
  * `Sign in…` nor `Sign out`. While the store of secrets is locked only the row and the locked line are drawn: the host would refuse
  * the list (and on Android that refusal opens the unlock sheet), and `remoteOn` is then the server's last answer, not a fresh one.
+ *
+ * `fresh` says that the server has answered since the view opened or the sign-in ended. Until then `remoteOn` is a value the host
+ * has not asked for (it reads false), so the row neither says that remote sessions are off nor draws the list, the help line and
+ * `New session`: it shows the state, its word and `Sign out`. It is the twin of the `refreshed` flag of the sync popover. The
+ * default is true, so the row of the browser build (which has no such answer to wait for) and every other caller read as before.
  */
-export function rowPlan(view: ServerView, listFailed: boolean, web = false): RowPlan {
+export function rowPlan(view: ServerView, listFailed: boolean, web = false, fresh = true): RowPlan {
   const desktop: LinkState = view.url === "" ? "signed_out" : listFailed && view.state === "signed_in" ? "unreachable" : view.state;
   const state: LinkState = web ? (listFailed ? "unreachable" : "signed_in") : desktop;
   const signedIn = state === "signed_in";
   let buttons: string[];
   switch (state) {
     case "signed_in":
-      buttons = view.remoteOn ? [SIGN_OUT, NEW_SESSION] : [SIGN_OUT];
+      buttons = fresh && view.remoteOn ? [SIGN_OUT, NEW_SESSION] : [SIGN_OUT];
       break;
     case "signed_out":
       buttons = [SIGN_IN_LINK];
@@ -229,9 +234,9 @@ export function rowPlan(view: ServerView, listFailed: boolean, web = false): Row
     dot: STATE_DOTS[state],
     buttons,
     locked: view.locked,
-    list: signedIn && view.remoteOn && !view.locked,
-    off: signedIn && !view.remoteOn && !view.locked,
-    help: signedIn && view.remoteOn && !view.locked,
+    list: signedIn && fresh && view.remoteOn && !view.locked,
+    off: signedIn && fresh && !view.remoteOn && !view.locked,
+    help: signedIn && fresh && view.remoteOn && !view.locked,
   };
 }
 

@@ -124,6 +124,19 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
   let sessions: SessionRow[] = [];
   let listFailed = false;
   let drawnKey = "";
+  /**
+   * Whether the server has answered since the view opened or the last sign-in ended: only then does the row say that remote
+   * sessions are off or draw the list and `New session` (the twin of the `refreshed` flag of the sync popover). The browser build
+   * has no such answer to wait for. `resets` counts the times it was taken back, so a fresh read that started before that does
+   * not count; the timer's read (`read(false)`) never sets it.
+   */
+  let fresh = web !== null;
+  let resets = 0;
+  const forget = (): void => {
+    if (web !== null) return;
+    fresh = false;
+    resets++;
+  };
   let busy = false;
   let timer: ReturnType<typeof setInterval> | null = null;
   let disposed = false;
@@ -156,7 +169,7 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
   };
 
   const draw = (): void => {
-    const plan = rowPlan(view, listFailed, web !== null);
+    const plan = rowPlan(view, listFailed, web !== null, fresh);
     const key = JSON.stringify([plan, view.url, sessions]);
     if (key === drawnKey) return;
     drawnKey = key;
@@ -198,9 +211,13 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
           "click",
           () =>
             void act(async () => {
+              forget();
               await openServerSignIn(legend);
+              forget();
               toRow();
-              // The server is asked (not only the host's last view): right after an approval the host's switches may not be known.
+              // The host's own view first (no network): the state, its word and `Sign out`, nothing under the row. Then the server is
+              // asked, and only its answer lets the row say that remote sessions are off or draw the list and `New session`.
+              await read(false);
               await read(true);
               toRow();
             }),
@@ -309,17 +326,22 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
   };
 
   /** The desktop: read the link and, when it shows a list, the list; draw what changed. */
-  const readLink = async (mine: number, fresh: boolean): Promise<void> => {
+  const readLink = async (mine: number, ask: boolean): Promise<void> => {
+    const started = resets;
     let next: ServerView;
+    let answered = false;
     try {
-      next = readServerView(await source.status(fresh));
+      next = readServerView(await source.status(ask));
+      answered = true;
     } catch {
       next = readServerView(null);
     }
     if (disposed || mine !== seq) return;
+    // An answer of the server counts when it was asked for after the last time the flag was taken back.
+    const known = (): boolean => fresh || (ask && answered && started === resets);
     let rows: SessionRow[] = [];
     let failed = false;
-    if (rowPlan(next, false).list) {
+    if (rowPlan(next, false, false, known()).list) {
       let raw: unknown = null;
       let locked = false;
       try {
@@ -335,17 +357,19 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
       failed = read === null;
       rows = read ?? [];
     }
+    // The list read above may have waited: a flag taken back in the meantime stays taken back.
+    fresh = known();
     view = next;
     listFailed = failed;
     sessions = rows;
     draw();
   };
 
-  const read = async (fresh: boolean): Promise<void> => {
+  const read = async (ask: boolean): Promise<void> => {
     const mine = ++seq;
     inFlight++;
     try {
-      await (web !== null ? readWeb(mine) : readLink(mine, fresh));
+      await (web !== null ? readWeb(mine) : readLink(mine, ask));
     } finally {
       inFlight--;
     }
@@ -368,7 +392,9 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
   }
 
   draw();
-  void read(true);
+  // The desktop reads the host's own view first (no network), so a slow server leaves the state and `Sign out` on the row while the
+  // answer of the server is out; then it asks the server. The browser build has only the list, read once.
+  void (web !== null ? read(true) : read(false).then(() => (disposed ? undefined : read(true))));
   timer = setInterval(tick, REFRESH_MS);
   return { refresh, dispose };
 }

@@ -14,6 +14,7 @@ export default async function ({ page, url, errors }) {
   else {
     await statesCase(page, url);
     await signInCase(page, url);
+    await freshCase(page, url);
   }
   await listCase(page, url);
   await actionsCase(page, url);
@@ -180,6 +181,68 @@ async function signInCase(page, url) {
   const seen = await page.evaluate(() => window.__ROW);
   assert.ok(seen.length > 1, `the row was drawn more than once (${seen.length})`);
   assert.deepEqual(seen.filter((text) => text.includes(OFF)), [], "the row never said that remote sessions are off on the way to the list");
+  await page.keyboard.press("Escape");
+}
+
+/**
+ * Until the server has answered since the view opened or the sign-in ended, the row shows the state, its word and Sign out and nothing
+ * under it: neither the off line, nor the list, nor the help line, nor New session. The stub holds the answer of `server_refresh`.
+ */
+async function freshCase(page, url) {
+  const OFF = "Remote sessions are off on this server.";
+  const underRow = (p) => p.locator(".conns .cx-help, .conns .cx-sess").count();
+  const release = (p) => p.evaluate(() => window.__MOCK__.serverLink.releaseRefresh());
+
+  // Opened with the answer held: remote sessions are off on the server, and the row does not say so before it is told.
+  await open(page, url, { view: { ...SIGNED_IN, remote_on: false }, hold: true });
+  await openDialog(page);
+  assert.deepEqual(await rowButtons(page), ["Sign out"], "the state and Sign out while the server has not answered");
+  assert.equal(await underRow(page), 0, "no off line and nothing else under the row yet");
+  await page.waitForTimeout(300);
+  assert.equal((await linkCalls(page, "server_refresh")).length, 1, "the server was asked and has not answered");
+  assert.equal(await underRow(page), 0);
+  await release(page);
+  await page.waitForFunction((s) => document.querySelector(".conns .cx-help")?.textContent === s, OFF);
+  assert.deepEqual(await rowButtons(page), ["Sign out"]);
+  await page.keyboard.press("Escape");
+
+  // Opened with the answer held and remote sessions on: no list, no help line and no New session until it comes.
+  await open(page, url, { hold: true });
+  await openDialog(page);
+  assert.deepEqual(await rowButtons(page), ["Sign out"]);
+  await page.waitForTimeout(300);
+  assert.equal(await underRow(page), 0, "an old value of the switch does not draw the list");
+  assert.equal((await sessionCalls(page, "server_sessions")).length, 0, "the list is not asked for before the server has answered");
+  await release(page);
+  await page.waitForSelector(".conns .cx-sess");
+  assert.deepEqual(await rowButtons(page), ["Sign out", "New session"]);
+  assert.equal(await page.locator(".conns .cx-help").textContent(),
+    "A session keeps running on the server with no window open. It ends when the server restarts or after the idle limit of the server with nobody connected.");
+  await page.keyboard.press("Escape");
+
+  // After a sign-in from the row the same holds until the server has answered once more.
+  await open(page, url, {
+    view: { ...SIGNED_IN, state: "signed_out", url: "", remote_on: false },
+    polls: ["approved"],
+    interval: 1,
+    switches: { sync_on: false, remote_on: true },
+  });
+  await openDialog(page, "not signed in");
+  await page.evaluate(() => window.__MOCK__.serverLink.holdRefresh());
+  await page.locator(".conns .cx-srv-acts button", { hasText: "Sign in…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Sign in to the server" });
+  await dialog.waitFor();
+  await page.locator("#ss-address").fill(ADDRESS);
+  await dialog.getByRole("button", { name: "Continue", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector(".ss-state")?.textContent === "Signed in");
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await dialog.waitFor({ state: "detached" });
+  await page.waitForFunction(() => document.querySelector(".conns .cx-srv-state")?.textContent === "signed in");
+  assert.deepEqual(await rowButtons(page), ["Sign out"], "signed in, and nothing more until the server has answered");
+  assert.equal(await underRow(page), 0);
+  await release(page);
+  await page.waitForSelector(".conns .cx-sess");
+  assert.deepEqual(await rowButtons(page), ["Sign out", "New session"]);
   await page.keyboard.press("Escape");
 }
 
