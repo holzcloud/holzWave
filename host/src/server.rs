@@ -489,8 +489,11 @@ impl ServerRuntime {
     }
 
     /// One poll of the sign-in in progress. The client holds a poll back that comes before the server's interval, so a page that
-    /// polls too often costs nothing. On approval the token goes into the keychain and the link file is written. Blocks on the
-    /// network. With no sign-in in progress the answer is `expired`.
+    /// polls too often costs nothing. On approval the token goes into the keychain and the link file is written, and the server
+    /// is asked once who the device is ([`ServerRuntime::refresh`]), so the view that follows carries the server's two switches
+    /// instead of values nobody has asked for. That ask only sets the view: a server that does not answer makes the view
+    /// `unreachable` with its sentence, and the sign-in still counts as approved (the token is kept and the answer is
+    /// `approved`). Blocks on the network, for the poll and for that one ask. With no sign-in in progress the answer is `expired`.
     pub fn sign_in_poll(&self) -> Result<SignInPoll, String> {
         let (mut pending, epoch) = {
             let mut state = lock(&self.state);
@@ -525,6 +528,8 @@ impl ServerRuntime {
                     {
                         let _ = signin::revoke_self(&url, &old);
                     }
+                    // Who the device is and which switches the server has on: its failure is in the view, never in the answer.
+                    self.refresh();
                     Ok(SignInPoll { state: "approved", interval })
                 }
                 Err(why) => {
@@ -636,7 +641,7 @@ pub(crate) mod fake {
     use std::collections::BTreeMap;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
 
@@ -673,6 +678,10 @@ pub(crate) mod fake {
         pub files: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
         pub revokes: Arc<AtomicUsize>,
         pub sync_on: Arc<AtomicBool>,
+        /// The remote-sessions switch the server answers about the device; off unless a test sets it.
+        pub remote_on: Arc<AtomicBool>,
+        /// When not 0, the answer to `GET /api/device/me` of a device the server knows is this status with no body.
+        pub me_status: Arc<AtomicU16>,
         /// When set, the server stops answering (every connection is closed unanswered).
         pub down: Arc<AtomicBool>,
         /// How long the answer to a poll is held back, in milliseconds: a poll that is still out while the person acts.
@@ -701,6 +710,8 @@ pub(crate) mod fake {
                 files: Arc::new(Mutex::new(BTreeMap::new())),
                 revokes: Arc::new(AtomicUsize::new(0)),
                 sync_on: Arc::new(AtomicBool::new(true)),
+                remote_on: Arc::new(AtomicBool::new(false)),
+                me_status: Arc::new(AtomicU16::new(0)),
                 down: Arc::new(AtomicBool::new(false)),
                 poll_delay: Arc::new(AtomicU64::new(0)),
                 issue: Arc::new(Mutex::new(TOKEN.to_owned())),
@@ -727,7 +738,7 @@ pub(crate) mod fake {
     }
 
     fn serve(mut stream: TcpStream, fake: &Fake) {
-        let Fake { grant, accepts, requests, files, revokes, sync_on, down, poll_delay, issue, revoked, .. } = fake;
+        let Fake { grant, accepts, requests, files, revokes, sync_on, remote_on, me_status, down, poll_delay, issue, revoked, .. } = fake;
         let mut reader = BufReader::new(stream.try_clone().expect("clone"));
         loop {
             let mut line = String::new();
@@ -795,10 +806,14 @@ pub(crate) mod fake {
                     };
                     respond(&mut stream, "200 OK", "", answer.as_bytes());
                 }
+                ("GET", "/api/device/me") if authed && me_status.load(Ordering::SeqCst) != 0 => {
+                    respond(&mut stream, &format!("{} Status", me_status.load(Ordering::SeqCst)), "", b"");
+                }
                 ("GET", "/api/device/me") if authed => {
                     let on = sync_on.load(Ordering::SeqCst);
+                    let remote = remote_on.load(Ordering::SeqCst);
                     let me = format!(
-                        r#"{{"device":{{"id":17,"name":"Holz's laptop","platform":"macos","expires_at":"2027-02-10T12:00:00Z"}},"switches":{{"sync":{on},"remote":false}}}}"#
+                        r#"{{"device":{{"id":17,"name":"Holz's laptop","platform":"macos","expires_at":"2027-02-10T12:00:00Z"}},"switches":{{"sync":{on},"remote":{remote}}}}}"#
                     );
                     respond(&mut stream, "200 OK", "", me.as_bytes());
                 }
@@ -968,9 +983,12 @@ mod tests {
         let view = rt.view();
         assert_eq!((view.state, view.url.as_str(), view.name.as_str()), ("signed_in", fake.origin.as_str(), "Holz's laptop"));
 
-        // A restart reads the same: a second runtime on the same directory and store.
+        // A restart reads the same link: a second runtime on the same directory and store. It has not asked the server yet, so
+        // the switches are not carried over.
         let again = ServerRuntime::new_for_loopback(dir.clone(), store.clone());
-        assert_eq!(again.view(), view);
+        let after = again.view();
+        assert_eq!((after.state, after.url.as_str(), after.name.as_str()), ("signed_in", fake.origin.as_str(), "Holz's laptop"));
+        assert_eq!((after.sync_on, after.remote_on), (false, false));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1161,8 +1179,10 @@ mod tests {
         let rt = Arc::new(rt);
         let fake = Fake::start();
         sign_in(&rt, &fake);
+        // The approval asked once; the check is the next one.
+        assert_eq!(fake.count("GET /api/device/me"), 1);
         LinkEndpoint(Arc::downgrade(&rt)).refused();
-        wait_for("the check", &|| fake.count("GET /api/device/me") == 1 && !rt.checking.load(Ordering::SeqCst));
+        wait_for("the check", &|| fake.count("GET /api/device/me") == 2 && !rt.checking.load(Ordering::SeqCst));
         assert_eq!(store.get(TOKEN_ACCOUNT).unwrap().as_deref(), Some(TOKEN));
         assert_eq!(rt.view().state, "signed_in");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1282,6 +1302,41 @@ mod tests {
         let before = fake.total();
         rt.refresh();
         assert_eq!(fake.total(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn right_after_an_approved_sign_in_the_view_carries_the_switches_the_server_answered() {
+        let (rt, store, dir) = runtime("after-approval");
+        let fake = Fake::start();
+        fake.sync_on.store(true, Ordering::SeqCst);
+        fake.remote_on.store(true, Ordering::SeqCst);
+        sign_in(&rt, &fake);
+        // No refresh was called: the sign-in itself asked the server once who the device is.
+        let view = rt.view();
+        assert_eq!((view.state, view.sync_on, view.remote_on, view.error), ("signed_in", true, true, None));
+        assert_eq!(fake.count("GET /api/device/me"), 1, "one request to the server, made by the approval");
+        assert!(store.get(TOKEN_ACCOUNT).unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_answer_after_an_approved_sign_in_leaves_it_approved_and_the_view_unreachable() {
+        let (rt, store, dir) = runtime("after-approval-503");
+        let fake = Fake::start();
+        fake.remote_on.store(true, Ordering::SeqCst);
+        fake.me_status.store(503, Ordering::SeqCst);
+        // The poll is still `approved`, the token and the link file are kept.
+        sign_in(&rt, &fake);
+        assert!(store.get(TOKEN_ACCOUNT).unwrap().is_some());
+        assert!(dir.join("server_link.json").exists());
+        let view = rt.view();
+        assert_eq!((view.state, view.sync_on, view.remote_on), ("unreachable", false, false));
+        assert_eq!(view.error.as_deref(), Some(Fault::Unreachable.sentence()));
+        // The server answers again: the next read is the server's.
+        fake.me_status.store(0, Ordering::SeqCst);
+        let view = rt.refresh();
+        assert_eq!((view.state, view.remote_on, view.error), ("signed_in", true, None));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

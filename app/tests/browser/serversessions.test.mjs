@@ -11,7 +11,10 @@ export const backends = ["tauri", "ws"];
 export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(5000);
   if (currentBackend() === "ws") await webCase(page, url);
-  else await statesCase(page, url);
+  else {
+    await statesCase(page, url);
+    await signInCase(page, url);
+  }
   await listCase(page, url);
   await actionsCase(page, url);
   await refusalCase(page, url);
@@ -134,6 +137,50 @@ async function statesCase(page, url) {
   await openDialog(page, "signing in…");
   assert.deepEqual(await rowButtons(page), []);
   assert.equal(await page.locator(".conns .cx-dot").evaluate((n) => getComputedStyle(n).borderTopStyle), "dotted");
+}
+
+/**
+ * A person who signs in from the row, on a host that does not yet know the server's switches when the approval comes (the stub keeps
+ * them false until `server_refresh`), sees the list and New session without opening the view again, and the row never says that
+ * remote sessions are off on the way there: every text the row had between the click and the list is recorded.
+ */
+async function signInCase(page, url) {
+  const OFF = "Remote sessions are off on this server.";
+  await open(page, url, {
+    view: { ...SIGNED_IN, state: "signed_out", url: "", remote_on: false },
+    polls: ["approved"],
+    interval: 1,
+    switches: { sync_on: false, remote_on: true },
+  });
+  await openDialog(page, "not signed in");
+  await page.evaluate(() => {
+    const group = document.querySelector(".conns .cx-server");
+    window.__ROW = [group.textContent];
+    new MutationObserver(() => {
+      const now = group.textContent;
+      if (window.__ROW[window.__ROW.length - 1] !== now) window.__ROW.push(now);
+    }).observe(group, { subtree: true, childList: true, characterData: true });
+  });
+  await page.locator(".conns .cx-srv-acts button", { hasText: "Sign in…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Sign in to the server" });
+  await dialog.waitFor();
+  await page.locator("#ss-address").fill(ADDRESS);
+  await dialog.getByRole("button", { name: "Continue", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector(".ss-state")?.textContent === "Signed in");
+  const askedBefore = (await linkCalls(page, "server_refresh")).length;
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await dialog.waitFor({ state: "detached" });
+
+  // Either the list or the help line comes; a row that said off instead would show neither and the next wait would time out.
+  await page.waitForFunction(() => document.querySelector(".conns .cx-sess") !== null || document.querySelector(".conns .cx-help") !== null);
+  await page.waitForSelector(".conns .cx-sess");
+  assert.deepEqual(await rowButtons(page), ["Sign out", "New session"], "New session is there without opening the view again");
+  assert.deepEqual(await sessionTitles(page), ["cargo build", "Session 2"], "so is the list");
+  assert.ok((await linkCalls(page, "server_refresh")).length > askedBefore, "the row asked the server (server_refresh) after the dialog closed");
+  const seen = await page.evaluate(() => window.__ROW);
+  assert.ok(seen.length > 1, `the row was drawn more than once (${seen.length})`);
+  assert.deepEqual(seen.filter((text) => text.includes(OFF)), [], "the row never said that remote sessions are off on the way to the list");
+  await page.keyboard.press("Escape");
 }
 
 async function listCase(page, url) {

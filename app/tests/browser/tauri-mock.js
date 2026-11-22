@@ -81,6 +81,11 @@
 //       startFails(text)  `server_sign_in_start` rejects with `text`; startFails(null) stops it. Without it the address must start
 //                      with `https://`, and the answer is `{ code: "BCDF-GHJK", url, expires_in: 600, interval: 5 }`
 //       setInterval(n)  the seconds of the interval the start and the polls state (default 5; a test that waits for a poll sets 1)
+//       switches       `{ sync_on, remote_on }` or null (default null). While it is set the stub plays the host as it was before
+//                      the sign-in asked the server: an approved poll makes the view `signed_in` with both switches false, and
+//                      `server_status` keeps saying so until `server_refresh` answers these switches (and keeps them from then
+//                      on). While it is null both commands answer the view as `set` left it
+//       holdRefresh(), releaseRefresh()  the answer of `server_refresh` waits until `releaseRefresh()`; the call is recorded at once
 //       calls          every call of the seven commands as `[command, args]`, oldest first
 //       reset()        back to the default
 //     remoteSessions   the sessions of the server (the desktop's signed-in one, or the browser's own): the six commands `server_sessions`,
@@ -1811,6 +1816,7 @@
   const linkStart = () => ({
     view: { state: "signed_out", url: "", name: "holzWave on Linux", locked: false, sync_on: false, remote_on: false, error: null },
     polls: [], calls: [], startError: null, interval: 5,
+    switches: null, stale: false, held: false, waiters: [],
   });
   let linkState = linkStart();
   const linkCommands = {
@@ -1820,6 +1826,11 @@
     },
     async server_refresh(args) {
       linkState.calls.push(["server_refresh", args]);
+      if (linkState.held) await new Promise((go) => linkState.waiters.push(go));
+      if (linkState.stale && linkState.view.state === "signed_in") {
+        Object.assign(linkState.view, linkState.switches);
+        linkState.stale = false;
+      }
       return structuredClone(linkState.view);
     },
     async server_sign_in_start(args) {
@@ -1834,7 +1845,15 @@
       linkState.calls.push(["server_sign_in_poll", args]);
       const next = linkState.polls.length > 1 ? linkState.polls.shift() : (linkState.polls[0] ?? "pending");
       const poll = typeof next === "string" ? { state: next, interval: linkState.interval } : { interval: linkState.interval, ...next };
-      if (poll.state === "approved") linkState.view.state = "signed_in";
+      if (poll.state === "approved") {
+        linkState.view.state = "signed_in";
+        // The host before it asked the server on approval: the switches are not known until a refresh.
+        if (linkState.switches !== null) {
+          linkState.view.sync_on = false;
+          linkState.view.remote_on = false;
+          linkState.stale = true;
+        }
+      }
       return poll;
     },
     async server_sign_in_cancel(args) {
@@ -1847,6 +1866,7 @@
       linkState.view.state = "signed_out";
       linkState.view.sync_on = false;
       linkState.view.remote_on = false;
+      linkState.stale = false;
       return structuredClone(linkState.view);
     },
     async sync_use_server(args) {
@@ -1865,8 +1885,18 @@
     set polls(list) {
       linkState.polls = structuredClone(list);
     },
+    set switches(value) {
+      linkState.switches = value === null ? null : structuredClone(value);
+    },
     get calls() {
       return structuredClone(linkState.calls);
+    },
+    holdRefresh() {
+      linkState.held = true;
+    },
+    releaseRefresh() {
+      linkState.held = false;
+      for (const go of linkState.waiters.splice(0)) go();
     },
     startFails(text) {
       linkState.startError = text ?? null;
@@ -1875,6 +1905,7 @@
       linkState.interval = seconds;
     },
     reset() {
+      for (const go of linkState.waiters.splice(0)) go();
       linkState = linkStart();
     },
   };

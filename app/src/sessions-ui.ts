@@ -200,7 +200,8 @@ export function buildServerRow(parent: HTMLElement, source: ServerSource, hooks:
             void act(async () => {
               await openServerSignIn(legend);
               toRow();
-              await refresh();
+              // The server is asked (not only the host's last view): right after an approval the host's switches may not be known.
+              await read(true);
               toRow();
             }),
           { signal: drawn.signal },
