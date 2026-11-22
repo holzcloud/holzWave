@@ -173,8 +173,9 @@ sh scripts/android-build.sh debug      # or: release
 This runs `npm --prefix app run tauri -- android build --ci --target aarch64 --apk --debug -- --locked` after sourcing the
 environment and setting the reproducibility variables (below), and prints the path of the APK as its last line
 (`app/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`; the flavour is called `universal` but holds the one ABI, arm64-v8a). The debug build has the application id
-`ch.holzcloud.holzwave.debug`, is debuggable and may use cleartext HTTP to the emulator's alias of the host machine, `10.0.2.2`, and to
-nothing else; the release build is neither.
+`ch.holzcloud.holzwave.debug`, is debuggable and may use cleartext HTTP to the hosts of the certificate authorities' revocation lists
+(both builds, see Revocation below) and to the emulator's alias of the host machine, `10.0.2.2`, and to nothing else; the release build
+is not debuggable and has no `10.0.2.2`.
 
 `release` builds the APK **without a signature** and says so. Signing is your own step with your own key: the script never signs,
 never creates a key and never calls `keytool` or `apksigner`, and no key belongs in the repository.
@@ -361,7 +362,8 @@ The generated template lists four ABIs; the committed project lists one, so no c
 build can add another. `local.properties`, the build folders, the generated Tauri settings and every key file are ignored by the
 project's own `.gitignore`, and `cargo test -p holzwave-app --test android_project` reads the committed files to check the id, the
 minimum SDK, the one ABI, that no machine path, key, Google service or installer permission is in them, that the manifest asks for the
-permissions of the list below only, and that only the debug build is debuggable and may use cleartext.
+permissions of the list below only, that only the debug build is debuggable, and that cleartext is configured as described under Revocation
+(the main manifest neither removes the verifier component's network security config nor names one of its own).
 
 ## The version code
 
@@ -404,9 +406,10 @@ check the scheme.
 - **No backup.** `allowBackup` is false and `data_extraction_rules.xml` excludes every domain, for the cloud backup and for the
   transfer to another phone. The app keeps its vault file and its history in its private folder, and those must not be copied to a
   backup service or to another device. There is no `fullBackupContent` file.
-- **Cleartext HTTP only in the debug build, and only to `10.0.2.2`.** The debug source set (`app/src/debug`) adds a network security
-  config that permits cleartext to the emulator's alias of the host machine and refuses it everywhere else. The release build has
-  neither the attribute nor the file.
+- **Cleartext HTTP only to the revocation-list hosts, and in the debug build to `10.0.2.2` as well.** Both builds refuse cleartext
+  everywhere except the hosts of the certificate authorities' revocation lists (see Revocation). The debug source set
+  (`app/src/debug`) holds a copy of that list plus a block of its own that permits cleartext to the emulator's alias of the host
+  machine, `10.0.2.2`, without subdomains. The release build has no `10.0.2.2` and no network security config file of its own.
 - **One exported component:** the launcher activity. Every other activity, service, receiver and provider says `exported="false"`.
   A receiver that a library adds (the profile installer's, guarded by the shell-only DUMP permission) is removed from the merged
   manifest.
@@ -551,10 +554,27 @@ chain is judged by the system trust store through the platform's own trust manag
 - **A failed set-up refuses, it never accepts.** If the call fails, the app does not crash and no check is loosened: the sync run
   and the send of an AI chat message refuse with the fixed word `tls_not_ready` (the sync shows it as an error, the chat as a
   network failure), and a restart tries again. The two refusals exist in Android builds only.
-- **Revocation.** The verifier asks Android to check revocation of the server's certificate as a soft failure only, and the
-  component's own manifest would allow plain HTTP to the hosts of the certificate authorities' revocation lists. The app takes that
-  allowance out of its manifest, because the release build allows no cleartext at all (the APK check enforces it). The result: the
-  system trust store decides what is trusted, and online revocation lookups that need plain HTTP are not made.
+- **Revocation.** For a chain under a root of the system store the verifier asks Android to check the revocation of the server's
+  certificate: first by OCSP, with the certificate authority's revocation list (CRL) as the fallback. A certificate that names no
+  OCSP address, as every Let's Encrypt certificate issued since 2025 (they carry only the address of a revocation list), passes that
+  check only when the list can be fetched; if it cannot, Android's check fails hard and the verifier answers `Revoked`, which showed
+  as `The server cannot be reached.` at sign-in. Those lists are served over plain HTTP. The verifier's Kotlin component therefore
+  brings a network security config that allows plain HTTP to the hosts of the authorities' lists (several hundred names, generated
+  upstream from the public CCADB register) and refuses it everywhere else. The app keeps that config: the main manifest does not
+  remove it, so it reaches the release build through the manifest merge. The debug source set must name a config of the same file
+  name to add `10.0.2.2` for the emulator's tests, and a resource of that name replaces the component's, so the debug file is a copy
+  of the component's list (taken from the artifact whose SHA-256 is pinned, with the crate version written in its header) plus the
+  extra block; when the crate is updated the list is copied again in the same commit, and a test compares the version in the header
+  with `Cargo.lock`. A revocation list is signed by its authority and checked by Android, so plain HTTP cannot forge one; what a
+  network observer can see is that the phone fetched a given authority's list (that authority's host name), never the server's
+  name or any data of the app. The text tests refuse an IP address, a wildcard, a machine name, a third block and `10.0.2.2` in the
+  release, and the APK check reads the compiled config out of both APKs (found through the resource table, because a release build
+  may shorten the file name) and compares its hosts with the copy: the release must hold exactly the copy's hosts without `10.0.2.2`,
+  the debug build exactly the copy's hosts with it, and the base config must refuse cleartext. Two costs are known and are the
+  verifier project's, not changed here: a very large list can hold up a sign-in (an issue upstream reports one of about 11 MB that
+  blocked handshakes for tens of seconds), and there is an open upstream request for an option to skip the network lookup on Android.
+  Not run on a phone: the fix is pinned by text tests and by the APK check; the run on the emulator against a public chain that
+  names only a revocation list is the check of a later step.
 - **Sync and the locked vault.** While the secret store is locked, the sync does not run at all: its state is `paused`, with no
   error text and no network connection, and the first unlock starts one run at once.
 - **What the emulator run proved.** `sh scripts/android-e2e.sh tls` runs a debug-only self-test on the arm64 emulator against a
@@ -586,8 +606,8 @@ chain is judged by the system trust store through the platform's own trust manag
   stops asking and the person has to use the settings), a `.local` name resolved by a real mDNS responder, and the sync and the chat
   against a private address on the emulator (their checks are in the core's tests with a gate that refuses).
 - **What it did not prove.** Any real phone, any Android version other than the images named, user-installed certificate
-  authorities (Android applies them to an app only as its target SDK and network security config allow; this app has no such
-  config, so none is expected to be trusted, and that was not tried), corporate proxies and TLS inspection, captive portals,
+  authorities (Android applies them to an app only as its target SDK and network security config allow; the app's config names no
+  trust anchors of its own, so none is expected to be trusted, and that was not tried), corporate proxies and TLS inspection, captive portals,
   certificate pinning (the app pins nothing), revocation behaviour, mobile networks, a real WebDAV server and a real AI provider
   from a phone.
 
@@ -665,7 +685,7 @@ It reads the real file with the pinned `aapt2`, `zipalign`, `apksigner` and the 
 when a tool or the file is missing). It checks the package name (with the `.debug` suffix for debug only), the version code against
 the scheme, `minSdkVersion` 31, the native code (arm64-v8a and nothing else, and no file under `lib/` of another ABI), the permissions
 against the list, `allowBackup`, the extraction rules inside the APK, the exported components of the **merged** manifest (including
-those of libraries), `debuggable` and cleartext in debug only, `zipalign -c -P 16 -v 4`, the alignment of every `LOAD` segment of
+those of libraries), `debuggable` in debug only, the network security config (the revocation-list hosts of the copy in both builds, `10.0.2.2` in debug only), `zipalign -c -P 16 -v 4`, the alignment of every `LOAD` segment of
 every native library (at least `0x4000`, the 16 KB page size that Android 15 and later devices may use), the absence of Google Play
 services and Firebase classes, that a release APK holds no trace of the debug-only self-test of the secret store (its trigger is searched
 in the dex files and the native library), and the signature (a release APK must be unsigned; a debug APK carries the debug

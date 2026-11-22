@@ -20,8 +20,13 @@
 #   manifest      allowBackup is false, a data extraction rules file is named and excludes the root, file, database, sharedpref and
 #                 external domains for the cloud backup and for the device transfer and includes nothing, there is no
 #                 fullBackupContent; the only exported component is the launcher activity and every other component says
-#                 exported=false; `debuggable` and cleartext traffic exist in the debug APK only (release: neither
-#                 usesCleartextTraffic nor a network security config; debug: no blanket usesCleartextTraffic)
+#                 exported=false; `debuggable` exists in the debug APK only; neither APK has a blanket usesCleartextTraffic
+#   cleartext     both APKs name a network security config; the file is found through the resource table (a release build may
+#                 shorten its name) and read with `aapt2 dump xmltree`: its base config refuses cleartext, and the hosts of its
+#                 blocks that permit cleartext are exactly the revocation-list hosts of the repository's copy
+#                 (app/src-tauri/gen/android/app/src/debug/res/xml/network_security_config.xml), in the debug APK plus 10.0.2.2 and
+#                 in the release APK without it. Android's revocation check needs those lists over plain HTTP for a certificate that
+#                 has no OCSP address; nothing else may be reachable without TLS
 #   16 KB pages   `zipalign -c -P 16 -v 4` passes, and every LOAD segment of every lib/arm64-v8a/*.so is aligned to 0x4000 or more
 #   services      the dex files name no Google Play services, Firebase or Play core class
 #   https         both modes: the Kotlin component of the platform certificate verifier is in the dex files (class
@@ -180,6 +185,14 @@ attr() { # <element> <attribute>: the value in the application or manifest, empt
     sed -n "s/^$1|$2|//p" "$tmp/manifest.txt" | head -n 1
 }
 
+# The file behind a reference such as @0x7f120000: the resource table names it (a release build may shorten the name).
+resource_file() { # <reference>
+    "$aapt2" dump resources "$apk" 2> /dev/null | awk -v id="${1#@}" '
+        $1 == "resource" && $2 == id { found = 1; next }
+        found && /\(file\)/ { for (i = 1; i <= NF; i++) if ($i ~ /^res\/.*\.xml$/) { print $i; exit } }
+        found && $1 == "resource" { exit }'
+}
+
 # Permissions.
 sed -n 's/^uses-permission[a-z0-9-]*|name|//p' "$tmp/manifest.txt" | sort -u > "$tmp/asked.txt"
 grep -v '^[[:space:]]*#' "$permissions_file" | sed 's/[[:space:]]*$//' | grep -v '^$' | sort -u > "$tmp/listed.txt"
@@ -217,10 +230,7 @@ if [ -z "$rules_ref" ]; then
 else
     pass "dataExtractionRules $rules_ref"
     # The reference is a resource id; the resource table names the file behind it.
-    rules_file=$("$aapt2" dump resources "$apk" 2> /dev/null | awk -v id="${rules_ref#@}" '
-        $1 == "resource" && $2 == id { found = 1; next }
-        found && /\(file\)/ { for (i = 1; i <= NF; i++) if ($i ~ /^res\/.*\.xml$/) { print $i; exit } }
-        found && $1 == "resource" { exit }')
+    rules_file=$(resource_file "$rules_ref")
     if [ -z "$rules_file" ]; then
         fail "data extraction rules: found no file behind $rules_ref in the resource table, wanted res/xml/<name>.xml"
     else
@@ -300,11 +310,111 @@ netsec=$(attr application networkSecurityConfig)
 if [ "$mode" = release ]; then
     if [ -z "$debuggable" ] || [ "$debuggable" = false ]; then pass "release is not debuggable"; else fail "debuggable: found '$debuggable' in the release APK, wanted not debuggable"; fi
     if [ -z "$cleartext" ] || [ "$cleartext" = false ]; then pass "release has no usesCleartextTraffic"; else fail "usesCleartextTraffic: found '$cleartext' in the release APK, wanted none"; fi
-    if [ -z "$netsec" ]; then pass "release has no network security config"; else fail "networkSecurityConfig: found '$netsec' in the release APK, wanted none"; fi
 else
     if [ "$debuggable" = true ]; then pass "debug is debuggable"; else fail "debuggable: found '${debuggable:-not set}' in the debug APK, wanted true"; fi
-    if [ "$cleartext" = true ]; then fail "usesCleartextTraffic: found true in the debug APK, wanted none (cleartext goes only to 10.0.2.2 through the network security config)"; else pass "debug has no blanket usesCleartextTraffic"; fi
-    if [ -n "$netsec" ]; then info "the debug APK names the network security config $netsec (cleartext to the emulator's host alias only)"; else info "the debug APK has no network security config"; fi
+    if [ "$cleartext" = true ]; then fail "usesCleartextTraffic: found true in the debug APK, wanted none (cleartext goes only to the revocation-list hosts and 10.0.2.2 through the network security config)"; else pass "debug has no blanket usesCleartextTraffic"; fi
+fi
+
+# The network security config. The copy in the repository is the list that both builds must hold: the release gets the one of the
+# verifier component through the manifest merge, the debug build has the copy plus 10.0.2.2.
+copy_file=app/src-tauri/gen/android/app/src/debug/res/xml/network_security_config.xml
+if [ ! -s "$copy_file" ]; then
+    echo "android-apk-check: the repository's copy of the revocation-list hosts is missing: $copy_file" >&2
+    exit 2
+fi
+# The permitting blocks of the copy as `host(includeSubdomains)` lines: comments dropped, the file read as one line of tags.
+tr '\n' ' ' < "$copy_file" | awk '
+    {
+        text = $0; plain = ""
+        while ((i = index(text, "<!--")) > 0) {
+            plain = plain substr(text, 1, i - 1)
+            text = substr(text, i + 4)
+            j = index(text, "-->")
+            if (j == 0) { text = ""; break }
+            text = substr(text, j + 3)
+        }
+        n = split(plain text, tag, "<")
+        permit = ""
+        for (k = 2; k <= n; k++) {
+            if (tag[k] ~ /^domain-config[ \t>]/) { permit = (tag[k] ~ /cleartextTrafficPermitted="true"/) ? "true" : "false" }
+            else if (tag[k] ~ /^\/domain-config/) { permit = "" }
+            else if (tag[k] ~ /^domain[ \t]/ && permit == "true") {
+                subs = (tag[k] ~ /includeSubdomains="true"/) ? "true" : "false"
+                host = substr(tag[k], index(tag[k], ">") + 1)
+                gsub(/^[ \t]+|[ \t]+$/, "", host)
+                print host "(" subs ")"
+            }
+        }
+    }' | sort -u > "$tmp/netsec-copy.txt"
+if [ ! -s "$tmp/netsec-copy.txt" ]; then
+    echo "android-apk-check: the repository's copy of the revocation-list hosts names no host that permits cleartext: $copy_file" >&2
+    exit 2
+fi
+if [ "$mode" = release ]; then
+    grep -vxF '10.0.2.2(false)' "$tmp/netsec-copy.txt" > "$tmp/netsec-want.txt"
+else
+    cp "$tmp/netsec-copy.txt" "$tmp/netsec-want.txt"
+fi
+if [ -z "$netsec" ]; then
+    fail "network security config: found none in the $mode APK, wanted one that allows plain HTTP to the revocation-list hosts of $copy_file only"
+else
+    netsec_file=$(resource_file "$netsec")
+    if [ -z "$netsec_file" ]; then
+        fail "network security config: found no file behind $netsec in the resource table, wanted res/xml/<name>.xml"
+    else
+        "$aapt2" dump xmltree --file "$netsec_file" "$apk" 2> /dev/null | awk '
+            # Each element line has its depth in its indent; an attribute belongs to the element above it; a text line to the domain.
+            /^ *E: / {
+                indent = index($0, "E:"); elem = $2; elem_indent = indent
+                for (d in permit) if (d + 0 >= indent) delete permit[d]
+                if (elem == "domain") {
+                    block = ""
+                    for (d = indent - 1; d >= 0; d--) if (d in permit) { block = permit[d]; break }
+                    pending = block; subs = "false"
+                }
+                next
+            }
+            /^ *A: / {
+                line = $0; eq = index(line, "="); value = substr(line, eq + 1)
+                sub(/^"/, "", value); sub(/[^a-zA-Z].*$/, "", value)
+                if (line ~ /cleartextTrafficPermitted/) {
+                    if (elem == "base-config") print "BASE|" value
+                    else if (elem == "domain-config") permit[elem_indent] = value
+                }
+                if (line ~ /includeSubdomains/ && elem == "domain") subs = value
+                next
+            }
+            /^ *T: / {
+                text = $0; sub(/^ *T: /, "", text); gsub(/^["\047 \t]+|["\047 \t]+$/, "", text)
+                if (pending == "true" && text != "") print "HOST|" text "(" subs ")"
+                pending = ""
+            }' > "$tmp/netsec-found.txt"
+        found_base=$(sed -n 's/^BASE|//p' "$tmp/netsec-found.txt" | head -n 1)
+        sed -n 's/^HOST|//p' "$tmp/netsec-found.txt" | sort -u > "$tmp/netsec-hosts.txt"
+        if [ "$found_base" = false ]; then
+            pass "$mode network security config: the base config refuses cleartext"
+        elif [ -z "$found_base" ]; then
+            fail "network security config: found no base config in $netsec_file, wanted one with cleartextTrafficPermitted false"
+        else
+            fail "network security config: the base config permits cleartext ('$found_base'), wanted false"
+        fi
+        extra=$(comm -13 "$tmp/netsec-want.txt" "$tmp/netsec-hosts.txt" | head -n 3 | tr '\n' ' ')
+        missing=$(comm -23 "$tmp/netsec-want.txt" "$tmp/netsec-hosts.txt" | head -n 3 | tr '\n' ' ')
+        if [ -n "$extra" ]; then
+            fail "network security config: found cleartext host(s) ${extra% } not in the repository's copy for the $mode APK, wanted exactly the hosts of $copy_file$([ "$mode" = release ] && echo ' without 10.0.2.2')"
+        fi
+        if [ -n "$missing" ]; then
+            fail "network security config: found no cleartext host ${missing% } of the repository's copy in the $mode APK, wanted exactly the hosts of $copy_file$([ "$mode" = release ] && echo ' without 10.0.2.2')"
+        fi
+        if [ -z "$extra" ] && [ -z "$missing" ]; then
+            count=$(wc -l < "$tmp/netsec-want.txt" | tr -d ' ')
+            if [ "$mode" = release ]; then
+                pass "release network security config holds the $count revocation-list hosts of the repository's copy and no other host"
+            else
+                pass "debug network security config holds the $count hosts of the repository's copy, 10.0.2.2 included, and no other host"
+            fi
+        fi
+    fi
 fi
 
 # ---- 16 KB pages ----------------------------------------------------------------------------------------------------------------

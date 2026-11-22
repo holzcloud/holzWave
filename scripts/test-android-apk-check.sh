@@ -43,7 +43,7 @@ BT=$(pin HOLZWAVE_BUILD_TOOLS)
 #   F_FULL_BACKUP    an extra application attribute line []
 #   F_RULES          the dataExtractionRules attribute line [a reference]
 #   F_DEBUGGABLE     the debuggable attribute line [debug: true, release: none]
-#   F_CLEARTEXT      an attribute line for usesCleartextTraffic or networkSecurityConfig [debug: the config, release: none]
+#   F_CLEARTEXT      an attribute line for usesCleartextTraffic or networkSecurityConfig [the config, in both modes]
 #   F_PERMISSION     an extra uses-permission name []
 #   F_COMPONENTS     extra component lines []
 #   F_MAIN_EXPORTED  the exported value of the launcher activity [true]
@@ -78,7 +78,7 @@ manifest_tree() {
         echo "        ${F_CLEARTEXT-A: http://schemas.android.com/apk/res/android:networkSecurityConfig(0x01010527)=@0x7f120001}"
     else
         [ -n "${F_DEBUGGABLE:-}" ] && echo "        $F_DEBUGGABLE"
-        [ -n "${F_CLEARTEXT:-}" ] && echo "        $F_CLEARTEXT"
+        echo "        ${F_CLEARTEXT-A: http://schemas.android.com/apk/res/android:networkSecurityConfig(0x01010527)=@0x7f120001}"
     fi
     printf '%s\n' \
         '          E: activity (line=32)' \
@@ -111,6 +111,32 @@ rules_tree() {
     return 0
 }
 
+# The compiled network security config of the application. $1: the value of the base config's cleartextTrafficPermitted; the
+# hosts of the permitting block are $2 (a space-separated list, includeSubdomains=true) and the emulator's block has the host
+# $3 (includeSubdomains=false), none when $3 is empty. Booleans are printed as aapt2 prints a string attribute without a
+# namespace, and the host as a text node.
+netsec_tree() {
+    printf '%s\n' '  E: network-security-config (line=2)'
+    if [ "$1" != none ]; then
+        printf '    E: base-config (line=3)\n      A: cleartextTrafficPermitted="%s" (Raw: "%s")\n' "$1" "$1"
+    fi
+    printf '    E: domain-config (line=8)\n      A: cleartextTrafficPermitted="true" (Raw: "true")\n'
+    for host in $2; do
+        printf '      E: domain (line=9)\n        A: includeSubdomains="true" (Raw: "true")\n          T: %s\n' "'$host'"
+    done
+    if [ -n "$3" ]; then
+        printf '    E: domain-config (line=380)\n      A: cleartextTrafficPermitted="true" (Raw: "true")\n'
+        printf '      E: domain (line=381)\n        A: includeSubdomains="false" (Raw: "false")\n          T: %s\n' "'$3'"
+    fi
+    return 0
+}
+
+# The hosts of the permitting blocks of the repository's copy of the verifier's config, the emulator's alias left out.
+copy_hosts() {
+    sed -n 's/.*<domain includeSubdomains="true">\([^<]*\)<\/domain>.*/\1/p' "$root/$copy_path" | grep -v '^10[.]0[.]2[.]2$'
+}
+copy_path=app/src-tauri/gen/android/app/src/debug/res/xml/network_security_config.xml
+
 n=0
 # mkcase <debug|release>: the fake machine in $c with good fixtures; the F_ variables and the C_ variables below change one fact.
 #   C_ENTRIES   the zip listing [one library of arm64-v8a, a manifest, a dex]
@@ -127,6 +153,10 @@ n=0
 #   C_NO_INIT   set: the native library does not export the verifier's set-up function (it does by default)
 #   C_TOOL      a tool to leave out of the fake SDK: aapt2, zipalign, apksigner, readelf, unzip
 #   C_RULES     the domains excluded in the rules file [root file database sharedpref external device_root]
+#   C_NSC_BASE  the base config's cleartextTrafficPermitted in the compiled config: true, false or none [false]
+#   C_NSC_HOSTS the hosts of the compiled config's permitting block [the hosts of the repository's copy]
+#   C_NSC_EMU   the emulator host of the second block [debug: 10.0.2.2, release: none; an empty value means none]
+#   C_NSC_FILE  the path of the compiled config in the APK [res/xml/network_security_config.xml]
 mkcase() {
     n=$((n + 1))
     c="$tmp/case$n"
@@ -142,6 +172,8 @@ mkcase() {
     cp "$here/android-env.sh" "$here/android-apk-check.sh" "$here/android-version-code.sh" "$c/repo/scripts/"
     printf '{\n  "version": "0.0.1-beta2",\n  "identifier": "ch.holzcloud.holzwave",\n  "bundle": {\n    "android": {\n      "debugApplicationIdSuffix": ".debug"\n    }\n  }\n}\n' > "$c/repo/app/src-tauri/tauri.conf.json"
     printf '# the list\nandroid.permission.INTERNET\n' > "$c/repo/app/src-tauri/android-permissions.txt"
+    mkdir -p "$c/repo/$(dirname "$copy_path")"
+    cp "$root/$copy_path" "$c/repo/$copy_path"
 
     if [ "$mode" = debug ]; then pkg=ch.holzcloud.holzwave.debug; else pkg=ch.holzcloud.holzwave; fi
     {
@@ -152,8 +184,11 @@ mkcase() {
     } > "$c/badging.txt"
     manifest_tree "$pkg" > "$c/manifest.txt"
     printf '%s\n' '  resource 0x7f120000 xml/data_extraction_rules' '      () (file) res/xml/data_extraction_rules.xml type=XML' \
-        '  resource 0x7f120001 xml/network_security_config' '      () (file) res/xml/network_security_config.xml type=XML' > "$c/resources.txt"
+        '  resource 0x7f120001 xml/network_security_config' "      () (file) ${C_NSC_FILE:-res/xml/network_security_config.xml} type=XML" > "$c/resources.txt"
     rules_tree "${C_RULES:-root file database sharedpref external device_root}" > "$c/rules.txt"
+    if [ "$mode" = debug ]; then emu=${C_NSC_EMU-10.0.2.2}; else emu=${C_NSC_EMU-}; fi
+    netsec_tree "${C_NSC_BASE:-false}" "${C_NSC_HOSTS:-$(copy_hosts | tr '\n' ' ')}" "$emu" > "$c/netsec.txt"
+    echo "${C_NSC_FILE:-res/xml/network_security_config.xml}" > "$c/netsec.file"
     printf '%s\n' "${C_ENTRIES:-AndroidManifest.xml
 classes.dex
 lib/arm64-v8a/libholzwave_app_lib.so
@@ -186,6 +221,7 @@ resources.arsc}" > "$c/entries.txt"
   "dump xmltree --file AndroidManifest.xml "*) cat "$HW_CASE/manifest.txt" ;;
   "dump resources "*) cat "$HW_CASE/resources.txt" ;;
   "dump xmltree --file res/xml/data_extraction_rules.xml "*) cat "$HW_CASE/rules.txt" ;;
+  "dump xmltree --file "*) if [ "$4" = "$(cat "$HW_CASE/netsec.file")" ]; then cat "$HW_CASE/netsec.txt"; else echo "no such file in the APK: $4" >&2; exit 1; fi ;;
   *) echo "unexpected aapt2 call" >&2; exit 9 ;;
 esac'
     shim "$sdk/build-tools/$BT/zipalign" 'cat "$HW_CASE/zipalign.txt"; exit "$(cat "$HW_CASE/zipalign.rc")"'
@@ -237,7 +273,7 @@ check() {
 }
 clean_after() { [ -z "$(ls -A "$c/tmpdir")" ]; }
 reset_f() { unset F_PACKAGE F_BACKUP F_FULL_BACKUP F_RULES F_DEBUGGABLE F_CLEARTEXT F_PERMISSION F_COMPONENTS F_MAIN_EXPORTED F_INCLUDE; }
-reset_c() { unset C_ENTRIES C_ZIPALIGN C_ALIGN C_CODE C_ABIS C_MIN C_SIGNED C_DN C_DEX C_SO C_TOOL C_RULES C_NO_VERIFIER C_NO_INIT; }
+reset_c() { unset C_ENTRIES C_ZIPALIGN C_ALIGN C_CODE C_ABIS C_MIN C_SIGNED C_DN C_DEX C_SO C_TOOL C_RULES C_NO_VERIFIER C_NO_INIT C_NSC_BASE C_NSC_HOSTS C_NSC_EMU C_NSC_FILE; }
 
 # rule <name> <mode>: with the F_ and C_ variables set by the caller, a run must fail with a FAIL line that matches <pattern>.
 expect_fail() { # <what> <mode> <pattern>
@@ -345,9 +381,40 @@ F_MAIN_EXPORTED=false; expect_fail "the launcher activity not exported (nothing 
 echo "debuggable and cleartext"
 F_DEBUGGABLE="A: http://schemas.android.com/apk/res/android:debuggable(0x0101000f)=true"; expect_fail "a debuggable release APK" release "debuggable: found 'true' in the release APK"
 F_CLEARTEXT="A: http://schemas.android.com/apk/res/android:usesCleartextTraffic(0x010104ec)=true"; expect_fail "cleartext traffic in a release APK" release "usesCleartextTraffic: found 'true' in the release APK"
-F_CLEARTEXT="A: http://schemas.android.com/apk/res/android:networkSecurityConfig(0x01010527)=@0x7f120001"; expect_fail "a network security config in a release APK" release "networkSecurityConfig: found '@0x7f120001' in the release APK"
 F_DEBUGGABLE=""; expect_fail "a debug APK that is not debuggable" debug "debuggable: found 'not set' in the debug APK"
 F_CLEARTEXT="A: http://schemas.android.com/apk/res/android:usesCleartextTraffic(0x010104ec)=true"; expect_fail "a blanket cleartext allow in the debug APK" debug "usesCleartextTraffic: found true in the debug APK"
+
+echo "the network security config: the revocation-list hosts, and 10.0.2.2 in debug only"
+copy_count=$(copy_hosts | wc -l | tr -d ' ')
+[ "$copy_count" -ge 50 ] && ok "the repository's copy holds $copy_count revocation-list hosts, read by the same pattern as the fixtures" || bad "the copy holds only $copy_count hosts: the fixture pattern does not read it"
+first_host=$(copy_hosts | head -n 1)
+F_CLEARTEXT=""; expect_fail "no network security config in a release APK" release "network security config: found none in the release APK"
+F_CLEARTEXT=""; expect_fail "no network security config in a debug APK" debug "network security config: found none in the debug APK"
+F_CLEARTEXT="A: http://schemas.android.com/apk/res/android:usesCleartextTraffic(0x010104ec)=true"; expect_fail "a release APK with a blanket cleartext allow and no config" release "usesCleartextTraffic: found 'true' in the release APK"
+C_NSC_EMU=10.0.2.2; expect_fail "10.0.2.2 in a release APK" release "network security config: found .*10.0.2.2.*not in the repository's copy for the release"
+C_NSC_EMU=""; expect_fail "a debug APK without 10.0.2.2" debug "network security config: found no cleartext host .*10.0.2.2"
+C_NSC_HOSTS="$(copy_hosts | tr '\n' ' ') example.org"; expect_fail "one host more than the copy in a release APK" release "network security config: found .*example.org.*not in the repository's copy"
+C_NSC_HOSTS="$(copy_hosts | tr '\n' ' ') 192.168.1.5"; expect_fail "an IP literal besides the copy's hosts in a debug APK" debug "network security config: found .*192.168.1.5.*not in the repository's copy"
+C_NSC_HOSTS="$(copy_hosts | tail -n +2 | tr '\n' ' ')"; expect_fail "one host fewer than the copy in a release APK" release "network security config: found no cleartext host .*$first_host"
+C_NSC_BASE=true; expect_fail "a base config that permits cleartext in a release APK" release "network security config: the base config permits cleartext"
+C_NSC_BASE=true; expect_fail "a base config that permits cleartext in a debug APK" debug "network security config: the base config permits cleartext"
+C_NSC_BASE=none; expect_fail "no base config in the compiled file" release "network security config: found no base config"
+C_NSC_FILE=res/Ab.xml; mkcase release
+check
+if [ "$rc" -eq 0 ] && echo "$out" | grep -q '^ok   release network security config holds the .* revocation-list hosts of the repository.s copy and no other host'; then
+    ok "a release build that shortened the file name is found through the resource table"
+else
+    bad "a shortened resource path (rc $rc): $out"
+fi
+reset_c
+mkcase debug
+check
+echo "$out" | grep -q '^ok   debug network security config holds the .* hosts of the repository.s copy, 10.0.2.2 included' \
+    && ok "a good debug APK is reported as holding the copy's hosts and 10.0.2.2" || bad "no debug network security line: $out"
+mkcase release
+rm -f "$c/repo/$copy_path"
+check
+[ "$rc" -eq 2 ] && ok "a missing repository copy is exit 2, never a skip" || bad "no copy (rc $rc): $out"
 
 echo "16 KB pages"
 C_ZIPALIGN=1; expect_fail "zipalign -P 16 failing" release "zipalign: found '.*BAD"
