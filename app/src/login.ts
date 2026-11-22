@@ -658,4 +658,14 @@ async function start(): Promise<void> {
   signInScreen(session, notice);
 }
 
+// A device link opened in a tab that already shows this page changes the fragment only, so no document is loaded and `start` does not run
+// again: the code is taken out of the address at once and kept for the sign-in that follows, which hands it to the application as at load.
+// No other kind of link is taken this way: a setup or an invite link is read when the page loads.
+window.addEventListener("hashchange", () => {
+  if (!location.hash.startsWith("#device=")) return;
+  const fragment = parseFragment(location.hash);
+  history.replaceState(null, "", location.pathname + location.search);
+  if (fragment?.kind === "device") pendingDevice = fragment.token;
+});
+
 void start();

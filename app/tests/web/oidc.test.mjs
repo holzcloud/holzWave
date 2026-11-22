@@ -2,7 +2,7 @@
 // site than the page's host) and comes back by a top-level GET that carries the 10-minute Lax cookie, and ends on the
 // signed-in page with the Strict session cookie. A replayed callback, a callback without the cookie and an identity outside
 // the allowed domain and group all end on the failed sentence, and no account is made for them.
-import { runTest, openPage, signIn, openPeople, check, equal, poll, answered } from "./lib.mjs";
+import { runTest, openPage, signIn, openPeople, check, equal, poll, answered, nativeClient, setSwitches } from "./lib.mjs";
 
 const FAILED = "Sign-in failed. Check your details or ask an admin.";
 
@@ -76,6 +76,43 @@ await runTest("oidc", { oidc: true }, async ({ harness, open }) => {
     context.expectClean("the context of the second sign-in");
   }
   equal(await people(), afterFirst, "the same subject with another address made no second account");
+
+  // ---- a device link and single sign-on: the code is lost on the round trip, and Open again opens it once more ----------------------
+  // The page leaves for the provider, so the code of the link cannot come back with the callback (accepted); the person's secrets are
+  // locked after a single sign-on, and the same browser loading the link again as a new document gets the dialog.
+  {
+    const native = nativeClient(harness);
+    await setSwitches(adminPage, { remote: true });
+    await harness.idp(allowed);
+    const grant = await native.start("Test laptop", "macos");
+    equal(grant.status, 200, "a native client can start a grant once a switch is on");
+    const context = await open({ allow: [idpOrigin] });
+    const page = await context.context.newPage();
+    await page.goto(`${harness.origin}/#device=${grant.userCode}`);
+    await page.waitForSelector(".lg-box");
+    await page.getByRole("link", { name: "Continue with Company" }).click();
+    await page.waitForSelector("canvas#term", { timeout: 30_000 });
+    await page.waitForTimeout(400);
+    equal(await page.getByRole("dialog", { name: "Authorize device" }).count(), 0, "the code did not come back from the provider");
+    const state = (await (await context.context.request.get(`${harness.origin}/api/session`)).json()).state;
+    equal(state, "locked", "the secrets of a person who signed in through a provider are locked");
+    // What Open again does: the same browser loads the link once more, as a new document.
+    const again = await context.context.newPage();
+    await again.goto(`${harness.origin}/#device=${grant.userCode}`);
+    const dialog = again.getByRole("dialog", { name: "Authorize device" });
+    await dialog.waitFor({ timeout: 8_000 });
+    await poll(async () => ((await dialog.locator(".dev-kv").count()) > 0 ? true : undefined), "the dialog shows who asks");
+    equal((await dialog.locator(".dev-code").innerText()).trim(), grant.userCode, "the code of the link");
+    equal(new URL(again.url()).hash, "", "the fragment is not in the address bar");
+    await dialog.getByRole("button", { name: "Approve" }).click();
+    await poll(async () => ((await dialog.locator(".dev-status").innerText()).includes("Device approved.") ? true : undefined), "the dialog says Device approved.");
+    const got = await native.poll(grant.deviceCode);
+    equal(got.state, "approved", "the app gets its token");
+    equal((await native.me(got.token)).status, 200, "the token signs the device in");
+    // The device ends its own sign-in so that nothing of this block is left behind.
+    equal((await native.call("DELETE", "/api/device/me", { token: got.token })).status, 204, "the device ends its own sign-in");
+    context.expectClean("the context of the device link after a single sign-on");
+  }
 
   // ---- the callback again, and the callback without the cookie -------------------------------------------------------------------
   {

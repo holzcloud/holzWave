@@ -155,6 +155,7 @@ await runTest("devices", {}, async ({ harness, open }) => {
     const context = await open();
     const page = await context.context.newPage();
     const grant = await native.start("Locked phone", "android");
+    equal(grant.status, 200, "a grant can be started");
     await signIn(page, harness, locked, `/#device=${grant.userCode}`);
     equal(await sessionState(context), "locked", "the session of the first sign-in says locked");
     const d = page.getByRole("dialog", { name: "Authorize device" });
@@ -171,6 +172,7 @@ await runTest("devices", {}, async ({ harness, open }) => {
   {
     // Control: nobody who is not signed in is asked anything.
     const grant = await native.start("Nobody's laptop", "linux");
+    equal(grant.status, 200, "a grant can be started");
     const context = await open();
     const page = await context.context.newPage();
     await page.goto(`${harness.origin}/#device=${grant.userCode}`);
@@ -179,6 +181,93 @@ await runTest("devices", {}, async ({ harness, open }) => {
     equal(await page.getByRole("dialog", { name: "Authorize device" }).count(), 0, "a page that is not signed in opens no dialog");
     equal((await native.poll(grant.deviceCode)).state, "pending", "and nothing was decided");
     context.expectClean("the context of the anonymous page");
+  }
+
+  // ---- a link opened in a tab that already shows the page is taken as well ----------------------------------------------------------
+  // Only the fragment changes there: no new document is loaded, so the page has to listen for the change.
+  const sameDocument = (page) => page.evaluate(() => { window.__sameDocument = true; });
+  // The canvas is drawn before the session of the page starts: the link is opened once the page has registered its own entries.
+  const sessionStarted = (page) =>
+    poll(
+      async () => ((await page.evaluate(async () => (await import(new URL("actions.js", location.href).href)).listActions().some((a) => a.id === "device.authorize"))) ? true : undefined),
+      "the page has started its session",
+    );
+  const stillSameDocument = (page) => page.evaluate(() => window.__sameDocument === true);
+  for (const [label, spec] of [
+    ["unlocked", { role: "member", name: "dv-tab-open" }],
+    ["locked", { role: "member", name: "dv-tab-lock", locked: true }],
+  ]) {
+    const who = await harness.account(spec);
+    const context = await open();
+    const page = await context.context.newPage();
+    await signIn(page, harness, who);
+    equal(await sessionState(context), label === "locked" ? "locked" : "signed_in", `the session of the ${label} person`);
+    await sessionStarted(page);
+    const grant = await native.start(`Tab ${label}`, "linux");
+    equal(grant.status, 200, "a grant can be started");
+    await sameDocument(page);
+    await page.goto(`${harness.origin}/#device=${grant.userCode}`);
+    const d = page.getByRole("dialog", { name: "Authorize device" });
+    await d.waitFor({ timeout: 8_000 });
+    await poll(async () => ((await d.locator(".dev-kv").count()) > 0 ? true : undefined), `a link opened in the open tab of a ${label} person shows who asks`);
+    equal((await d.locator(".dev-code").innerText()).trim(), grant.userCode, `the code of the link in the open tab (${label})`);
+    equal(new URL(page.url()).hash, "", `the fragment leaves the address of the open tab at once (${label})`);
+    equal(await stillSameDocument(page), true, `the document of the open tab was not loaded again (${label})`);
+    equal((await pageHolds(page, grant.userCode)).join(","), "", `the code is not in the address, the title, the cookies or the storage (${label})`);
+    await d.getByRole("button", { name: "Approve" }).click();
+    await poll(async () => ((await d.locator(".dev-status").innerText()).includes("Device approved.") ? true : undefined), `the dialog says Device approved. (${label})`);
+    const got = await native.poll(grant.deviceCode);
+    equal(got.state, "approved", `the app gets its token (${label})`);
+    // The device ends its own sign-in: the grants of one address are few at a time, and the lists counted below hold what they held before.
+    equal((await native.call("DELETE", "/api/device/me", { token: got.token })).status, 204, `the device ends its own sign-in (${label})`);
+    // A fragment that is not a device link changes nothing: it stays in the address and opens nothing.
+    await d.getByRole("button", { name: "Close" }).click();
+    await d.waitFor({ state: "detached" });
+    await page.goto(`${harness.origin}/#x`);
+    await page.waitForTimeout(400);
+    equal(await page.getByRole("dialog").count(), 0, `a fragment that is no device link opens nothing (${label})`);
+    equal(new URL(page.url()).hash, "#x", `and is left in the address (${label})`);
+    // A device fragment that is malformed opens nothing either, and is taken out of the address like at load.
+    await page.goto(`${harness.origin}/#device=NOT-A-CODE`);
+    await page.waitForTimeout(400);
+    equal(await page.getByRole("dialog").count(), 0, `a malformed device fragment opens nothing (${label})`);
+    equal(new URL(page.url()).hash, "", `and is taken out of the address (${label})`);
+    context.expectClean(`the context of the open tab (${label})`);
+  }
+  {
+    // The sign-in page is open and the link arrives in the same tab: the code is kept for the sign-in that follows.
+    const who = await harness.account({ role: "member", name: "dv-tab-anon" });
+    const context = await open();
+    const page = await context.context.newPage();
+    await page.goto(`${harness.origin}/`);
+    await page.waitForSelector(".lg-box");
+    const grant = await native.start("Tab sign-in", "android");
+    equal(grant.status, 200, "a grant can be started");
+    await sameDocument(page);
+    await page.goto(`${harness.origin}/#x`);
+    await page.waitForTimeout(400);
+    equal(new URL(page.url()).hash, "#x", "a fragment that is no device link stays in the address of the sign-in page");
+    await page.goto(`${harness.origin}/#device=${grant.userCode}`);
+    await poll(async () => (new URL(page.url()).hash === "" ? true : undefined), "the fragment leaves the address of the sign-in page");
+    equal(await stillSameDocument(page), true, "the sign-in page was not loaded again");
+    equal(await page.getByRole("dialog").count(), 0, "the sign-in page opens no dialog");
+    await page.getByLabel("Username").fill(who.username);
+    await page.getByLabel("Password", { exact: true }).fill(who.password);
+    await page.getByRole("button", { name: "Continue" }).click();
+    await page.getByLabel("Code").waitFor();
+    await page.getByLabel("Code").fill(await who.authenticator.next());
+    await page.getByRole("button", { name: "Sign in" }).click();
+    const d = page.getByRole("dialog", { name: "Authorize device" });
+    await d.waitFor();
+    await poll(async () => ((await d.locator(".dev-kv").count()) > 0 ? true : undefined), "the main page shows who asks, with the code the sign-in page kept");
+    equal((await d.locator(".dev-code").innerText()).trim(), grant.userCode, "the code that arrived while the sign-in page was open");
+    equal(new URL(page.url()).hash, "", "no fragment in the address after the sign-in");
+    await d.getByRole("button", { name: "Approve" }).click();
+    await poll(async () => ((await d.locator(".dev-status").innerText()).includes("Device approved.") ? true : undefined), "the dialog says Device approved.");
+    const got = await native.poll(grant.deviceCode);
+    equal(got.state, "approved", "the app gets its token");
+    equal((await native.call("DELETE", "/api/device/me", { token: got.token })).status, 204, "the device ends its own sign-in");
+    context.expectClean("the context of the sign-in page that was open");
   }
 
   // ---- the lists: a person sees and ends their own devices only, an administrator everybody's -------------------------------------------
@@ -321,7 +410,8 @@ await runTest("devices", {}, async ({ harness, open }) => {
     await again.getByRole("button", { name: "Close" }).click();
     const last = await openPeople(adminPage);
     await poll(async () => ((await last.locator('[data-group="devices"] .dev-row').count()) === 2 ? true : undefined), "turning the switches off ended no stored device");
-    equal((await last.locator('[data-group="device-access"] .dev-switch').evaluateAll((bs) => bs.map((b) => b.textContent).join(","))), "OFF,OFF", "both off is the state the server holds");
+    // The switches are drawn after the list of devices: read them once they are there.
+    await poll(async () => (((await last.locator('[data-group="device-access"] .dev-switch').evaluateAll((bs) => bs.map((b) => b.textContent).join(","))) === "OFF,OFF") ? true : undefined), "both off is the state the server holds");
     await last.getByRole("button", { name: "Close" }).click();
   }
   anaContext.expectClean("the context of the person whose devices were listed");

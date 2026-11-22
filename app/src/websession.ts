@@ -36,6 +36,8 @@ let unlockApi: typeof import("./unlock.js") | null = null;
  * removed from the address at once and kept nowhere else: not in storage, not in a cookie, not in a log line.
  */
 let deviceCode: string | null = null;
+/** True once the answer of `GET /api/session` was a live session (signed in, whether the secrets are open or not): a code that arrives later can be decided at once. */
+let live = false;
 /** True once the first lookup was an answer: from then on the `web` segment is part of the strip, empty or not, so that it is a live region before it speaks. */
 let known = false;
 
@@ -126,6 +128,17 @@ async function openDeviceCode(): Promise<void> {
   await openAuthorize(code);
 }
 
+/**
+ * Take the device code out of the address: the fragment `#device=...` is read once, removed from the address at once and kept only in
+ * `deviceCode`. A fragment of another kind is left alone, and one that is not a well formed code is removed and opens nothing.
+ */
+function takeDeviceFragment(): void {
+  if (!location.hash.startsWith("#device=")) return;
+  const code = parseFragment(location.hash)?.token ?? null;
+  history.replaceState(null, "", location.pathname + location.search);
+  if (code !== null) deviceCode = code;
+}
+
 /** The text button of a mark was pressed. */
 function act(action: NonNullable<Mark["action"]>): void {
   if (action === "unlock") void openUnlockDialog();
@@ -204,10 +217,13 @@ export function initWebSession(onChange: () => void): Promise<void> {
   started = true;
   changed = onChange;
   // An app asked to sign in and its address carries the code: take it out of the address now, whatever it holds.
-  if (location.hash.startsWith("#device=")) {
-    deviceCode = parseFragment(location.hash)?.token ?? null;
-    history.replaceState(null, "", location.pathname + location.search);
-  }
+  takeDeviceFragment();
+  // A link opened in a tab that already shows the page changes the fragment only, so no document is loaded: it is taken the same way,
+  // and decided at once when the session is known to be live, or when the first lookup has ended.
+  window.addEventListener("hashchange", () => {
+    takeDeviceFragment();
+    if (live && deviceCode !== null) void openDeviceCode();
+  });
   // The palette entries of the account: the dialog and the end of this session.
   registerAction({ id: "account.open", title: "Account…", run: () => void openAccountDialog() });
   registerAction({ id: "account.signout", title: "Sign out", run: () => void signOut() });
@@ -238,7 +254,8 @@ export function initWebSession(onChange: () => void): Promise<void> {
       // may decide it, whether the secrets are open (`signed_in`) or not (`locked`: single sign-on, a passkey without PRF, a password
       // that does not key the store). Approving a device does not read or open the secret store, and the server takes the lookup,
       // the approval and the refusal from a locked session as well.
-      if (deviceCode !== null && info.state !== "anonymous") void openDeviceCode();
+      live = info.state !== "anonymous";
+      if (live && deviceCode !== null) void openDeviceCode();
     },
     () => {
       // A failed lookup leaves the page as it is.

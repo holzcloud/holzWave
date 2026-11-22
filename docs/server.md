@@ -272,9 +272,12 @@ an authenticator app.
    consonants `BCDFGHJKLMNPQRSTVWXZ`.
 2. The app opens the system browser at `<public_url>/#device=<code>`. The code is in the fragment, which a browser never sends
    to a server. The person signs in there the usual way; the page keeps the code through a sign-in with a passkey or a password,
-   and asks to confirm it is the person when the sign-in is older than `sessions.step_up`. A sign-in through single sign-on
-   leaves the page for the provider and loses the code: `Open again` in the app opens it once more. An administrator or a
-   member can also type a code into the palette entry `Authorize device…`.
+   also when the saved secrets stay locked after it (a passkey without the PRF extension, a password that does not key the
+   store), and asks to confirm it is the person when the sign-in is older than `sessions.step_up`. A link opened in a tab that
+   already shows the page, signed in or not, is taken as well. A sign-in through single sign-on leaves the page for the provider
+   and loses the code: `Open again` in the app opens it once more in the signed-in browser, and the page asks about the device
+   whether or not the secrets are open, because approving a device does not read them. An administrator or a member can also
+   type a code into the palette entry `Authorize device…`.
 3. The page `Authorize device` shows the name of the device, its platform, the network address the request came from, when it
    was made, and the code to compare with the app, and says to approve only what the person started. `Approve` or `Deny`.
 4. The app asks the server every 5 seconds whether the request was decided. A request lives 10 minutes. After the approval the
