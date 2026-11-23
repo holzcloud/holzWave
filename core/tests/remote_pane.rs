@@ -126,6 +126,15 @@ fn count(text: &str, needle: &str) -> usize {
     text.matches(needle).count()
 }
 
+/// Whether the view says that a key was typed and not sent.
+fn not_sent(pane: &PaneHandle) -> bool {
+    pane.remote_view().expect("a remote pane has a view").not_sent
+}
+
+fn dropped(pane: &PaneHandle) -> u64 {
+    pane.remote_view().expect("a remote pane has a view").dropped_input
+}
+
 fn enter(pane: &PaneHandle) {
     pane.key(DomKey { code: "Enter".into(), key: "Enter".into(), ..DomKey::default() }).expect("a key");
 }
@@ -247,7 +256,7 @@ fn a_dropped_socket_shows_reconnecting_once_with_the_count_and_heals_with_a_fres
 }
 
 #[test]
-fn when_the_tries_are_used_the_pane_fails_waits_for_enter_drops_what_is_typed_and_a_close_ends_the_wait() {
+fn when_the_tries_are_used_the_pane_fails_waits_for_enter_counts_what_is_typed_as_not_sent_and_a_close_ends_the_wait() {
     let device = FakeDevice::start();
     let hub = hub_with(&device, fast());
     let mut session = Session::new(80, 24);
@@ -262,17 +271,23 @@ fn when_the_tries_are_used_the_pane_fails_waits_for_enter_drops_what_is_typed_an
     assert_eq!(count(&text, NOTICE_RECONNECTING), 1, "one Reconnecting line for the whole loss: {text:?}");
     assert_eq!(count(&text, NOTICE_UNREACHABLE), 1);
 
-    // Typed bytes are dropped: nothing connects, nothing is kept.
+    assert!(!not_sent(&pane), "nothing was typed yet");
+
+    // Typed bytes are not sent and not kept; they are counted, and the view says so.
     pane.text("abc".into()).unwrap();
+    wait_for("the state", || not_sent(&pane));
+    assert_eq!(dropped(&pane), 3);
     assert!(device.accept_within(Duration::from_millis(400)).is_none(), "nothing happens by itself after the tries");
     assert_eq!(pane.conn_state(), ConnState::Failed);
 
-    // Enter is one fresh try. The server still does not speak: failed again, and it says so again.
-    enter(&pane);
+    // Enter is one fresh try, and the other bytes of its buffer are counted like any typed bytes. The server still does not
+    // speak: failed again, and it says so again.
+    pane.text("xy\r".into()).unwrap();
     device.drop_connections_for(Duration::from_millis(600));
     wait_for("a second notice", || count(&screen(&pane), NOTICE_UNREACHABLE) == 2);
     assert_eq!(pane.conn_state(), ConnState::Failed);
-    // Another Enter and this time the server answers: what was typed meanwhile never arrived.
+    assert_eq!(dropped(&pane), 5, "the two bytes beside the Enter were counted, the Enter was not");
+    // Another Enter, alone in its buffer, drops nothing; this time the server answers: what was typed meanwhile never arrived.
     enter(&pane);
     let mut conn = device.accept();
     let request = conn.request();
@@ -280,8 +295,11 @@ fn when_the_tries_are_used_the_pane_fails_waits_for_enter_drops_what_is_typed_an
     session.serve(&mut conn, &request, WriterView::Writing, 100);
     wait_text(&pane, "back$");
     assert!(!screen(&pane).contains("abc"), "typed bytes are not kept while the connection is down");
+    assert!(!screen(&pane).contains("Not sent"), "the state is the header's, never a line on the screen");
     let got = conn.drain(Duration::from_millis(200));
     assert!(!got.iter().any(|g| matches!(g, Got::Input { .. })), "{got:?}");
+    assert_eq!(dropped(&pane), 5, "an Enter that starts the try drops nothing");
+    assert!(not_sent(&pane), "the state outlives the reconnect: this pane has not sent a key since");
 
     // Failed again, then a close ends the wait.
     conn.cut();
@@ -314,8 +332,11 @@ fn a_network_that_goes_silent_shows_reconnecting_within_the_bound_then_unreachab
     // The header's label follows the state of the connection: while it is made again the pane no longer says it writes.
     assert!(matches!(pane.conn_state(), ConnState::Reconnecting { attempt: 1, of: 3, .. }), "{:?}", pane.conn_state());
     wait_text(&pane, NOTICE_RECONNECTING);
-    // Typed after the bound: not sent, not kept.
+    // Typed after the bound: not sent, not kept, and the view says so.
+    assert!(!not_sent(&pane));
     pane.text("late".into()).unwrap();
+    wait_for("the state", || not_sent(&pane));
+    assert_eq!(dropped(&pane), 4);
 
     // The server is there and does not speak: every try fails, and the pane waits for Enter.
     device.drop_connections_for(Duration::from_millis(500));
@@ -336,10 +357,16 @@ fn a_network_that_goes_silent_shows_reconnecting_within_the_bound_then_unreachab
     session.serve(&mut conn, &request, WriterView::Writing, 100);
     wait_text(&pane, "back$");
     wait_state(&pane, |s| *s == ConnState::Connected);
-    let got = conn.drain(Duration::from_millis(300));
-    assert!(!got.iter().any(|g| matches!(g, Got::Input { .. })), "{got:?}");
     assert!(!screen(&pane).contains("late"), "typed bytes are not kept while the connection is down");
+    assert_eq!(dropped(&pane), 9, "\"late\" and \"later\"");
+    assert!(not_sent(&pane), "attached again, the state stays until this pane sends a key");
     assert!(probe.exits().is_empty(), "the pane stayed open all the time");
+    // The first typed byte the pane sends while it writes ends the state; nothing typed before it arrived (the silence bound of
+    // this hub is short and the scripted server says nothing, so the connection is used at once).
+    conn.ping();
+    pane.text("ls\r".into()).unwrap();
+    assert_eq!(conn.drain(Duration::from_millis(200)), vec![Got::Input { session: 4, bytes: b"ls\r".to_vec() }]);
+    wait_for("the state to end", || !not_sent(&pane));
     drop(silent);
     pane.close();
     assert!(pane.join(PATIENCE));
@@ -591,17 +618,66 @@ fn a_watcher_drops_what_is_typed_before_it_is_sent_and_counts_it_and_a_writer_se
     let mut session = Session::new(80, 24);
     session.print("watching$ ");
     let (pane, _probe, mut conn) = attached_pane(&device, &hub, 4, &mut session, WriterView::Watching, None, "watching$");
+    assert!(!not_sent(&pane));
     pane.text("rm -rf /\r".into()).unwrap();
     wait_for("the count", || pane.remote_view().is_some_and(|v| v.dropped_input >= 9));
     assert_eq!(pane.remote_view().unwrap().dropped_input, 9);
+    assert!(not_sent(&pane), "a watcher's typed bytes leave the state as well as the count");
     assert!(conn.drain(Duration::from_millis(300)).is_empty(), "nothing was sent");
     assert_eq!(hub.stats().input_frames, 0);
 
     conn.event(Event::Writer { session: 4, state: WriterView::Writing });
     wait_for("writing", || pane.remote_view().is_some_and(|v| v.writer == WriterView::Writing));
+    assert!(not_sent(&pane), "becoming the writer sends nothing: the state stays until a key is sent");
     pane.text("ls\r".into()).unwrap();
     let got = conn.drain(Duration::from_millis(500));
     assert_eq!(got, vec![Got::Input { session: 4, bytes: b"ls\r".to_vec() }]);
+    wait_for("the state to end", || !not_sent(&pane));
+    assert_eq!(dropped(&pane), 9, "a sent byte is not a dropped one");
+}
+
+#[test]
+fn keys_typed_while_the_first_attach_is_on_its_way_are_not_sent_and_say_not_sent_without_a_line_on_the_screen() {
+    let device = FakeDevice::start();
+    let hub = hub_with(&device, fast());
+    let (pane, _probe) = start_pane(&hub, 4, (80, 24), None);
+    assert!(!not_sent(&pane), "a pane that never dropped anything says nothing");
+    wait_text(&pane, NOTICE_ATTACHING);
+    let before = screen(&pane);
+    pane.text("early".into()).unwrap();
+    wait_for("the state", || not_sent(&pane));
+    assert_eq!(dropped(&pane), 5);
+    assert_eq!(pane.remote_view().unwrap().state, RemoteState::Attaching, "the phase is still the attach");
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(screen(&pane), before, "a drop puts nothing on the screen");
+
+    // The session is there: nothing typed meanwhile is sent, and the state waits for a sent key.
+    let mut session = Session::new(80, 24);
+    session.print("ready$ ");
+    let mut conn = device.accept();
+    let request = conn.request();
+    session.serve(&mut conn, &request, WriterView::Writing, 100);
+    wait_text(&pane, "ready$");
+    wait_state(&pane, |s| *s == ConnState::Connected);
+    let got = conn.drain(Duration::from_millis(200));
+    assert!(!got.iter().any(|g| matches!(g, Got::Input { .. })), "{got:?}");
+    assert!(not_sent(&pane));
+    assert!(!screen(&pane).contains("early"));
+    pane.text("ls\r".into()).unwrap();
+    assert_eq!(conn.drain(Duration::from_millis(500)), vec![Got::Input { session: 4, bytes: b"ls\r".to_vec() }]);
+    wait_for("the state to end", || !not_sent(&pane));
+    assert_eq!(dropped(&pane), 5);
+
+    // A pane that writes from the start and never drops has no state at all.
+    let device = FakeDevice::start();
+    let hub = hub_with(&device, fast());
+    let mut other = Session::new(80, 24);
+    other.print("quiet$ ");
+    let (quiet, _probe, mut conn) = attached_pane(&device, &hub, 5, &mut other, WriterView::Writing, None, "quiet$");
+    quiet.text("pwd\r".into()).unwrap();
+    assert_eq!(conn.drain(Duration::from_millis(500)), vec![Got::Input { session: 5, bytes: b"pwd\r".to_vec() }]);
+    assert!(!not_sent(&quiet));
+    assert_eq!(dropped(&quiet), 0);
 }
 
 #[test]

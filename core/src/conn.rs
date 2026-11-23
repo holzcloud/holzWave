@@ -64,6 +64,10 @@ pub struct RemoteView {
     pub state: RemoteState,
     /// How many bytes of typed input were dropped before they were sent, because this pane did not hold the right to write.
     pub dropped_input: u64,
+    /// A key this pane typed was not sent, and it has not sent one since: the header says `Not sent`. Set by every typed byte
+    /// the link could not send (while it attaches, reconnects, has no try left, watches or nobody writes), cleared by the next
+    /// write that is sent. It is a lasting state, not a moment, and it never keeps the bytes.
+    pub not_sent: bool,
 }
 
 /// The transient state of a remote pane, the part of the design record's table that is not a state of the connection.

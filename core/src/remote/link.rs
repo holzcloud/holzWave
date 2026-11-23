@@ -8,9 +8,11 @@
 //!   their order with the bytes is the order they happened in. The grid of the session is applied before the first byte of a
 //!   snapshot ([`PaneSink::grid`]); a size that changes while the session runs is applied after the live bytes before it
 //!   ([`PaneSink::grid_in_order`]), which the session wrote at the old size.
-//! * **The writer rule.** Only the writer's typed bytes are sent. Typed bytes of a pane that watches, or that nobody is told
-//!   writes, are dropped here and counted ([`RemoteView::dropped_input`]); the hub drops them again and the server a third
-//!   time. Nothing typed is kept while the connection is down.
+//! * **The writer rule.** Only the writer's typed bytes are sent. What a pane cannot send (it attaches, reconnects, has no try
+//!   left, watches, or nobody is told it writes) is dropped here, counted ([`RemoteView::dropped_input`]) and never kept; the hub
+//!   drops what reaches it again and the server a third time. A drop sets [`RemoteView::not_sent`], which stays until this pane
+//!   sends typed bytes again, so the header can say `Not sent` through a reconnect. It is a boolean: no byte of what was typed is
+//!   held, logged or shown, and it never puts a line on the screen.
 //! * **The grid rule.** The writer's size is the session's size: a resize of the writer's tile is sent, a watcher's is only
 //!   recorded, and when a pane starts to write it sends its recorded tile size once if that is not the session's size. The
 //!   pane's engine follows the size the server states.
@@ -211,6 +213,7 @@ impl ServerLink {
             more: false,
             state: RemoteState::Attaching,
             dropped_input: 0,
+            not_sent: false,
         };
         let shared = Arc::new(Shared {
             handle: Mutex::new(sub.handle()),
@@ -438,18 +441,30 @@ struct ServerWriter {
     shared: Arc<Shared>,
 }
 
+impl ServerWriter {
+    /// Bytes this pane could not send: counted, forgotten, and the view says so until a write is sent.
+    fn dropped(&self, bytes: usize) {
+        self.shared.dropped.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.shared.lock().view.not_sent = true;
+    }
+}
+
 impl Write for ServerWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self.shared.state.get() {
             ConnState::Connected => {
                 if self.shared.lock().view.writer == WriterView::Writing {
-                    let _ = self.shared.handle().input(buf);
+                    match self.shared.handle().input(buf) {
+                        Ok(()) => self.shared.lock().view.not_sent = false,
+                        // The hub is gone: nothing went anywhere.
+                        Err(_) => self.dropped(buf.len()),
+                    }
                 } else {
                     // A pane that watches, or that nobody is told writes: nothing is sent.
-                    self.shared.dropped.fetch_add(buf.len() as u64, Ordering::Relaxed);
+                    self.dropped(buf.len());
                 }
             }
-            // Enter tries once more; everything else typed is dropped.
+            // Enter tries once more; the other bytes of the buffer are dropped, and a buffer that is only Enter drops nothing.
             ConnState::Failed if buf.iter().any(|b| *b == b'\r' || *b == b'\n') => {
                 self.shared.state.set(ConnState::Connecting);
                 if self.shared.signed_out.load(Ordering::SeqCst) {
@@ -457,10 +472,14 @@ impl Write for ServerWriter {
                 } else {
                     let _ = self.shared.handle().retry();
                 }
+                let others = buf.iter().filter(|b| **b != b'\r' && **b != b'\n').count();
+                if others > 0 {
+                    self.dropped(others);
+                }
             }
-            // While the connection is down nothing typed is sent and none of it is kept: the session may have another writer
-            // when the connection is back.
-            _ => {}
+            // Attaching, reconnecting, no try left, closed: nothing typed is sent and none of it is kept (the session may have
+            // another writer when the connection is back), but it is counted and the view says so.
+            _ => self.dropped(buf.len()),
         }
         Ok(buf.len())
     }

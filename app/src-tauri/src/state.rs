@@ -280,7 +280,9 @@ mod protocol {
         let profile = holzwave_core::profiles::Profile::new("web-1", "Web", "web.example.org");
         let saved = ConnView::new(4, &profile, &ConnState::Reconnecting { attempt: 2, of: 5, in_secs: 3 }).expect("a connection");
         let remote = |pane, state: &ConnState, writer, phase| {
-            let view = RemoteView { session: 7, writer, cols: 120, rows: 40, more: true, state: phase, dropped_input: 0 };
+            // A pane that gave up after the tries were used and was typed at since: the one sample that says `not_sent`.
+            let not_sent = pane == 13;
+            let view = RemoteView { session: 7, writer, cols: 120, rows: 40, more: true, state: phase, dropped_input: 0, not_sent };
             ConnView::remote(pane, "sync.example.test", state, RemoteConn::of(&view))
         };
         to_value(&vec![

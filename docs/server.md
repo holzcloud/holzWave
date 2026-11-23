@@ -406,17 +406,21 @@ failure, and binary frames with the bytes. It is bounded: 4 KiB for a request, 6
 for an answer and 16 sessions attached at once, with the rate, silence and violation limits of the `limits` section that the
 page's socket has. A person reaches only their own sessions: another person's session answers `not_found` exactly as one that
 never existed. The close codes: 4401 the token was revoked or ran out or the account ended (at once when it is announced, and
-within `limits.session_recheck` otherwise), 1001 the feature was turned off or the server is stopping, 1013 too many sockets or
+within `limits.session_recheck` otherwise), 1001 the feature was turned off, the server is stopping or the socket was silent for `limits.ws_silence`, 1013 too many sockets or
 a write that made no progress, 1012 the worker ended, 1008 a flood of requests or too many broken rules, 1009 a message over
 its size, 1003 a message of a kind the socket does not take. No terminal byte and no token reaches a log, the audit files or the database.
 
-The server pings a device socket at least every 25 seconds (`limits.ping_interval`, or 25 seconds when that is longer). An app
-that hears nothing at all on its socket for 60 seconds (no message, no ping and no pong: twice the ping time and the 10 seconds
-of its beat) treats the connection as broken, even when the network keeps it open, and does what it does after a lost
-connection: the pane says `Reconnecting…`, then `Server unreachable. Press Enter to try again.` when the tries are used. What
-was typed between the moment the network went silent and the moment the app noticed is lost, and typing after that is neither
-sent nor kept. While the link was silent the server may have given the right to write away after its own 30 seconds, so the
-pane can come back `FREE`; `Take over` takes the right back. A reverse proxy that answers the upgrade with 502, 503 or 504 (the
+The server pings a device socket at least every 25 seconds (`limits.ping_interval`, or 25 seconds when that is longer). While a pane is
+attached, the app sends a beat every 10 seconds and the answer must come within 10 seconds, or the app treats the connection as broken, even
+when the network keeps it open: a network that goes silent is noticed within about 20 seconds. A connection with no pane attached has no beat to
+wait for, so the older rule stays as the backstop: an app that hears nothing at all on its socket for 60 seconds (no message, no ping and no pong:
+twice the ping time and the 10 seconds of its beat) treats it as broken too. The app then does what it does after a lost connection: the pane says
+`Reconnecting…`, then `Server unreachable. Press Enter to try again.` when the tries are used, once for the failure however often Enter is pressed
+on a server that still does not answer. What a pane cannot send (while it attaches, reconnects, has no try left, watches or nobody writes) is not
+sent and not kept, and its header says `Not sent` from the first such key until the pane sends typed bytes again. Keys typed in the seconds before
+the app notices that the network went silent were handed to a connection that looked alive; they are lost without that cue. On its side the server
+closes a socket that was silent for `limits.ws_silence` with the close code 1001. While the link was silent the server may have given
+the right to write away after its own 30 seconds, so the pane can come back `FREE`; `Take over` takes the right back. A reverse proxy that answers the upgrade with 502, 503 or 504 (the
 server is restarting or gone), and a 429, are read as a server that cannot be reached and are tried again the same way; any
 other refusal of the upgrade is final and is not tried again.
 

@@ -231,8 +231,11 @@ test("the app info and the pointer commands are pinned", () => {
   for (const conn of conns.slice(1)) {
     assert.deepEqual(keys(conn), ["attempt", "name", "of", "pane", "profile", "remote", "secs", "state"]);
     assert.equal(conn.profile, "");
-    assert.deepEqual(keys(conn.remote), ["cols", "more", "phase", "rows", "session", "writer"]);
+    assert.deepEqual(keys(conn.remote), ["cols", "more", "not_sent", "phase", "rows", "session", "writer"]);
+    assert.equal(typeof conn.remote.not_sent, "boolean");
   }
+  // `not_sent` rides beside the phase: a key was typed that the pane could not send, so the header can say it with any state.
+  assert.deepEqual([...new Set(conns.slice(1).map((c) => c.remote.not_sent))].sort(), [false, true]);
   assert.deepEqual([...new Set(conns.slice(1).map((c) => c.remote.writer))].sort(), ["free", "watching", "writing"]);
   assert.deepEqual([...new Set(conns.slice(1).map((c) => c.remote.phase))].sort(), ["", "attaching", "input_dropped", "loading_older", "resyncing"]);
   assert.ok(!JSON.stringify([golden.answers.sessions, conns]).includes("hwd_"), "no sample holds a device token");

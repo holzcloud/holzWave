@@ -94,6 +94,8 @@ pub struct RemoteConn {
     /// What the pane is busy with: `attaching`, `loading_older`, `resyncing`, `input_dropped`, or the empty text when it shows
     /// the session.
     pub phase: &'static str,
+    /// A key this pane typed was not sent, and it has not sent one since: the header says `Not sent`, beside the phase.
+    pub not_sent: bool,
 }
 
 impl RemoteConn {
@@ -106,7 +108,7 @@ impl RemoteConn {
             RemoteState::Resyncing => "resyncing",
             RemoteState::InputDropped => "input_dropped",
         };
-        Self { writer: view.writer.word(), session: view.session, cols: view.cols, rows: view.rows, more: view.more, phase }
+        Self { writer: view.writer.word(), session: view.session, cols: view.cols, rows: view.rows, more: view.more, phase, not_sent: view.not_sent }
     }
 }
 
@@ -773,16 +775,25 @@ mod tests {
     #[test]
     fn the_view_of_a_pane_of_a_server_session_names_the_host_and_says_who_writes() {
         use crate::remote::proto::WriterView;
-        let seen = |writer, state| RemoteView { session: 7, writer, cols: 120, rows: 40, more: true, state, dropped_input: 3 };
+        let seen = |writer, state| RemoteView { session: 7, writer, cols: 120, rows: 40, more: true, state, dropped_input: 3, not_sent: false };
         let view =
             ConnView::remote(9, "hw.example.test", &ConnState::Connected, RemoteConn::of(&seen(WriterView::Writing, RemoteState::None)));
         assert_eq!(
             serde_json::to_value(&view).unwrap(),
             serde_json::json!({
                 "pane": 9, "profile": "", "name": "hw.example.test", "state": "connected", "attempt": 0, "of": 0, "secs": 0,
-                "remote": { "writer": "writing", "session": 7, "cols": 120, "rows": 40, "more": true, "phase": "" }
+                "remote": { "writer": "writing", "session": 7, "cols": 120, "rows": 40, "more": true, "phase": "", "not_sent": false }
             })
         );
+        // A key this pane could not send is a member of its own beside the phase, so the header can say it together with a state.
+        let mut typed = seen(WriterView::Watching, RemoteState::Attaching);
+        typed.not_sent = true;
+        let remote = RemoteConn::of(&typed);
+        assert!(remote.not_sent, "the member copies what the link says");
+        assert_eq!(remote.phase, "attaching");
+        let json = serde_json::to_value(ConnView::remote(9, "h", &ConnState::Connecting, remote)).unwrap();
+        assert_eq!(json["remote"]["not_sent"], serde_json::json!(true));
+        assert_eq!(json["remote"]["phase"], serde_json::json!("attaching"));
         // Every word of the member, and the states of the connection it rides on.
         let words: Vec<(&str, &str)> = [
             (WriterView::Watching, RemoteState::Attaching),
