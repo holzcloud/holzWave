@@ -21,8 +21,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use holzwave_core::remote::hub::{Endpoint, Hub, HubError, HubOptions, SubEvent};
 use holzwave_core::remote::ws::{Recv, WsClient, WsError, WsLimits, WsUrl, platform_tls};
-use holzwave_core::server_link::{Fault, Token};
+use holzwave_core::server_link::{Fault, Origin, Token};
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::http;
 use tungstenite::{Message, WebSocket};
@@ -591,7 +592,8 @@ fn assert_refused_by_the_certificate_check(config: Option<Arc<rustls::ClientConf
         panic!("a certificate that is not trusted must not be accepted");
     };
     let took = started.elapsed();
-    assert_eq!(e, WsError::Tls, "{e}");
+    assert_eq!(e, WsError::Certificate, "{e}");
+    assert_eq!(e.to_string(), Fault::Certificate.sentence(), "the sentence of the fault, and no reason");
     peer.thread.join().expect("the peer ended");
     let outcome = outcome.lock().unwrap().clone().expect("the peer's handshake failed");
     // The client got as far as the certificate, looked at it and said so.
@@ -636,6 +638,51 @@ fn the_same_certificate_works_when_the_callers_configuration_trusts_it_and_the_h
     assert!(!seen.has_origin);
     peer.finish();
     assert_eq!(*outcome.lock().unwrap(), None);
+}
+
+/// An endpoint at a TLS peer whose certificate the client's trust store does not hold. It counts the tokens it hands out, which is
+/// one per try to connect.
+struct UntrustedServer {
+    origin: Origin,
+    tries: std::sync::atomic::AtomicUsize,
+}
+
+impl Endpoint for UntrustedServer {
+    fn origin(&self) -> Option<Origin> {
+        Some(self.origin.clone())
+    }
+
+    fn token(&self) -> Result<Token, Fault> {
+        self.tries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(token())
+    }
+
+    fn tls(&self) -> Option<Arc<rustls::ClientConfig>> {
+        Some(trusting_nothing())
+    }
+}
+
+#[test]
+fn a_hub_whose_server_certificate_is_refused_ends_its_subscription_with_the_certificate_fault_after_one_try() {
+    let (peer, _outcome) = tls_peer(|_| panic!("a connection with an untrusted certificate must not be upgraded"));
+    let origin = Origin::parse_https(&format!("https://{}", peer.addr)).expect("an https address");
+    let endpoint = Arc::new(UntrustedServer { origin, tries: Default::default() });
+    // The tries a lost connection gets are the default five, three seconds apart: a fault that is final must not use them.
+    let hub = Hub::new(endpoint.clone(), HubOptions::default());
+    let sub = hub.attach(1, None);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let lost = loop {
+        assert!(Instant::now() < deadline, "the subscription did not end in time");
+        match sub.recv(Duration::from_millis(50)) {
+            Some(SubEvent::Lost(error)) => break error,
+            Some(SubEvent::Reconnecting { .. }) => panic!("a certificate that is not trusted is not tried again"),
+            _ => {}
+        }
+    };
+    assert_eq!(lost, HubError::Fault(Fault::Certificate));
+    assert_eq!(lost.to_string(), "The certificate of the server was not accepted.");
+    peer.thread.join().expect("the peer ended");
+    assert_eq!(endpoint.tries.load(std::sync::atomic::Ordering::SeqCst), 1, "one try, no more");
 }
 
 fn wait_for_the_client_tls(ws: &mut WebSocket<rustls::StreamOwned<rustls::ServerConnection, TcpStream>>) {

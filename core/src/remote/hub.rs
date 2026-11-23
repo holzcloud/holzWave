@@ -26,7 +26,8 @@
 //! ([`Reconnect`]: five tries, three seconds apart), with a fresh token from the [`Endpoint`] for every try, and every
 //! subscription is attached again from a fresh snapshot with the tail it last used. A token the server refuses (a 401 on the
 //! upgrade or the close code 4401), a feature that is off, a refused upgrade and a certificate that is not trusted are final:
-//! they are not tried again. Once the tries are used, a pane's Enter, a call (`list`, `new`, `end`) or a new attach makes one
+//! they are not tried again. A certificate that is not trusted ends the subscriptions with [`Fault::Certificate`], its own
+//! fault with its own sentence, and not with the plain refusal of an upgrade. Once the tries are used, a pane's Enter, a call (`list`, `new`, `end`) or a new attach makes one
 //! more try, and on success every waiting subscription is attached again; with no subscription left the hub simply connects
 //! on the next request.
 //!
@@ -783,7 +784,9 @@ fn final_fault(error: &WsError) -> Option<Fault> {
         WsError::Fault(fault) => Some(*fault),
         // A message over the bound is the server breaking a rule of the protocol.
         WsError::TooLarge => Some(Fault::Protocol),
-        // A certificate that is not trusted, or a platform that refused the local network: another try changes nothing.
+        // A certificate that is not trusted has its own fault: another try changes nothing.
+        WsError::Certificate => Some(Fault::Certificate),
+        // Another failure of the secure connection, or a platform that refused the local network: another try changes nothing.
         WsError::Tls | WsError::Blocked(_) => Some(Fault::Refused),
     }
 }
@@ -1516,6 +1519,18 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_certificate_is_final_with_its_own_fault_and_the_rest_keeps_its_meaning() {
+        assert_eq!(final_fault(&WsError::Certificate), Some(Fault::Certificate));
+        // A TLS failure that is no verdict on the certificate stays a refusal, as does the platform's local-network gate.
+        assert_eq!(final_fault(&WsError::Tls), Some(Fault::Refused));
+        assert_eq!(final_fault(&WsError::Blocked("no".into())), Some(Fault::Refused));
+        assert_eq!(final_fault(&WsError::Fault(Fault::Unreachable)), None);
+        assert_eq!(final_fault(&WsError::Fault(Fault::SignedOut)), Some(Fault::SignedOut));
+        assert_eq!(final_fault(&WsError::Closed), None);
+        assert_eq!(final_fault(&WsError::TooLarge), Some(Fault::Protocol));
+    }
 
     #[test]
     fn the_silence_bound_is_twice_the_ping_and_one_beat() {

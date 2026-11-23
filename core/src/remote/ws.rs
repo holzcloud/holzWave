@@ -276,8 +276,13 @@ impl WsLimits {
 pub enum WsError {
     /// One of the faults of the link (the status of a refused upgrade, a connection that broke, a rule of the protocol).
     Fault(Fault),
-    /// The TLS handshake failed: the certificate is not trusted or does not fit the name, or the peer does not speak TLS.
+    /// The TLS handshake failed for a reason that is no verdict on the certificate: the peer does not speak TLS, speaks it
+    /// wrongly, or a configuration could not be built.
     Tls,
+    /// The server's certificate was refused: the trust store does not hold its issuer, it is revoked or expired, or it does not
+    /// fit the name. No reason is kept (the platform's verifier decides, and its reasons are not reliable enough to repeat).
+    /// Another try changes nothing.
+    Certificate,
     /// The platform did not allow a connection to the local network. The sentence is the core's own.
     Blocked(String),
     /// A message is larger than the limits allow, coming in or going out.
@@ -297,6 +302,7 @@ impl fmt::Display for WsError {
         match self {
             WsError::Fault(fault) => f.write_str(fault.sentence()),
             WsError::Tls => f.write_str("The secure connection to the server could not be verified."),
+            WsError::Certificate => f.write_str(Fault::Certificate.sentence()),
             WsError::Blocked(sentence) => f.write_str(sentence),
             WsError::TooLarge => f.write_str("A message is larger than holzWave accepts."),
             WsError::Closed => f.write_str("The connection to the server is closed."),
@@ -451,10 +457,11 @@ fn map_error(e: tungstenite::Error) -> WsError {
         // The connection ended before the answer to the upgrade was complete: nothing was answered, so the server is not there.
         E::Protocol(tungstenite::error::ProtocolError::HandshakeIncomplete) => WsError::Fault(Fault::Unreachable),
         E::Io(e) => {
-            if e.get_ref().is_some_and(|inner| inner.is::<rustls::Error>()) {
-                WsError::Tls
-            } else {
-                WsError::Fault(Fault::Unreachable)
+            match e.get_ref().and_then(|inner| inner.downcast_ref::<rustls::Error>()) {
+                // The verdict of the verifier on the certificate (only the kind is read, never a text).
+                Some(rustls::Error::InvalidCertificate(_) | rustls::Error::NoCertificatesPresented) => WsError::Certificate,
+                Some(_) => WsError::Tls,
+                None => WsError::Fault(Fault::Unreachable),
             }
         }
         E::Tls(_) => WsError::Tls,
