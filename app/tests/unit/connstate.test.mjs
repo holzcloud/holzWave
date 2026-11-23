@@ -118,24 +118,26 @@ test("a WSL connection opens on Windows only and a Docker connection not on Andr
 
 // ---- a pane that shows a session of a server (docs/design.md 6.34) ------------------------------------------------------------------
 
-const REMOTE = { writer: "watching", session: 7, cols: 120, rows: 40, more: true, phase: "" };
-const remoteConn = (over = {}) => ({ pane: 4, profile: "", name: "holz.example.net", state: "connected", attempt: 0, of: 0, secs: 0, remote: { ...REMOTE, ...over } });
+// The member as the core sends it (`not_sent` beside `phase`) and as the page reads it (`notSent`).
+const WIRE = { writer: "watching", session: 7, cols: 120, rows: 40, more: true, phase: "", not_sent: false };
+const REMOTE = { writer: "watching", session: 7, cols: 120, rows: 40, more: true, phase: "", notSent: false };
+const remoteConn = (over = {}) => ({ pane: 4, profile: "", name: "holz.example.net", state: "connected", attempt: 0, of: 0, secs: 0, remote: { ...WIRE, ...over } });
 
 test("the remote member is read from its closed sets and within the clamps", () => {
   const [read] = readPaneConns([remoteConn()]);
   assert.deepEqual(read.remote, REMOTE);
-  for (const writer of WRITERS) assert.equal(readRemote({ ...REMOTE, writer }).writer, writer);
-  for (const phase of PHASES) assert.equal(readRemote({ ...REMOTE, phase }).phase, phase);
-  assert.equal(readRemote({ ...REMOTE, phase: "exploding" }).phase, "", "a phase the page does not know reads as none");
-  assert.equal(readRemote({ ...REMOTE, phase: 3 }).phase, "");
+  for (const writer of WRITERS) assert.equal(readRemote({ ...WIRE, writer }).writer, writer);
+  for (const phase of PHASES) assert.equal(readRemote({ ...WIRE, phase }).phase, phase);
+  assert.equal(readRemote({ ...WIRE, phase: "exploding" }).phase, "", "a phase the page does not know reads as none");
+  assert.equal(readRemote({ ...WIRE, phase: 3 }).phase, "");
   for (const bad of [
-    null, [], "remote", { ...REMOTE, writer: "WRITING" }, { ...REMOTE, writer: "owner" }, { ...REMOTE, session: -1 }, { ...REMOTE, session: 1.5 },
-    { ...REMOTE, cols: 0 }, { ...REMOTE, cols: 1001 }, { ...REMOTE, rows: 501 }, { ...REMOTE, more: "yes" },
+    null, [], "remote", { ...WIRE, writer: "WRITING" }, { ...WIRE, writer: "owner" }, { ...WIRE, session: -1 }, { ...WIRE, session: 1.5 },
+    { ...WIRE, cols: 0 }, { ...WIRE, cols: 1001 }, { ...WIRE, rows: 501 }, { ...WIRE, more: "yes" },
   ]) {
     assert.equal(readRemote(bad), null, JSON.stringify(bad));
   }
-  const canary = readRemote({ ...REMOTE, token: "hwd_" + "A".repeat(43) });
-  assert.deepEqual(Object.keys(canary).sort(), ["cols", "more", "phase", "rows", "session", "writer"], "no member the page does not name");
+  const canary = readRemote({ ...WIRE, token: "hwd_" + "A".repeat(43) });
+  assert.deepEqual(Object.keys(canary).sort(), ["cols", "more", "notSent", "phase", "rows", "session", "writer"], "no member the page does not name");
 });
 
 test("a pane without a well formed remote member reads exactly as before", () => {

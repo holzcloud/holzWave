@@ -32,6 +32,8 @@ export interface RemoteConn {
   /** The server holds lines older than the ones the pane has. */
   more: boolean;
   phase: Phase;
+  /** A key this pane could not send is not kept, and the header says so until the pane sends typed bytes again. */
+  notSent: boolean;
 }
 
 /** The closed sets of the remote member, as the core spells them. */
@@ -62,7 +64,8 @@ export function readRemote(raw: unknown): RemoteConn | null {
   if (writer === undefined || session === null || cols === null || rows === null || typeof o.more !== "boolean") return null;
   // A phase this page does not know reads as none: the pane then shows the session as it is.
   const phase = PHASES.find((p) => p === o.phase) ?? "";
-  return { writer, session, cols, rows, more: o.more, phase };
+  // Only a boolean says it: a host that does not send the member, or sends anything else, reads as false.
+  return { writer, session, cols, rows, more: o.more, phase, notSent: o.not_sent === true };
 }
 
 /** A saved connection, as the core lists it. The secret itself never reaches the page, only whether one is saved. */

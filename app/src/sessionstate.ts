@@ -264,7 +264,7 @@ export function serverName(url: string): string {
 // ---- the states of a pane that shows a session (docs/design.md 6.34, "The states of a pane") ----------------------------------------
 
 /** The transient states of a remote pane. */
-export type PaneState = "attaching" | "loading_older" | "resyncing" | "input_dropped" | "ended" | "reconnecting" | "unreachable";
+export type PaneState = "attaching" | "loading_older" | "resyncing" | "input_dropped" | "not_sent" | "ended" | "reconnecting" | "unreachable";
 
 /** The words of the header's context slot for each state; `ended` with a status is `Session ended · exit N`. */
 export const PANE_STATE_WORDS: Readonly<Record<PaneState, string>> = {
@@ -272,6 +272,7 @@ export const PANE_STATE_WORDS: Readonly<Record<PaneState, string>> = {
   loading_older: "Loading older lines…",
   resyncing: "Resyncing…",
   input_dropped: "Input dropped",
+  not_sent: "Not sent",
   ended: "Session ended",
   reconnecting: "Reconnecting…",
   unreachable: "Server unreachable",
@@ -299,14 +300,27 @@ export interface PaneStateView {
 /** The parts of a pane's connection the state is read from (connstate's `PaneConn`, without importing it). */
 export interface RemoteSeen {
   state: "connecting" | "connected" | "reconnecting" | "failed" | "closed";
-  remote: { phase: "" | "attaching" | "loading_older" | "resyncing" | "input_dropped" };
+  remote: { phase: "" | "attaching" | "loading_older" | "resyncing" | "input_dropped"; notSent?: boolean };
 }
+
+/** What follows the word of another state while a key the pane could not send is still not sent: ` · Not sent`. */
+const NOT_SENT_AFTER = ` · ${PANE_STATE_WORDS.not_sent}`;
 
 /**
  * The state of a remote pane, or null when it shows the session as it is. `held` is the status of a pane the host holds on the screen
  * after its session ended (`undefined` when it does not hold it, `null` inside when the status could not be read).
  */
 export function paneState(c: RemoteSeen, held?: { status: number | null } | null): PaneStateView | null {
+  const view = paneStateOf(c, held);
+  if (c.remote.notSent !== true) return view;
+  // A key the pane could not send: alone it is the state `Not sent` (the dot as before, the label shown); after another state's word it
+  // adds ` · Not sent` to that word and keeps that state's dot and label. The warn tone, with its `!` and underline, is the same.
+  if (view === null) return { state: "not_sent", text: PANE_STATE_WORDS.not_sent, dot: null, warn: true, label: true };
+  return { ...view, text: `${view.text}${NOT_SENT_AFTER}`, warn: true };
+}
+
+/** The state of a pane before the lasting `Not sent` is added. */
+function paneStateOf(c: RemoteSeen, held?: { status: number | null } | null): PaneStateView | null {
   const view = (state: PaneState, dot: PaneStateView["dot"], label: boolean, text = PANE_STATE_WORDS[state]): PaneStateView => ({
     state,
     text,

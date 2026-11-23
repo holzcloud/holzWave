@@ -102,9 +102,11 @@
 //                      sentence, `server_session_end` removes the row and closes the panes that show it, and `pane_takeover`
 //                      and `pane_load_older` reject a pane that shows no session
 //       panes          a copy of the panes of a session as `pane_connections` lists them: the core's `ConnView` with its
-//                      `remote` member `{ writer, session, cols, rows, more, phase }`. While there is none, `pane_connections`
+//                      `remote` member `{ writer, session, cols, rows, more, phase, not_sent }`. While there is none, `pane_connections`
 //                      answers as before (a handler of `on`, or nothing)
-//       setPane(pane, partial)  add the pane of a session or change it; `partial.remote` is merged into the remote member.
+//       setPane(pane, partial)  add the pane of a session or change it; `partial.remote` is merged into the remote member
+//                      (`remote: { not_sent: true }` is a pane that could not send a key; `not_sent: undefined` removes the value, as a
+//                      host that does not send the member)
 //                      A new pane is `connected`, named `sync.example.test`, watching session 1 at 80 by 24 with nothing older
 //       dropPane(pane) the pane leaves the answer
 //       pane_takeover  makes the pane `writing` and every other pane of its session `watching`; `pane_load_older` sets the
@@ -1983,7 +1985,7 @@
     setPane(pane, partial = {}) {
       const conn = sessionState.panes.get(pane) ?? {
         pane, profile: "", name: "sync.example.test", state: "connected", attempt: 0, of: 0, secs: 0,
-        remote: { writer: "watching", session: 1, cols: 80, rows: 24, more: false, phase: "" },
+        remote: { writer: "watching", session: 1, cols: 80, rows: 24, more: false, phase: "", not_sent: false },
       };
       const { remote, ...rest } = structuredClone(partial);
       Object.assign(conn, rest, { pane });

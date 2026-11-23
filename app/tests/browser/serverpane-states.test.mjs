@@ -12,6 +12,7 @@ export const backends = ["tauri", "ws"];
 export default async function ({ page, url, errors }) {
   page.setDefaultTimeout(5000);
   await statesCase(page, url);
+  await notSentCase(page, url);
   await olderCase(page, url);
   await gridCase(page, url);
   if (currentBackend() === "tauri") await phoneCase(page, url);
@@ -94,6 +95,79 @@ async function statesCase(page, url) {
     assert.equal(moving, false, "nothing moves");
   }
   await page.emulateMedia({ forcedColors: "none", contrast: "no-preference", reducedMotion: "no-preference" });
+}
+
+/** What the header of `pane` shows: the context word, its tone, its mark and underline, the writer label and the button after it. */
+const lookAt = (page, pane) =>
+  head(page, pane).evaluate((h) => ({
+    ctx: h.querySelector(".ph-ctx").textContent,
+    tone: h.querySelector(".ph-ctx").dataset.tone ?? null,
+    label: h.querySelector(".ph-writer")?.textContent ?? null,
+    take: h.querySelector(".ph-take")?.textContent ?? null,
+    mark: getComputedStyle(h.querySelector(".ph-ctx > span"), "::before").content,
+    underline: getComputedStyle(h.querySelector(".ph-ctx")).textDecorationLine,
+    dot: h.querySelector(".ph-dot").dataset.state,
+  }));
+
+/** A pane that could not send a key says `Not sent` in the header, alone and after the word of another state (docs/design.md 6.34). */
+async function notSentCase(page, url) {
+  await open(page, url, { 2: { remote: { writer: "writing", cols: 80, rows: 24 } } });
+  const sizes = await tile(page, 2);
+  await setPane(page, 2, { remote: { cols: sizes.cols, rows: sizes.rows } });
+  await ctxIs(page, 2, "sync.example.test");
+  // The mock's default member says false; a member without the key reads as false too.
+  assert.equal((await lookAt(page, 2)).tone, null, "no word before a key was dropped");
+
+  // A writer that could not send: the word alone, warn, with the mark and the underline; the label stays.
+  await setPane(page, 2, { remote: { not_sent: true } });
+  await ctxIs(page, 2, "Not sent");
+  let got = await lookAt(page, 2);
+  assert.equal(got.tone, "warn");
+  assert.equal(got.label, "WRITING", "the writer label stays");
+  assert.match(got.mark, /!/, "the mark !");
+  assert.equal(got.underline, "underline", "the underline is the second cue");
+  assert.notEqual(got.dot, "wait", "the dot is as before");
+  assert.equal(await head(page, 2).locator(".ph-ctx").getAttribute("title"), "Not sent");
+
+  // After the word of another state: that word, then ` · Not sent`, warn, with that state's label rule.
+  const after = [
+    [{ state: "reconnecting", attempt: 1, of: 5, secs: 2, remote: { phase: "" } }, "Reconnecting… · Not sent", null, "wait"],
+    [{ state: "failed", remote: { phase: "" } }, "Server unreachable · Not sent", null, "failed"],
+    [{ state: "connected", remote: { phase: "attaching" } }, "Attaching… · Not sent", null, "wait"],
+    [{ state: "connected", remote: { phase: "input_dropped" } }, "Input dropped · Not sent", "WRITING", null],
+    [{ state: "connected", remote: { phase: "" } }, "Not sent", "WRITING", null],
+  ];
+  for (const [partial, word, label, dot] of after) {
+    await setPane(page, 2, partial);
+    await ctxIs(page, 2, word);
+    got = await lookAt(page, 2);
+    assert.equal(got.tone, "warn", `${word}: warn`);
+    assert.equal(got.label, label, `${word}: the label rule of the state`);
+    assert.match(got.mark, /!/, `${word}: the mark`);
+    assert.equal(got.underline, "underline", `${word}: the underline`);
+    if (dot === "wait" || dot === "failed") assert.equal(got.dot, dot, `${word}: the dot of the state`);
+  }
+
+  // A watcher that typed: WATCHING, Take over and the word.
+  await setPane(page, 2, { remote: { writer: "watching", not_sent: true } });
+  await page.waitForFunction(() => document.querySelector('.panehead[data-pane="2"] .ph-writer')?.textContent === "WATCHING");
+  await ctxIs(page, 2, "Not sent");
+  got = await lookAt(page, 2);
+  assert.equal(got.label, "WATCHING");
+  assert.equal(got.take, "Take over");
+  assert.equal(got.tone, "warn");
+
+  // The word goes when the view no longer says it, and a member without it reads as false.
+  await setPane(page, 2, { remote: { not_sent: false } });
+  await ctxIs(page, 2, "sync.example.test");
+  assert.equal((await lookAt(page, 2)).tone, null, "the warn tone goes with the word");
+  await setPane(page, 2, { remote: { not_sent: true } });
+  await ctxIs(page, 2, "Not sent");
+  await setPane(page, 2, { remote: { not_sent: undefined } });
+  await ctxIs(page, 2, "sync.example.test");
+  await setPane(page, 2, { remote: { not_sent: "yes" } });
+  await ctxIs(page, 2, "sync.example.test");
+  assert.equal((await lookAt(page, 2)).tone, null, "a member that is not a boolean reads as false");
 }
 
 async function olderCase(page, url) {
