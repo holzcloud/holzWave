@@ -113,11 +113,13 @@ pub enum SessionFault {
     Protocol,
     /// The session is already shown in a pane of this device.
     AlreadyOpen,
+    /// The platform's verifier refused the certificate of the server; the sentence is the core's, and says no reason.
+    Certificate,
 }
 
 impl SessionFault {
     /// Every case, in the order of the declaration.
-    pub const ALL: [SessionFault; 10] = [
+    pub const ALL: [SessionFault; 11] = [
         SessionFault::SignedOut,
         SessionFault::Locked,
         SessionFault::Keychain,
@@ -128,6 +130,7 @@ impl SessionFault {
         SessionFault::Refused,
         SessionFault::Protocol,
         SessionFault::AlreadyOpen,
+        SessionFault::Certificate,
     ];
 
     /// The one fixed sentence of the fault.
@@ -143,6 +146,7 @@ impl SessionFault {
             SessionFault::Refused => "The server refused the request.",
             SessionFault::Protocol => "The server sent something holzWave does not accept.",
             SessionFault::AlreadyOpen => "That session is already open on this computer.",
+            SessionFault::Certificate => Fault::Certificate.sentence(),
         }
     }
 }
@@ -181,6 +185,7 @@ impl From<HubError> for SessionFault {
                 SessionFault::Refused
             }
             HubError::Fault(Fault::Protocol) | HubError::Word(ErrorWord::BadRequest) => SessionFault::Protocol,
+            HubError::Fault(Fault::Certificate) => SessionFault::Certificate,
             HubError::AlreadyAttached => SessionFault::AlreadyOpen,
         }
     }
@@ -497,6 +502,9 @@ mod tests {
         }
         assert_eq!(SessionFault::Off.sentence(), "Remote sessions are off on this server.", "the sentence of the design record");
         assert_eq!(SessionFault::Locked.sentence(), SECRETS_LOCKED);
+        assert_eq!(SessionFault::ALL.len(), 11);
+        assert_eq!(SessionFault::Certificate.sentence(), Fault::Certificate.sentence(), "the host says the core's sentence");
+        assert_eq!(SessionFault::Certificate.sentence(), "The certificate of the server was not accepted.");
     }
 
     #[test]
@@ -520,6 +528,7 @@ mod tests {
             (HubError::Fault(Fault::Protocol), F::Protocol),
             (HubError::Word(ErrorWord::BadRequest), F::Protocol),
             (HubError::AlreadyAttached, F::AlreadyOpen),
+            (HubError::Fault(Fault::Certificate), F::Certificate),
         ];
         for (error, fault) in cases {
             assert_eq!(SessionFault::from(error), fault, "{error:?}");

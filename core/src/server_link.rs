@@ -86,11 +86,15 @@ pub enum Fault {
     Refused,
     /// The server sent something this client does not accept: a frame, an answer or a text outside the rules.
     Protocol,
+    /// The platform's verifier refused the certificate of the server (an issuer it does not know, a revocation, an expiry,
+    /// another name, no certificate). Final: another try changes nothing. The verifier's reasons are not told apart, because a
+    /// revocation check that could not be made is reported by it as a revocation, so the fault says no reason.
+    Certificate,
 }
 
 impl Fault {
     /// Every case, in the order of the declaration.
-    pub const ALL: [Fault; 5] = [Fault::SignedOut, Fault::Off, Fault::Unreachable, Fault::Refused, Fault::Protocol];
+    pub const ALL: [Fault; 6] = [Fault::SignedOut, Fault::Off, Fault::Unreachable, Fault::Refused, Fault::Protocol, Fault::Certificate];
 
     /// The one fixed sentence of this fault.
     pub fn sentence(self) -> &'static str {
@@ -100,6 +104,7 @@ impl Fault {
             Fault::Unreachable => "The server cannot be reached.",
             Fault::Refused => "The server refused the request.",
             Fault::Protocol => "The server sent something holzWave does not accept.",
+            Fault::Certificate => "The certificate of the server was not accepted.",
         }
     }
 
@@ -115,6 +120,22 @@ impl Fault {
             429 | 502 | 503 | 504 => Fault::Unreachable,
             _ => Fault::Refused,
         }
+    }
+}
+
+/// The fault of a request that did not get an answer: [`Fault::Certificate`] when the client's error holds the verdict of the
+/// certificate check (the TLS error itself, or an I/O error that wraps it), and [`Fault::Unreachable`] for every other error
+/// (a refused connection, a timeout, a host that is not found, a broken connection, a TLS error that is no verdict on the
+/// certificate). The text of the error is not read, kept or printed: it is the system's and the network's, and not shown.
+pub(crate) fn transport_fault(error: &ureq::Error) -> Fault {
+    let tls = match error {
+        ureq::Error::Rustls(e) => Some(e),
+        ureq::Error::Io(e) => e.get_ref().and_then(|inner| inner.downcast_ref::<rustls::Error>()),
+        _ => None,
+    };
+    match tls {
+        Some(rustls::Error::InvalidCertificate(_) | rustls::Error::NoCertificatesPresented) => Fault::Certificate,
+        _ => Fault::Unreachable,
     }
 }
 
@@ -437,6 +458,89 @@ pub fn token_clear(store: &dyn SecretStore) -> crate::Result<()> {
     store.delete(TOKEN_ACCOUNT)
 }
 
+/// What the tests of the two HTTP clients share: a TLS peer whose certificate a client that trusts nothing refuses, and such a
+/// client's agent.
+#[cfg(test)]
+pub(crate) mod test_tls {
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::thread::JoinHandle;
+    use std::time::Duration;
+
+    use ureq::Agent;
+    use ureq::config::Config;
+    use ureq::tls::{RootCerts, TlsConfig};
+
+    /// A self-signed certificate for `127.0.0.1` and `localhost` (valid for a century) and its key, made once with `openssl req
+    /// -x509` for these tests and never used for anything else. The bytes are DER in hex.
+    const CERT_HEX: &str = concat!(
+        "3082017e30820123a00302010202145bc0a4311ced4d61ff5df05004736c5e24b5a1b6300a06082a8648ce3d04030230",
+        "143112301006035504030c096c6f63616c686f73743020170d3236313131303034343633385a180f3231323631303137",
+        "3034343633385a30143112301006035504030c096c6f63616c686f73743059301306072a8648ce3d020106082a8648ce",
+        "3d03010703420004dc6dd4f441304ea3f7acb7bda608edb3b3a1a28dcdb92ddf0d5e1b2d87bf9626c54b07a76b2aee63",
+        "06b3563a15ef1d640e79591ec14f40f22675ed7068f4cbd5a351304f300c0603551d130101ff04023000300e0603551d",
+        "0f0101ff04040302078030130603551d25040c300a06082b06010505070301301a0603551d110413301187047f000001",
+        "82096c6f63616c686f7374300a06082a8648ce3d0403020349003046022100cbb490256be562383d4180853d907edb4e",
+        "16233d9e62c97e03b58cc7c2770d5e022100fe7f85c5668e5c5418d07a1df1ea9e27c4c664294801f0326d669671082d",
+        "820d"
+    );
+    const KEY_HEX: &str = concat!(
+        "308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420d3cf70e623894ef47e9c6de6",
+        "079b01bfcbe6fbc3f4f6b833fc2423c94668c6e4a14403420004dc6dd4f441304ea3f7acb7bda608edb3b3a1a28dcdb9",
+        "2ddf0d5e1b2d87bf9626c54b07a76b2aee6306b3563a15ef1d640e79591ec14f40f22675ed7068f4cbd5"
+    );
+
+    fn unhex(text: &str) -> Vec<u8> {
+        (0..text.len()).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("hex")).collect()
+    }
+
+    fn server_config() -> Arc<rustls::ServerConfig> {
+        let cert = rustls::pki_types::CertificateDer::from(unhex(CERT_HEX));
+        let key = rustls::pki_types::PrivateKeyDer::from(rustls::pki_types::PrivatePkcs8KeyDer::from(unhex(KEY_HEX)));
+        Arc::new(
+            rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .expect("protocol versions")
+                .with_no_client_auth()
+                .with_single_cert(vec![cert], key)
+                .expect("the certificate and key fit"),
+        )
+    }
+
+    /// A TLS peer on a loopback port that takes one connection and runs the handshake. The thread ends with `Err` when the
+    /// handshake failed (the client refused the certificate) and with `Ok` when it was completed, which it must not be: no byte
+    /// of a request is read.
+    pub(crate) fn untrusted_peer() -> (u16, JoinHandle<Result<(), ()>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+        let port = listener.local_addr().expect("address").port();
+        let config = server_config();
+        let thread = std::thread::spawn(move || {
+            let (mut tcp, _) = listener.accept().expect("a connection");
+            let _ = tcp.set_read_timeout(Some(Duration::from_secs(10)));
+            let mut connection = rustls::ServerConnection::new(config).expect("a server connection");
+            while connection.is_handshaking() {
+                if connection.complete_io(&mut tcp).is_err() {
+                    return Err(());
+                }
+            }
+            Ok(())
+        });
+        (port, thread)
+    }
+
+    /// An agent as the clients build theirs, except that its trust store holds nothing, so every certificate is from an unknown
+    /// issuer. (The platform's verifier needs tens of seconds to refuse a self-signed certificate on a development machine.)
+    pub(crate) fn agent_trusting_nothing(timeout: Duration) -> Agent {
+        let config: Config = Config::builder()
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .timeout_global(Some(timeout))
+            .tls_config(TlsConfig::builder().root_certs(RootCerts::Specific(Arc::new(Vec::new()))).build())
+            .build();
+        config.into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,8 +589,8 @@ mod tests {
     // ---- the closed set of faults ----
 
     #[test]
-    fn a_fault_is_one_of_five_cases_each_with_one_fixed_sentence() {
-        // An exhaustive match: a sixth case does not compile until this test names it.
+    fn a_fault_is_one_of_six_cases_each_with_one_fixed_sentence() {
+        // An exhaustive match: a seventh case does not compile until this test names it.
         fn index(fault: Fault) -> usize {
             match fault {
                 Fault::SignedOut => 0,
@@ -494,9 +598,10 @@ mod tests {
                 Fault::Unreachable => 2,
                 Fault::Refused => 3,
                 Fault::Protocol => 4,
+                Fault::Certificate => 5,
             }
         }
-        assert_eq!(Fault::ALL.len(), 5);
+        assert_eq!(Fault::ALL.len(), 6);
         for (i, fault) in Fault::ALL.into_iter().enumerate() {
             assert_eq!(index(fault), i, "ALL is in the order of the declaration");
         }
@@ -509,17 +614,69 @@ mod tests {
                 "The server cannot be reached.",
                 "The server refused the request.",
                 "The server sent something holzWave does not accept.",
+                "The certificate of the server was not accepted.",
             ]
         );
         let mut unique = sentences.clone();
         unique.sort_unstable();
         unique.dedup();
-        assert_eq!(unique.len(), 5, "no two faults share a sentence");
+        assert_eq!(unique.len(), 6, "no two faults share a sentence");
         for fault in Fault::ALL {
             // No server-provided text: the sentence is a constant, and the display and the crate error say exactly it.
             assert_eq!(fault.to_string(), fault.sentence());
             assert_eq!(Error::from(fault).to_string(), fault.sentence());
             assert!(!format!("{fault:?}").to_lowercase().contains("canary"));
+        }
+        // The sentence of the certificate says no reason: the system's verifier decides, and its reasons are not repeated.
+        let words = Fault::Certificate.sentence().to_lowercase();
+        for reason in ["revoked", "revocation", "expired", "issuer", "unknown", "name", "signature"] {
+            assert!(!words.contains(reason), "the sentence names a reason: {reason}");
+        }
+    }
+
+    #[test]
+    fn the_sentence_of_the_certificate_fault_is_the_words_of_the_design_record() {
+        let design = include_str!("../../docs/design.md");
+        let row = design.lines().find(|l| l.starts_with("| certificate |")).expect("the row certificate of the states of the second screen");
+        let words = row.split('|').nth(3).expect("a third cell").trim().trim_matches('`');
+        assert_eq!(Fault::Certificate.sentence(), words);
+    }
+
+    #[test]
+    fn a_certificate_refusal_inside_a_client_error_is_the_certificate_fault() {
+        use rustls::CertificateError as C;
+        let verdicts = [
+            rustls::Error::InvalidCertificate(C::UnknownIssuer),
+            rustls::Error::InvalidCertificate(C::Revoked),
+            rustls::Error::InvalidCertificate(C::Expired),
+            rustls::Error::InvalidCertificate(C::NotValidForName),
+            rustls::Error::InvalidCertificate(C::BadSignature),
+            rustls::Error::NoCertificatesPresented,
+        ];
+        for verdict in verdicts {
+            let shown = verdict.clone();
+            assert_eq!(transport_fault(&ureq::Error::Rustls(verdict.clone())), Fault::Certificate, "{shown:?}");
+            let wrapped = ureq::Error::Io(std::io::Error::other(verdict));
+            assert_eq!(transport_fault(&wrapped), Fault::Certificate, "wrapped {shown:?}");
+        }
+        // Everything else is a server that cannot be reached, whatever the reason.
+        let io = |kind| ureq::Error::Io(std::io::Error::new(kind, "x"));
+        let others = [
+            io(std::io::ErrorKind::ConnectionRefused),
+            io(std::io::ErrorKind::TimedOut),
+            io(std::io::ErrorKind::ConnectionReset),
+            ureq::Error::Timeout(ureq::Timeout::Global),
+            ureq::Error::HostNotFound,
+            ureq::Error::ConnectionFailed,
+            // An I/O error with another inner error.
+            ureq::Error::Io(std::io::Error::other(std::fmt::Error)),
+            // A rustls error that is no verdict on the certificate.
+            ureq::Error::Rustls(rustls::Error::HandshakeNotComplete),
+            ureq::Error::Io(std::io::Error::other(rustls::Error::HandshakeNotComplete)),
+            ureq::Error::Rustls(rustls::Error::AlertReceived(rustls::AlertDescription::HandshakeFailure)),
+        ];
+        for error in others {
+            assert_eq!(transport_fault(&error), Fault::Unreachable, "{error:?}");
         }
     }
 

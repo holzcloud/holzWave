@@ -31,7 +31,7 @@ use ureq::http::{HeaderValue, Request};
 use zeroize::Zeroizing;
 
 use crate::remote::ws::UrlError;
-use crate::server_link::{Fault, MAX_DEVICE_ID, MAX_NAME, Origin, TOKEN_BODY_LEN, Token};
+use crate::server_link::{Fault, MAX_DEVICE_ID, MAX_NAME, Origin, TOKEN_BODY_LEN, Token, transport_fault};
 use crate::sync::server::agent;
 
 /// The most bytes of any answer that is read. The answers are a few hundred bytes; a server that says more is answering wrongly.
@@ -363,7 +363,8 @@ impl Client {
         let req = req.body(body.unwrap_or_default().to_vec()).map_err(|_| Fault::Protocol)?;
         // A server on the local network needs the platform's permission on Android 17: asked here, when the request is made.
         crate::reach::ensure_blocking(self.origin.host(), self.origin.port()).map_err(SignInError::Blocked)?;
-        let mut resp = self.agent.run(req).map_err(|_| Fault::Unreachable)?;
+        // A refused certificate is its own fault; every other error of the client is a server that cannot be reached.
+        let mut resp = self.agent.run(req).map_err(|e| transport_fault(&e))?;
         let status = resp.status().as_u16();
         // The body of anything but a success is the server's words, and nothing here would use them.
         if !(200..300).contains(&status) {
@@ -374,7 +375,7 @@ impl Client {
             return Err(Fault::Protocol.into());
         }
         let mut bytes = Zeroizing::new(Vec::new());
-        resp.body_mut().as_reader().take(MAX_ANSWER + 1).read_to_end(&mut bytes).map_err(|_| Fault::Unreachable)?;
+        resp.body_mut().as_reader().take(MAX_ANSWER + 1).read_to_end(&mut bytes).map_err(|e| transport_fault(&ureq::Error::from(e)))?;
         if bytes.len() as u64 > MAX_ANSWER {
             return Err(Fault::Protocol.into());
         }
@@ -844,6 +845,27 @@ mod tests {
         assert_eq!(error.fault(), None);
         quiet(&error);
         assert!(!format!("{error} {error:?}").contains("server-words"));
+    }
+
+    #[test]
+    fn a_certificate_the_client_does_not_trust_is_the_certificate_fault_and_a_closed_port_is_not() {
+        // A TLS peer whose certificate the client's trust store does not hold: the handshake is refused, so no request is sent.
+        let (port, peer) = crate::server_link::test_tls::untrusted_peer();
+        let client = Client {
+            agent: crate::server_link::test_tls::agent_trusting_nothing(Duration::from_secs(20)),
+            origin: Origin::parse(&format!("https://127.0.0.1:{port}")).expect("an origin"),
+        };
+        let error = client.start("n", "linux").expect_err("a certificate that is not trusted is refused");
+        assert_eq!(error, SignInError::Fault(Fault::Certificate));
+        assert_eq!(error.sentence(), "The certificate of the server was not accepted.");
+        assert_eq!(error.fault(), Some(Fault::Certificate));
+        quiet(&error);
+        assert_eq!(peer.join().expect("the peer ended"), Err(()), "the handshake did not complete, so no request was sent");
+
+        // Nothing listening is a server that cannot be reached, whatever the scheme.
+        let closed = TcpListener::bind("127.0.0.1:0").expect("bind").local_addr().expect("address").port();
+        let error = quick(&format!("http://127.0.0.1:{closed}")).start("n", "linux").expect_err("nothing listens");
+        assert_eq!(error, SignInError::Fault(Fault::Unreachable));
     }
 
     #[test]
