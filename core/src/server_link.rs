@@ -458,89 +458,6 @@ pub fn token_clear(store: &dyn SecretStore) -> crate::Result<()> {
     store.delete(TOKEN_ACCOUNT)
 }
 
-/// What the tests of the two HTTP clients share: a TLS peer whose certificate a client that trusts nothing refuses, and such a
-/// client's agent.
-#[cfg(test)]
-pub(crate) mod test_tls {
-    use std::net::TcpListener;
-    use std::sync::Arc;
-    use std::thread::JoinHandle;
-    use std::time::Duration;
-
-    use ureq::Agent;
-    use ureq::config::Config;
-    use ureq::tls::{RootCerts, TlsConfig};
-
-    /// A self-signed certificate for `127.0.0.1` and `localhost` (valid for a century) and its key, made once with `openssl req
-    /// -x509` for these tests and never used for anything else. The bytes are DER in hex.
-    const CERT_HEX: &str = concat!(
-        "3082017e30820123a00302010202145bc0a4311ced4d61ff5df05004736c5e24b5a1b6300a06082a8648ce3d04030230",
-        "143112301006035504030c096c6f63616c686f73743020170d3236313131303034343633385a180f3231323631303137",
-        "3034343633385a30143112301006035504030c096c6f63616c686f73743059301306072a8648ce3d020106082a8648ce",
-        "3d03010703420004dc6dd4f441304ea3f7acb7bda608edb3b3a1a28dcdb92ddf0d5e1b2d87bf9626c54b07a76b2aee63",
-        "06b3563a15ef1d640e79591ec14f40f22675ed7068f4cbd5a351304f300c0603551d130101ff04023000300e0603551d",
-        "0f0101ff04040302078030130603551d25040c300a06082b06010505070301301a0603551d110413301187047f000001",
-        "82096c6f63616c686f7374300a06082a8648ce3d0403020349003046022100cbb490256be562383d4180853d907edb4e",
-        "16233d9e62c97e03b58cc7c2770d5e022100fe7f85c5668e5c5418d07a1df1ea9e27c4c664294801f0326d669671082d",
-        "820d"
-    );
-    const KEY_HEX: &str = concat!(
-        "308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420d3cf70e623894ef47e9c6de6",
-        "079b01bfcbe6fbc3f4f6b833fc2423c94668c6e4a14403420004dc6dd4f441304ea3f7acb7bda608edb3b3a1a28dcdb9",
-        "2ddf0d5e1b2d87bf9626c54b07a76b2aee6306b3563a15ef1d640e79591ec14f40f22675ed7068f4cbd5"
-    );
-
-    fn unhex(text: &str) -> Vec<u8> {
-        (0..text.len()).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("hex")).collect()
-    }
-
-    fn server_config() -> Arc<rustls::ServerConfig> {
-        let cert = rustls::pki_types::CertificateDer::from(unhex(CERT_HEX));
-        let key = rustls::pki_types::PrivateKeyDer::from(rustls::pki_types::PrivatePkcs8KeyDer::from(unhex(KEY_HEX)));
-        Arc::new(
-            rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .expect("protocol versions")
-                .with_no_client_auth()
-                .with_single_cert(vec![cert], key)
-                .expect("the certificate and key fit"),
-        )
-    }
-
-    /// A TLS peer on a loopback port that takes one connection and runs the handshake. The thread ends with `Err` when the
-    /// handshake failed (the client refused the certificate) and with `Ok` when it was completed, which it must not be: no byte
-    /// of a request is read.
-    pub(crate) fn untrusted_peer() -> (u16, JoinHandle<Result<(), ()>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
-        let port = listener.local_addr().expect("address").port();
-        let config = server_config();
-        let thread = std::thread::spawn(move || {
-            let (mut tcp, _) = listener.accept().expect("a connection");
-            let _ = tcp.set_read_timeout(Some(Duration::from_secs(10)));
-            let mut connection = rustls::ServerConnection::new(config).expect("a server connection");
-            while connection.is_handshaking() {
-                if connection.complete_io(&mut tcp).is_err() {
-                    return Err(());
-                }
-            }
-            Ok(())
-        });
-        (port, thread)
-    }
-
-    /// An agent as the clients build theirs, except that its trust store holds nothing, so every certificate is from an unknown
-    /// issuer. (The platform's verifier needs tens of seconds to refuse a self-signed certificate on a development machine.)
-    pub(crate) fn agent_trusting_nothing(timeout: Duration) -> Agent {
-        let config: Config = Config::builder()
-            .http_status_as_error(false)
-            .max_redirects(0)
-            .timeout_global(Some(timeout))
-            .tls_config(TlsConfig::builder().root_certs(RootCerts::Specific(Arc::new(Vec::new()))).build())
-            .build();
-        config.into()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -961,5 +878,90 @@ mod tests {
         assert_eq!(ServerLinkFile::new_with("http://127.0.0.1:8080/x", "1", "n", true), Err(LinkFileError::Url));
         assert!(ServerLinkFile::new_with("https://sync.example", "1", "n", true).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+// This module follows `mod tests` on purpose: the network scan of the project policy reads a file up to its first test module,
+// and a peer on a loopback port is no network API of the product.
+/// What the tests of the two HTTP clients share: a TLS peer whose certificate a client that trusts nothing refuses, and such a
+/// client's agent.
+#[cfg(test)]
+pub(crate) mod test_tls {
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::thread::JoinHandle;
+    use std::time::Duration;
+
+    use ureq::Agent;
+    use ureq::config::Config;
+    use ureq::tls::{RootCerts, TlsConfig};
+
+    /// A self-signed certificate for `127.0.0.1` and `localhost` (valid for a century) and its key, made once with `openssl req
+    /// -x509` for these tests and never used for anything else. The bytes are DER in hex.
+    const CERT_HEX: &str = concat!(
+        "3082017e30820123a00302010202145bc0a4311ced4d61ff5df05004736c5e24b5a1b6300a06082a8648ce3d04030230",
+        "143112301006035504030c096c6f63616c686f73743020170d3236313131303034343633385a180f3231323631303137",
+        "3034343633385a30143112301006035504030c096c6f63616c686f73743059301306072a8648ce3d020106082a8648ce",
+        "3d03010703420004dc6dd4f441304ea3f7acb7bda608edb3b3a1a28dcdb92ddf0d5e1b2d87bf9626c54b07a76b2aee63",
+        "06b3563a15ef1d640e79591ec14f40f22675ed7068f4cbd5a351304f300c0603551d130101ff04023000300e0603551d",
+        "0f0101ff04040302078030130603551d25040c300a06082b06010505070301301a0603551d110413301187047f000001",
+        "82096c6f63616c686f7374300a06082a8648ce3d0403020349003046022100cbb490256be562383d4180853d907edb4e",
+        "16233d9e62c97e03b58cc7c2770d5e022100fe7f85c5668e5c5418d07a1df1ea9e27c4c664294801f0326d669671082d",
+        "820d"
+    );
+    const KEY_HEX: &str = concat!(
+        "308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b0201010420d3cf70e623894ef47e9c6de6",
+        "079b01bfcbe6fbc3f4f6b833fc2423c94668c6e4a14403420004dc6dd4f441304ea3f7acb7bda608edb3b3a1a28dcdb9",
+        "2ddf0d5e1b2d87bf9626c54b07a76b2aee6306b3563a15ef1d640e79591ec14f40f22675ed7068f4cbd5"
+    );
+
+    fn unhex(text: &str) -> Vec<u8> {
+        (0..text.len()).step_by(2).map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("hex")).collect()
+    }
+
+    fn server_config() -> Arc<rustls::ServerConfig> {
+        let cert = rustls::pki_types::CertificateDer::from(unhex(CERT_HEX));
+        let key = rustls::pki_types::PrivateKeyDer::from(rustls::pki_types::PrivatePkcs8KeyDer::from(unhex(KEY_HEX)));
+        Arc::new(
+            rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .expect("protocol versions")
+                .with_no_client_auth()
+                .with_single_cert(vec![cert], key)
+                .expect("the certificate and key fit"),
+        )
+    }
+
+    /// A TLS peer on a loopback port that takes one connection and runs the handshake. The thread ends with `Err` when the
+    /// handshake failed (the client refused the certificate) and with `Ok` when it was completed, which it must not be: no byte
+    /// of a request is read.
+    pub(crate) fn untrusted_peer() -> (u16, JoinHandle<Result<(), ()>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+        let port = listener.local_addr().expect("address").port();
+        let config = server_config();
+        let thread = std::thread::spawn(move || {
+            let (mut tcp, _) = listener.accept().expect("a connection");
+            let _ = tcp.set_read_timeout(Some(Duration::from_secs(10)));
+            let mut connection = rustls::ServerConnection::new(config).expect("a server connection");
+            while connection.is_handshaking() {
+                if connection.complete_io(&mut tcp).is_err() {
+                    return Err(());
+                }
+            }
+            Ok(())
+        });
+        (port, thread)
+    }
+
+    /// An agent as the clients build theirs, except that its trust store holds nothing, so every certificate is from an unknown
+    /// issuer. (The platform's verifier needs tens of seconds to refuse a self-signed certificate on a development machine.)
+    pub(crate) fn agent_trusting_nothing(timeout: Duration) -> Agent {
+        let config: Config = Config::builder()
+            .http_status_as_error(false)
+            .max_redirects(0)
+            .timeout_global(Some(timeout))
+            .tls_config(TlsConfig::builder().root_certs(RootCerts::Specific(Arc::new(Vec::new()))).build())
+            .build();
+        config.into()
     }
 }

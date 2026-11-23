@@ -502,6 +502,13 @@ const PERMITTED_HITS: &[(&str, &str, &str)] = &[
          shares the agent of the sync transport",
     ),
     (
+        "core/src/server_link.rs",
+        "ureq",
+        "the one function that reads the error of the two clients of a holzWave server (core/src/sync/server.rs and \
+         core/src/server_signin.rs) and tells a refused certificate from a server that cannot be reached: it names the type of \
+         the error and opens no connection and sends nothing",
+    ),
+    (
         "host/src/server.rs",
         "std::net",
         "the in-memory stand-in for a server in the test module of the host's link (compiled for tests only, never in a build of the app): it listens on a loopback port the test chose and speaks the routes of the server to the runtimes under test",
