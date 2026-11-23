@@ -243,6 +243,57 @@ test("each state of a pane says the record's word in the context slot, with a do
   assert.ok(section.includes("goes 5 seconds after the server last said it"), "the record says how long it lasts");
 });
 
+test("a key the pane could not send is the state Not sent alone and ` · Not sent` after the word of any other state, as the record says", () => {
+  const table = section.slice(section.indexOf("**The states of a pane.**"), section.indexOf("On attach the server sends"));
+  const row = table.split("\n").find((line) => line.startsWith("| not sent |")).split("|").map((c) => c.trim());
+  const [, , dot, context, line, label] = row;
+  const word = context.match(/`([^`]+)`/)[1];
+  assert.equal(word, "Not sent");
+  assert.equal(PANE_STATE_WORDS.not_sent, word, "the page's word is the word of the row `not sent`");
+  assert.ok(quoted(PANE_STATE_WORDS.not_sent), "the words table lists it");
+  assert.ok(section.includes("| `Attaching…`, `Loading older lines…`, `Resyncing…`, `Input dropped`, `Not sent`,"), "the words table lists it with the other states of a pane");
+  assert.ok(section.includes("then ` · Not sent`"), "the record names the suffix");
+  const suffix = " · Not sent";
+  // Alone: the dot as before, warn, underlined with the mark, no line on the screen, the label shown.
+  const alone = paneState({ state: "connected", remote: { phase: "", notSent: true } });
+  assert.deepEqual(alone, { state: "not_sent", text: word, dot: null, warn: context.includes("warn"), label: label === "shown" });
+  assert.equal(dot, "as before");
+  assert.ok(line.startsWith("none"), "no line on the screen");
+  // Not true, absent or not a boolean: as before.
+  for (const off of [false, undefined, null, "yes", 1]) {
+    assert.equal(paneState({ state: "connected", remote: { phase: "", notSent: off } }), null, String(off));
+  }
+  // After each of the seven other states: that state's word, then the suffix, warn, and that state's dot and label.
+  const states = [
+    ["attaching", seen("connected", "attaching")],
+    ["loading_older", seen("connected", "loading_older")],
+    ["resyncing", seen("connected", "resyncing")],
+    ["input_dropped", seen("connected", "input_dropped")],
+    ["ended", seen("closed")],
+    ["ended", seen("connected"), { status: 3 }],
+    ["ended", seen("connected"), { status: null }],
+    ["reconnecting", seen("reconnecting")],
+    ["unreachable", seen("failed")],
+    ["attaching", seen("connecting")],
+  ];
+  assert.equal(new Set(states.map(([name]) => name)).size, Object.keys(PANE_STATE_WORDS).length - 1, "every state but Not sent itself is covered");
+  for (const [name, c, held] of states) {
+    const base = paneState(c, held);
+    assert.equal(base.state, name);
+    const withWord = paneState({ state: c.state, remote: { phase: c.remote.phase, notSent: true } }, held);
+    assert.equal(withWord.text, `${base.text}${suffix}`, `${name}: the word, then the suffix`);
+    assert.equal(withWord.warn, true, `${name}: warn whenever Not sent is true`);
+    assert.equal(withWord.state, name, `${name}: the state itself stays`);
+    assert.equal(withWord.dot, base.dot, `${name}: the dot of the state`);
+    assert.equal(withWord.label, base.label, `${name}: the label rule of the state`);
+  }
+  // The suffix is added once and the held end keeps its status.
+  assert.equal(paneState(seen("connected"), { status: 3 }).text, "Session ended · exit 3");
+  assert.equal(paneState({ state: "connected", remote: { phase: "", notSent: true } }, { status: 3 }).text, "Session ended · exit 3 · Not sent");
+  assert.equal(paneState({ state: "reconnecting", remote: { phase: "", notSent: true } }).text, "Reconnecting… · Not sent");
+  assert.equal(paneState({ state: "failed", remote: { phase: "", notSent: true } }).text, "Server unreachable · Not sent");
+});
+
 // ---- older lines -------------------------------------------------------------------------------------------------------------------
 
 test("the older-lines latch asks once at the top, only for a remote pane with more lines, and opens again after the phase", () => {

@@ -140,6 +140,19 @@ test("the remote member is read from its closed sets and within the clamps", () 
   assert.deepEqual(Object.keys(canary).sort(), ["cols", "more", "notSent", "phase", "rows", "session", "writer"], "no member the page does not name");
 });
 
+test("not_sent is read as a boolean and anything else, or no member, reads as false", () => {
+  assert.equal(readRemote({ ...WIRE, not_sent: true }).notSent, true);
+  assert.equal(readRemote({ ...WIRE, not_sent: false }).notSent, false);
+  for (const odd of ["true", "yes", 1, 0, null, [], {}, undefined]) {
+    assert.equal(readRemote({ ...WIRE, not_sent: odd }).notSent, false, JSON.stringify(odd) ?? "undefined");
+  }
+  const { not_sent: _gone, ...without } = WIRE;
+  assert.equal(readRemote(without).notSent, false, "a host that does not send the member");
+  const [read] = readPaneConns([remoteConn({ not_sent: true })]);
+  assert.equal(read.remote.notSent, true, "through the answer of pane_connections");
+  assert.equal(readRemote({ ...WIRE, not_sent: true }).phase, "", "the member does not touch the phase");
+});
+
 test("a pane without a well formed remote member reads exactly as before", () => {
   const plain = conn();
   assert.deepEqual(readPaneConns([plain]), [plain]);
