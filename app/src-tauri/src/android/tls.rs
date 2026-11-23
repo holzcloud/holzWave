@@ -23,6 +23,8 @@ const FAILED_LINE: &str = "holzwave: the platform certificate verifier could not
 /// Called from Kotlin: `HolzwavePlugin.initTls(context)`. Idempotent: a second call finds the verifier set up and changes nothing.
 #[jni_mangle("ch.holzcloud.holzwave.HolzwavePlugin", "initTls")]
 pub fn init_tls<'caller>(mut unowned_env: EnvUnowned<'caller>, _this: JObject<'caller>, context: JObject<'caller>) {
+    // Before the verifier is set up, so the reason of its very first refusal reaches logcat.
+    super::verifier_log::install();
     unowned_env
         .with_env(|env| -> jni::errors::Result<()> {
             match holzwave_core::platform_tls::init_with_env(env, context) {

@@ -35,6 +35,9 @@ holzwave-core = { path = "../../core", features = ["keyring"] }
 # no other platform compiles or locks it differently. No TLS code of ours: the verifier is the one rustls already uses.
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "=0.22.4"
+# The verifier writes the system's reason for a refused certificate through the `log` facade; the backend of
+# src/android/verifier_log.rs prints those warnings to logcat. The version is the one the lock file already holds for the verifier.
+log = "=0.4.34"
 
 # The on-device model of macOS. The table is macOS only, so Windows, Linux and mobile builds (iOS is another target OS) never
 # compile Swift. The crate links Apple's framework weakly, and a library crate's link arguments do not reach the crates that

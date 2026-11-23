@@ -5,7 +5,7 @@
 //! [`service`] (when the foreground service is told the counts of the live sessions) are compiled for Android and for the
 //! unit tests on the desktop (they touch no Android API, so their rules are proved without a device); the desktop app never
 //! uses them. [`keystore`] is the vault's keystore and clock over the plugin, tested on the desktop with a recorder in place of the
-//! plugin, and [`picker`] is the hand-over's file picker over the same plugin and the same bridge. [`plugin`], the handle to the Kotlin class, and the thread of [`service`] that uses it exist on Android only, and so
+//! plugin, and [`picker`] is the hand-over's file picker over the same plugin and the same bridge. [`verifier_log`], the warn-level log backend of the certificate verifier (its line builder is tested on the desktop), [`plugin`], the handle to the Kotlin class, and the thread of [`service`] that uses it exist on Android only, and so
 //! does `selftest`, which exists in debug builds of the app only.
 
 pub mod host;
@@ -19,3 +19,5 @@ pub mod selftest;
 pub mod service;
 #[cfg(target_os = "android")]
 pub mod tls;
+#[cfg(any(test, target_os = "android"))]
+pub mod verifier_log;

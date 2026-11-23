@@ -158,6 +158,12 @@ const WORKSPACE_ALLOWLIST: &[(&str, &[Dependency])] = &[
                  Android context once (android/tls.rs); already in the lock file through the verifier, Android target table only",
             ),
             (
+                "log",
+                "the platform certificate verifier writes its reason for a refused certificate through this facade, and the \
+                 backend of android/verifier_log.rs prints its warnings to logcat for diagnosis; already in the lock file \
+                 through the verifier, Android target table only, no new crate",
+            ),
+            (
                 "objc2",
                 "autorelease pool around the macOS pasteboard calls (clipboard.rs); already in the lock file through tao and \
                  muda, macOS target table only",
