@@ -2394,8 +2394,10 @@ fn tls_problems(
     if rust.contains("unsafe") {
         problems.push("tls.rs has a line with the unsafe keyword".into());
     }
-    // The dependencies: jni only, exactly pinned to the version the lock holds for the verifier, Android only.
+    // The dependencies: jni and log only, each exactly pinned to the version the lock holds for the verifier, Android only. The
+    // verifier reports why it refused a certificate through the log facade, and the app's backend prints that to logcat.
     let jni_in_lock = lock_versions(lock, "jni");
+    let log_in_lock = lock_versions(lock, "log");
     let table = "[target.'cfg(target_os = \"android\")'.dependencies]";
     match app_manifest.find(table) {
         None => problems.push("the app manifest has no Android-only dependency table".into()),
@@ -2403,8 +2405,12 @@ fn tls_problems(
             let rest = &app_manifest[at + table.len()..];
             let body = &rest[..rest.find("\n[").unwrap_or(rest.len())];
             let names: Vec<&str> = body.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).filter_map(|l| l.split('=').next()).map(str::trim).collect();
-            if names != ["jni"] {
-                problems.push(format!("the Android-only table names {names:?}, not only jni"));
+            if names != ["jni", "log"] {
+                problems.push(format!("the Android-only table names {names:?}, not only jni and log"));
+            }
+            let log_pin = quoted_after(body, "log = ").unwrap_or("");
+            if log_pin.strip_prefix('=').is_none_or(|v| !log_in_lock.iter().any(|l| l == v)) {
+                problems.push(format!("log is pinned as {log_pin:?}, not exactly a version the lock holds ({log_in_lock:?})"));
             }
             let pin = quoted_after(body, "jni = ").unwrap_or("");
             let wanted = jni_in_lock.iter().find(|v| v.starts_with("0.22.")).cloned().unwrap_or_default();
@@ -2438,6 +2444,25 @@ fn tls_problems(
     problems
 }
 
+/// A Rust file up to its first test module (`#[cfg(test)]` followed by a `mod` line), the same rule the project policy's
+/// network scan uses: test modules follow the product code, and a test peer may use what the product never may.
+fn without_tests(text: &str) -> &str {
+    let mut at = 0;
+    let mut lines = text.split_inclusive('\n').peekable();
+    while let Some(line) = lines.next() {
+        if line.trim() == "#[cfg(test)]"
+            && lines.peek().is_some_and(|next| {
+                let next = next.trim_start();
+                next.starts_with("mod ") || next.starts_with("pub(crate) mod ") || next.starts_with("pub mod ")
+            })
+        {
+            return &text[..at];
+        }
+        at += line.len();
+    }
+    text
+}
+
 /// The sources of the shell, the host and the core, without their tests, as `(path, text)`.
 fn tls_sources() -> Vec<(String, String)> {
     fn walk(dir: &Path, out: &mut Vec<(String, String)>) {
@@ -2449,7 +2474,7 @@ fn tls_sources() -> Vec<(String, String)> {
             } else if path.extension().is_some_and(|e| e == "rs")
                 && let Ok(text) = std::fs::read_to_string(&path)
             {
-                out.push((path.display().to_string(), text));
+                out.push((path.display().to_string(), without_tests(&text).to_owned()));
             }
         }
     }
@@ -2547,6 +2572,9 @@ fn the_tls_check_fails_on_bad_input() {
         ("jni outside the Android table", Box::new(|i| i.app_manifest = i.app_manifest.replace("[target.'cfg(target_os = \"android\")'.dependencies]\njni = \"=0.22.4\"", "[dependencies]\njni = \"=0.22.4\""))),
         ("jni with a range", Box::new(|i| i.app_manifest = i.app_manifest.replace("jni = \"=0.22.4\"", "jni = \"0.22\""))),
         ("a second Android dependency", Box::new(|i| i.app_manifest = i.app_manifest.replace("jni = \"=0.22.4\"", "jni = \"=0.22.4\"\nrustls-platform-verifier = \"0.7.1\""))),
+        ("log with a range", Box::new(|i| i.app_manifest = i.app_manifest.replace("log = \"=0.4.34\"", "log = \"0.4\""))),
+        ("log at a version the lock lacks", Box::new(|i| i.app_manifest = i.app_manifest.replace("log = \"=0.4.34\"", "log = \"=0.4.0\""))),
+        ("no log", Box::new(|i| i.app_manifest = i.app_manifest.replace("log = \"=0.4.34\"", ""))),
         ("a tauri plugin", Box::new(|i| i.app_manifest.push_str("\ntauri-plugin-x = \"1\"\n"))),
         ("a custom verifier", Box::new(|i| i.sources.push(("x.rs".into(), "let c = builder.dangerous();".into())))),
         ("webpki roots", Box::new(|i| i.sources.push(("x.rs".into(), "use webpki_roots::TLS_SERVER_ROOTS;".into())))),
@@ -2555,6 +2583,13 @@ fn the_tls_check_fails_on_bad_input() {
     for (what, mutate) in &cases {
         assert!(!tls_check(mutate).is_empty(), "{what} passed");
     }
+    // A test module may use them; the product code before it may not.
+    let in_tests = "fn a() {}\n#[cfg(test)]\nmod tests {\n    fn b() { let r = RootCerts::Specific(x); }\n}\n";
+    assert_eq!(without_tests(in_tests), "fn a() {}\n");
+    let before_tests = "fn a() { let r = RootCerts::Specific(x); }\n#[cfg(test)]\nmod tests {}\n";
+    assert!(without_tests(before_tests).contains("RootCerts::Specific"));
+    let cfg_test_item = "#[cfg(test)]\nfn helper() {}\nfn a() { let r = RootCerts::Specific(x); }\n";
+    assert!(without_tests(cfg_test_item).contains("RootCerts::Specific"), "a single cfg(test) item does not end the product code");
     // Comments may talk about these things.
     let commented = tls_check(|i| i.sources.push(("x.rs".into(), "// no webpki_roots and no .dangerous() here\n".into())));
     assert!(commented.is_empty(), "{commented:?}");
