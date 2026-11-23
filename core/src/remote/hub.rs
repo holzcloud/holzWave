@@ -32,12 +32,15 @@
 //! on the next request.
 //!
 //! **Silence.** A network can keep the TCP connection open and pass nothing (a proxy that froze, a NAT that forgot the
-//! connection): no error and no close ever comes. The server pings a device socket at least every
-//! [`proto::PING_SECONDS`], and an attached client's beat is answered too, so a connection on which nothing at all was heard
-//! (no message, no ping, no pong) for [`HubOptions::silence`] ([`proto::SILENCE_SECONDS`]) is dropped as a broken one: no
-//! close frame is written into it (a write into a dead link may wait), the subscriptions go to `Reconnecting` and the tries,
-//! a call that waits fails as unreachable, and an idle hub is down and connects again on the next request. What was typed
-//! between the moment the link went silent and the moment the hub noticed is lost.
+//! connection): no error and no close ever comes. Two rules end such a link as a broken one. The first is the beat: while a
+//! subscription exists the hub beats every [`HubOptions::beat`] and the server answers at once, so a beat that is not answered
+//! within [`HubOptions::beat_timeout`] ([`CALL_TIMEOUT`], 10 seconds) ends the link, which a silent network is noticed by within
+//! about twenty seconds, even when pings still arrive. The second is the backstop for a connection with no beat to wait for: a
+//! connection on which nothing at all was heard (no message, no ping, no pong) for [`HubOptions::silence`]
+//! ([`proto::SILENCE_SECONDS`]) is dropped too. Either way no close frame is written into the link (a write into a dead link may
+//! wait), the subscriptions go to `Reconnecting` and the tries, a call that waits fails as unreachable, and an idle hub is down
+//! and connects again on the next request. What was typed between the moment the link went silent and the moment the hub
+//! noticed is lost.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -111,6 +114,8 @@ pub struct HubOptions {
     pub beat: Duration,
     /// How long a call waits for its answer.
     pub call_timeout: Duration,
+    /// How long the server has to answer a beat. A beat that is not answered in this time ends the connection as a broken one.
+    pub beat_timeout: Duration,
     /// The most bytes of snapshot an attach may promise.
     pub max_snapshot: u32,
     /// The most bytes one subscription may hold unread.
@@ -136,6 +141,7 @@ impl Default for HubOptions {
             reconnect: Reconnect::default(),
             beat: Duration::from_secs(proto::BEAT_SECONDS),
             call_timeout: CALL_TIMEOUT,
+            beat_timeout: CALL_TIMEOUT,
             max_snapshot: MAX_SNAPSHOT,
             sub_queue_bytes: SUB_QUEUE_BYTES,
             attached_poll: Duration::from_millis(2),
@@ -156,6 +162,7 @@ impl HubOptions {
             reconnect: Reconnect { attempts: self.reconnect.attempts.min(100), delay: self.reconnect.delay.min(Duration::from_secs(3600)) },
             beat: self.beat.clamp(Duration::from_millis(5), Duration::from_secs(60)),
             call_timeout: self.call_timeout.clamp(Duration::from_millis(50), Duration::from_secs(60)),
+            beat_timeout: self.beat_timeout.clamp(Duration::from_millis(50), Duration::from_secs(3600)),
             max_snapshot: self.max_snapshot.clamp(1024, MAX_SNAPSHOT),
             sub_queue_bytes: self.sub_queue_bytes.clamp(64 * 1024, 64 * 1024 * 1024),
             attached_poll: self.attached_poll.clamp(Duration::from_millis(1), Duration::from_millis(100)),
@@ -735,8 +742,10 @@ impl Sub {
 enum Pending {
     Call(Sender<Result<Answer, HubError>>),
     Attach { id: u64, session: u32 },
-    /// A beat, a resize, a takeover, a detach: nothing waits for the answer.
+    /// A resize, a takeover, a detach: nothing waits for the answer, and a late one changes nothing.
     Quiet,
+    /// A beat: nothing waits for the answer, but one that does not come in time ends the connection.
+    Beat,
 }
 
 /// Where the connection is.
@@ -1042,6 +1051,15 @@ impl Core {
         let _ = self.send(op, Pending::Quiet, deadline);
     }
 
+    /// The beat of an attached client: the server answers it at once, and an answer that is late ends the connection.
+    fn beat(&mut self) {
+        if !matches!(self.mode, Mode::Up) || self.pending.len() >= MAX_PENDING {
+            return;
+        }
+        let deadline = Instant::now() + self.options.beat_timeout;
+        let _ = self.send(Op::Beat { session: None }, Pending::Beat, deadline);
+    }
+
     fn ask_attach(&mut self, session: u32) {
         let Some(sub) = self.subs.get(&session) else { return };
         let (id, tail) = (sub.id, sub.tail);
@@ -1334,6 +1352,11 @@ impl Core {
         let late: Vec<u64> = self.pending.iter().filter(|(_, (_, deadline))| now >= *deadline).map(|(id, _)| *id).collect();
         for id in late {
             match self.pending.remove(&id) {
+                // The server did not answer its own beat in time: the link is broken, whatever else it still passes.
+                Some((Pending::Beat, _)) => {
+                    self.drop_connection(None);
+                    return;
+                }
                 Some((Pending::Call(reply), _)) => {
                     let _ = reply.send(Err(HubError::Timeout));
                 }
@@ -1346,7 +1369,7 @@ impl Core {
         if !self.subs.is_empty() && now.duration_since(self.last_beat) >= self.options.beat {
             self.last_beat = now;
             bump(&self.stats.beats);
-            self.quiet(Op::Beat { session: None });
+            self.beat();
         }
         if self.subs.is_empty() && self.pending.is_empty() && now.duration_since(self.last_activity) >= self.options.idle_close {
             if let Some(mut ws) = self.ws.take() {
@@ -1382,7 +1405,7 @@ impl Core {
             Pending::Call(reply) => {
                 let _ = reply.send(result.map_err(HubError::Word));
             }
-            Pending::Quiet => {}
+            Pending::Quiet | Pending::Beat => {}
             Pending::Attach { id: sub, session } => {
                 if !self.owns(sub, session) || !self.subs.get(&session).is_some_and(|s| s.phase == Phase::Asked { req: id }) {
                     return;
@@ -1530,6 +1553,16 @@ mod tests {
         assert_eq!(final_fault(&WsError::Fault(Fault::SignedOut)), Some(Fault::SignedOut));
         assert_eq!(final_fault(&WsError::Closed), None);
         assert_eq!(final_fault(&WsError::TooLarge), Some(Fault::Protocol));
+    }
+
+    #[test]
+    fn the_beat_must_be_answered_within_ten_seconds_and_the_bound_is_clamped() {
+        assert_eq!(HubOptions::default().beat_timeout, Duration::from_secs(10));
+        assert_eq!(HubOptions::default().clamped().beat_timeout, Duration::from_secs(10));
+        let with = |beat_timeout: Duration| HubOptions { beat_timeout, ..HubOptions::default() }.clamped().beat_timeout;
+        assert_eq!(with(Duration::ZERO), Duration::from_millis(50), "a beat is never due before it was sent");
+        assert_eq!(with(Duration::from_millis(300)), Duration::from_millis(300));
+        assert_eq!(with(Duration::from_secs(86_400)), Duration::from_secs(3600));
     }
 
     #[test]

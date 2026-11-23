@@ -805,6 +805,81 @@ fn pings_alone_keep_a_quiet_connection_and_when_they_stop_the_silence_is_noticed
     drop(conn);
 }
 
+/// The beat of the tests below, how long the server has to answer it, and the silence bound that is far beyond both: only the
+/// unanswered beat can end the link here.
+const BEAT: Duration = Duration::from_millis(200);
+const BEAT_TIMEOUT: Duration = Duration::from_millis(300);
+
+fn beating_hub(device: &FakeDevice) -> Hub {
+    hub_with(device, |o| {
+        o.beat = BEAT;
+        o.beat_timeout = BEAT_TIMEOUT;
+        o.call_timeout = BEAT_TIMEOUT;
+        o.silence = Duration::from_secs(3600);
+        o.reconnect = Reconnect { attempts: 3, delay: Duration::from_millis(30) };
+    })
+}
+
+#[test]
+fn a_beat_the_server_never_answers_ends_the_link_within_the_beat_and_its_timeout_while_pings_keep_arriving() {
+    let device = FakeDevice::start();
+    let hub = beating_hub(&device);
+    let (sub, mut conn) = attach_plain(&device, &hub, 3, b"");
+    // The server keeps pinging, so the connection is never silent, and answers no text request at all.
+    let started = Instant::now();
+    let deadline = started + PATIENCE;
+    let mut events = Vec::new();
+    while !events.iter().any(|e| matches!(e, SubEvent::Reconnecting { .. })) {
+        assert!(Instant::now() < deadline, "the unanswered beat did not end the link, got {events:?}");
+        conn.ping();
+        events.extend(events_for(&sub, Duration::from_millis(20)));
+    }
+    let waited = started.elapsed();
+    assert!(matches!(events.last(), Some(SubEvent::Reconnecting { attempt: 1, of: 3, .. })), "{events:?}");
+    assert!(!is_lost(&events), "a link that did not answer is not a final fault: {events:?}");
+    assert!(waited <= BEAT + BEAT_TIMEOUT + MARGIN, "the unanswered beat was noticed after {waited:?}");
+    assert!(hub.stats().beats >= 1);
+    // The next try finds the server and attaches the stream again.
+    drop(conn);
+    let mut conn = device.accept();
+    let request = conn.request();
+    assert_eq!(request.op, Op::Attach { session: 3, tail: None });
+    conn.attached(request.id, 3, 80, 24, WriterView::Writing, false, 0);
+    let events = events_until(&sub, |e| !e.is_empty());
+    assert!(matches!(events[0], SubEvent::Attached { again: true, .. }), "{events:?}");
+    assert_eq!(hub.stats().connects, 2);
+}
+
+#[test]
+fn a_server_that_answers_every_beat_keeps_the_connection_and_a_late_answer_of_a_resize_never_drops_it() {
+    let device = FakeDevice::start();
+    let hub = beating_hub(&device);
+    let (sub, mut conn) = attach_plain(&device, &hub, 3, b"");
+    sub.handle().resize(100, 30).expect("the writer may resize");
+    // Five beat intervals, every beat answered at once; the resize is answered only after its own deadline has passed.
+    let until = Instant::now() + BEAT * 5;
+    let mut events = Vec::new();
+    let mut resize = None;
+    let mut answered = 0;
+    while Instant::now() < until {
+        match conn.next(Duration::from_millis(20)) {
+            Got::Request(Request { id, op: Op::Beat { .. } }) => {
+                conn.answer(id, Answer::Done);
+                answered += 1;
+            }
+            Got::Request(Request { id, op: Op::Resize { cols: 100, rows: 30, .. } }) => resize = Some(id),
+            _ => {}
+        }
+        events.extend(events_for(&sub, Duration::from_millis(1)));
+    }
+    assert!(answered >= 4, "only {answered} beats came in five intervals");
+    let resize = resize.expect("the resize was sent");
+    conn.answer(resize, Answer::Done);
+    events.extend(events_for(&sub, BEAT));
+    assert!(events.is_empty(), "a healthy connection was dropped: {events:?}");
+    assert_eq!(hub.stats().connects, 1);
+}
+
 #[test]
 fn a_call_waiting_on_a_connection_that_went_silent_ends_as_unreachable_and_never_hangs() {
     let device = FakeDevice::start();

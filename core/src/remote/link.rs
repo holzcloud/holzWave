@@ -243,6 +243,7 @@ impl ServerLink {
             restore: false,
             restore_after_attach: false,
             reconnect_noticed: false,
+            unreachable_noticed: false,
             ending: None,
         };
         let writer = ServerWriter { shared: shared.clone() };
@@ -275,6 +276,9 @@ struct ServerReader {
     restore_after_attach: bool,
     /// The notice of a lost connection was shown for this loss.
     reconnect_noticed: bool,
+    /// The notice that the server is unreachable was shown for this failure: an Enter whose try fails again does not write it
+    /// again, and the pane being attached again starts a new failure.
+    unreachable_noticed: bool,
     ending: Option<Ending>,
 }
 
@@ -291,6 +295,7 @@ impl ServerReader {
         self.sub = sub;
         self.shared.lock().view.state = RemoteState::Attaching;
         self.reconnect_noticed = false;
+        self.unreachable_noticed = false;
         self.say(NOTICE_ATTACHING);
     }
 
@@ -312,6 +317,7 @@ impl ServerReader {
                     inner.view.state = RemoteState::None;
                 }
                 self.reconnect_noticed = false;
+                self.unreachable_noticed = false;
                 self.shared.state.set(ConnState::Connected);
                 self.snapshot_left = snapshot;
                 self.restore = std::mem::take(&mut self.restore_after_attach);
@@ -373,7 +379,10 @@ impl ServerReader {
             SubEvent::GaveUp => {
                 self.shared.older_not_coming();
                 self.shared.state.set(ConnState::Failed);
-                self.say(NOTICE_UNREACHABLE);
+                // Once per failure: the header shows each try, and a column of the same line says nothing more.
+                if !std::mem::replace(&mut self.unreachable_noticed, true) {
+                    self.say(NOTICE_UNREACHABLE);
+                }
             }
             // Only the header says it: a line on the screen would move the session's own text, which the server's screen does
             // not have.

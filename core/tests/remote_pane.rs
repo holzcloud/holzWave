@@ -281,11 +281,12 @@ fn when_the_tries_are_used_the_pane_fails_waits_for_enter_counts_what_is_typed_a
     assert_eq!(pane.conn_state(), ConnState::Failed);
 
     // Enter is one fresh try, and the other bytes of its buffer are counted like any typed bytes. The server still does not
-    // speak: failed again, and it says so again.
+    // speak: failed again, and the line that says so is not written a second time.
     pane.text("xy\r".into()).unwrap();
+    wait_for("the count", || dropped(&pane) == 5);
     device.drop_connections_for(Duration::from_millis(600));
-    wait_for("a second notice", || count(&screen(&pane), NOTICE_UNREACHABLE) == 2);
-    assert_eq!(pane.conn_state(), ConnState::Failed);
+    wait_state(&pane, |s| *s == ConnState::Failed);
+    assert_eq!(count(&screen(&pane), NOTICE_UNREACHABLE), 1, "once per failure, not once per try");
     assert_eq!(dropped(&pane), 5, "the two bytes beside the Enter were counted, the Enter was not");
     // Another Enter, alone in its buffer, drops nothing; this time the server answers: what was typed meanwhile never arrived.
     enter(&pane);
@@ -368,6 +369,49 @@ fn a_network_that_goes_silent_shows_reconnecting_within_the_bound_then_unreachab
     assert_eq!(conn.drain(Duration::from_millis(200)), vec![Got::Input { session: 4, bytes: b"ls\r".to_vec() }]);
     wait_for("the state to end", || !not_sent(&pane));
     drop(silent);
+    pane.close();
+    assert!(pane.join(PATIENCE));
+}
+
+#[test]
+fn the_unreachable_line_is_written_once_per_failure_however_often_enter_tries_again_and_once_more_after_a_new_failure() {
+    let device = FakeDevice::start();
+    let hub = hub_with(&device, fast());
+    let mut session = Session::new(80, 24);
+    session.print("prompt$ ");
+    let (pane, _probe, conn) = attached_pane(&device, &hub, 4, &mut session, WriterView::Writing, None, "prompt$");
+    conn.cut();
+    device.drop_connections_for(Duration::from_millis(500));
+    wait_state(&pane, |s| *s == ConnState::Failed);
+    wait_text(&pane, NOTICE_UNREACHABLE);
+    assert_eq!(count(&screen(&pane), NOTICE_UNREACHABLE), 1);
+
+    // Three Enters, each a try that fails again: the pane is in the connecting state while the try lasts (nothing answers it
+    // until the scripted server drops it), and the screen holds the line once.
+    for round in 1..=3 {
+        enter(&pane);
+        wait_state(&pane, |s| *s == ConnState::Connecting);
+        device.drop_connections_for(Duration::from_millis(400));
+        wait_state(&pane, |s| *s == ConnState::Failed);
+        let text = screen(&pane);
+        assert_eq!(count(&text, NOTICE_UNREACHABLE), 1, "try {round} wrote the line again: {text:?}");
+        assert_eq!(count(&text, NOTICE_RECONNECTING), 1, "{text:?}");
+    }
+
+    // The server is back: Enter attaches the pane again. That ends the failure, so a new one writes the line once more.
+    enter(&pane);
+    let mut conn = device.accept();
+    let request = conn.request();
+    session.print("back$ ");
+    session.serve(&mut conn, &request, WriterView::Writing, 100);
+    wait_text(&pane, "back$");
+    wait_state(&pane, |s| *s == ConnState::Connected);
+    assert_eq!(count(&screen(&pane), NOTICE_UNREACHABLE), 0, "the fresh attach replaced the screen");
+    conn.cut();
+    device.drop_connections_for(Duration::from_millis(500));
+    wait_state(&pane, |s| *s == ConnState::Failed);
+    wait_text(&pane, NOTICE_UNREACHABLE);
+    assert_eq!(count(&screen(&pane), NOTICE_UNREACHABLE), 1, "a new failure writes it once");
     pane.close();
     assert!(pane.join(PATIENCE));
 }
