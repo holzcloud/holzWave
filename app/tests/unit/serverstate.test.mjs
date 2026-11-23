@@ -89,6 +89,23 @@ test("a state is a shape and a word; a failure also has the mark and the underli
   assert.equal(waitWords("failed", "x".repeat(900)).word.length, 200);
 });
 
+test("the certificate state is read from the host's sentence and from the poll word, and its view is the record's row", () => {
+  const sentence = "The certificate of the server was not accepted.";
+  assert.deepEqual(refusalOf(sentence), { kind: "state", state: "certificate" });
+  assert.deepEqual(refusalOf(new Error(sentence)), { kind: "state", state: "certificate" });
+  assert.deepEqual(readPoll({ state: "certificate", interval: 5 }), { state: "certificate", interval: 5 });
+  assert.equal(isFailure("certificate"), true);
+  // The view: the mark, a failure, and the words of the row `certificate` of the table in the record.
+  assert.deepEqual(waitWords("certificate"), { dot: "mark", bad: true, word: sentence });
+  const rowOfRecord = section.split("\n").find((line) => line.startsWith("| certificate |"));
+  assert.ok(rowOfRecord, "the record has the row `certificate`");
+  const cells = rowOfRecord.split("|").map((c) => c.trim());
+  assert.equal(cells[2], "`!` and an underline");
+  assert.equal(cells[3], "`" + waitWords("certificate").word + "`");
+  // The first screen and the second say the same words: nothing is written twice.
+  assert.equal(WAIT_WORDS.certificate.word, sentence);
+});
+
 // ---- the readers -------------------------------------------------------------------------------------------------------------------
 
 const VIEW = { state: "signed_in", url: "https://holz.example.net", name: "Holz MacBook", locked: false, sync_on: true, remote_on: false, error: null };

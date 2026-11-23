@@ -37,7 +37,7 @@ export const UNREACHABLE = "unreachable";
 // ---- the states of the second screen ----------------------------------------------------------------------------------------------
 
 /** The states of the wait, in the order of the record's table. `failed` is a refusal of the host that the record has no word for. */
-export type WaitState = "waiting" | "approved" | "denied" | "expired" | "too_many" | "unreachable" | "off" | "failed";
+export type WaitState = "waiting" | "approved" | "denied" | "expired" | "too_many" | "unreachable" | "certificate" | "off" | "failed";
 
 /** How a state is shown: the dot (a shape), whether it is a failure (the mark `!` and an underline), and the words. */
 export interface WaitWords {
@@ -54,6 +54,7 @@ export const WAIT_WORDS: Readonly<Record<Exclude<WaitState, "failed">, WaitWords
   expired: { dot: "mark", bad: true, word: "The code expired. Start again." },
   too_many: { dot: "mark", bad: true, word: "Too many devices or requests. Try again later." },
   unreachable: { dot: "mark", bad: true, word: "The server cannot be reached." },
+  certificate: { dot: "mark", bad: true, word: "The certificate of the server was not accepted." },
   off: { dot: "mark", bad: true, word: "Device sign-in is off on this server." },
 };
 
@@ -222,8 +223,8 @@ export interface SignInPoll {
 }
 
 /**
- * Read the answer of `server_sign_in_poll`. The host's words are `pending`, `approved`, `denied`, `expired`, `too_many`, `off` and
- * `unreachable`; any other word, or an answer that is no object, reads as `unreachable`, which stops the wait and shows a state of
+ * Read the answer of `server_sign_in_poll`. The host's words are `pending`, `approved`, `denied`, `expired`, `too_many`, `off`,
+ * `certificate` and `unreachable`; any other word, or an answer that is no object, reads as `unreachable`, which stops the wait and shows a state of
  * the record instead of waiting on something the page does not understand.
  */
 export function readPoll(raw: unknown): SignInPoll {
@@ -238,6 +239,7 @@ export function readPoll(raw: unknown): SignInPoll {
     case "expired":
     case "too_many":
     case "off":
+    case "certificate":
     case "unreachable":
       return { state: word, interval };
     default:
@@ -249,6 +251,8 @@ export function readPoll(raw: unknown): SignInPoll {
 
 /** The fixed sentences of the host that name a state of the record. */
 const HOST_UNREACHABLE = "The server cannot be reached.";
+/** The sentence of a certificate the system refused, the host's and the record's (design.md 6.35); it names no reason. */
+const HOST_CERTIFICATE = WAIT_WORDS.certificate.word;
 const HOST_OFF = "This feature is off on the server.";
 /** The text of a store of secrets that is locked (the host's and the page's own constant of design.md 6.6). */
 const HOST_LOCKED = "secrets are locked";
@@ -256,15 +260,16 @@ const HOST_LOCKED = "secrets are locked";
 /** What a rejected command comes to on the first screen: the state of the record that its sentence names, or the sentence itself. */
 export type Refusal =
   | { kind: "locked" }
-  | { kind: "state"; state: "unreachable" | "off" }
+  | { kind: "state"; state: "unreachable" | "certificate" | "off" }
   | { kind: "sentence"; text: string };
 
-/** The refusal of a command: the host's fixed sentence is read as a state when it is one of the two that the record words. */
+/** The refusal of a command: the host's fixed sentence is read as a state when it is one of the three that the record words. */
 export function refusalOf(failure: unknown): Refusal {
   const raw = typeof failure === "string" ? failure : failure instanceof Error ? failure.message : "";
   const text = plain(raw, MAX_SENTENCE);
   if (text === HOST_LOCKED || text === STRINGS.answerConnect) return { kind: "locked" };
   if (text === HOST_UNREACHABLE) return { kind: "state", state: "unreachable" };
+  if (text === HOST_CERTIFICATE) return { kind: "state", state: "certificate" };
   if (text === HOST_OFF) return { kind: "state", state: "off" };
   return { kind: "sentence", text: text === "" ? "The sign-in failed." : text };
 }

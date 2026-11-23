@@ -13,6 +13,7 @@ export default async function ({ page, url, errors }) {
   if (currentBackend() === "tauri") {
     await failureCase(page, url);
     await startRefusedCase(page, url);
+    await certificateCueCase(page, url);
     sourceCase();
   }
   assert.deepEqual(errors, [], "the page reported errors");
@@ -26,6 +27,7 @@ async function failureCase(page, url) {
     ["too_many", "Too many devices or requests. Try again later."],
     ["off", "Device sign-in is off on this server."],
     ["unreachable", "The server cannot be reached."],
+    ["certificate", "The certificate of the server was not accepted."],
   ];
   for (const [word, line] of cases) {
     await open(page, url, { polls: [word], interval: 1 });
@@ -62,6 +64,7 @@ async function startRefusedCase(page, url) {
   const cases = [
     ["The server cannot be reached.", "The server cannot be reached."],
     ["This feature is off on the server.", "Device sign-in is off on this server."],
+    ["The certificate of the server was not accepted.", "The certificate of the server was not accepted."],
     ["The sign-in could not be saved in the keychain.", "The sign-in could not be saved in the keychain."],
     ["", "The sign-in failed."],
   ];
@@ -73,6 +76,13 @@ async function startRefusedCase(page, url) {
     await page.waitForFunction(() => document.querySelector(".ss-refusal")?.textContent !== "");
     const text = await page.locator(".ss-refusal").textContent();
     assert.equal(text, shown);
+    // A refusal line carries a second cue besides its colour: the mark `!` and an underline.
+    const cue = await page.locator(".ss-refusal").evaluate((n) => ({
+      mark: getComputedStyle(n, "::before").content,
+      line: getComputedStyle(n).textDecorationLine,
+    }));
+    assert.ok(cue.mark.includes("!"), `${shown}: the mark`);
+    assert.ok(cue.line.includes("underline"), `${shown}: underlined`);
     assert.equal(await page.locator("#ss-address").inputValue(), GOOD);
     assert.equal(await page.locator(".ss-code").count(), 0, "no code is shown for a request that never started");
     assert.equal(await count(page, "server_sign_in_poll"), 0, "nothing is polled");
@@ -80,6 +90,24 @@ async function startRefusedCase(page, url) {
     await page.keyboard.press("Escape");
     await gone(page);
   }
+}
+
+/** The certificate state keeps its mark and its underline when the system draws without colour or with high contrast. */
+async function certificateCueCase(page, url) {
+  for (const [media, value] of [["forcedColors", "active"], ["contrast", "more"]]) {
+    await page.emulateMedia({ [media]: value });
+    await open(page, url, { polls: ["certificate"], interval: 1 });
+    if (media === "contrast") await page.waitForFunction(() => document.documentElement.classList.contains("contrast-high"));
+    await openDialog(page);
+    await page.locator("#ss-address").fill(GOOD);
+    await dialog(page).getByRole("button", { name: "Continue", exact: true }).click();
+    await page.waitForFunction(() => document.querySelector(".ss-state")?.textContent?.includes("certificate"));
+    assert.equal(await stateText(page), "!The certificate of the server was not accepted.", `${value}: the mark and the words`);
+    assert.ok((await page.locator(".ss-word").evaluate((n) => getComputedStyle(n).textDecorationLine)).includes("underline"), `${value}: underlined`);
+    await dialog(page).getByRole("button", { name: "Cancel", exact: true }).click();
+    await gone(page);
+  }
+  await page.emulateMedia({ forcedColors: null, contrast: "no-preference" });
 }
 
 /** The source has no innerHTML, no literal colour, no timer left behind by name and no label of the planning tree. */

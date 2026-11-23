@@ -78,7 +78,7 @@ pub struct SignInView {
 /// How the wait stands.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SignInPoll {
-    /// `pending`, `approved`, `denied`, `expired`, `too_many`, `off` or `unreachable`.
+    /// `pending`, `approved`, `denied`, `expired`, `too_many`, `off`, `certificate` or `unreachable`.
     pub state: &'static str,
     /// Seconds to leave before the next poll.
     pub interval: u64,
@@ -503,6 +503,13 @@ impl ServerRuntime {
             }
         };
         let answer = network_ready().map_err(SignInError::Blocked).and_then(|()| signin::poll(&mut pending.grant));
+        self.settle_poll(pending, epoch, answer)
+    }
+
+    /// What the host makes of the answer of one poll: the word the page reads, and what stays in the state. The wait goes on
+    /// after a poll that is pending or that lost the server; every other end of it drops the sign-in, a refused certificate
+    /// among them (it does not heal by polling, and `Start again` makes a new sign-in).
+    fn settle_poll(&self, pending: Pending, epoch: u64, answer: Result<Poll, SignInError>) -> Result<SignInPoll, String> {
         let interval = pending.grant.interval();
         // What goes back into the state, unless the sign-in was cancelled or replaced while the request was out.
         let keep = |pending: Pending| {
@@ -546,6 +553,7 @@ impl ServerRuntime {
                 }
             },
             Err(SignInError::Fault(Fault::Off)) => Ok(SignInPoll { state: "off", interval }),
+            Err(SignInError::Fault(Fault::Certificate)) => Ok(SignInPoll { state: "certificate", interval }),
             Err(SignInError::Fault(Fault::Unreachable)) => {
                 keep(pending);
                 Ok(SignInPoll { state: "unreachable", interval })
@@ -1035,6 +1043,31 @@ mod tests {
         assert_eq!(rt.sign_in_poll().unwrap().state, "off");
         assert_eq!(rt.view().state, "signed_out", "the wait ended");
         assert_eq!(rt.sign_in_poll().unwrap().state, "expired");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_refused_certificate_ends_the_wait_with_its_own_word_and_keeps_nothing() {
+        let (rt, store, dir) = runtime("certificate");
+        let fake = Fake::start();
+        rt.sign_in_start(&fake.origin).unwrap();
+        // The fake speaks plain http, so a refused certificate cannot happen on the wire here (the client's own tests drive a real
+        // handshake): the answer of the client is put in by hand, to see what the host makes of it.
+        let (pending, epoch) = {
+            let mut state = lock(&rt.state);
+            (state.pending.take().expect("a sign-in waits"), state.epoch)
+        };
+        let answer = rt.settle_poll(pending, epoch, Err(SignInError::Fault(Fault::Certificate))).expect("an answer, not an error");
+        assert_eq!(answer.state, "certificate");
+        // A certificate does not heal by polling: the wait is over and nothing was kept.
+        assert_eq!(rt.sign_in_poll().unwrap().state, "expired");
+        assert_eq!(rt.view().state, "signed_out");
+        assert_eq!(store.get(TOKEN_ACCOUNT).unwrap(), None, "the keychain is not touched");
+        assert!(!dir.join("server_link.json").exists(), "no link file");
+        // The start rejects with the fault's sentence, which the page reads as the state.
+        let said = sentence(&SignInError::Fault(Fault::Certificate));
+        assert_eq!(said, Fault::Certificate.sentence());
+        assert_eq!(said, "The certificate of the server was not accepted.");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
