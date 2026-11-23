@@ -379,7 +379,7 @@ async fn tracer_a_signed_in_app_lists_makes_and_shows_a_session_and_what_is_type
         serde_json::to_value(&line).unwrap(),
         serde_json::json!({
             "pane": pane, "profile": "", "name": "127.0.0.1", "state": "connected", "attempt": 0, "of": 0, "secs": 0,
-            "remote": { "writer": "writing", "session": session, "cols": 80, "rows": 24, "more": false, "phase": "" }
+            "remote": { "writer": "writing", "session": session, "cols": 80, "rows": 24, "more": false, "phase": "", "not_sent": false }
         })
     );
     assert_eq!(desk.core.session_counts(), (0, 1), "one connection and no shell of this computer");

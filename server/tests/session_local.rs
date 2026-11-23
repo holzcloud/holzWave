@@ -505,7 +505,7 @@ fn tracer_a_window_pane_shows_a_session_of_its_own_worker_and_closing_it_only_de
         serde_json::to_value(&line).unwrap(),
         json!({
             "pane": pane, "profile": "", "name": THIS_SERVER, "state": "connected", "attempt": 0, "of": 0, "secs": 0,
-            "remote": { "writer": "writing", "session": session, "cols": 80, "rows": 24, "more": false, "phase": "" }
+            "remote": { "writer": "writing", "session": session, "cols": 80, "rows": 24, "more": false, "phase": "", "not_sent": false }
         })
     );
     let rows = w.core.server_sessions().expect("the list");
