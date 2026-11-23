@@ -30,7 +30,7 @@
 //! passphrase file after it moved the passphrase into the vault. Nothing secret, no command line typed into the session and no
 //! host answer is logged: a step says ok or one of the fixed reasons.
 //!
-//! The steps `tls-public`, `tls-untrusted`, `sync-save`, `sync-paused` and `sync-resume` run the two real network clients of the
+//! The steps `tls-public`, `tls-public-crl`, `tls-untrusted`, `sync-save`, `sync-paused` and `sync-resume` run the two real network clients of the
 //! core (the WebDAV client of the sync and the client of the AI chat) against a public site and against a server with a
 //! self-signed certificate that the emulator script starts on the Mac and forwards to the emulator's loopback address with `adb
 //! reverse`. They show
@@ -86,6 +86,11 @@ const AI_KEY: &str = "HW-SELFTEST-AI-KEY";
 /// A public site every network has, for the positive check of the verifier. The address is a constant of this debug module and
 /// not a setting. Nothing but a request without a body or a secret is sent to it.
 const PUBLIC_URL: &str = "https://example.com/";
+/// A public site whose leaf certificate is issued by Let's Encrypt: it carries a revocation-list address and no OCSP address, so
+/// the platform verifier accepts it only when the list can be fetched over the plain HTTP that the network security config allows
+/// for the hosts of such lists. The site of `PUBLIC_URL` has an OCSP address and passed while every list-only chain failed, so it
+/// proves nothing about this shape. The address is a constant of this debug module; only a request without a body or a secret is sent.
+const PUBLIC_CRL_ONLY_URL: &str = "https://letsencrypt.org/";
 /// The loopback address of the emulator, where `adb reverse` forwards the port of the TLS server with a self-signed certificate that
 /// the script runs on the Mac. (The emulator's own name for the Mac, 10.0.2.2, is a local-network address, which an app that
 /// targets Android 17 may not reach without the local-network permission; the loopback address needs none.)
@@ -421,6 +426,17 @@ impl Steps {
                 }
                 if !ai.is_answer() {
                     return Err(format!("the AI client got no answer from the public site: {}", ai.text()));
+                }
+                Ok(format!("sync client: {}; AI client: {}", sync.text(), ai.text()))
+            }
+            // A chain whose leaf names a revocation list and no OCSP responder is accepted too, once the list can be fetched.
+            "tls-public-crl" => {
+                let (sync, ai) = (sync_reach(PUBLIC_CRL_ONLY_URL), ai_reach(PUBLIC_CRL_ONLY_URL));
+                if !sync.is_answer() {
+                    return Err(format!("the sync client got no answer from the list-only public site: {}", sync.text()));
+                }
+                if !ai.is_answer() {
+                    return Err(format!("the AI client got no answer from the list-only public site: {}", ai.text()));
                 }
                 Ok(format!("sync client: {}; AI client: {}", sync.text(), ai.text()))
             }

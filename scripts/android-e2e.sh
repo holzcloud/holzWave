@@ -100,6 +100,8 @@
 #      server saw the connection attempts (its log), so the refusal is a verdict on the certificate and not a missing route;
 #   b. `tls-public`: both clients request https://example.com/ and both get an HTTP-level answer, so the verifier accepts what the
 #      system trusts (the check is skipped, and said to be, when the Mac cannot connect to that site: a skip is never reported as ok);
+#      `tls-public-crl`: both clients request https://letsencrypt.org/, whose leaf names a revocation list and no OCSP responder, and
+#      both get an HTTP-level answer (skipped, and said to be, when the Mac cannot connect to that site);
 #   c. a PIN is set (the script clears it again at every way out) and the first unlock makes a protected vault; the sync is saved
 #      through the real path, which is refused as a certificate error and keeps nothing, and the account a successful save would
 #      have left is put in place; the app is stopped;
@@ -2103,6 +2105,12 @@ if [ "$SECTION" = vault ] || [ "$SECTION" = tls ] || [ "$SECTION" = handover ] |
         expect_ok tls-public none "both clients get an HTTP answer from a public site: the system's trust store accepts it" || true
     else
         skipped "tls-public" "the Mac cannot open a connection to example.com port 443, and the emulator goes through the Mac's network"
+    fi
+    # A public chain whose leaf carries only a revocation-list address: it passes only when the list can be fetched.
+    if nc -z -w 5 letsencrypt.org 443 >/dev/null 2>&1; then
+        expect_ok tls-public-crl none "a public chain with only a revocation-list address is accepted by both clients" || true
+    else
+        skipped "tls-public-crl" "the Mac cannot open a connection to letsencrypt.org port 443, and the emulator goes through the Mac's network"
     fi
 
     # c. a PIN, the protected vault, the sync saved

@@ -573,8 +573,15 @@ chain is judged by the system trust store through the platform's own trust manag
   the debug build exactly the copy's hosts with it, and the base config must refuse cleartext. Two costs are known and are the
   verifier project's, not changed here: a very large list can hold up a sign-in (an issue upstream reports one of about 11 MB that
   blocked handshakes for tens of seconds), and there is an open upstream request for an option to skip the network lookup on Android.
-  Not run on a phone: the fix is pinned by text tests and by the APK check; the run on the emulator against a public chain that
-  names only a revocation list is the check of a later step.
+  Not run on a phone: the fix is pinned by text tests and by the APK check, and by the emulator run described below.
+- **The verifier's reason reaches logcat.** The verifier writes the system's own reason for a refused certificate through the Rust
+  `log` facade (for example that a certificate names no revocation responder), and the app used to install no backend for it, so the
+  reason was lost. `src/android/verifier_log.rs` is that backend: it prints the warnings and errors of the verifier's own target, and
+  nothing of any other target or below warn, as one plain line on standard error (which reaches logcat as `RustStdoutStderr`) that
+  starts with `holzwave: rustls_platform_verifier warn:` or `error:`, holds no control character and is cut at 512 characters. It is
+  installed once by `init_tls`, before the verifier is set up. The messages are the system's words about a certificate; no token,
+  password or key of the app passes through the verifier. The line builder is tested on the desktop; the backend itself is Android code
+  and was run on the emulator only (see below).
 - **Sync and the locked vault.** While the secret store is locked, the sync does not run at all: its state is `paused`, with no
   error text and no network connection, and the first unlock starts one run at once.
 - **What the emulator run proved.** `sh scripts/android-e2e.sh tls` runs a debug-only self-test on the arm64 emulator against a
@@ -586,6 +593,17 @@ chain is judged by the system trust store through the platform's own trust manag
   and the server's own log shows the failed handshakes; a save of a sync account against it keeps nothing; after a restart with a
   locked vault the sync is `paused` with no error text and the server sees no connection, and the unlock starts one run that
   reaches the handshake and refuses the certificate. The canary secret is in no log, file, environment or argument list.
+- **A public chain with only a revocation-list address, on the emulator.** The step `tls-public-crl` makes both clients request
+  `https://letsencrypt.org/`, whose leaf certificate names a revocation list and no OCSP responder. The earlier public site has an
+  OCSP address, so it passed even while every list-only chain failed; this one passes only when the list can be fetched over the
+  plain HTTP that the network security config allows for the authorities' list hosts. The script runs it when the Mac can connect to
+  that site and reports a skip, never an ok, when it cannot. Run on 2026-11-23 on the arm64 emulator, API 37 image
+  (`system-images;android-37.0;default;arm64-v8a`) and API 31 image (`system-images;android-31;default;arm64-v8a`), after
+  `sh scripts/android-build.sh debug`: both clients got an HTTP answer on both images (the sync client the server's own `405 Method
+  Not Allowed`, the chat client an answer), and the rest of the section passed as before. On both images the log also holds the
+  verifier's own reason for the self-signed server, as `holzwave: rustls_platform_verifier warn: certificate was not trusted: ...
+  Trust anchor for certification path not found.` followed by an `error` line, one plain line each. Emulator only: no phone, and no
+  other chain than the one named, was tried.
 - **Local-network addresses on Android 17 (declared).** The emulator's name for the development machine, `10.0.2.2`, is a local-network
   address, and so is any private address (10/8, 172.16/12, 192.168/16, 100.64/10, link-local, fc00::/7, `.local` names). An app that
   targets Android 17 (this one does) can not reach such an address until it holds the runtime permission `ACCESS_LOCAL_NETWORK`; without
