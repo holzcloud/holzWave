@@ -28,7 +28,7 @@ use zeroize::Zeroizing;
 
 use super::crypto::MAX_BLOB;
 use super::webdav::{Backend, CONFLICT, Cond, Entry, safe_segment, sha256_hex};
-use crate::server_link::{Fault, Origin, Token};
+use crate::server_link::{Fault, Origin, Token, transport_fault};
 use crate::{Error, Result};
 
 /// The most bytes of the answer to `ensure` and to a write: neither has a body worth reading.
@@ -144,7 +144,8 @@ impl ServerBackend {
         // A server on the local network needs the platform's permission on Android 17 (a connection without it times out):
         // asked here, when the request is made. No gate exists elsewhere: this returns at once.
         crate::reach::ensure_blocking(&self.host, self.port).map_err(err)?;
-        let mut resp = self.agent.run(req).map_err(|_| Fault::Unreachable)?;
+        // A refused certificate is its own fault; every other error of the client is a server that cannot be reached.
+        let mut resp = self.agent.run(req).map_err(|e| transport_fault(&e))?;
         let status = resp.status();
         let etag = resp.headers().get("ETag").and_then(|v| v.to_str().ok()).map(clean_etag);
         // The body of a refusal is never read: it is the server's words, and nothing here would use them.
@@ -157,7 +158,7 @@ impl ServerBackend {
             return Err(Fault::Protocol.into());
         }
         let mut bytes = Vec::new();
-        resp.body_mut().as_reader().take(limit + 1).read_to_end(&mut bytes).map_err(|_| Fault::Unreachable)?;
+        resp.body_mut().as_reader().take(limit + 1).read_to_end(&mut bytes).map_err(|e| transport_fault(&ureq::Error::from(e)))?;
         if bytes.len() as u64 > limit {
             return Err(Fault::Protocol.into());
         }
@@ -582,6 +583,38 @@ mod tests {
                 assert!(!text.contains(SERVER_WORDS), "{status}");
             }
         }
+    }
+
+    #[test]
+    fn a_refused_certificate_is_the_certificate_fault_and_a_closed_port_stays_unreachable() {
+        use crate::server_link::test_tls::{agent_trusting_nothing, untrusted_peer};
+        type Call = fn(&ServerBackend) -> Error;
+        let calls: [(&str, Call); 4] = [
+            ("ensure", |b| b.ensure("").unwrap_err()),
+            ("list", |b| b.list("files").unwrap_err()),
+            ("get", |b| b.get("meta.json").unwrap_err()),
+            ("put", |b| b.put("files/a.hwx", b"x", &Cond::Any).unwrap_err()),
+        ];
+        for (what, call) in calls {
+            // A TLS peer whose certificate the client's trust store does not hold: the handshake is refused, so no request is sent.
+            let (port, peer) = untrusted_peer();
+            let backend = ServerBackend {
+                agent: agent_trusting_nothing(Duration::from_secs(20)),
+                base: format!("https://127.0.0.1:{port}"),
+                host: "127.0.0.1".to_owned(),
+                port,
+                bearer: token().bearer(),
+            };
+            let text = text_of(call(&backend));
+            assert_eq!(text, Fault::Certificate.sentence(), "{what}");
+            assert_eq!(text, "The certificate of the server was not accepted.", "{what}");
+            assert!(!text.contains(SERVER_WORDS) && !text.contains(TOKEN), "{what}");
+            assert_eq!(peer.join().expect("the peer ended"), Err(()), "{what}: the handshake did not complete, so no request was sent");
+        }
+        // Nothing listening is a server that cannot be reached.
+        let closed = TcpListener::bind("127.0.0.1:0").expect("bind").local_addr().expect("address").port();
+        let backend = ServerBackend::new(&format!("http://127.0.0.1:{closed}"), &token()).expect("a loopback address is accepted");
+        assert_eq!(text_of(backend.ensure("").unwrap_err()), Fault::Unreachable.sentence());
     }
 
     #[test]
