@@ -458,6 +458,135 @@ fn the_plist_declares_the_use_of_the_local_network() {
     assert!(Path::new(env!("CARGO_MANIFEST_DIR")).join("Info.plist").is_file(), "Info.plist sits next to tauri.conf.json");
 }
 
+// ---- the macOS signature -------------------------------------------------------------------------------------------
+//
+// macOS files the Local Network permission, and other privacy answers, under the signing identifier. The signature that
+// the linker makes by itself carries a new identifier on every build, so each build was a new app that had lost its
+// answers. These tests pin what keeps the identifier fixed: the configuration, the sign script and the release order.
+
+const SIGN_MACOS: &str = include_str!("../../../scripts/sign-macos.sh");
+const BUNDLE_CHECK_MACOS: &str = include_str!("../../../scripts/bundle-check-macos.sh");
+const RELEASE_MACOS: &str = include_str!("../../../scripts/release-macos.sh");
+const WSH_CONF: &str = include_str!("../tauri.wsh.conf.json");
+
+/// The identifier of the app, read from the configuration so the scripts cannot drift away from it unseen.
+fn app_identifier() -> String {
+    conf()["identifier"].as_str().expect("identifier is a string").to_owned()
+}
+
+#[test]
+fn the_macos_app_is_signed_ad_hoc_under_its_identifier_without_the_hardened_runtime() {
+    // `-` makes the bundler sign ad hoc, inside out, and take the identifier from the bundle; without it the linker's
+    // signature stays and the identifier changes with every build. The hardened runtime is off because it has not been
+    // tried with WebKit, the Swift bridges and the programs in the panes; turning it on is a decision, so it is pinned.
+    let conf = conf();
+    let mac = &conf["bundle"]["macOS"];
+    assert_eq!(mac["signingIdentity"], "-", "bundle.macOS.signingIdentity is the ad hoc identity");
+    assert_eq!(mac["hardenedRuntime"], false, "bundle.macOS.hardenedRuntime stays off until it has been tried");
+    assert!(mac.get("entitlements").is_none(), "no entitlements are configured");
+    assert_eq!(mac["minimumSystemVersion"], "13.0");
+    // The overlay of the release builds adds the sidecar and the resources only, so a release signs like a plain build.
+    let wsh: Value = serde_json::from_str(WSH_CONF).expect("tauri.wsh.conf.json is JSON");
+    assert!(wsh["bundle"].get("macOS").is_none(), "the overlay must not change how the macOS app is signed");
+}
+
+#[test]
+fn the_sign_script_names_wsh_and_then_the_app_and_signs_without_deep() {
+    let id = app_identifier();
+    assert!(SIGN_MACOS.starts_with("#!/bin/sh\n"), "sign-macos.sh is not a /bin/sh script");
+    let lines = code_lines(SIGN_MACOS);
+    // Inside out: the sidecar first, then the bundle that seals it.
+    let wsh_flag = format!("--identifier {id}.wsh");
+    let app_flag = format!("--identifier {id} ");
+    let wsh_at = lines.iter().position(|l| l.contains("codesign") && l.contains(&wsh_flag)).expect("wsh is signed under its identifier");
+    let app_at = lines
+        .iter()
+        .position(|l| l.contains("codesign") && l.contains(&app_flag) && l.contains("\"$app\""))
+        .expect("the app is signed under its identifier");
+    assert!(wsh_at < app_at, "the app is signed before wsh: the seal would not cover the new signature");
+    // `--deep` signs nested code with the options of the outer code; here it may only verify.
+    for line in &lines {
+        if line.contains("--deep") {
+            assert!(line.contains("--verify"), "--deep outside a verify line: {line}");
+        }
+    }
+    assert!(lines.iter().any(|l| l.contains("codesign --verify --strict --deep")), "the whole app is verified at the end");
+    for line in lines.iter().filter(|l| l.contains("codesign --force")) {
+        assert!(line.contains("--sign - "), "a signature that is not ad hoc: {line}");
+    }
+    for line in &lines {
+        for forbidden in ["--options", "--entitlements", "--timestamp"] {
+            assert!(!line.contains(forbidden), "{forbidden} in sign-macos.sh: {line}");
+        }
+    }
+    for line in commands(SIGN_MACOS) {
+        for forbidden in ["gh ", "git ", "curl", "wget", "sudo ", "eval ", "set -x"] {
+            assert!(!line.contains(forbidden), "sign-macos.sh runs `{forbidden}`: {line}");
+        }
+    }
+}
+
+#[test]
+fn the_sign_script_refuses_bad_arguments_before_it_touches_anything() {
+    // Every refusal is exit 2 and happens before codesign is asked, so it runs the same on any machine.
+    let missing = "/nonexistent/holzWave.app";
+    for args in [&[][..], &["one", "two"], &[missing]] {
+        let (code, err) = run_script("scripts/sign-macos.sh", args);
+        assert_eq!(code, 2, "arguments {args:?} were not refused with 2: {err}");
+        assert!(err.starts_with("sign-macos: "), "the refusal does not carry the script's name: {err}");
+    }
+    let (_, err) = run_script("scripts/sign-macos.sh", &[]);
+    assert!(err.contains("usage: sh scripts/sign-macos.sh"), "no usage line: {err}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_sign_script_refuses_to_sign_another_app_under_the_identifier() {
+    // The script signs whatever bundle it is given under the project's identifier, so it must stop at a bundle that
+    // names another app, before anything is signed (plutil reads the plist, so this runs on macOS only).
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("the clock is after 1970").as_nanos();
+    let dir = std::env::temp_dir().join(format!("holzwave-sign-test-{}-{nanos}", std::process::id()));
+    let app = dir.join("Other.app");
+    std::fs::create_dir_all(app.join("Contents/MacOS")).expect("the scratch bundle is created");
+    std::fs::write(
+        app.join("Contents/Info.plist"),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>com.example.other</string></dict></plist>\n",
+    )
+    .expect("the scratch plist is written");
+    let (code, err) = run_script("scripts/sign-macos.sh", &[app.to_str().expect("the path is UTF-8")]);
+    let signed = app.join("Contents/_CodeSignature").exists();
+    std::fs::remove_dir_all(&dir).expect("the scratch bundle is removed");
+    assert_eq!(code, 1, "another app was not refused with 1: {err}");
+    assert!(err.contains("com.example.other"), "the refusal does not name the identifier it found: {err}");
+    assert!(!signed, "something was signed before the refusal");
+}
+
+#[test]
+fn the_release_script_signs_after_the_build_and_checks_before_it_packs() {
+    // The bundler names the sidecar after its file; the sign script gives it the fixed identifier, and the check then
+    // proves it, so the order is build, sign, check, pack.
+    let lines = code_lines(RELEASE_MACOS);
+    let first = |needle: &str| lines.iter().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("no line runs {needle}"));
+    let (build, sign, check, pack) = (first("tauri -- build"), first("sign-macos.sh"), first("bundle-check-macos.sh"), first("hdiutil create"));
+    assert!(build < sign && sign < check && check < pack, "release order is build {build}, sign {sign}, check {check}, pack {pack}");
+    assert_eq!(lines.iter().filter(|l| l.contains("sign-macos.sh")).count(), 1, "the sign script runs once");
+}
+
+#[test]
+fn the_bundle_check_demands_both_identifiers_and_compares_the_code_without_signatures() {
+    // The signature of the bundled sidecar is replaced after the build, so the comparison with the built file is made
+    // with both signatures removed; the identifiers and the signature are checked on their own.
+    let id = app_identifier();
+    let lines = code_lines(BUNDLE_CHECK_MACOS);
+    assert!(lines.iter().any(|l| l.contains(&format!("{id}.wsh"))), "wsh's identifier is not checked");
+    assert!(lines.iter().any(|l| l.contains("codesign --verify --strict --deep")), "the whole app is not verified");
+    assert!(lines.iter().any(|l| l.contains("Identifier=")), "the signing identifier is not read");
+    assert!(lines.iter().any(|l| l.contains("--remove-signature")), "the sidecars are not compared without signatures");
+    assert!(lines.iter().any(|l| l.contains("CFBundleIdentifier")), "the bundle identifier is not compared");
+}
+
 // ---- the aarch64 Linux packages (the second wave, built in the native arm64 container) -------------------------
 
 const LINUX_ARM64: &str = include_str!("../../../scripts/release-linux-arm64.sh");
