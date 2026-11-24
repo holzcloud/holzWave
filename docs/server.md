@@ -421,8 +421,11 @@ answered with the last number it applied; a frame that comes after a missing one
 with `"gap":true` until the missing frame comes. A frame of another epoch, or from a pane that only watches, is dropped without an answer,
 so input written before a takeover never reaches the program after it. The frame the app sent before the numbers existed (tag 0x10) is a
 frame of an unknown kind and is dropped without an answer; a browser pane in the worker's own window does not number its input. The server
-keeps no input for this: a frame that is not applied is dropped, not stored. The app numbers its frames and goes on from the number the
-server names after a gap; it does not yet keep what it sent, so bytes a network swallowed are not sent again. It is bounded: 4 KiB for a request, 64 KiB of bytes in a frame, 32 requests waiting
+keeps no input for this: a frame that is not applied is dropped, not stored. The app numbers its frames and keeps each one in memory until the server acknowledges it, and every key typed while the pane attaches again or
+reconnects: at most 64 KiB of typed bytes and nothing older than 30 seconds per pane, wiped when it is dropped and never written to a file or a
+log. A frame the server reports as a gap is sent again, once for each report. When the connection is made again and the answer to the new
+`attach` says that the pane writes with the same `epoch`, the app drops the frames below the `next` of the answer and sends the others in order; in
+any other case (another epoch, a pane that only watches, a right that ran out) it drops them and the pane says `Not sent`. It is bounded: 4 KiB for a request, 64 KiB of bytes in a frame, 32 requests waiting
 for an answer and 16 sessions attached at once, with the rate, silence and violation limits of the `limits` section that the
 page's socket has. A person reaches only their own sessions: another person's session answers `not_found` exactly as one that
 never existed. The close codes: 4401 the token was revoked or ran out or the account ended (at once when it is announced, and
@@ -436,9 +439,11 @@ when the network keeps it open: a network that goes silent is noticed within abo
 wait for, so the older rule stays as the backstop: an app that hears nothing at all on its socket for 60 seconds (no message, no ping and no pong:
 twice the ping time and the 10 seconds of its beat) treats it as broken too. The app then does what it does after a lost connection: the pane says
 `Reconnecting…`, then `Server unreachable. Press Enter to try again.` when the tries are used, once for the failure however often Enter is pressed
-on a server that still does not answer. What a pane cannot send (while it attaches, reconnects, has no try left, watches or nobody writes) is not
-sent and not kept, and its header says `Not sent` from the first such key until the pane sends typed bytes again. Keys typed in the seconds before
-the app notices that the network went silent were handed to a connection that looked alive; they are lost without that cue. On its side the server
+on a server that still does not answer. A pane that writes keeps what it types while it
+attaches again or reconnects, and what the server did not acknowledge before the connection broke, and sends it once when the same writer is
+back (see above for the bounds). A pane that watches, a pane nobody writes in, a first attach and a pane with no try left keep nothing, and a
+kept key that cannot be sent in the end (the right moved, the 30 seconds or the 64 KiB passed) is dropped: the header says `Not sent` from the
+first such key until the pane sends typed bytes again. On its side the server
 closes a socket that was silent for `limits.ws_silence` with the close code 1001. When the app is back within the 30 seconds, the pane
 writes again without `Take over`: the app presents the token of its last attach and keeps it only in memory. After a longer loss the right
 is free, the pane says `FREE` and `Take over` takes it back. A reverse proxy that answers the upgrade with 502, 503 or 504 (the

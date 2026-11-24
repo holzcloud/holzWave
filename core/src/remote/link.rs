@@ -8,11 +8,13 @@
 //!   their order with the bytes is the order they happened in. The grid of the session is applied before the first byte of a
 //!   snapshot ([`PaneSink::grid`]); a size that changes while the session runs is applied after the live bytes before it
 //!   ([`PaneSink::grid_in_order`]), which the session wrote at the old size.
-//! * **The writer rule.** Only the writer's typed bytes are sent. What a pane cannot send (it attaches, reconnects, has no try
-//!   left, watches, or nobody is told it writes) is dropped here, counted ([`RemoteView::dropped_input`]) and never kept; the hub
-//!   drops what reaches it again and the server a third time. A drop sets [`RemoteView::not_sent`], which stays until this pane
-//!   sends typed bytes again, so the header can say `Not sent` through a reconnect. It is a boolean: no byte of what was typed is
-//!   held, logged or shown, and it never puts a line on the screen.
+//! * **The writer rule.** Only the writer's typed bytes are sent. While the pane attaches or reconnects, what it types goes to the
+//!   hub, which keeps it (a pane that wrote, at most 64 KiB and 30 seconds, in memory, wiped when dropped) and sends it once when
+//!   the same writer is back, or refuses it with [`SubEvent::NotSent`] when it cannot be sent (a first attach, a pane that watches,
+//!   the bounds, the right gone). What a pane cannot send at all (it watches, nobody is told it writes, no try is left, it never
+//!   attached so far, it was signed out) is dropped here, at once. Either way the bytes are counted ([`RemoteView::dropped_input`]) and the drop sets
+//!   [`RemoteView::not_sent`], which stays until this pane sends typed bytes again, so the header can say `Not sent` through a
+//!   reconnect. It is a boolean: no byte of what was typed is held here, logged or shown, and it never puts a line on the screen.
 //! * **The grid rule.** The writer's size is the session's size: a resize of the writer's tile is sent, a watcher's is only
 //!   recorded, and when a pane starts to write it sends its recorded tile size once if that is not the session's size. The
 //!   pane's engine follows the size the server states.
@@ -107,6 +109,9 @@ struct Shared {
     renew: Renew,
     /// The sign-in ended: the pane waits for Enter and then takes a new subscription (the token comes from the endpoint again).
     signed_out: AtomicBool,
+    /// An attach was accepted at least once: only then is there an earlier right to come back to, and only then does the hub
+    /// keep what is typed while the pane attaches again. Before it, typed bytes are dropped here at once.
+    attached_once: AtomicBool,
     /// Enter was pressed in the signed-out state.
     again: AtomicBool,
     state: SharedState,
@@ -134,6 +139,12 @@ impl Shared {
         drop(inner);
         view.dropped_input = self.dropped.load(Ordering::Relaxed);
         view
+    }
+
+    /// Typed bytes that were not sent and are not kept: counted, and the view says so until this pane sends a key again.
+    fn not_sent(&self, bytes: usize) {
+        self.dropped.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.lock().view.not_sent = true;
     }
 
     /// The older lines that were asked for do not come as asked: the request could not be sent, or the connection went before
@@ -219,6 +230,7 @@ impl ServerLink {
             handle: Mutex::new(sub.handle()),
             renew,
             signed_out: AtomicBool::new(false),
+            attached_once: AtomicBool::new(false),
             again: AtomicBool::new(false),
             state,
             inner: Mutex::new(Inner {
@@ -318,6 +330,7 @@ impl ServerReader {
                 }
                 self.reconnect_noticed = false;
                 self.unreachable_noticed = false;
+                self.shared.attached_once.store(true, Ordering::SeqCst);
                 self.shared.state.set(ConnState::Connected);
                 self.snapshot_left = snapshot;
                 self.restore = std::mem::take(&mut self.restore_after_attach);
@@ -387,6 +400,9 @@ impl ServerReader {
             // Only the header says it: a line on the screen would move the session's own text, which the server's screen does
             // not have.
             SubEvent::InputDropped => self.shared.lock().dropped_until = Some(Instant::now() + INPUT_DROPPED_FOR),
+            // The hub kept what was typed and could not send it in the end, or could not keep it: the header says so, the screen
+            // does not.
+            SubEvent::NotSent { bytes } => self.shared.not_sent(bytes),
             SubEvent::Lost(HubError::Closed) => self.ending = Some(Ending::Closed),
             SubEvent::Lost(error @ HubError::Fault(Fault::SignedOut)) => {
                 // The server does not take the token any more. The pane stays and says so; after a new sign-in Enter attaches
@@ -453,8 +469,7 @@ struct ServerWriter {
 impl ServerWriter {
     /// Bytes this pane could not send: counted, forgotten, and the view says so until a write is sent.
     fn dropped(&self, bytes: usize) {
-        self.shared.dropped.fetch_add(bytes as u64, Ordering::Relaxed);
-        self.shared.lock().view.not_sent = true;
+        self.shared.not_sent(bytes);
     }
 }
 
@@ -486,8 +501,19 @@ impl Write for ServerWriter {
                     self.dropped(others);
                 }
             }
-            // Attaching, reconnecting, no try left, closed: nothing typed is sent and none of it is kept (the session may have
-            // another writer when the connection is back), but it is counted and the view says so.
+            // Attaching again or reconnecting: the hub decides. It keeps what a pane that wrote typed meanwhile and sends it when the
+            // same writer is back; it refuses the rest and says so ([`SubEvent::NotSent`]), which sets the view.
+            ConnState::Connecting | ConnState::Reconnecting { .. } => {
+                // A pane that never attached has no right to come back to, and the hub's thread may be busy making the first
+                // connection for as long as the upgrade takes: it says so at once, without waiting for the hub.
+                if self.shared.signed_out.load(Ordering::SeqCst)
+                    || !self.shared.attached_once.load(Ordering::SeqCst)
+                    || self.shared.handle().input(buf).is_err()
+                {
+                    self.dropped(buf.len());
+                }
+            }
+            // No try left, closed: nothing typed is sent and none of it is kept, but it is counted and the view says so.
             _ => self.dropped(buf.len()),
         }
         Ok(buf.len())

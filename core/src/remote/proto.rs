@@ -983,6 +983,13 @@ impl fmt::Debug for Input<'_> {
 /// The frame of input for a session, written under `epoch` as number `seq` (both from 1). No bytes, or more than [`MAX_INPUT`],
 /// is refused, and so is an epoch or a number of 0.
 pub fn encode_input(session: u32, epoch: u32, seq: u32, bytes: &[u8]) -> Result<Vec<u8>, ParseError> {
+    // The frame is built once, in the buffer that is handed out: nothing is copied, so the wipe of the other form is not skipped.
+    encode_input_zeroizing(session, epoch, seq, bytes).map(|mut frame| std::mem::take(&mut *frame))
+}
+
+/// The same frame in a buffer that is set to zero when it is dropped: what a client that sends what a person typed uses, since
+/// typed bytes can be passwords.
+pub fn encode_input_zeroizing(session: u32, epoch: u32, seq: u32, bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>, ParseError> {
     if bytes.is_empty() {
         return Err(ParseError::BadLength);
     }
@@ -992,7 +999,8 @@ pub fn encode_input(session: u32, epoch: u32, seq: u32, bytes: &[u8]) -> Result<
     if epoch == 0 || seq == 0 {
         return Err(ParseError::WrongType);
     }
-    let mut out = Vec::with_capacity(INPUT_HEAD + bytes.len());
+    // The whole frame is reserved at once, so that no growth leaves an unwiped copy behind.
+    let mut out = Zeroizing::new(Vec::with_capacity(INPUT_HEAD + bytes.len()));
     out.push(TAG_INPUT);
     out.extend_from_slice(&session.to_be_bytes());
     out.extend_from_slice(&epoch.to_be_bytes());

@@ -492,14 +492,20 @@ fn input_is_sent_while_this_client_writes_and_dropped_before_it_is_sent_when_it_
     handle.input(b"rm -rf\r").unwrap();
     assert!(conn.drain(Duration::from_millis(300)).is_empty(), "nothing was sent");
     assert_eq!(hub.stats().dropped_input_bytes, 7);
-    // Input over the frame limit is split into frames of at most the limit.
+    let told = events_until(&sub, |e| !e.is_empty());
+    assert_eq!(told, vec![SubEvent::NotSent { bytes: 7 }], "a key that is dropped is never dropped unseen");
+    // The hub keeps what it sent until the server acknowledges it, and never more than 64 KiB: one write of more than that is
+    // sent as far as the buffer takes it and the rest is refused, with the pane told how much was not sent.
     conn.event(Event::Writer { session: 3, state: WriterView::Writing, epoch: 1 });
     events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::Writer(WriterView::Writing))));
-    let big = vec![b'a'; proto::MAX_INPUT * 2 + 5];
+    let big = vec![b'a'; proto::MAX_INPUT + 5];
     handle.input(&big).unwrap();
     let got = conn.drain(Duration::from_millis(500));
     let sizes: Vec<usize> = got.iter().map(|g| if let Got::Input { bytes, .. } = g { bytes.len() } else { 0 }).collect();
-    assert_eq!(sizes, vec![proto::MAX_INPUT, proto::MAX_INPUT, 5]);
+    assert_eq!(sizes, vec![proto::MAX_INPUT]);
+    let told = events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::NotSent { .. })));
+    assert!(told.contains(&SubEvent::NotSent { bytes: 5 }), "{told:?}");
+    assert_eq!(hub.stats().dropped_input_bytes, 7 + 5);
 }
 
 #[test]

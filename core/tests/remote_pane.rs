@@ -330,7 +330,7 @@ fn when_the_tries_are_used_the_pane_fails_waits_for_enter_counts_what_is_typed_a
 }
 
 #[test]
-fn a_network_that_goes_silent_shows_reconnecting_within_the_bound_then_unreachable_and_what_is_typed_after_it_is_never_sent() {
+fn a_network_that_goes_silent_shows_reconnecting_within_the_bound_then_unreachable_and_what_was_kept_for_it_says_not_sent_when_no_try_is_left() {
     let device = FakeDevice::start();
     let silence = Duration::from_millis(300);
     let hub = hub_with(&device, |o| {
@@ -351,16 +351,22 @@ fn a_network_that_goes_silent_shows_reconnecting_within_the_bound_then_unreachab
     // The header's label follows the state of the connection: while it is made again the pane no longer says it writes.
     assert!(matches!(pane.conn_state(), ConnState::Reconnecting { attempt: 1, of: 3, .. }), "{:?}", pane.conn_state());
     wait_text(&pane, NOTICE_RECONNECTING);
-    // Typed after the bound: not sent, not kept, and the view says so.
+    // Typed after the bound, while the pane reconnects: this pane wrote, so the hub keeps it for the connection that may come back.
+    // That is not a lost key yet: the view says nothing. (The hub's thread is making a try that blocks on the upgrade, so it
+    // handles the key as soon as the tries below fail; the test cannot watch it being kept.)
     assert!(!not_sent(&pane));
     pane.text("late".into()).unwrap();
-    wait_for("the state", || not_sent(&pane));
-    assert_eq!(dropped(&pane), 4);
+    assert!(!not_sent(&pane), "a kept key is not a lost key");
+    assert_eq!(dropped(&pane), 0);
 
-    // The server is there and does not speak: every try fails, and the pane waits for Enter.
+    // The server is there and does not speak: every try fails, and the pane waits for Enter. No try is left for what was kept: it
+    // is dropped and the view says so.
     device.drop_connections_for(Duration::from_millis(500));
     wait_state(&pane, |s| *s == ConnState::Failed);
     wait_text(&pane, NOTICE_UNREACHABLE);
+    wait_for("the state", || not_sent(&pane));
+    assert_eq!(dropped(&pane), 4, "\"late\" was counted when it was given up");
+    wait_for("nothing kept", || hub.stats().kept_input_bytes == 0);
     let text = screen(&pane);
     assert_eq!(count(&text, NOTICE_RECONNECTING), 1, "one Reconnecting line for the whole loss: {text:?}");
     assert_eq!(count(&text, NOTICE_UNREACHABLE), 1, "{text:?}");
@@ -376,7 +382,7 @@ fn a_network_that_goes_silent_shows_reconnecting_within_the_bound_then_unreachab
     session.serve(&mut conn, &request, WriterView::Writing, 100);
     wait_text(&pane, "back$");
     wait_state(&pane, |s| *s == ConnState::Connected);
-    assert!(!screen(&pane).contains("late"), "typed bytes are not kept while the connection is down");
+    assert!(!screen(&pane).contains("late"), "what was given up is not sent when the connection is back");
     assert_eq!(dropped(&pane), 9, "\"late\" and \"later\"");
     assert!(not_sent(&pane), "attached again, the state stays until this pane sends a key");
     assert!(probe.exits().is_empty(), "the pane stayed open all the time");
@@ -819,6 +825,7 @@ fn keys_typed_while_the_first_attach_is_on_its_way_are_not_sent_and_say_not_sent
     wait_for("the state", || not_sent(&pane));
     assert_eq!(dropped(&pane), 5);
     assert_eq!(pane.remote_view().unwrap().state, RemoteState::Attaching, "the phase is still the attach");
+    assert_eq!(hub.stats().kept_input_bytes, 0, "a first attach has no right to come back to: nothing is kept");
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(screen(&pane), before, "a drop puts nothing on the screen");
 
@@ -849,6 +856,84 @@ fn keys_typed_while_the_first_attach_is_on_its_way_are_not_sent_and_say_not_sent
     assert_eq!(conn.drain(Duration::from_millis(500)), vec![Got::Input { session: 5, bytes: b"pwd\r".to_vec() }]);
     assert!(!not_sent(&quiet));
     assert_eq!(dropped(&quiet), 0);
+}
+
+#[test]
+fn keys_typed_while_reconnecting_after_writing_are_kept_and_sent_once_after_a_resumed_attach_that_says_writing_with_the_same_epoch() {
+    let device = FakeDevice::start();
+    let hub = hub_with(&device, fast());
+    let mut session = Session::new(80, 24);
+    session.print("writer$ ");
+    let (pane, probe) = start_pane(&hub, 4, (80, 24), None);
+    let mut conn = device.accept();
+    let request = conn.request();
+    assert_eq!(session.serve_by_token(&mut conn, &request, 100), WriterView::Writing);
+    wait_text(&pane, "writer$");
+    wait_for("writing", || pane.remote_view().is_some_and(|v| v.writer == WriterView::Writing && v.state == RemoteState::None));
+    pane.text("a".into()).unwrap();
+    assert_eq!(conn.drain(Duration::from_millis(300)), vec![Got::Input { session: 4, bytes: b"a".to_vec() }]);
+
+    // The connection is cut. What is typed while the pane says Reconnecting is kept and not counted as lost.
+    conn.cut();
+    wait_state(&pane, |s| matches!(s, ConnState::Reconnecting { .. }));
+    pane.text("b".into()).unwrap();
+    pane.text("c\r".into()).unwrap();
+    // The hub's thread is making its next try, which blocks on the upgrade: the test accepts it, and the hub handles the keys
+    // while the attach waits for its answer.
+    let mut conn = device.accept();
+    let request = conn.request();
+    wait_for("the hub to keep both", || hub.stats().kept_input_bytes == 3);
+    assert!(!not_sent(&pane));
+    assert_eq!(dropped(&pane), 0);
+
+    // The same writer is back, under the same epoch: both keys are sent, in order, and once. The first frame was applied before the
+    // cut (the fake acknowledged it), so the replay starts at the second number.
+    assert_eq!(request.op, Op::Attach { session: 4, tail: None, resume: Some(device.issued()[0].clone()) });
+    assert_eq!(session.serve_by_token(&mut conn, &request, 100), WriterView::Writing);
+    let got = conn.drain(Duration::from_millis(400));
+    let sent: Vec<&Got> = got.iter().filter(|g| matches!(g, Got::Input { .. })).collect();
+    assert_eq!(
+        sent,
+        vec![&Got::Input { session: 4, bytes: b"b".to_vec() }, &Got::Input { session: 4, bytes: b"c\r".to_vec() }],
+        "{got:?}"
+    );
+    assert_eq!(device.frames(), vec![(4, 1, 1), (4, 1, 2), (4, 1, 3)], "each number reached the server once");
+    wait_for("the acks", || hub.stats().kept_input_bytes == 0);
+    assert!(!not_sent(&pane), "nothing was lost");
+    assert_eq!(dropped(&pane), 0);
+    assert_eq!(hub.stats().input_resent, 2);
+    assert!(probe.exits().is_empty());
+}
+
+#[test]
+fn keys_kept_for_a_reconnect_are_not_sent_when_the_right_is_gone_when_the_connection_is_back_and_the_pane_says_not_sent() {
+    let device = FakeDevice::start();
+    let hub = hub_with(&device, fast());
+    let mut session = Session::new(80, 24);
+    session.print("writer$ ");
+    let (pane, _probe) = start_pane(&hub, 4, (80, 24), None);
+    let mut conn = device.accept();
+    let request = conn.request();
+    assert_eq!(session.serve_by_token(&mut conn, &request, 100), WriterView::Writing);
+    wait_text(&pane, "writer$");
+    wait_for("writing", || pane.remote_view().is_some_and(|v| v.writer == WriterView::Writing && v.state == RemoteState::None));
+
+    conn.cut();
+    wait_state(&pane, |s| matches!(s, ConnState::Reconnecting { .. }));
+    pane.text("secret\r".into()).unwrap();
+    // Another device wrote while the connection was away: the answer says Free, so what was kept must not be typed into a session
+    // somebody else may be using. It is dropped, never sent, and the header says so.
+    device.set_writing(false);
+    let mut conn = device.accept();
+    let request = conn.request();
+    wait_for("the hub to keep it", || hub.stats().kept_input_bytes == 7);
+    assert!(!not_sent(&pane));
+    assert_eq!(session.serve_by_token(&mut conn, &request, 100), WriterView::Free);
+    wait_for("the state", || not_sent(&pane));
+    assert_eq!(dropped(&pane), 7);
+    assert_eq!(hub.stats().kept_input_bytes, 0);
+    assert!(!conn.drain(Duration::from_millis(300)).iter().any(|g| matches!(g, Got::Input { .. })), "nothing was sent");
+    assert!(!screen(&pane).contains("secret") && !screen(&pane).contains("Not sent"), "the header says it, the screen does not");
 }
 
 #[test]

@@ -40,9 +40,21 @@
 //! ([`proto::SILENCE_SECONDS`]) is dropped too. Either way no close frame is written into the link (a write into a dead link may
 //! wait), the subscriptions go to `Reconnecting` and the tries, a call that waits fails as unreachable, and an idle hub is down
 //! and connects again on the next request. What was typed between the moment the link went silent and the moment the hub
-//! noticed is lost.
+//! noticed was handed to a connection that looked alive; it is kept like everything else that is not acknowledged (below).
+//!
+//! **Typed input.** What a person types is numbered and kept: every input frame of a subscription that writes stays in one
+//! buffer of that subscription until the server acknowledges it ([`Event::Ack`]), and so does every key typed while the
+//! subscription attaches again or the connection is made again. The buffer holds at most [`KEEP_BYTES`] of typed bytes, none
+//! older than [`HubOptions::input_keep_age`] ([`KEEP_AGE`], 30 seconds), only in memory, and every copy the hub makes of typed bytes
+//! (the bytes it is handed, each kept frame, each encoded frame) is set to zero when it ends, because typed bytes can be
+//! passwords. When the answer to an attach says that the subscription writes under the same epoch, the frames below the answer's
+//! `next` are dropped (the server applied them) and the rest is sent again in order; the server applies a number once. In
+//! every other case (another epoch, watching, free, the bounds, no try left, the subscription ending) the buffer is dropped and
+//! the subscription is told [`SubEvent::NotSent`], so no key is lost unseen. A first attach has no earlier right to come back
+//! to: what is typed meanwhile is not kept. An acknowledgement that reports a gap makes the hub send the frames after it again,
+//! once for each such report.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -57,6 +69,7 @@ use super::proto::{
 use super::ws::{Recv, WsClient, WsError, WsLimits};
 use crate::server_link::{Fault, Origin, Token};
 use crate::ssh::Reconnect;
+use zeroize::{Zeroize, Zeroizing};
 
 /// How long a call waits for the answer of the server before it gives up.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -66,6 +79,13 @@ pub const MAX_SNAPSHOT: u32 = 16 * 1024 * 1024;
 
 /// The bytes one subscription may hold between the hub and its reader: a whole snapshot and some live output.
 pub const SUB_QUEUE_BYTES: usize = 24 * 1024 * 1024;
+
+/// The most bytes of typed input one subscription keeps until the server confirms them or the connection is back.
+pub const KEEP_BYTES: usize = 64 * 1024;
+
+/// How old a kept frame may be: after this the pane that typed it is told that it was not sent. It is also how long the server
+/// keeps the right of a writer whose connection was lost, so a frame older than this could not be sent under it anyway.
+pub const KEEP_AGE: Duration = Duration::from_secs(30);
 
 /// What an event that carries no bytes counts as in the queue of a subscription.
 const EVENT_COST: usize = 64;
@@ -133,6 +153,8 @@ pub struct HubOptions {
     pub idle_close: Duration,
     /// How long the connection may hear nothing at all (no message, no ping, no pong) before it is treated as broken.
     pub silence: Duration,
+    /// How old a kept input frame may be before it is dropped and the pane says that it was not sent. Never above [`KEEP_AGE`].
+    pub input_keep_age: Duration,
 }
 
 impl Default for HubOptions {
@@ -150,6 +172,7 @@ impl Default for HubOptions {
             idle_poll: Duration::from_millis(25),
             idle_close: Duration::from_secs(60),
             silence: Duration::from_secs(proto::SILENCE_SECONDS),
+            input_keep_age: KEEP_AGE,
         }
     }
 }
@@ -171,6 +194,7 @@ impl HubOptions {
             idle_poll: self.idle_poll.clamp(Duration::from_millis(1), Duration::from_secs(1)),
             idle_close: self.idle_close.clamp(Duration::from_millis(100), Duration::from_secs(3600)),
             silence: self.silence.clamp(Duration::from_millis(50), Duration::from_secs(3600)),
+            input_keep_age: self.input_keep_age.clamp(Duration::from_millis(10), KEEP_AGE),
         }
     }
 }
@@ -284,6 +308,9 @@ pub enum SubEvent {
     GaveUp,
     /// Input this client sent was dropped because the program does not read its input; said at most about once a second.
     InputDropped,
+    /// `bytes` of typed input were not sent and are not kept: the pane watches or nobody writes, the bounds were passed, the
+    /// right to write was not there when the connection came back, or no try is left. Never says what the bytes were.
+    NotSent { bytes: usize },
     /// The subscription is over and will not be attached again.
     Lost(HubError),
 }
@@ -311,6 +338,10 @@ pub struct HubStats {
     /// Binary frames of input that were sent, and bytes of input that were dropped before they were sent.
     pub input_frames: u64,
     pub dropped_input_bytes: u64,
+    /// Input frames that were sent again: after a resumed attach, or because the server reported a gap.
+    pub input_resent: u64,
+    /// Bytes of typed input the hub holds now, in every subscription, until the server confirms them (a gauge, not a count).
+    pub kept_input_bytes: u64,
     /// Streams that were ended because the server broke a rule.
     pub protocol_faults: u64,
     /// Beats sent.
@@ -329,6 +360,8 @@ struct Cells {
     dropped_chunks: AtomicU64,
     input_frames: AtomicU64,
     dropped_input_bytes: AtomicU64,
+    input_resent: AtomicU64,
+    kept_input_bytes: AtomicU64,
     protocol_faults: AtomicU64,
     beats: AtomicU64,
     queue_high_water: AtomicU64,
@@ -345,6 +378,8 @@ impl Cells {
             dropped_chunks: n(&self.dropped_chunks),
             input_frames: n(&self.input_frames),
             dropped_input_bytes: n(&self.dropped_input_bytes),
+            input_resent: n(&self.input_resent),
+            kept_input_bytes: n(&self.kept_input_bytes),
             protocol_faults: n(&self.protocol_faults),
             beats: n(&self.beats),
             queue_high_water: n(&self.queue_high_water),
@@ -362,7 +397,7 @@ enum Cmd {
     Connect(Sender<Result<(), HubError>>),
     Call { op: Op, reply: Sender<Result<Answer, HubError>> },
     Attach { sub: Sub },
-    Input { id: u64, session: u32, bytes: Vec<u8> },
+    Input { id: u64, session: u32, bytes: Zeroizing<Vec<u8>>, at: Instant },
     Resize { id: u64, session: u32, cols: u16, rows: u16 },
     Takeover { id: u64, session: u32 },
     Reattach { id: u64, session: u32, tail: Option<u32>, cause: Cause },
@@ -466,6 +501,7 @@ impl Hub {
             resume: None,
             epoch: None,
             next_seq: 1,
+            keep: Keep::default(),
         };
         let handle =
             SubHandle { id, session, route: Route::Hub(self.inner.cmd.clone()), wake: tx.clone(), queued: queued.clone() };
@@ -621,7 +657,8 @@ impl SubHandle {
     }
 
     /// Typed bytes for the program. They reach it only while this client holds the right to write: the hub drops them
-    /// before they are sent otherwise (and counts the bytes in [`HubStats::dropped_input_bytes`]).
+    /// before they are sent otherwise (counts the bytes in [`HubStats::dropped_input_bytes`] and says [`SubEvent::NotSent`]).
+    /// While the subscription attaches again or the connection is made again, the hub keeps them (see the module doc).
     pub fn input(&self, bytes: &[u8]) -> Result<(), HubError> {
         if bytes.is_empty() {
             return Ok(());
@@ -629,7 +666,7 @@ impl SubHandle {
         if let Route::Local(local) = &self.route {
             return local.input(bytes);
         }
-        self.send(Cmd::Input { id: self.id, session: self.session, bytes: bytes.to_vec() })
+        self.send(Cmd::Input { id: self.id, session: self.session, bytes: Zeroizing::new(bytes.to_vec()), at: Instant::now() })
     }
 
     /// Asks the server to resize the session; it does only for the writer.
@@ -718,9 +755,10 @@ struct Sub {
     /// The epoch of the lease as the last attach answer or the last writer event said it: the epoch every input frame is
     /// written under.
     epoch: Option<u32>,
-    /// The number of the next input frame, from the `next` of the last attach answer. The hub keeps no frame and does not wait
-    /// for an acknowledgement: a gap that the server reports only puts the count back where the server is.
+    /// The number of the next input frame: the `next` of the last attach answer, then one more for every frame kept.
     next_seq: u32,
+    /// The input frames the server did not acknowledge yet, and the keys typed while there was no stream to send them on.
+    keep: Keep,
 }
 
 impl fmt::Debug for Sub {
@@ -733,7 +771,152 @@ impl fmt::Debug for Sub {
             .field("resume", &self.resume.as_ref().map(|_| "ResumeToken(..)"))
             .field("epoch", &self.epoch)
             .field("next_seq", &self.next_seq)
+            .field("keep", &self.keep)
             .finish_non_exhaustive()
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The buffer of typed input
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// One input frame that was typed and that the server has not confirmed: its number, the epoch it is written under, when it was
+/// typed, and the typed bytes. The bytes are in a buffer that is set to zero when it is dropped.
+struct Kept {
+    seq: u32,
+    epoch: u32,
+    at: Instant,
+    bytes: Zeroizing<Vec<u8>>,
+}
+
+impl fmt::Debug for Kept {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // What was typed can be a password: only its size is ever printed.
+        f.debug_struct("Kept").field("seq", &self.seq).field("epoch", &self.epoch).field("bytes", &self.bytes.len()).finish()
+    }
+}
+
+/// The one place where a kept frame ends: its bytes are set to zero in place, the whole buffer, before the frame is freed. Every
+/// way out of the buffer (confirmed, too old, over the bound, not resumed, the subscription ending) goes through here. Returns how
+/// many bytes the frame held.
+fn wipe(mut frame: Kept) -> usize {
+    let len = frame.bytes.len();
+    Zeroize::zeroize(frame.bytes.as_mut_slice());
+    release(frame);
+    len
+}
+
+#[cfg(not(test))]
+fn release(frame: Kept) {
+    drop(frame);
+}
+
+/// A test can ask to be handed the wiped frames instead of having them freed, to look at their bytes.
+#[cfg(test)]
+fn release(frame: Kept) {
+    let kept_for_the_test = WIPED.with(|list| match list.borrow_mut().as_mut() {
+        Some(list) => {
+            list.push(frame);
+            None
+        }
+        None => Some(frame),
+    });
+    drop(kept_for_the_test);
+}
+
+#[cfg(test)]
+thread_local! {
+    static WIPED: std::cell::RefCell<Option<Vec<Kept>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The input of one subscription that the server did not confirm, oldest first, with its bounds. Memory only; never printed.
+#[derive(Default)]
+struct Keep {
+    frames: VecDeque<Kept>,
+    /// The typed bytes held, in every frame.
+    bytes: usize,
+    /// A write did not fit: nothing more is kept until the buffer is empty, so that what is sent is always a start of what was
+    /// typed and never what came after a part that was left out.
+    full: bool,
+}
+
+impl fmt::Debug for Keep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Keep").field("frames", &self.frames.len()).field("bytes", &self.bytes).field("full", &self.full).finish()
+    }
+}
+
+impl Drop for Keep {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+impl Keep {
+    fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    /// Keeps `bytes` as frame `seq` under `epoch`. `false` (nothing kept) when it does not fit in [`KEEP_BYTES`] or an earlier
+    /// write did not fit.
+    fn push(&mut self, seq: u32, epoch: u32, at: Instant, bytes: &[u8]) -> bool {
+        if self.full || self.bytes.saturating_add(bytes.len()) > KEEP_BYTES {
+            self.full = true;
+            return false;
+        }
+        self.bytes += bytes.len();
+        self.frames.push_back(Kept { seq, epoch, at, bytes: Zeroizing::new(bytes.to_vec()) });
+        true
+    }
+
+    fn after_removal(&mut self) {
+        if self.frames.is_empty() {
+            self.full = false;
+        }
+    }
+
+    /// Drops every frame up to and including `seq` (the server applied them). Returns the bytes dropped.
+    fn confirm_through(&mut self, seq: u32) -> usize {
+        let mut dropped = 0;
+        while self.frames.front().is_some_and(|f| f.seq <= seq) {
+            if let Some(frame) = self.frames.pop_front() {
+                dropped += wipe(frame);
+            }
+        }
+        self.bytes -= dropped;
+        self.after_removal();
+        dropped
+    }
+
+    /// Drops everything. Returns the bytes dropped.
+    fn clear(&mut self) -> usize {
+        let mut dropped = 0;
+        while let Some(frame) = self.frames.pop_front() {
+            dropped += wipe(frame);
+        }
+        self.bytes = 0;
+        self.after_removal();
+        dropped
+    }
+
+    /// Drops everything when the oldest frame is older than `max_age`: what comes after a frame that was left out must not be
+    /// sent either. Returns the bytes dropped.
+    fn expire(&mut self, now: Instant, max_age: Duration) -> usize {
+        if self.frames.front().is_some_and(|f| now.saturating_duration_since(f.at) >= max_age) { self.clear() } else { 0 }
+    }
+
+    /// The epoch every frame is written under, when it is the same one for all of them.
+    fn uniform_epoch(&self) -> Option<u32> {
+        let first = self.frames.front()?.epoch;
+        self.frames.iter().all(|f| f.epoch == first).then_some(first)
+    }
+
+    fn first_seq(&self) -> Option<u32> {
+        self.frames.front().map(|f| f.seq)
+    }
+
+    fn last_seq(&self) -> Option<u32> {
+        self.frames.back().map(|f| f.seq)
     }
 }
 
@@ -875,7 +1058,9 @@ impl Core {
                     }
                 },
                 Mode::Backoff { attempt, at } => {
-                    match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
+                    // A wait is never longer than a second, so that kept input that grows too old is told about on time.
+                    let wait = at.saturating_duration_since(Instant::now()).min(Duration::from_secs(1));
+                    match rx.recv_timeout(wait) {
                         Ok(cmd) => self.handle(cmd),
                         Err(RecvTimeoutError::Timeout) => {}
                         Err(RecvTimeoutError::Disconnected) => {
@@ -883,12 +1068,20 @@ impl Core {
                             return;
                         }
                     }
+                    self.expire_kept();
                     if matches!(self.mode, Mode::Backoff { .. }) && Instant::now() >= at {
                         self.try_again(attempt);
                     }
                 }
             }
+            self.publish();
         }
+    }
+
+    /// What the stats say about the input that is held now.
+    fn publish(&self) {
+        let held: usize = self.subs.values().map(|sub| sub.keep.bytes).sum();
+        self.stats.kept_input_bytes.store(held as u64, Ordering::Relaxed);
     }
 
     fn shutdown(&mut self) {
@@ -897,6 +1090,7 @@ impl Core {
         }
         self.lose_all(HubError::Disconnected);
         self.fail_pending(HubError::Disconnected);
+        self.publish();
     }
 
     // ---- commands ----------------------------------------------------------------------------------------------------
@@ -915,7 +1109,7 @@ impl Core {
             }
             Cmd::Call { op, reply } => self.call(op, reply),
             Cmd::Attach { sub } => self.attach(sub),
-            Cmd::Input { id, session, bytes } => self.input(id, session, &bytes),
+            Cmd::Input { id, session, bytes, at } => self.input(id, session, &bytes, at),
             Cmd::Resize { id, session, cols, rows } => {
                 if self.owns(id, session) {
                     self.quiet(Op::Resize { session, cols, rows });
@@ -1021,37 +1215,101 @@ impl Core {
         }
     }
 
-    fn input(&mut self, id: u64, session: u32, bytes: &[u8]) {
-        if !self.owns(id, session) || !matches!(self.mode, Mode::Up) {
+    /// Typed bytes of a pane, typed at `at` (the age bound counts from then, not from when the thread got to them). A subscription that writes and has a right to come back to keeps them, numbered, and sends them at
+    /// once when its stream is live; while it attaches again or the connection is made again they are only kept. Everything else
+    /// is refused, and the pane is told so: no key is dropped unseen.
+    fn input(&mut self, id: u64, session: u32, bytes: &[u8], at: Instant) {
+        if !self.owns(id, session) {
             return;
         }
-        let writing = self
-            .subs
-            .get(&session)
-            .is_some_and(|sub| sub.writer == WriterView::Writing && matches!(sub.phase, Phase::Snapshot { .. } | Phase::Live { .. }));
-        if !writing {
-            self.stats.dropped_input_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-            return;
-        }
+        let up = matches!(self.mode, Mode::Up);
+        let can_wait = up || matches!(self.mode, Mode::Backoff { .. });
+        let mut refused = 0usize;
+        let mut first_new = None;
         for part in bytes.chunks(MAX_INPUT) {
-            let Some(sub) = self.subs.get_mut(&session) else { return };
-            // A subscription writes only after an attach answer, which always carries an epoch. Without one the write is not
-            // sent: no frame goes out under an epoch that was made up, and 0 is never a valid one.
+            let Some(sub) = self.subs.get_mut(&session) else { break };
+            // A right to come back to needs an epoch of an earlier answer, and that this client wrote under it. No frame goes out
+            // under an epoch that was made up, and 0 is never a valid one; a number that cannot grow is not used.
             let seq = sub.next_seq;
-            let frame = sub.epoch.and_then(|epoch| proto::encode_input(session, epoch, seq, part).ok());
-            let Some(frame) = frame else {
-                self.stats.dropped_input_bytes.fetch_add(part.len() as u64, Ordering::Relaxed);
-                continue;
+            let kept = match sub.epoch {
+                Some(epoch) if can_wait && sub.writer == WriterView::Writing && seq < u32::MAX => sub.keep.push(seq, epoch, at, part),
+                _ => false,
             };
-            let Some(ws) = self.ws.as_mut() else { return };
-            match ws.send_binary(&frame) {
-                Ok(()) => sub.next_seq = seq.saturating_add(1),
-                Err(error) => {
-                    self.broken(&error);
-                    return;
+            if !kept {
+                refused += part.len();
+                continue;
+            }
+            sub.next_seq = seq + 1;
+            first_new.get_or_insert(seq);
+        }
+        if refused > 0 {
+            self.refuse(session, refused);
+        }
+        // What was kept now goes out when the stream is live: every frame before it was sent when the stream began, so these are the
+        // only ones that were not. While the stream is not live they wait for the answer to the attach.
+        let live = self.subs.get(&session).is_some_and(|sub| matches!(sub.phase, Phase::Snapshot { .. } | Phase::Live { .. }));
+        if let Some(from) = first_new
+            && up
+            && live
+        {
+            self.transmit(session, from, false);
+        }
+    }
+
+    /// Sends the kept frames with a number of `from` or more, in order, each in a buffer that is wiped when it is dropped. A
+    /// frame that is sent again is counted as resent. A failed send ends the connection; what is kept stays.
+    fn transmit(&mut self, session: u32, from: u32, resend: bool) {
+        let mut failure = None;
+        let mut sent = 0u64;
+        if let (Some(sub), Some(ws)) = (self.subs.get(&session), self.ws.as_mut()) {
+            for frame in sub.keep.frames.iter().filter(|f| f.seq >= from) {
+                let Ok(encoded) = proto::encode_input_zeroizing(session, frame.epoch, frame.seq, &frame.bytes) else { continue };
+                match ws.send_binary(&encoded) {
+                    Ok(()) => sent += 1,
+                    Err(error) => {
+                        failure = Some(error);
+                        break;
+                    }
                 }
             }
-            bump(&self.stats.input_frames);
+        }
+        self.stats.input_frames.fetch_add(sent, Ordering::Relaxed);
+        if resend {
+            self.stats.input_resent.fetch_add(sent, Ordering::Relaxed);
+        }
+        if let Some(error) = failure {
+            self.broken(&error);
+        }
+    }
+
+    /// Typed bytes that are not sent and not kept: counted, and the subscription is told.
+    fn refuse(&mut self, session: u32, bytes: usize) {
+        self.stats.dropped_input_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.tell(session, SubEvent::NotSent { bytes });
+    }
+
+    /// Drops everything kept for `session` (for a reason the caller names by calling this) and tells the subscription.
+    fn drop_kept(&mut self, session: u32) {
+        let Some(sub) = self.subs.get_mut(&session) else { return };
+        let bytes = sub.keep.clear();
+        if bytes > 0 {
+            self.refuse(session, bytes);
+        }
+    }
+
+    /// Drops what has been kept for longer than the bound, in every subscription, and tells each.
+    fn expire_kept(&mut self) {
+        let (now, max_age) = (Instant::now(), self.options.input_keep_age);
+        let late: Vec<(u32, usize)> = self
+            .subs
+            .iter_mut()
+            .filter_map(|(session, sub)| {
+                let bytes = sub.keep.expire(now, max_age);
+                (bytes > 0).then_some((*session, bytes))
+            })
+            .collect();
+        for (session, bytes) in late {
+            self.refuse(session, bytes);
         }
     }
 
@@ -1172,7 +1430,8 @@ impl Core {
 
     /// Ends one subscription with `error`, and tells the server it is gone.
     fn end_sub(&mut self, session: u32, error: HubError) {
-        if let Some(sub) = self.subs.remove(&session) {
+        if let Some(mut sub) = self.subs.remove(&session) {
+            Self::tell_not_sent(&mut sub, self.options.sub_queue_bytes, &self.stats);
             sub.push(SubEvent::Lost(error), false, self.options.sub_queue_bytes, &self.stats);
             self.detach_on_server(session);
             self.rest_if_unused();
@@ -1181,8 +1440,18 @@ impl Core {
 
     fn lose_all(&mut self, error: HubError) {
         let bound = self.options.sub_queue_bytes;
-        for (_, sub) in self.subs.drain() {
+        for (_, mut sub) in self.subs.drain() {
+            Self::tell_not_sent(&mut sub, bound, &self.stats);
             sub.push(SubEvent::Lost(error), false, bound, &self.stats);
+        }
+    }
+
+    /// What a subscription held that did not go out is dropped with it, and the pane that typed it is told.
+    fn tell_not_sent(sub: &mut Sub, bound: usize, stats: &Cells) {
+        let bytes = sub.keep.clear();
+        if bytes > 0 {
+            stats.dropped_input_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+            sub.push(SubEvent::NotSent { bytes }, false, bound, stats);
         }
     }
 
@@ -1264,6 +1533,8 @@ impl Core {
         self.mode = Mode::Failed;
         let sessions: Vec<u32> = self.subs.keys().copied().collect();
         for session in sessions {
+            // No try is left: what was kept for the connection that did not come back is not sent, and the pane says so.
+            self.drop_kept(session);
             self.tell(session, SubEvent::GaveUp);
         }
     }
@@ -1385,6 +1656,7 @@ impl Core {
     }
 
     fn housekeeping(&mut self) {
+        self.expire_kept();
         let now = Instant::now();
         // A link that passes nothing at all is broken, even when the TCP connection says nothing of it.
         if self.ws.as_ref().is_some_and(|ws| now.saturating_duration_since(ws.heard()) >= self.options.silence) {
@@ -1484,17 +1756,41 @@ impl Core {
         epoch: u32,
         next: u32,
     ) {
+        let max_age = self.options.input_keep_age;
         let Some(sub) = self.subs.get_mut(&session) else { return };
         let again = sub.attached_before;
         sub.attached_before = true;
+        // What was kept is sent again only when the server says that this subscription writes under the very epoch the frames were
+        // written under: then the right never moved, and the frames below `next` were applied already. Anything else (another
+        // epoch, watching, free, a frame too old, a number the server does not expect) is dropped, and the pane says so.
+        let mut lost = sub.keep.expire(Instant::now(), max_age);
+        let mut resend = false;
+        if !sub.keep.is_empty() {
+            if writer == WriterView::Writing && sub.keep.uniform_epoch() == Some(epoch) {
+                sub.keep.confirm_through(next.saturating_sub(1));
+                if sub.keep.first_seq().is_some_and(|first| first != next) {
+                    // A number is missing before what is kept: the server would take every frame for a gap.
+                    lost += sub.keep.clear();
+                }
+                resend = !sub.keep.is_empty();
+            } else {
+                lost += sub.keep.clear();
+            }
+        }
         sub.writer = writer;
         // The new token replaces the old one, which is wiped as it is dropped.
         sub.resume = Some(resume);
         sub.epoch = Some(epoch);
-        // Input is numbered from where the server says it is: every frame sent before this attach was handled before it.
-        sub.next_seq = next;
+        // Input is numbered from where the server says it is, and goes on after what is kept.
+        sub.next_seq = sub.keep.last_seq().map_or(next, |last| last.saturating_add(1));
         sub.phase = if snapshot == 0 { Phase::Live { seq: 0 } } else { Phase::Snapshot { left: snapshot, seq: 0 } };
         self.tell(session, SubEvent::Attached { cols, rows, writer, more, snapshot, again, epoch });
+        if lost > 0 {
+            self.refuse(session, lost);
+        }
+        if resend {
+            self.transmit(session, next, true);
+        }
     }
 
     /// The server broke a rule on one stream: that subscription ends, the connection and the others go on.
@@ -1511,9 +1807,18 @@ impl Core {
         let bound = self.options.sub_queue_bytes;
         match event {
             Event::Writer { state, epoch, .. } => {
+                let mut lost = 0;
                 if let Some(sub) = self.subs.get_mut(&session) {
+                    // The right moved, or this client does not have it: the server drops what is written under an epoch that is
+                    // not its own now, so what is kept is not sent and the pane says so.
+                    if state != WriterView::Writing || sub.keep.uniform_epoch().is_some_and(|kept| kept != epoch) {
+                        lost = sub.keep.clear();
+                    }
                     sub.writer = state;
                     sub.epoch = Some(epoch);
+                }
+                if lost > 0 {
+                    self.refuse(session, lost);
                 }
                 self.offer(session, SubEvent::Writer(state), true, bound);
             }
@@ -1531,11 +1836,25 @@ impl Core {
             Event::Resync { .. } => self.resync(session),
             Event::Dropped { .. } => self.offer(session, SubEvent::InputDropped, true, bound),
             Event::Ack { seq, gap, .. } => {
-                // Nothing is kept, so there is nothing to free by an acknowledgement. A gap means the server did not get a
-                // frame (the socket's rate or a worker that was behind dropped it): the count goes back to where the server
-                // is, so that what is typed next is applied instead of dropped one frame after the other.
-                if gap && let Some(sub) = self.subs.get_mut(&session) {
-                    sub.next_seq = seq.saturating_add(1);
+                let Some(sub) = self.subs.get_mut(&session) else { return };
+                // Every frame up to `seq` reached the program: they are not needed any more, and their bytes are wiped.
+                sub.keep.confirm_through(seq);
+                if !gap {
+                    return;
+                }
+                // A gap means that the server did not get a frame (the socket's rate or a worker that was behind dropped it) and
+                // got one after it. What is kept after `seq` is sent again, once for this report. With nothing kept the count goes
+                // back to where the server is, so that what is typed next is applied instead of dropped; with a frame missing
+                // from what is kept it cannot be filled, and the rest is not sent after a hole.
+                match sub.keep.first_seq() {
+                    None => sub.next_seq = seq.saturating_add(1),
+                    Some(first) if first == seq.saturating_add(1) => self.transmit(session, first, true),
+                    Some(_) => {
+                        self.drop_kept(session);
+                        if let Some(sub) = self.subs.get_mut(&session) {
+                            sub.next_seq = seq.saturating_add(1);
+                        }
+                    }
                 }
             }
         }
@@ -1642,6 +1961,7 @@ mod tests {
             resume: Some(token),
             epoch: Some(2),
             next_seq: 1,
+            keep: Keep::default(),
         };
         let printed = format!("{sub:?} {:#?}", sub);
         assert!(!printed.contains(hex.as_str()), "{printed}");

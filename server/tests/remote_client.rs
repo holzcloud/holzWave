@@ -254,6 +254,117 @@ async fn a_writer_cut_for_longer_than_the_timeout_is_free_and_drops_what_it_type
     assert!(pane.join(Duration::from_secs(10)));
 }
 
+/// How many lines of the screen hold exactly `text` (the echo of a typed command is another text).
+fn lines_of(screen: &str, text: &str) -> usize {
+    screen.lines().filter(|l| l.trim() == text).count()
+}
+
+/// The row of the first line of the screen that holds exactly `text`.
+fn row_of(screen: &str, text: &str) -> Option<usize> {
+    screen.lines().position(|l| l.trim() == text)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lines_typed_during_a_short_cut_reach_the_shell_once_each_and_in_order_after_the_reconnect() {
+    let remote = Remote::start().await;
+    let (_minted, endpoint) = remote.device("laptop");
+    // The hub tries again for as long as the cut lasts, so that only the cut's length decides what happens.
+    let options = HubOptions { reconnect: Reconnect { attempts: 60, delay: Duration::from_millis(250) }, ..HubOptions::default() };
+    let hub = Hub::new(endpoint.clone(), options);
+    let (session, _) = blocking({
+        let hub = hub.clone();
+        move || hub.new_session(80, 24).expect("a new session")
+    })
+    .await;
+    let (pane, probe) = open_pane(&hub, session, (80, 24));
+    until_prompt(&pane).await;
+    pane.text("echo hw-before\r".to_owned()).unwrap();
+    until_screen(&pane, "the first answer", SHELL, |t| lines_of(t, "hw-before") == 1).await;
+
+    // The network is away: the pane says that it connects again, and what is typed meanwhile is kept by the hub.
+    remote.relay.block(true);
+    remote.relay.cut();
+    until_view(&pane, "the lost connection", SHELL, |_| matches!(pane.conn_state(), ConnState::Reconnecting { .. })).await;
+    pane.text("echo hw-during-1\r".to_owned()).unwrap();
+    pane.text("echo hw-during-2\r".to_owned()).unwrap();
+    // Both lines are in the hub's hands before the network comes back.
+    let typed = "echo hw-during-1\r".len() + "echo hw-during-2\r".len();
+    let deadline = std::time::Instant::now() + SHELL;
+    while hub.stats().kept_input_bytes < typed as u64 {
+        assert!(std::time::Instant::now() < deadline, "the hub kept nothing: {:?}", hub.stats());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!pane.remote_view().unwrap().not_sent, "kept keys are not a lost key");
+    remote.relay.block(false);
+
+    // The same writer is back inside the time the server keeps its right: each line runs once, after the first, in the order typed.
+    until_screen(&pane, "the replayed lines", SHELL, |t| lines_of(t, "hw-during-1") == 1 && lines_of(t, "hw-during-2") == 1).await;
+    // Nothing more comes: wait for a line typed afterwards, so that a repeat would have had time to show.
+    pane.text("echo hw-after\r".to_owned()).unwrap();
+    until_screen(&pane, "the last answer", SHELL, |t| lines_of(t, "hw-after") == 1).await;
+    let text = screen(&pane);
+    for line in ["hw-before", "hw-during-1", "hw-during-2", "hw-after"] {
+        assert_eq!(lines_of(&text, line), 1, "{line} must run exactly once: {text:?}");
+    }
+    let rows: Vec<usize> = ["hw-before", "hw-during-1", "hw-during-2", "hw-after"].iter().map(|l| row_of(&text, l).unwrap()).collect();
+    assert!(rows.windows(2).all(|w| w[0] < w[1]), "the lines ran out of order: {rows:?}");
+    let view = pane.remote_view().unwrap();
+    assert_eq!((view.writer, view.not_sent), (WriterView::Writing, false), "{view:?}");
+    assert!(hub.stats().connects >= 2, "{:?}", hub.stats());
+    assert!(probe.exits().is_empty());
+    pane.close();
+    assert!(pane.join(Duration::from_secs(10)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lines_typed_during_a_cut_longer_than_the_timeout_never_reach_the_shell_and_the_pane_says_not_sent() {
+    // The server keeps the right of a cut writer for three seconds; the cut is longer. The hub tries again for as long as it takes.
+    let env = env_with(WsOptions { supervisor: Some(writer_timeout(3000)), ..WsOptions::default() }).await;
+    let remote = Remote::from(env).await;
+    let (_minted, endpoint) = remote.device("laptop");
+    let options = HubOptions {
+        beat: Duration::from_millis(300),
+        reconnect: Reconnect { attempts: 60, delay: Duration::from_millis(250) },
+        ..HubOptions::default()
+    };
+    let hub = Hub::new(endpoint.clone(), options);
+    let (session, _) = blocking({
+        let hub = hub.clone();
+        move || hub.new_session(80, 24).expect("a new session")
+    })
+    .await;
+    let (pane, _probe) = open_pane(&hub, session, (80, 24));
+    until_prompt(&pane).await;
+    pane.text("echo hw-before\r".to_owned()).unwrap();
+    until_screen(&pane, "the first answer", SHELL, |t| lines_of(t, "hw-before") == 1).await;
+
+    remote.relay.block(true);
+    remote.relay.cut();
+    until_view(&pane, "the lost connection", SHELL, |_| matches!(pane.conn_state(), ConnState::Reconnecting { .. })).await;
+    pane.text("echo hw-during-1\r".to_owned()).unwrap();
+    let deadline = std::time::Instant::now() + SHELL;
+    while hub.stats().kept_input_bytes == 0 {
+        assert!(std::time::Instant::now() < deadline, "the hub kept nothing: {:?}", hub.stats());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Longer than the three seconds: the right is free when the pane is back.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    remote.relay.block(false);
+    until_view(&pane, "the pane free and told", SHELL, |v| v.state == RemoteState::None && v.writer == WriterView::Free && v.not_sent).await;
+    assert_eq!(pane.conn_state(), ConnState::Connected);
+    assert_eq!(hub.stats().kept_input_bytes, 0, "nothing stays kept after the answer");
+
+    // The line never runs, not even after the pane takes the right: a line typed afterwards runs and shows that the first did not.
+    pane.takeover().unwrap();
+    until_view(&pane, "writing", SHELL, |v| v.writer == WriterView::Writing).await;
+    pane.text(SUM.to_owned()).unwrap();
+    until_screen(&pane, "the sum", SHELL, |t| lines_of(t, "hw-42") == 1).await;
+    let text = screen(&pane);
+    assert_eq!(lines_of(&text, "hw-during-1"), 0, "a kept line must not run in a session the pane no longer wrote in: {text:?}");
+    pane.close();
+    assert!(pane.join(Duration::from_secs(10)));
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Two devices: one writes, one watches and takes over
 // ---------------------------------------------------------------------------------------------------------------------
