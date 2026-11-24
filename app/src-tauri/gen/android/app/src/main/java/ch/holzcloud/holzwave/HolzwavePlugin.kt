@@ -6,7 +6,9 @@ import android.app.Activity
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.ActivityNotFoundException
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -24,6 +26,7 @@ import app.tauri.plugin.JSArray
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import app.tauri.plugin.PluginManager
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
@@ -81,6 +84,12 @@ class ClipWriteArgs {
   var text: String = ""
 }
 
+/** The link opener: the address to hand to the system. */
+@InvokeArg
+class OpenLinkArgs {
+  var url: String = ""
+}
+
 /**
  * The first-party plugin of the app: the way Rust and Kotlin talk, registered from the Rust side with Tauri's plugin builder
  * (no `tauri-plugin-*` crate). The Rust side registers no invoke handler for it, so the page cannot call it; only Rust code of
@@ -100,6 +109,10 @@ class ClipWriteArgs {
  * And the two halves of the single-file hand-over and the clipboard: `pickIn` and `saveOut` show the system's open-document and
  * create-document dialogs and copy one file ([HolzwaveFiles]), `clipboardRead` and `clipboardWrite` read and write the system
  * clipboard as plain text. None of them is reachable from the page.
+ *
+ * And the link opener: `openLink` hands an address to the system with a view intent (the browser for a web address, the mail app
+ * for `mailto`). The Rust side has checked the address and the list of link schemes; the command checks the scheme and the length
+ * again on its own side and opens nothing but `https`, `http` and `mailto`.
  */
 @TauriPlugin
 class HolzwavePlugin(host: Activity) : Plugin(host) {
@@ -547,6 +560,56 @@ class HolzwavePlugin(host: Activity) : Plugin(host) {
     invoke.resolve(answer)
   }
 
+  // ---- the link opener ------------------------------------------------------------------------------------------------------
+
+  /** Hands an address of the scheme `https`, `http` or `mailto` to the system and answers `{ kind: "opened" | "no_app" }`. */
+  @Command
+  fun openLink(invoke: Invoke) {
+    try {
+      val args = invoke.parseArgs(OpenLinkArgs::class.java)
+      val uri = linkOf(args.url)
+      if (uri == null) {
+        // Never the address and never the system's text: the one word.
+        invoke.reject("failed", "failed")
+        return
+      }
+      // A view of this address, for activities that a web page may start (browsers, the mail app). The address is never read as
+      // an intent description, and nothing is sent or offered in a chooser.
+      val intent = Intent(Intent.ACTION_VIEW, uri).addCategory(Intent.CATEGORY_BROWSABLE)
+      main.post {
+        try {
+          val front = current
+          if (front != null) {
+            front.startActivity(intent)
+          } else {
+            app.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+          }
+          val answer = JSObject()
+          answer.put("kind", "opened")
+          invoke.resolve(answer)
+        } catch (e: ActivityNotFoundException) {
+          val answer = JSObject()
+          answer.put("kind", "no_app")
+          invoke.resolve(answer)
+        } catch (e: Throwable) {
+          invoke.reject("failed", "failed")
+        }
+      }
+    } catch (e: Throwable) {
+      invoke.reject("failed", "failed")
+    }
+  }
+
+  /** The address as a [Uri] when it is short, holds no control or blank character and its scheme is one of the three; else `null`. */
+  private fun linkOf(url: String): Uri? {
+    if (url.isEmpty() || url.length > MAX_LINK_CHARS || url.any { it <= ' ' || it == '\u007f' }) return null
+    val uri = Uri.parse(url)
+    return when (uri.scheme?.lowercase(Locale.ROOT)) {
+      "https", "http", "mailto" -> uri
+      else -> null
+    }
+  }
+
   // ---- the local network permission ------------------------------------------------------------------------------------------
   // Android 17 lets an app that targets it reach a device on the local network (a private address) only with the runtime permission
   // ACCESS_LOCAL_NETWORK; a connection without it does not fail, it times out. The Rust side asks here before it dials such an
@@ -710,6 +773,8 @@ class HolzwavePlugin(host: Activity) : Plugin(host) {
 
   companion object {
     private const val TAG = "holzwave"
+    /** The longest address `openLink` takes, the same bound as the Rust side's (2048 bytes). */
+    private const val MAX_LINK_CHARS = 2048
     private const val STOP_ALL_EVENT = "stopAll"
     /** The permission exists from Android 17 (API 37), and only an app that targets it needs it. */
     private const val LOCAL_NETWORK = "android.permission.ACCESS_LOCAL_NETWORK"

@@ -3010,3 +3010,111 @@ fn the_local_network_check_fails_on_bad_input() {
         assert!(!problems.is_empty(), "{what} passed");
     }
 }
+
+// ---- the link opener: an address goes to the system through one command that checks it again ----------------------------------
+
+/// What the plugin must say about opening a link, one sentence per problem. The command `openLink` takes an address from Rust
+/// (which has checked it against the list of link schemes), parses it as an address and never as an intent description,
+/// compares the lower-cased scheme with exactly `https`, `http` and `mailto`, bounds the length, builds a view intent for
+/// activities that a web page may start, starts it on the main looper, and answers a missing app as the fixed word `no_app`.
+/// Nothing in the plugin sends, shares or offers a chooser.
+fn link_opener_problems(plugin_kt: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    let code = source_code(plugin_kt);
+    for word in ["parseUri", "ACTION_SEND", "createChooser", "Chooser", "ACTION_MAIN", "ACTION_SENDTO"] {
+        if code.contains(word) {
+            problems.push(format!("the plugin uses {word}: an address is viewed, never sent, shared or parsed as an intent"));
+        }
+    }
+    let Some(at) = code.find("@Command\n  fun openLink(invoke: Invoke) {") else {
+        problems.push("the plugin has no command openLink".into());
+        return problems;
+    };
+    // The body of the command: up to the next function of the class that is not one the command's own.
+    let body = &code[at..];
+    let body = &body[..body.find("private fun linkOf").unwrap_or(body.len())];
+    let Some(post) = body.find("main.post {") else {
+        problems.push("openLink does not start the intent inside main.post".into());
+        return problems;
+    };
+    let after_post = &body[post..];
+    if !after_post.contains("startActivity(intent") || body[..post].contains("startActivity(") {
+        problems.push("openLink starts an activity outside main.post".into());
+    }
+    if !body.contains("Intent(Intent.ACTION_VIEW, uri)") {
+        problems.push("openLink does not build a view intent of the checked address".into());
+    }
+    if !body.contains("addCategory(Intent.CATEGORY_BROWSABLE)") {
+        problems.push("the intent of openLink lacks CATEGORY_BROWSABLE, so an activity that no page may start could match".into());
+    }
+    match after_post.find("catch (e: ActivityNotFoundException) {") {
+        Some(catch) => {
+            let rest = &after_post[catch..];
+            let end = rest.find("catch (e: Throwable)").unwrap_or(rest.len());
+            if !rest[..end].contains("answer.put(\"kind\", \"no_app\")") {
+                problems.push("a missing app is not answered as no_app".into());
+            }
+        }
+        None => problems.push("openLink does not catch ActivityNotFoundException".into()),
+    }
+    if !body.contains("answer.put(\"kind\", \"opened\")") {
+        problems.push("openLink does not answer opened".into());
+    }
+    if !body.contains("val uri = linkOf(args.url)") || !body.contains("if (uri == null)") {
+        problems.push("openLink does not refuse an address that linkOf refuses".into());
+    }
+    // The check of the address itself.
+    let Some(check) = code.find("private fun linkOf(url: String): Uri? {") else {
+        problems.push("the plugin has no linkOf check".into());
+        return problems;
+    };
+    let check = &code[check..];
+    let check = &check[..check.find("\n  }\n").unwrap_or(check.len())];
+    if !check.contains("url.length > MAX_LINK_CHARS") || !code.lines().any(|line| line.trim() == "private const val MAX_LINK_CHARS = 2048") {
+        problems.push("the address is not bounded to 2048 characters".into());
+    }
+    if !check.contains("url.any { it <= ' ' || it == '\\u007f' }") {
+        problems.push("an address with a control or blank character is not refused".into());
+    }
+    if !check.contains("Uri.parse(url)") {
+        problems.push("the address is not parsed as an address".into());
+    }
+    let arms = check.split("when (uri.scheme?.lowercase(Locale.ROOT)) {").nth(1).unwrap_or("");
+    let arms: Vec<&str> = arms.lines().map(str::trim).filter(|line| !line.is_empty() && *line != "}").collect();
+    if arms != ["\"https\", \"http\", \"mailto\" -> uri", "else -> null"] {
+        problems.push(format!("the scheme is not compared with exactly https, http and mailto, lower-cased: {arms:?}"));
+    }
+    problems
+}
+
+#[test]
+fn the_plugin_opens_only_https_http_and_mailto_with_a_browsable_view_on_the_main_looper() {
+    assert_none("link opener", link_opener_problems(PLUGIN_KT));
+}
+
+#[test]
+fn the_link_opener_check_fails_on_bad_input() {
+    assert!(link_opener_problems(PLUGIN_KT).is_empty(), "the plugin passes");
+    let cases: Vec<(&str, String)> = vec![
+        ("no scheme check", PLUGIN_KT.replace("\"https\", \"http\", \"mailto\" -> uri", "else -> uri")),
+        ("a fourth scheme", PLUGIN_KT.replace("\"https\", \"http\", \"mailto\" -> uri", "\"https\", \"http\", \"mailto\", \"intent\" -> uri")),
+        ("another scheme", PLUGIN_KT.replace("\"https\", \"http\", \"mailto\" -> uri", "\"https\", \"http\", \"file\" -> uri")),
+        ("a scheme that keeps its case", PLUGIN_KT.replace("uri.scheme?.lowercase(Locale.ROOT)", "uri.scheme")),
+        ("no bound", PLUGIN_KT.replace("url.length > MAX_LINK_CHARS", "false")),
+        ("a wider bound", PLUGIN_KT.replace("private const val MAX_LINK_CHARS = 2048", "private const val MAX_LINK_CHARS = 20480")),
+        ("no browsable category", PLUGIN_KT.replace("addCategory(Intent.CATEGORY_BROWSABLE)", "addCategory(Intent.CATEGORY_DEFAULT)")),
+        ("a start outside main.post", PLUGIN_KT.replace("      main.post {\n        try {\n          val front = current", "      run {\n        try {\n          val front = current")),
+        ("an intent description", PLUGIN_KT.replace("val intent = Intent(Intent.ACTION_VIEW, uri)", "val intent = Intent.parseUri(args.url, 0)")),
+        ("a send", format!("{PLUGIN_KT}\nfun x() = Intent(Intent.ACTION_SEND)\n")),
+        ("a chooser", format!("{PLUGIN_KT}\nfun x(i: Intent) = Intent.createChooser(i, \"\")\n")),
+        ("no missing-app word", PLUGIN_KT.replace("answer.put(\"kind\", \"no_app\")", "answer.put(\"kind\", \"failed\")")),
+        ("no catch of a missing app", PLUGIN_KT.replace("catch (e: ActivityNotFoundException) {", "catch (e: IllegalStateException) {")),
+        ("no command", PLUGIN_KT.replace("fun openLink(invoke: Invoke) {", "fun openLinkX(invoke: Invoke) {")),
+    ];
+    for (what, changed) in cases {
+        assert!(!link_opener_problems(&changed).is_empty(), "{what} passed");
+    }
+    // A comment may name the words the code does not use.
+    let commented = format!("{PLUGIN_KT}\n// never parseUri, never a Chooser\n");
+    assert!(link_opener_problems(&commented).is_empty(), "a comment about the words passed as bad");
+}

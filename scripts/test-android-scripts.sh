@@ -311,7 +311,7 @@ run android-e2e.sh
 [ "$rc" -eq 2 ] && ok "no argument is a usage error, exit 2" || bad "e2e usage (rc $rc)"
 mkcase
 run android-e2e.sh nonsense
-[ "$rc" -eq 2 ] && echo "$out" | grep -q 'tracer|service|vault|tls|handover|clipboard' && ok "an unknown section is a usage error that names the six sections, exit 2" \
+[ "$rc" -eq 2 ] && echo "$out" | grep -q 'tracer|service|vault|tls|handover|clipboard|opener' && ok "an unknown section is a usage error that names the sections, opener among them, exit 2" \
   || bad "e2e unknown section (rc $rc): $out"
 mkcase
 rm -f "$c/bin/adb"
@@ -380,7 +380,11 @@ mkcase
 rm -f "$c/bin/adb"
 run android-e2e.sh clipboard
 [ "$rc" -eq 2 ] && nothing_left && ok "the clipboard section without adb is exit 2" || bad "e2e clipboard without adb (rc $rc): $out"
-for section in handover clipboard; do
+mkcase
+rm -f "$c/bin/adb"
+run android-e2e.sh opener
+[ "$rc" -eq 2 ] && nothing_left && ok "the opener section without adb is exit 2" || bad "e2e opener without adb (rc $rc): $out"
+for section in handover clipboard opener; do
   mkcase
   : > "$LOG"
   run android-e2e.sh "$section"
@@ -395,6 +399,33 @@ for section in handover clipboard; do
     ok "the $section section never calls locksettings"
   fi
 done
+
+# The opener section disables packages of the emulator. Its cleanup must enable every one of them again, and each package must be
+# written to the list that the cleanup reads before the command that disables it.
+sed -n '/^cleanup() {/,/^}/p' "$here/android-e2e.sh" > "$tmp/cleanup.sh"
+if grep -q 'pm enable --user 0 "\$opener_pkg"' "$tmp/cleanup.sh" && grep -q '<"\$opener_list"' "$tmp/cleanup.sh"; then
+  ok "the cleanup of the e2e script enables again every package that the opener section disabled"
+else
+  bad "the cleanup of the e2e script does not enable the packages of the opener section again"
+fi
+sed -n '/^    elif \[ "\$SECTION" = opener \]; then/,/^    elif \[ "\$SECTION" = handover \]; then/p' "$here/android-e2e.sh" > "$tmp/opener.sh"
+named=$(grep -n 'echo "\$pkg" >>"\$opener_list"' "$tmp/opener.sh" | head -n 1 | cut -d: -f1)
+disabled=$(grep -n 'pm disable-user --user 0' "$tmp/opener.sh" | head -n 1 | cut -d: -f1)
+if [ -n "$named" ] && [ -n "$disabled" ] && [ "$named" -lt "$disabled" ]; then
+  ok "the opener section writes a package to its list before it disables it"
+else
+  bad "the opener section does not name a package before disabling it (named line '$named', disabled line '$disabled')"
+fi
+if [ "$(grep -c 'disable-user' "$tmp/opener.sh")" -ge 1 ] && ! grep -q 'disable-user' "$tmp/cleanup.sh"; then
+  ok "only the opener section disables packages, and only with disable-user (never uninstall or clear)"
+else
+  bad "the e2e script disables packages somewhere other than the opener section"
+fi
+if grep -Eq 'pm (uninstall|clear)|adb[^|]* uninstall' "$tmp/opener.sh"; then
+  bad "the opener section removes or clears a package"
+else
+  ok "the opener section removes and clears no package"
+fi
 
 echo "test 5b: the parser of the dialog driver finds a node in a uiautomator dump"
 # The function under test is the one in the script, cut out by its first and last line, so what is proved is what runs.

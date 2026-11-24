@@ -30,6 +30,12 @@
 //! passphrase file after it moved the passphrase into the vault. Nothing secret, no command line typed into the session and no
 //! host answer is logged: a step says ok or one of the fixed reasons.
 //!
+//! The steps `open-link` and `open-link-refused` run the link opener of the host over the real plugin: `open-link` opens a public
+//! address through the same opener the sign-in uses, from a thread of its own, and says the opener's word (`opened` or `no_app`)
+//! within five seconds; `open-link-refused` calls the plugin's `openLink` directly, past the host's checks on purpose, with the
+//! addresses the plugin must refuse by itself. Neither prints more than a fixed word; the script of the emulator reads which
+//! activity is in front afterwards, because only the system knows whether one was started.
+//!
 //! The steps `tls-public`, `tls-public-crl`, `tls-untrusted`, `sync-save`, `sync-paused` and `sync-resume` run the two real network clients of the
 //! core (the WebDAV client of the sync and the client of the AI chat) against a public site and against a server with a
 //! self-signed certificate that the emulator script starts on the Mac and forwards to the emulator's loopback address with `adb
@@ -51,7 +57,7 @@ use holzwave_core::layout::{MAIN_WINDOW, PaneId};
 use holzwave_core::profiles::{Auth, Profile};
 use holzwave_core::secrets::SecretStore;
 use holzwave_core::sync::webdav::{Backend, WebDav};
-use holzwave_core::vault::{Clock, LostReason, Protection, VaultError, VaultState, VaultStore};
+use holzwave_core::vault::{Clock, KeystoreError, LostReason, Protection, VaultError, VaultState, VaultStore};
 use holzwave_host::ai_host::ProfileInputMsg;
 use holzwave_host::commands::connections::{connect, connection_save, pane_connections};
 use holzwave_host::commands::handover::{HandoverOutcomeMsg, handover_in, handover_out};
@@ -59,13 +65,14 @@ use holzwave_host::commands::terminal::{key, start_pane, text};
 use holzwave_host::commands::vault::{vault_lock, vault_unlock};
 use holzwave_host::keystore_wire::RecentsMode;
 use holzwave_host::locked::{SECRETS_LOCKED, is_locked};
-use holzwave_host::seams::Host;
+use holzwave_host::seams::{Host, OpenError};
 use holzwave_host::state::AppCore;
 use serde_json::{Value, json};
 
 use crate::android::host::AndroidHost;
 use crate::clipboard;
-use crate::android::keystore::{AndroidClock, PluginBridge};
+use crate::android::keystore::{AndroidClock, Bridge, PluginBridge};
+use crate::android::opener::OPEN_LINK;
 use crate::android::plugin;
 
 /// The account the steps use.
@@ -91,6 +98,11 @@ const PUBLIC_URL: &str = "https://example.com/";
 /// for the hosts of such lists. The site of `PUBLIC_URL` has an OCSP address and passed while every list-only chain failed, so it
 /// proves nothing about this shape. The address is a constant of this debug module; only a request without a body or a secret is sent.
 const PUBLIC_CRL_ONLY_URL: &str = "https://letsencrypt.org/";
+/// The address `open-link` hands to the system: a public page, opened in whichever browser the device has. Nothing is sent to it by the app.
+const OPEN_LINK_URL: &str = "https://example.com/";
+/// How long the opener has to answer. The command answers as soon as the main looper has started the activity, so a longer wait
+/// means the answer is stuck behind the thread that must resolve it.
+const OPEN_LINK_SECS: u64 = 5;
 /// The loopback address of the emulator, where `adb reverse` forwards the port of the TLS server with a self-signed certificate that
 /// the script runs on the Mac. (The emulator's own name for the Mac, 10.0.2.2, is a local-network address, which an app that
 /// targets Android 17 may not reach without the local-network permission; the loopback address needs none.)
@@ -462,6 +474,8 @@ impl Steps {
             // The unlock (the system prompt, answered by the script) starts one run, which reaches the untrusted server.
             "sync-resume" => self.sync_resume(),
             // The system's open dialog, driven by the script: the outcome kind and, for a copy, the cleaned name and the size.
+            "open-link" => self.open_link(),
+            "open-link-refused" => open_link_refused(),
             "handover-in" => handover_line(&handover_in(&self.core)),
             // A fixed pattern is written to the shell's folder and copied out through the system's create dialog.
             "handover-out" => {
@@ -710,6 +724,25 @@ impl Steps {
             .ok_or_else(|| "the profile of the earlier step is missing".to_owned())
     }
 
+    /// Open [`OPEN_LINK_URL`] through the host's own link opener (over the real plugin), from a thread of its own as the command
+    /// runs, and report the opener's word. An answer that has not come in [`OPEN_LINK_SECS`] fails the step.
+    fn open_link(&self) -> Outcome {
+        let opener = self.host.link_opener().ok_or_else(|| "the host has no link opener".to_owned())?;
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("hw-open-link".into())
+            .spawn(move || {
+                let _ = send.send(opener.open(OPEN_LINK_URL));
+            })
+            .map_err(|_| "the thread of the opener could not start".to_owned())?;
+        match receive.recv_timeout(Duration::from_secs(OPEN_LINK_SECS)) {
+            Ok(Ok(())) => Ok("opened".into()),
+            Ok(Err(OpenError::NoApp)) => Ok("no_app".into()),
+            Ok(Err(OpenError::Failed)) => fail("the opener failed"),
+            Err(_) => fail("the opener gave no answer within the time"),
+        }
+    }
+
     /// Wait up to three seconds for the host's watcher to have told the plugin and for the plugin's answer to match the wish,
     /// then report the applied value and the mode.
     fn recents(&self, hidden: bool) -> Outcome {
@@ -746,6 +779,30 @@ fn handover_line(outcome: &HandoverOutcomeMsg) -> Outcome {
         HandoverOutcomeMsg::Failed => fail("the hand-over failed"),
         HandoverOutcomeMsg::Unavailable => fail("the build has no document dialog"),
     }
+}
+
+/// The addresses the plugin must refuse on its own, whatever the host checked: an intent description, a script, a file and an
+/// address over the bound. The plugin is called directly. Each must come back as the plugin's one rejection; an answer, of any
+/// kind, means an address got past it. The script of the emulator then checks that the app is still the activity in front.
+fn open_link_refused() -> Outcome {
+    let long = format!("https://example.com/{}", "a".repeat(2049 - "https://example.com/".len()));
+    debug_assert_eq!(long.len(), 2049);
+    let refused = [
+        ("intent", "intent://example.com#Intent;scheme=https;end".to_owned()),
+        ("javascript", "javascript:alert(1)".to_owned()),
+        ("file", "file:///sdcard/x".to_owned()),
+        ("over-long", long),
+        ("blank", "https://exa mple.com/".to_owned()),
+        ("upper-case intent", "INTENT://example.com#Intent;end".to_owned()),
+    ];
+    for (what, url) in refused {
+        match PluginBridge.call(OPEN_LINK, &json!({ "url": url })) {
+            Err(KeystoreError::Failed(_)) => {}
+            Err(_) => return Err(format!("the plugin refused the {what} address with another word")),
+            Ok(_) => return Err(format!("the plugin answered for the {what} address")),
+        }
+    }
+    Ok("six addresses refused with the fixed word".into())
 }
 
 /// A write, a read back and a refusal. A read right after the app came to the front may find the system's clipboard closed to an

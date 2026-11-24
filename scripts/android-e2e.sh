@@ -8,6 +8,7 @@
 #   sh scripts/android-e2e.sh tls
 #   sh scripts/android-e2e.sh handover
 #   sh scripts/android-e2e.sh clipboard
+#   sh scripts/android-e2e.sh opener
 #   sh scripts/android-e2e.sh release      (the minified release, a copy signed with the SDK debug key; see its section)
 #
 # What `floor` does (it starts like `vault`: emulator, debug APK, fresh install; it waits for the app's window and not for a shell,
@@ -144,6 +145,22 @@
 # image shows there is printed, and is not a pass condition). What it does NOT prove: the clipboard strips of third party
 # keyboards, the clipboard managers of phone makers, multi-window and foldable focus rules, and any real phone.
 #
+# What `opener` does (same start as `handover`; it is not part of `all` or `matrix`, because it disables packages of the image) is run the
+# two debug-only steps of the link opener, one line per check. The opener is the host's own, over the real plugin, the one the sign-in
+# uses:
+#   a. `open-link` hands https://example.com/ to the system from a thread of its own and answers `opened` within five seconds, and the
+#      activity in front afterwards (read with `dumpsys activity activities`) belongs to another package than the app: a browser started;
+#   b. `open-link-refused` calls the plugin's `openLink` directly, past the host's checks on purpose, with an `intent:` address, a
+#      `javascript:` address, a `file:` address, one of 2049 characters, one with a blank and an upper-case `INTENT:` address; the plugin
+#      must reject every one of them with its fixed word, and the activity in front is still the app's, so no activity was started;
+#   c. every activity that resolves a browsable https view (`cmd package query-activities`) has its package disabled for the user
+#      with `pm disable-user`, the query then finds none, and `open-link` answers `no_app` (the ActivityNotFoundException path);
+#   d. every package the script disabled is enabled again, at every way out, and the run fails when `pm list packages -d` after it
+#      differs from the list before it.
+# A check that cannot be done (the image has no browser, a package cannot be disabled) ends `not run` with the reason and is never ok.
+# What it does NOT prove: a real phone, a browser that a phone maker chose, the chooser or a default browser that a person set, a
+# mail app for `mailto`, an address that a browser itself refuses, and any image but the one run.
+#
 # Environment: HOLZWAVE_EMULATOR_PORT (default 5554) picks the emulator; HOLZWAVE_E2E_SKIP_BUILD=1 reuses the debug APK that
 # is already built (for a repeated run).
 #
@@ -168,9 +185,9 @@ export ANDROID_SERIAL=$SERIAL
 PROFILE=${2:-}
 
 case "$SECTION" in
-    floor | tracer | service | vault | tls | handover | clipboard | touch | ssh | pagesize | release | all | matrix) ;;
+    floor | tracer | service | vault | tls | handover | clipboard | opener | touch | ssh | pagesize | release | all | matrix) ;;
     *)
-        echo "usage: sh scripts/android-e2e.sh tracer|service|vault|tls|handover|clipboard|touch|ssh|pagesize|floor|release|all [profile]|matrix" >&2
+        echo "usage: sh scripts/android-e2e.sh tracer|service|vault|tls|handover|clipboard|opener|touch|ssh|pagesize|floor|release|all [profile]|matrix" >&2
         exit 2
         ;;
 esac
@@ -223,6 +240,13 @@ cleanup() {
         sh scripts/android-ssh-server.sh stop "$ssh_dir" >/dev/null 2>&1
         ssh_dir=
     fi
+    # The opener section's disabled packages are enabled again first, every one the script named before it disabled it, while the
+    # emulator is still there. A package that is already enabled is not changed by `pm enable`.
+    if [ -n "$opener_list" ] && [ -r "$opener_list" ]; then
+        while IFS= read -r opener_pkg; do
+            [ -n "$opener_pkg" ] && adbd shell pm enable --user 0 "$opener_pkg" >/dev/null 2>&1
+        done <"$opener_list"
+    fi
     # The throwaway TLS server of the tls section; its certificate and key are in $tmp, which is removed below.
     [ -n "$reversed" ] && adb -s "$SERIAL" reverse --remove tcp:8443 >/dev/null 2>&1
     if [ -n "$server_pid" ]; then
@@ -250,6 +274,7 @@ server_pid=
 reversed=
 ssh_dir=
 ssh_reversed=
+opener_list=
 PIN=1234
 trap cleanup EXIT HUP INT TERM
 
@@ -634,7 +659,7 @@ if [ "$(adbd shell getprop ro.build.version.sdk | tr -d '\r')" -ge 33 ]; then
     adbd shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS || die "the notification permission could not be granted"
 fi
 
-if [ "$SECTION" != vault ] && [ "$SECTION" != tls ] && [ "$SECTION" != handover ] && [ "$SECTION" != clipboard ] && [ "$SECTION" != ssh ] \
+if [ "$SECTION" != vault ] && [ "$SECTION" != tls ] && [ "$SECTION" != handover ] && [ "$SECTION" != clipboard ] && [ "$SECTION" != opener ] && [ "$SECTION" != ssh ] \
     && [ "$SECTION" != floor ]; then
 # 2. start the app and wait for its window
 # The touch section reads the page through uiautomator. A WebView hands its content to the accessibility tree only when it is asked to,
@@ -1565,7 +1590,7 @@ if [ "$SECTION" = service ]; then
 fi
 
 
-if [ "$SECTION" = vault ] || [ "$SECTION" = tls ] || [ "$SECTION" = handover ] || [ "$SECTION" = clipboard ] || [ "$SECTION" = ssh ]; then
+if [ "$SECTION" = vault ] || [ "$SECTION" = tls ] || [ "$SECTION" = handover ] || [ "$SECTION" = clipboard ] || [ "$SECTION" = opener ] || [ "$SECTION" = ssh ]; then
     notrun=0
     skipped() { # <description> <reason>: a check that was not done is said so, and never counts as ok
         echo "e2e $SECTION: not run $1 ($2)"
@@ -2178,6 +2203,126 @@ if [ "$SECTION" = vault ] || [ "$SECTION" = tls ] || [ "$SECTION" = handover ] |
     # the PIN is cleared while the emulator is still there, and the app stopped
     stop_app
     adbd shell locksettings clear --old "$PIN" >/dev/null && pin_set=
+    elif [ "$SECTION" = opener ]; then
+    # ---- the opener section ---------------------------------------------------------------------------------------------------
+    echo "e2e opener: image API $sdk; the link opener of the host over the real plugin, a browser of the image, and every browser disabled in turn"
+    # The package of the activity that is resumed (in front). The line is `topResumedActivity=ActivityRecord{... u0 <pkg>/<class> t<n>}`
+    # on current images and `mResumedActivity: ActivityRecord{...}` on older ones; the first of them wins.
+    resumed_pkg() {
+        adbd shell dumpsys activity activities | tr -d '\r' | grep -E 'topResumedActivity|mResumedActivity|ResumedActivity:' | head -n 1 \
+            | sed -n 's|.* \([A-Za-z][A-Za-z0-9_.]*\)/[A-Za-z0-9_.$]*.*|\1|p'
+    }
+    # Wait up to <seconds> for the package in front to be (or not to be) the app's.
+    wait_front() { # <app|other> <seconds>
+        waited=0
+        while [ "$waited" -lt "$2" ]; do
+            front=$(resumed_pkg)
+            if [ "$1" = app ]; then
+                [ "$front" = "$PKG" ] && return 0
+            else
+                [ -n "$front" ] && [ "$front" != "$PKG" ] && return 0
+            fi
+            sleep 1
+            waited=$((waited + 1))
+        done
+        front=$(resumed_pkg)
+        return 1
+    }
+    # The packages with an activity that resolves a browsable https view, one per line.
+    browsers() {
+        adbd shell cmd package query-activities --brief -a android.intent.action.VIEW -d https://example.com/ -c android.intent.category.BROWSABLE \
+            | tr -d '\r' | grep '/' | sed 's|^[[:space:]]*||; s|/.*||' | grep -v -e '[[:space:]]' | sort -u
+    }
+    back_to_app() {
+        adbd shell am start -W -n "$PKG/$ACTIVITY" >/dev/null 2>&1
+        wait_front app 15 || true
+    }
+
+    opener_list="$tmp/disabled-by-this-run"
+    : >"$opener_list"
+    adbd shell pm list packages -d | tr -d '\r' | sort >"$tmp/disabled-before"
+    echo "e2e opener: packages disabled before the run: $(wc -l <"$tmp/disabled-before" | tr -d ' ')"
+    found=$(browsers)
+    echo "e2e opener: activities that resolve a browsable https view on this image: $(echo "$found" | tr '\n' ' ')"
+
+    # a. the opener path opens a browser
+    if [ -z "$found" ]; then
+        skipped "open-link opens a browser" "no package of the image resolves a browsable https view, so there is nothing to open"
+    else
+        run_step open-link none 60
+        case "$line" in
+            *"open-link: ok opened"*)
+                if wait_front other 20; then
+                    check "open-link answers opened and the activity in front is the package $front, not the app's" ok
+                else
+                    check "open-link answers opened and an activity of another package comes to the front" bad "in front: '${front:-none}'"
+                fi
+                ;;
+            *) check "open-link answers opened" bad "$line" ;;
+        esac
+    fi
+    back_to_app
+
+    # b. the plugin refuses by itself
+    run_step open-link-refused none 60
+    case "$line" in
+        *"open-link-refused: ok"*)
+            sleep 3
+            front=$(resumed_pkg)
+            if [ "$front" = "$PKG" ]; then
+                check "the plugin rejected intent:, javascript:, file:, an over-long, a blank and an upper-case INTENT: address with its fixed word and no activity started (in front: the app) [${line#*"open-link-refused: ok "}]" ok
+            else
+                check "the plugin refused every address by itself and the app stayed in front" bad "in front: '${front:-none}'"
+            fi
+            ;;
+        *) check "the plugin rejects every address it must refuse, by itself" bad "$line" ;;
+    esac
+    back_to_app
+
+    # c. no browser at all
+    if [ -z "$found" ]; then
+        # The image has none, so the answer is the no-app word without anything disabled.
+        run_step open-link none 60
+        case "$line" in
+            *"open-link: ok no_app"*) check "with no browser on the image open-link answers no_app" ok ;;
+            *) check "with no browser on the image open-link answers no_app" bad "$line" ;;
+        esac
+    else
+        undone=
+        for pkg in $found; do
+            # Named in the list first, so that a run that ends in the middle still enables it again.
+            echo "$pkg" >>"$opener_list"
+            adbd shell pm disable-user --user 0 "$pkg" >"$tmp/disable.out" 2>&1 || true
+            grep -q 'new state: disabled-user' "$tmp/disable.out" || undone="$undone $pkg"
+        done
+        left=$(browsers)
+        if [ -n "$undone" ] || [ -n "$left" ]; then
+            skipped "open-link answers no_app with every browser disabled" "could not disable:${undone:-}; still resolving: $(echo "$left" | tr '\n' ' ')"
+        else
+            run_step open-link none 60
+            case "$line" in
+                *"open-link: ok no_app"*) check "with every browsable https handler disabled open-link answers no_app (ActivityNotFoundException) [$(echo "$found" | tr '\n' ' ')]" ok ;;
+                *) check "with every browsable https handler disabled open-link answers no_app" bad "$line" ;;
+            esac
+        fi
+        # d. every package comes back
+        while IFS= read -r pkg; do
+            [ -n "$pkg" ] && adbd shell pm enable --user 0 "$pkg" >/dev/null 2>&1
+        done <"$opener_list"
+        if [ "$(browsers | sort -u | tr '\n' ' ')" = "$(echo "$found" | tr '\n' ' ')" ]; then
+            check "after the run the same activities resolve a browsable https view again" ok
+        else
+            check "after the run the same activities resolve a browsable https view again" bad "now: $(browsers | tr '\n' ' ')"
+        fi
+    fi
+    adbd shell pm list packages -d | tr -d '\r' | sort >"$tmp/disabled-after"
+    if cmp -s "$tmp/disabled-before" "$tmp/disabled-after"; then
+        check "the list of disabled packages after the run is the list before it" ok
+    else
+        check "the list of disabled packages after the run is the list before it" bad "$(diff "$tmp/disabled-before" "$tmp/disabled-after" | tr '\n' ' ' | cut -c1-200)"
+    fi
+    back_to_app
+    stop_app
     elif [ "$SECTION" = handover ]; then
     # ---- the handover section -------------------------------------------------------------------------------------------------
     echo "e2e handover: image API $sdk; the system's own document dialog (the documents app of the image) is driven with uiautomator"

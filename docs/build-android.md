@@ -25,7 +25,7 @@ Contents: [What to install](#what-to-install-all-free) · [arm64 only](#arm64-on
 [The end to end check](#the-end-to-end-check) · [The whole set](#the-whole-set-on-three-images) ·
 [The committed project](#the-committed-project) · [The version code](#the-version-code) · [The manifest](#what-the-manifest-decides) ·
 [Permissions](#one-list-of-permissions) · [The service](#the-service-that-keeps-sessions-alive) · [The secret store](#the-secret-store) ·
-[HTTPS](#https-and-certificates) · [Hand-over](#handing-one-file-over) · [The clipboard](#the-clipboard) ·
+[HTTPS](#https-and-certificates) · [Hand-over](#handing-one-file-over) · [The clipboard](#the-clipboard) · [Opening a link](#opening-a-link) ·
 [Check an APK](#check-a-built-apk) · [Unsigned release](#the-release-is-unsigned) · [Reproducibility](#reproducibility) ·
 [What was not tried](#what-was-not-tried) · [What ran and what did not](#what-ran-and-what-did-not) ·
 [Facts for whoever offers the app](#facts-for-whoever-offers-the-app)
@@ -219,7 +219,7 @@ ARM or 32-bit x86 at all.
 sh scripts/android-e2e.sh tracer
 ```
 
-(The section `service` is described with the foreground service below, the section `vault` with the secret store, the section `tls` with HTTPS and certificates, and the sections `handover` and `clipboard` with the single-file hand-over and the clipboard.) It starts the emulator if none runs (and stops it at the end only if it started it), builds and installs the debug APK, starts
+(The section `service` is described with the foreground service below, the section `vault` with the secret store, the section `tls` with HTTPS and certificates, the sections `handover` and `clipboard` with the single-file hand-over and the clipboard, and the section `opener` with opening a link.) It starts the emulator if none runs (and stops it at the end only if it started it), builds and installs the debug APK, starts
 the app, waits until the app has started a shell, taps the screen, types three lines with the real Android key path (`adb shell
 input text` and the Enter key), and reads the results back with `run-as`:
 
@@ -692,6 +692,41 @@ terminal selection goes the same way.
   the clipboard strips of third party keyboards, the clipboard managers of phone makers, multi-window and foldable focus rules, how
   a real phone's system shows or hides the preview of a sensitive clip, and any real phone.
 
+## Opening a link
+
+An Android app has no program to start that opens a link, so the opener the desktop uses (one fixed program with the link as its
+only argument) does not exist here. The host asks the system instead, through the app's own Kotlin plugin: the command `openLink`
+starts a view intent for the address and the system picks the app (the browser for a web address, the mail app for `mailto`). There is
+no Tauri plugin and no new dependency.
+
+- **The host decides first, on every platform.** `open_url` checks the length, the characters and the list of link schemes in the
+  settings exactly as on the desktop; only then, and only for `https`, `http` and `mailto`, is the address handed to the plugin. A
+  scheme the list allows but Android is not asked to open (`ssh`, `tel`) is refused with `Links of this kind cannot be opened on this
+  device.`, a `file` link and a reveal of a path with `Files cannot be shown on this device.` The decision is made on the platform
+  the host reports and not on the operating system the program was built for.
+- **The Kotlin side checks again, by itself.** `openLink` takes the address as an address (`Uri.parse`, never `Intent.parseUri`),
+  refuses one longer than 2048 characters or with a control or blank character, compares the lower-cased scheme with exactly `https`,
+  `http` and `mailto`, builds `ACTION_VIEW` with `CATEGORY_BROWSABLE` (so only an activity that a web page may start can match), and
+  starts it on the main looper. Nothing is sent, shared or offered in a chooser. The answer is one of two words, `opened` and
+  `no_app` (the system had no activity for it: `ActivityNotFoundException`); any other failure is a rejection with the one word
+  `failed`, and no text of the system reaches a message. The manifest needs no `queries` entry for `startActivity`.
+- **What a person is told.** `No app on this device can open this link.` when there is no app, `The link could not be opened.` for
+  any other failure. The sign-in's second screen shows the sentence in place of `Opening your browser…` (the page side of that line
+  is not built yet; the design record describes it).
+- **What the emulator run proved.** `sh scripts/android-e2e.sh opener` (it is not part of `all`, because it disables packages of the
+  image) runs two debug-only steps. `open-link` hands `https://example.com/` to the system through the host's own opener over the
+  real plugin, from a thread of its own, and gets `opened` within five seconds; the activity that is then in front belongs to the
+  image's only browser (`org.chromium.webview_shell`), not to the app. `open-link-refused` calls the plugin's command directly,
+  past the host's checks, with an `intent:` address, a `javascript:` address, a `file:` address, an address of 2049 characters, an
+  address with a blank and an upper-case `INTENT:` address; the plugin rejects every one of them with its fixed word and the app is
+  still in front, so no activity was started. Then every package that resolves a browsable `https` view is disabled with
+  `pm disable-user`, `open-link` answers `no_app`, and every package is enabled again (also by the script's cleanup on every way
+  out); the run fails when `pm list packages -d` after it differs from the list before it. It passed on the Android 17 image (API 37)
+  and on the Android 12 image (API 31), both arm64 emulators, on 24 November 2026.
+- **What it did not prove.** A real phone, a browser that a phone maker chose, a default browser or a chooser that a person set, a mail
+  app for `mailto` (the images have none), an address that a browser itself refuses, a link opened from the page in a running pane
+  (the run drives the opener, not a click), and any other image.
+
 ## Check a built APK
 
 ```sh
@@ -778,6 +813,7 @@ registry paths of the form `/cargo-home/registry/...`; whether those stay the sa
   all arm64): no Android 13, 14, 15 or 16 image, no phone maker's skin, and for the Android 12 image only the sections named above.
 - The hardware-keyboard rule of the key row, the two-finger pinch, and text composed by a real soft keyboard (Gboard): the emulator's
   input command cannot make them, so those checks are `not run`.
+- Opening a link on a real phone: the opener ran on two emulator images with the one browser they carry, never with a phone maker's browser, a default browser or a chooser, and never for `mailto` (the images have no mail app).
 - A real SSH server on a network: the SSH check reaches a throwaway OpenSSH server on this computer's loopback address through
   `adb reverse` (and once as `10.0.2.2` for the local-network permission), with one key. Password login to a server, other key types, a
   server that is slow or drops, and the local-network permission for a real address on a real network were not tried.
