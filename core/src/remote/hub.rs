@@ -1597,6 +1597,32 @@ mod tests {
     }
 
     #[test]
+    fn the_debug_of_a_subscription_says_that_it_holds_a_token_and_never_what_the_token_is() {
+        let token = ResumeToken::from_bytes([0xab; proto::RESUME_BYTES]);
+        let hex = token.to_hex();
+        let (tx, _rx) = mpsc::channel();
+        let sub = Sub {
+            id: 1,
+            session: 3,
+            tx,
+            queued: Arc::new(AtomicUsize::new(0)),
+            tail: None,
+            phase: Phase::Live { seq: 0 },
+            writer: WriterView::Writing,
+            attached_before: true,
+            streak: 0,
+            resume: Some(token),
+            epoch: Some(2),
+        };
+        let printed = format!("{sub:?} {:#?}", sub);
+        assert!(!printed.contains(hex.as_str()), "{printed}");
+        assert!(!printed.contains("abab"), "{printed}");
+        assert!(printed.contains("ResumeToken(..)"), "{printed}");
+        let none = Sub { resume: None, ..sub };
+        assert!(format!("{none:?}").contains("resume: None"));
+    }
+
+    #[test]
     fn the_beat_must_be_answered_within_ten_seconds_and_the_bound_is_clamped() {
         assert_eq!(HubOptions::default().beat_timeout, Duration::from_secs(10));
         assert_eq!(HubOptions::default().clamped().beat_timeout, Duration::from_secs(10));

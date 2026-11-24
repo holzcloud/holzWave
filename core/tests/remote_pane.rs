@@ -180,6 +180,24 @@ impl Session {
         wanted as u32
     }
 
+    /// Answers an attach by the fake's model of the server's rule for the right to write (see `Conn::answer_attach`): the writer
+    /// view follows the token the pane presented, not a view the test chooses. Returns the view it said.
+    fn serve_by_token(&mut self, conn: &mut Conn, request: &Request, default_tail: u32) -> WriterView {
+        let Op::Attach { session, tail, .. } = request.op else { panic!("an attach was expected, got {request:?}") };
+        let wanted = tail.unwrap_or(default_tail) as usize;
+        let rows = wanted.min(self.engine.scrollback_rows());
+        let snapshot = self.engine.snapshot_vt(rows, BOUND).expect("snapshot");
+        let (cols, grid_rows) = self.engine.size().expect("size");
+        let writer = conn.answer_attach(request, cols, grid_rows, snapshot.len() as u32);
+        let mut seq = 0;
+        for chunk in snapshot.chunks(16 * 1024) {
+            conn.snapshot(session, seq, chunk);
+            seq += 1;
+        }
+        self.next_seq = seq;
+        writer
+    }
+
     fn live(&mut self, conn: &mut Conn, session: u32, text: &str) {
         self.print(text);
         conn.live(session, self.next_seq, text.as_bytes());
@@ -529,7 +547,7 @@ fn after_a_resync_a_reconnect_and_older_lines_the_pane_holds_what_a_new_pane_wou
     // 1. A resync: the server says the pane was too slow. The answer is delayed so that the state can be read.
     conn.event(Event::Resync { session: 4 });
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(100), resume: None }, "the tail the pane last used");
+    assert_eq!(fake_device::untokened(&request.op), Op::Attach { session: 4, tail: Some(100), resume: None }, "the tail the pane last used");
     wait_for("the resyncing state", || pane.remote_view().is_some_and(|v| v.state == RemoteState::Resyncing));
     wait_text(&pane, NOTICE_RESYNCING);
     session.serve(&mut conn, &request, WriterView::Writing, 100);
@@ -551,7 +569,7 @@ fn after_a_resync_a_reconnect_and_older_lines_the_pane_holds_what_a_new_pane_wou
     let before = pane_snapshot(&pane, 1000).2;
     pane.load_older().unwrap();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(200), resume: None }, "the tail doubles");
+    assert_eq!(fake_device::untokened(&request.op), Op::Attach { session: 4, tail: Some(200), resume: None }, "the tail doubles");
     session.serve(&mut conn, &request, WriterView::Writing, 100);
     wait_for("older lines", || pane_snapshot(&pane, 1000).2 > before);
     wait_for("the state to end", || pane.remote_view().is_some_and(|v| v.state == RemoteState::None));
@@ -653,6 +671,115 @@ fn input_the_server_dropped_is_said_in_the_view_for_a_few_seconds_and_never_on_t
         std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(pane.remote_view().unwrap().state, RemoteState::None);
+}
+
+#[test]
+fn a_writing_pane_whose_connection_drops_and_is_accepted_again_with_its_token_is_writing_and_sends_what_is_typed() {
+    let device = FakeDevice::start();
+    let hub = hub_with(&device, fast());
+    let mut session = Session::new(80, 24);
+    session.print("writer$ ");
+    // The tile is the session's size: nothing to resize after an attach.
+    let (pane, probe) = start_pane(&hub, 4, (80, 24), None);
+    let mut conn = device.accept();
+    let request = conn.request();
+    assert_eq!(session.serve_by_token(&mut conn, &request, 100), WriterView::Writing);
+    wait_text(&pane, "writer$");
+    wait_for("writing", || pane.remote_view().is_some_and(|v| v.writer == WriterView::Writing && v.state == RemoteState::None));
+    pane.text("a".into()).unwrap();
+    assert_eq!(conn.drain(Duration::from_millis(300)), vec![Got::Input { session: 4, bytes: b"a".to_vec() }]);
+
+    // The connection is cut and made again: the hub presents the token of the answer before, and the right is kept.
+    conn.cut();
+    wait_state(&pane, |s| matches!(s, ConnState::Reconnecting { .. }));
+    session.print("\r\nafter the gap$ ");
+    let mut conn = device.accept();
+    let request = conn.request();
+    assert_eq!(request.op, Op::Attach { session: 4, tail: None, resume: Some(device.issued()[0].clone()) });
+    assert_eq!(session.serve_by_token(&mut conn, &request, 100), WriterView::Writing);
+    wait_text(&pane, "after the gap$");
+    wait_state(&pane, |s| *s == ConnState::Connected);
+    let view = pane.remote_view().unwrap();
+    assert_eq!((view.writer, view.state), (WriterView::Writing, RemoteState::None), "{view:?}");
+    // The size is the same, so none is sent again; what is typed after the gap is sent, with no takeover before it.
+    assert!(conn.request_within(Duration::from_millis(300)).is_none(), "no size and no takeover was sent");
+    pane.text("b".into()).unwrap();
+    assert_eq!(conn.drain(Duration::from_millis(300)), vec![Got::Input { session: 4, bytes: b"b".to_vec() }]);
+    assert_eq!(dropped(&pane), 0);
+    assert!(!not_sent(&pane));
+    assert!(probe.exits().is_empty());
+}
+
+#[test]
+fn a_resumed_writer_sends_the_size_of_its_tile_again_only_when_it_is_not_the_sessions() {
+    let device = FakeDevice::start();
+    let hub = hub_with(&device, fast());
+    let mut session = Session::new(80, 24);
+    session.print("created small$ ");
+    // The tile is bigger than the session, and the scripted server never changes the session's size.
+    let (pane, _probe) = start_pane(&hub, 4, (100, 30), None);
+    let mut conn = device.accept();
+    let request = conn.request();
+    session.serve_by_token(&mut conn, &request, 100);
+    let request = conn.request();
+    assert_eq!(request.op, Op::Resize { session: 4, cols: 100, rows: 30 });
+    wait_text(&pane, "created small$");
+
+    conn.cut();
+    let mut conn = device.accept();
+    let request = conn.request();
+    assert!(matches!(&request.op, Op::Attach { resume: Some(_), .. }));
+    assert_eq!(session.serve_by_token(&mut conn, &request, 100), WriterView::Writing);
+    let request = conn.request();
+    assert_eq!(request.op, Op::Resize { session: 4, cols: 100, rows: 30 }, "the tile still differs, so its size is sent again");
+    wait_for("writing", || pane.remote_view().is_some_and(|v| v.writer == WriterView::Writing));
+}
+
+#[test]
+fn with_a_wrong_or_no_token_the_fake_says_free_and_the_pane_says_free_drops_what_is_typed_and_waits_for_a_takeover() {
+    let device = FakeDevice::start();
+    let hub = hub_with(&device, fast());
+    let mut session = Session::new(80, 24);
+    session.print("writer$ ");
+    let (pane, _probe) = start_pane(&hub, 4, (80, 24), None);
+    let mut conn = device.accept();
+    let request = conn.request();
+    assert_eq!(session.serve_by_token(&mut conn, &request, 100), WriterView::Writing);
+    wait_text(&pane, "writer$");
+
+    // A wrong token: another device wrote while the connection was away, so the token of this one is no longer the writer's.
+    conn.cut();
+    device.set_writing(false);
+    session.print("\r\nafter the gap$ ");
+    let mut conn = device.accept();
+    let request = conn.request();
+    assert_eq!(session.serve_by_token(&mut conn, &request, 100), WriterView::Free);
+    wait_text(&pane, "after the gap$");
+    wait_for("free", || pane.remote_view().is_some_and(|v| v.writer == WriterView::Free && v.state == RemoteState::None));
+    pane.text("lost\r".into()).unwrap();
+    wait_for("the count", || dropped(&pane) >= 5);
+    assert!(not_sent(&pane), "typed while nobody writes leaves the state");
+    assert!(conn.drain(Duration::from_millis(300)).is_empty(), "nothing was sent");
+
+    // Taking over brings the right back, as before.
+    pane.takeover().unwrap();
+    let request = conn.request();
+    assert_eq!(request.op, Op::Takeover { session: 4 });
+    conn.answer(request.id, holzwave_core::remote::proto::Answer::Done);
+    conn.event(Event::Writer { session: 4, state: WriterView::Writing, epoch: 2 });
+    wait_for("writing", || pane.remote_view().is_some_and(|v| v.writer == WriterView::Writing));
+
+    // No token: a pane that is opened anew for the session is a new attachment, which has none to present and so is not the writer.
+    pane.close();
+    assert!(pane.join(Duration::from_secs(10)));
+    let (second, _probe) = start_pane(&hub, 4, (80, 24), None);
+    let request = conn.request_within(Duration::from_secs(3)).expect("the first pane detached");
+    assert_eq!(request.op, Op::Detach { session: 4 });
+    device.set_writing(true);
+    let request = conn.request();
+    assert_eq!(request.op, Op::Attach { session: 4, tail: None, resume: None }, "a new attachment presents no token");
+    assert_eq!(session.serve_by_token(&mut conn, &request, 100), WriterView::Free);
+    wait_for("free", || second.remote_view().is_some_and(|v| v.writer == WriterView::Free));
 }
 
 #[test]
@@ -857,7 +984,7 @@ fn older_lines_double_the_tail_keep_the_viewport_where_it_was_and_stop_when_the_
     // A second call while the request is on its way does nothing.
     pane.load_older().unwrap();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(200), resume: None });
+    assert_eq!(fake_device::untokened(&request.op), Op::Attach { session: 4, tail: Some(200), resume: None });
     wait_for("the loading state", || pane.remote_view().is_some_and(|v| v.state == RemoteState::LoadingOlder));
     wait_text(&pane, NOTICE_LOADING_OLDER);
     session.serve(&mut conn, &request, WriterView::Watching, 100);
@@ -873,7 +1000,7 @@ fn older_lines_double_the_tail_keep_the_viewport_where_it_was_and_stop_when_the_
         pane.load_older().unwrap();
         let request = conn.request();
         tail *= 2;
-        assert_eq!(request.op, Op::Attach { session: 4, tail: Some(tail), resume: None });
+        assert_eq!(fake_device::untokened(&request.op), Op::Attach { session: 4, tail: Some(tail), resume: None });
         session.serve(&mut conn, &request, WriterView::Watching, 100);
         wait_for("the state to end", || pane.remote_view().is_some_and(|v| v.state == RemoteState::None));
     }
@@ -890,7 +1017,7 @@ fn older_lines_that_a_lost_connection_cut_off_are_not_said_to_load_and_can_be_as
     let (pane, _probe, mut conn) = attached_pane(&device, &hub, 4, &mut session, WriterView::Writing, Some(100), "marker-end");
     pane.load_older().unwrap();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(200), resume: None });
+    assert_eq!(fake_device::untokened(&request.op), Op::Attach { session: 4, tail: Some(200), resume: None });
     wait_for("loading older", || pane.remote_view().is_some_and(|v| v.state == RemoteState::LoadingOlder));
     // The connection goes before the answer.
     conn.cut();
@@ -899,13 +1026,13 @@ fn older_lines_that_a_lost_connection_cut_off_are_not_said_to_load_and_can_be_as
     // The reconnect attaches with the longer tail; afterwards older lines can be asked for again.
     let mut conn = device.accept();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(200), resume: None });
+    assert_eq!(fake_device::untokened(&request.op), Op::Attach { session: 4, tail: Some(200), resume: None });
     session.serve(&mut conn, &request, WriterView::Writing, 100);
     wait_state(&pane, |s| *s == ConnState::Connected);
     wait_for("the state to end", || pane.remote_view().is_some_and(|v| v.state == RemoteState::None));
     pane.load_older().unwrap();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(400), resume: None });
+    assert_eq!(fake_device::untokened(&request.op), Op::Attach { session: 4, tail: Some(400), resume: None });
 }
 
 #[test]

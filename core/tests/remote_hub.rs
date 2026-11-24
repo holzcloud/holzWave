@@ -251,7 +251,8 @@ fn an_upgrade_a_proxy_answers_502_503_504_or_429_is_unreachable_and_tried_again(
         sub.handle().retry().unwrap();
         let mut conn = device.accept();
         let request = conn.request();
-        assert_eq!(request.op, Op::Attach { session: 3, tail: None, resume: None });
+        // The token of the attach before the failed tries is still held and presented.
+        assert!(matches!(request.op, Op::Attach { session: 3, tail: None, resume: Some(_) }), "{status}: {request:?}");
         conn.attached(request.id, 3, 80, 24, WriterView::Writing, false, 0);
         let events = events_until(&sub, |e| !e.is_empty());
         assert!(matches!(events[0], SubEvent::Attached { again: true, .. }), "{status}: {events:?}");
@@ -281,7 +282,7 @@ fn an_attach_delivers_the_grid_then_the_snapshot_chunks_in_order_then_the_live_c
     assert_eq!(
         events,
         vec![
-            SubEvent::Attached { cols: 100, rows: 30, writer: WriterView::Watching, more: true, snapshot: 9, again: false },
+            SubEvent::Attached { cols: 100, rows: 30, writer: WriterView::Watching, more: true, snapshot: 9, again: false, epoch: 1 },
             SubEvent::Snapshot(b"abc".to_vec()),
             SubEvent::Snapshot(b"defghi".to_vec()),
             SubEvent::Live(b"live-1".to_vec()),
@@ -413,7 +414,7 @@ fn a_reader_that_does_not_keep_up_is_attached_again_and_its_queue_never_passes_i
     }
     // The hub asks for a fresh attach instead of buffering.
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 3, tail: None, resume: None });
+    assert_eq!(fake_device::untokened(&request.op), Op::Attach { session: 3, tail: None, resume: None });
     let stats = hub.stats();
     assert!(stats.overflows >= 1, "{stats:?}");
     assert!(stats.queue_high_water <= bound as u64, "the queue passed its bound: {stats:?}");
@@ -582,15 +583,141 @@ fn a_lost_connection_is_made_again_with_a_fresh_token_and_every_subscription_is_
     assert_eq!(events, vec![SubEvent::Reconnecting { attempt: 1, of: 5, in_secs: 0 }]);
     let mut conn = device.accept();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 3, tail: Some(200), resume: None }, "the tail the last attach used");
+    assert_eq!(fake_device::untokened(&request.op), Op::Attach { session: 3, tail: Some(200), resume: None }, "the tail the last attach used");
     conn.attached(request.id, 3, 90, 25, WriterView::Free, false, 0);
     let events = events_until(&sub, |e| !e.is_empty());
-    assert_eq!(events, vec![SubEvent::Attached { cols: 90, rows: 25, writer: WriterView::Free, more: false, snapshot: 0, again: true }]);
+    assert_eq!(events, vec![SubEvent::Attached { cols: 90, rows: 25, writer: WriterView::Free, more: false, snapshot: 0, again: true, epoch: 1 }]);
     // The second connection carried another token than the first.
     let seen = device.seen();
     assert_eq!(seen.len(), 2);
     assert_ne!(seen[0].authorization, seen[1].authorization);
     assert_eq!(device.endpoint.handed().len(), 2);
+}
+
+/// The attach the hub is expected to send with `token` (the one of the answer before it), and no other.
+fn attach_with(session: u32, tail: Option<u32>, token: &proto::ResumeToken) -> Op {
+    Op::Attach { session, tail, resume: Some(token.clone()) }
+}
+
+#[test]
+fn every_attach_after_the_first_carries_the_token_of_the_answer_before_it_and_a_new_attach_after_a_detach_carries_none() {
+    let device = FakeDevice::start();
+    let hub = hub_with(&device, |o| o.reconnect = Reconnect { attempts: 5, delay: Duration::from_millis(50) });
+    let sub = hub.attach(3, Some(100));
+    let mut conn = device.accept();
+
+    // The first attach of a subscription has nothing to present.
+    let request = conn.request();
+    assert_eq!(request.op, Op::Attach { session: 3, tail: Some(100), resume: None });
+    assert_eq!(conn.answer_attach(&request, 80, 24, 0), WriterView::Writing);
+    events_until(&sub, |e| !e.is_empty());
+
+    // A fresh start the person asked for (older lines) presents the token of the first answer.
+    sub.handle().reattach(Some(200), Cause::Older).unwrap();
+    let request = conn.request();
+    assert_eq!(request.op, attach_with(3, Some(200), &device.issued()[0]), "older lines present the first token");
+    assert_eq!(conn.answer_attach(&request, 80, 24, 0), WriterView::Writing);
+    events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::Attached { again: true, .. })));
+
+    // A fresh start the reader needed (a resync) presents the second one, never the first again.
+    sub.handle().reattach(Some(200), Cause::Resync).unwrap();
+    let request = conn.request();
+    assert_eq!(request.op, attach_with(3, Some(200), &device.issued()[1]), "a resync presents the second token");
+    assert_eq!(conn.answer_attach(&request, 80, 24, 0), WriterView::Writing);
+    events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::Attached { again: true, .. })));
+
+    // A lost connection that is made again presents the third.
+    conn.cut();
+    let mut conn = device.accept();
+    let request = conn.request();
+    assert_eq!(request.op, attach_with(3, Some(200), &device.issued()[2]), "a reconnect presents the third token");
+    assert_eq!(conn.answer_attach(&request, 80, 24, 0), WriterView::Writing, "the right is kept for the token of the writer");
+    let events = events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::Attached { .. })));
+    assert!(
+        events.iter().any(|e| matches!(e, SubEvent::Attached { writer: WriterView::Writing, again: true, epoch: 1, .. })),
+        "{events:?}"
+    );
+
+    // A second reconnect after a connection that never answered the attach presents the token it still has: the fourth.
+    sub.handle().reattach(None, Cause::Resync).unwrap();
+    let request = conn.request();
+    assert_eq!(request.op, attach_with(3, None, &device.issued()[3]));
+    conn.cut();
+    let mut conn = device.accept();
+    let request = conn.request();
+    assert_eq!(request.op, attach_with(3, None, &device.issued()[3]), "no answer came, so the token is still the fourth");
+    conn.answer_attach(&request, 80, 24, 0);
+    events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::Attached { .. })));
+
+    // Leaving the session ends the subscription and its token with it: the next attach of the session is a first attach.
+    sub.handle().detach();
+    assert_eq!(conn.request().op, Op::Detach { session: 3 });
+    let again = hub.attach(3, Some(100));
+    let request = conn.request();
+    assert_eq!(request.op, Op::Attach { session: 3, tail: Some(100), resume: None }, "a new subscription carries no token");
+    conn.answer_attach(&request, 80, 24, 0);
+    events_until(&again, |e| e.iter().any(|e| matches!(e, SubEvent::Attached { again: false, .. })));
+    // Every attach the fake answered: none, then the token of the answer before it each time, and none again for the new one.
+    let issued = device.issued();
+    let presented = device.presented();
+    assert_eq!(presented.len(), 6);
+    assert_eq!(presented[0], None);
+    for (k, token) in presented[1..5].iter().enumerate() {
+        assert_eq!(token.as_ref(), Some(&issued[k]), "attach {}", k + 1);
+    }
+    assert_eq!(presented[5], None);
+}
+
+#[test]
+fn a_reconnect_with_a_wrong_or_no_token_is_free_and_the_view_of_the_subscription_says_so() {
+    let device = FakeDevice::start();
+    let hub = hub_with(&device, |o| o.reconnect = Reconnect { attempts: 5, delay: Duration::from_millis(50) });
+    let sub = hub.attach(3, None);
+    let mut conn = device.accept();
+    let request = conn.request();
+    conn.answer_attach(&request, 80, 24, 0);
+    events_until(&sub, |e| !e.is_empty());
+    // Another device took the right while the connection was away: the token alone does not bring it back.
+    conn.cut();
+    device.set_writing(false);
+    let mut conn = device.accept();
+    let request = conn.request();
+    assert_eq!(request.op, attach_with(3, None, &device.issued()[0]));
+    assert_eq!(conn.answer_attach(&request, 80, 24, 0), WriterView::Free);
+    let events = events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::Attached { .. })));
+    assert!(events.iter().any(|e| matches!(e, SubEvent::Attached { writer: WriterView::Free, again: true, .. })), "{events:?}");
+}
+
+#[test]
+fn nothing_a_hub_a_subscription_or_its_handle_prints_holds_a_resume_token() {
+    let device = FakeDevice::start();
+    let hub = plain_hub(&device);
+    let sub = hub.attach(3, None);
+    let mut conn = device.accept();
+    let request = conn.request();
+    conn.answer_attach(&request, 80, 24, 4);
+    conn.snapshot(3, 0, b"snap");
+    let mut everything = String::new();
+    for event in events_until(&sub, |e| e.len() >= 2) {
+        everything.push_str(&format!("{event:?}"));
+    }
+    // A second answer replaces the first token: both are looked for, whatever the hub still holds.
+    sub.handle().reattach(None, Cause::Resync).unwrap();
+    let request = conn.request();
+    assert!(matches!(&request.op, Op::Attach { resume: Some(_), .. }));
+    everything.push_str(&format!("{request:?}"));
+    conn.answer_attach(&request, 80, 24, 0);
+    for event in events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::Attached { .. }))) {
+        everything.push_str(&format!("{event:?}"));
+    }
+    everything.push_str(&format!("{hub:?} {:?} {:?}", sub.handle(), hub.stats()));
+    let issued = device.issued();
+    assert_eq!(issued.len(), 2);
+    for token in &issued {
+        let hex = token.to_hex();
+        assert!(!everything.contains(hex.as_str()), "a token's hex is in a printed value: {everything}");
+    }
+    assert!(everything.contains("ResumeToken(..)"), "the request prints the marker: {everything}");
 }
 
 #[test]
@@ -629,7 +756,7 @@ fn the_state_says_five_tries_three_seconds_apart_and_then_gives_up_and_waits_for
     sub.handle().retry().unwrap();
     let mut conn = device.accept();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 3, tail: None, resume: None });
+    assert_eq!(fake_device::untokened(&request.op), Op::Attach { session: 3, tail: None, resume: None });
     conn.attached(request.id, 3, 80, 24, WriterView::Writing, false, 0);
     let events = events_until(&sub, |e| !e.is_empty());
     assert!(matches!(events[0], SubEvent::Attached { again: true, .. }), "{events:?}");
@@ -663,7 +790,7 @@ fn after_the_tries_are_used_a_call_tries_once_and_on_success_the_waiting_pane_is
     let call = std::thread::spawn(move || h.list());
     let mut conn = device.accept();
     let attach = conn.request();
-    assert_eq!(attach.op, Op::Attach { session: 3, tail: None, resume: None });
+    assert_eq!(fake_device::untokened(&attach.op), Op::Attach { session: 3, tail: None, resume: None });
     let list = conn.request();
     assert_eq!(list.op, Op::List);
     conn.attached(attach.id, 3, 80, 24, WriterView::Writing, false, 0);
@@ -742,7 +869,7 @@ fn a_close_code_of_a_revoked_token_is_final_and_is_not_tried_again_but_a_busy_se
     assert!(matches!(events[0], SubEvent::Reconnecting { attempt: 1, .. }), "{events:?}");
     let mut conn = device.accept();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 3, tail: None, resume: None });
+    assert_eq!(fake_device::untokened(&request.op), Op::Attach { session: 3, tail: None, resume: None });
 }
 
 /// The silence bound of the tests below, and how much later than the bound the hub may notice it.
@@ -776,7 +903,7 @@ fn a_connection_that_stays_open_and_passes_nothing_is_dropped_after_the_silence_
     // The next try finds the server, and the stream is attached again from a fresh snapshot.
     let mut conn = device.accept();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 3, tail: None, resume: None });
+    assert_eq!(fake_device::untokened(&request.op), Op::Attach { session: 3, tail: None, resume: None });
     conn.attached(request.id, 3, 80, 24, WriterView::Writing, false, 0);
     let events = events_until(&sub, |e| !e.is_empty());
     assert!(matches!(events[0], SubEvent::Attached { again: true, .. }), "{events:?}");
@@ -843,7 +970,7 @@ fn a_beat_the_server_never_answers_ends_the_link_within_the_beat_and_its_timeout
     drop(conn);
     let mut conn = device.accept();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 3, tail: None, resume: None });
+    assert_eq!(fake_device::untokened(&request.op), Op::Attach { session: 3, tail: None, resume: None });
     conn.attached(request.id, 3, 80, 24, WriterView::Writing, false, 0);
     let events = events_until(&sub, |e| !e.is_empty());
     assert!(matches!(events[0], SubEvent::Attached { again: true, .. }), "{events:?}");
@@ -922,7 +1049,7 @@ fn disconnect_ends_every_subscription_as_signed_out_and_a_new_attach_connects_ag
     let again = hub.attach(3, None);
     let mut conn = device.accept();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 3, tail: None, resume: None });
+    assert_eq!(fake_device::untokened(&request.op), Op::Attach { session: 3, tail: None, resume: None });
     conn.attached(request.id, 3, 80, 24, WriterView::Writing, false, 0);
     let events = events_until(&again, |e| !e.is_empty());
     assert!(matches!(events[0], SubEvent::Attached { again: false, .. }));

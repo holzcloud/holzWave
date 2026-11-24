@@ -75,12 +75,27 @@ impl Endpoint for FakeEndpoint {
     }
 }
 
+/// The fake's model of the server's rule for the right to write, shared by every connection of one [`FakeDevice`]: one session
+/// whose writer is the device, a token given with every attach answer, and what every attach presented.
+#[derive(Default)]
+struct Lease {
+    /// Whether the device holds the right (the fake starts with the device holding it, as the app that made the session does).
+    writing: bool,
+    /// The token of the last answer: the only one that is good for a resume.
+    current: Option<ResumeToken>,
+    /// Every token that was handed out, in order.
+    issued: Vec<ResumeToken>,
+    /// What every attach carried, in order.
+    presented: Vec<Option<ResumeToken>>,
+}
+
 /// A listener that plays a server.
 pub struct FakeDevice {
     listener: TcpListener,
     pub addr: SocketAddr,
     pub endpoint: Arc<FakeEndpoint>,
     seen: Arc<Mutex<Vec<Seen>>>,
+    lease: Arc<Mutex<Lease>>,
 }
 
 impl FakeDevice {
@@ -96,7 +111,24 @@ impl FakeDevice {
             signed_out: Mutex::new(false),
             refusals: AtomicU64::new(0),
         });
-        FakeDevice { listener, addr, endpoint, seen: Arc::new(Mutex::new(Vec::new())) }
+        let lease = Lease { writing: true, ..Lease::default() };
+        FakeDevice { listener, addr, endpoint, seen: Arc::new(Mutex::new(Vec::new())), lease: Arc::new(Mutex::new(lease)) }
+    }
+
+    /// Every resume token the fake handed out, in order. The tests keep them to compare with what the client sends and to search
+    /// what it prints; nothing of them is printed here.
+    pub fn issued(&self) -> Vec<ResumeToken> {
+        self.lease.lock().unwrap().issued.clone()
+    }
+
+    /// What every attach the fake answered with [`Conn::answer_attach`] carried, in order.
+    pub fn presented(&self) -> Vec<Option<ResumeToken>> {
+        self.lease.lock().unwrap().presented.clone()
+    }
+
+    /// Gives the right to write to another device, or back: what a takeover does on the server.
+    pub fn set_writing(&self, writing: bool) {
+        self.lease.lock().unwrap().writing = writing;
     }
 
     /// What every upgrade request carried, in the order they came.
@@ -137,7 +169,7 @@ impl FakeDevice {
             Ok(response)
         })
         .ok()?;
-        Some(Conn { ws })
+        Some(Conn { ws, lease: self.lease.clone() })
     }
 
     /// Accepts the next connection and upgrades it, or fails the test.
@@ -207,6 +239,7 @@ pub enum Got {
 /// One upgraded connection, seen from the server's side.
 pub struct Conn {
     ws: WebSocket<TcpStream>,
+    lease: Arc<Mutex<Lease>>,
 }
 
 impl Conn {
@@ -291,6 +324,31 @@ impl Conn {
         self.answer(id, Answer::Attached { session, cols, rows, writer, more, snapshot, resume, epoch: 1 });
     }
 
+    /// Answers an attach the way the server's rule does: the writer view is `Writing` only for a device that holds the right and
+    /// either presents the token of the last answer or has attached nothing before (the app that made the session); a wrong or
+    /// absent token on a later attach answers `Free`. Every answer carries a fresh token, which replaces the one before it, and
+    /// the epoch 1. The snapshot is not sent: the test sends it. Returns the writer view it said.
+    pub fn answer_attach(&mut self, request: &Request, cols: u16, rows: u16, snapshot: u32) -> WriterView {
+        let Op::Attach { session, resume, .. } = &request.op else { panic!("an attach was expected, got {request:?}") };
+        let fresh = ResumeToken::generate().expect("random bytes");
+        let writer = {
+            let mut lease = self.lease.lock().unwrap();
+            let good = match (resume, &lease.current) {
+                (Some(presented), Some(current)) => presented == current,
+                (None, None) => true,
+                _ => false,
+            };
+            let writer = if lease.writing && good { WriterView::Writing } else { WriterView::Free };
+            lease.writing = writer == WriterView::Writing;
+            lease.presented.push(resume.clone());
+            lease.current = Some(fresh.clone());
+            lease.issued.push(fresh.clone());
+            writer
+        };
+        self.answer(request.id, Answer::Attached { session: *session, cols, rows, writer, more: false, snapshot, resume: fresh, epoch: 1 });
+        writer
+    }
+
     pub fn event(&mut self, event: Event) {
         self.send(Message::text(Reply::Event(event).encode()));
     }
@@ -337,6 +395,15 @@ impl Conn {
     /// Drops the connection without a close frame, as a network that failed does.
     pub fn cut(self) {
         let _ = self.ws.get_ref().shutdown(std::net::Shutdown::Both);
+    }
+}
+
+/// An operation with the resume token of an attach taken out, for the tests whose subject is not the token: an attach after the
+/// first one of a subscription carries the token of the answer before it.
+pub fn untokened(op: &Op) -> Op {
+    match op {
+        Op::Attach { session, tail, .. } => Op::Attach { session: *session, tail: *tail, resume: None },
+        other => other.clone(),
     }
 }
 

@@ -429,8 +429,9 @@ twice the ping time and the 10 seconds of its beat) treats it as broken too. The
 on a server that still does not answer. What a pane cannot send (while it attaches, reconnects, has no try left, watches or nobody writes) is not
 sent and not kept, and its header says `Not sent` from the first such key until the pane sends typed bytes again. Keys typed in the seconds before
 the app notices that the network went silent were handed to a connection that looked alive; they are lost without that cue. On its side the server
-closes a socket that was silent for `limits.ws_silence` with the close code 1001. While the link was silent the server may have given
-the right to write away after its own 30 seconds, so the pane can come back `FREE`; `Take over` takes the right back. A reverse proxy that answers the upgrade with 502, 503 or 504 (the
+closes a socket that was silent for `limits.ws_silence` with the close code 1001. When the app is back within the 30 seconds, the pane
+writes again without `Take over`: the app presents the token of its last attach and keeps it only in memory. After a longer loss the right
+is free, the pane says `FREE` and `Take over` takes it back. A reverse proxy that answers the upgrade with 502, 503 or 504 (the
 server is restarting or gone), and a 429, are read as a server that cannot be reached and are tried again the same way; any
 other refusal of the upgrade is final and is not tried again.
 
