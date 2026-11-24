@@ -899,6 +899,204 @@ fn a_takeover_by_another_attachment_ends_the_suspension_of_a_holder_and_its_toke
     assert_eq!(host.list()[0].attached, 2);
 }
 
+// ---- numbered input ----------------------------------------------------------------------------------------------------------
+
+#[test]
+fn numbered_input_is_applied_in_order_a_repeat_is_acked_again_and_a_gap_is_marked_once() {
+    // No echo of the terminal: whatever comes back was written by `cat`, so it reached the program.
+    let programs = Programs::new("stty -echo; cat");
+    let host = host_of(&programs);
+    let writer = Rec::new();
+    let id = started(&host, &writer);
+    let attached = attach(&host, 1, &writer, id, None).expect("attach");
+    assert_eq!(attached.next, 1, "a new attachment starts at 1");
+    let epoch = attached.epoch;
+    std::thread::sleep(Duration::from_millis(300)); // `stty` has run
+
+    for (seq, line) in [(1, "one\n"), (2, "two\n"), (3, "three\n")] {
+        assert_eq!(host.input_seq(1, id, epoch, seq, line.as_bytes()), Ok(Input::Accepted));
+    }
+    assert_eq!(writer.acks(), vec![(1, false), (2, false), (3, false)]);
+
+    // Frame 2 again: not applied, answered with the last number that was.
+    assert_eq!(host.input_seq(1, id, epoch, 2, b"two-again\n"), Ok(Input::Dropped));
+    assert_eq!(writer.acks().last(), Some(&(3, false)));
+    assert_eq!(writer.acks().len(), 4);
+
+    // Frame 5 while 4 is missing: not applied, answered with 3 and the gap flag; the gap is said once, not for every frame.
+    assert_eq!(host.input_seq(1, id, epoch, 5, b"five-too-early\n"), Ok(Input::Dropped));
+    assert_eq!(writer.acks().last(), Some(&(3, true)));
+    assert_eq!(host.input_seq(1, id, epoch, 6, b"six-too-early\n"), Ok(Input::Dropped));
+    assert_eq!(writer.acks().len(), 5, "the gap was told already");
+
+    // The sender goes on from 4: both are applied and acknowledged, and so is the next one.
+    for (seq, line) in [(4, "four\n"), (5, "five\n"), (6, "six\n")] {
+        assert_eq!(host.input_seq(1, id, epoch, seq, line.as_bytes()), Ok(Input::Accepted));
+    }
+    assert_eq!(&writer.acks()[5..], &[(4, false), (5, false), (6, false)]);
+    // A frame number of 0 is no frame of this attachment.
+    assert_eq!(host.input_seq(1, id, epoch, 0, b"zero\n"), Ok(Input::Dropped));
+    assert_eq!(writer.acks().len(), 8);
+
+    until("the program shows the six lines", || writer.live_text().contains("six"));
+    let text = writer.live_text();
+    let at = |word: &str| text.match_indices(word).map(|(at, _)| at).collect::<Vec<_>>();
+    let order: Vec<usize> = ["one", "two", "three", "four", "five", "six"]
+        .iter()
+        .map(|word| {
+            let found = at(word);
+            assert_eq!(found.len(), 1, "{word} reached the program once: {text:?}");
+            found[0]
+        })
+        .collect();
+    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "in order: {text:?}");
+    for never in ["two-again", "too-early", "zero"] {
+        assert!(!text.contains(never), "{never} never reached the program: {text:?}");
+    }
+    // An unknown session is not found; a client the host does not know is dropped without an answer.
+    assert_eq!(host.input_seq(1, id + 40, epoch, 7, b"x"), Err(SesError::NotFound));
+    assert_eq!(host.input_seq(77, id, epoch, 7, b"x"), Ok(Input::Dropped));
+    assert_eq!(host.input_seq(1, id, epoch, 7, &vec![b'x'; 70_000]), Err(SesError::BadRequest));
+    assert_eq!(writer.acks().len(), 8, "none of those was acknowledged");
+}
+
+#[test]
+fn numbered_input_under_an_old_epoch_never_reaches_the_program_after_a_takeover() {
+    let programs = Programs::new("stty -echo; cat");
+    let host = host_of(&programs);
+    let (a, b) = (Rec::new(), Rec::new());
+    let id = started(&host, &a);
+    let first = attach(&host, 1, &a, id, None).expect("attach");
+    let second = attach(&host, 2, &b, id, None).expect("attach");
+    assert_eq!(second.writer, WriterState::Watching);
+    std::thread::sleep(Duration::from_millis(300)); // `stty` has run
+
+    assert_eq!(host.input_seq(1, id, first.epoch, 1, b"a-before\n"), Ok(Input::Accepted));
+    assert_eq!(a.acks(), vec![(1, false)]);
+
+    host.takeover(2, id).expect("takeover");
+    let now = *b.epochs().last().expect("the takeover told the epoch");
+    assert_ne!(now, first.epoch);
+
+    // A's frame of the old epoch, which it wrote before it heard of the takeover, and one under the new epoch from a client that
+    // does not hold the right: neither reaches the program, nobody is told.
+    assert_eq!(host.input_seq(1, id, first.epoch, 2, b"a-late\n"), Ok(Input::Dropped));
+    assert_eq!(host.input_seq(1, id, now, 3, b"a-claims-the-new-epoch\n"), Ok(Input::Dropped));
+    assert_eq!(a.acks(), vec![(1, false)], "no answer for a frame that was not applied");
+    // B's frame under the old epoch is stale too; its frame under the new epoch is applied, from its own number 1... which the
+    // stale frame used up, so the number after it is 2.
+    assert_eq!(host.input_seq(2, id, first.epoch, 1, b"b-stale\n"), Ok(Input::Dropped));
+    assert!(b.acks().is_empty());
+    assert_eq!(host.input_seq(2, id, now, 2, b"b-now\n"), Ok(Input::Accepted));
+    assert_eq!(b.acks(), vec![(2, false)]);
+
+    until("B's line comes back", || a.live_text().contains("b-now"));
+    std::thread::sleep(Duration::from_millis(300));
+    let text = a.live_text();
+    assert!(text.contains("a-before"), "{text:?}");
+    for never in ["a-late", "a-claims", "b-stale"] {
+        assert!(!text.contains(never), "{never} never reached the program: {text:?}");
+    }
+}
+
+#[test]
+fn numbered_input_of_a_watcher_is_dropped_without_an_answer() {
+    let programs = Programs::new("stty -echo; cat");
+    let host = host_of(&programs);
+    let (writer, watcher) = (Rec::new(), Rec::new());
+    let id = started(&host, &writer);
+    let held = attach(&host, 1, &writer, id, None).expect("attach");
+    let seen = attach(&host, 2, &watcher, id, None).expect("attach");
+    assert_eq!(seen.writer, WriterState::Watching);
+    std::thread::sleep(Duration::from_millis(300)); // `stty` has run
+
+    // Even under the epoch that is current, and with the number that is next.
+    assert_eq!(host.input_seq(2, id, seen.epoch, 1, b"from-the-watcher\n"), Ok(Input::Dropped));
+    assert_eq!(host.input_seq(1, id, held.epoch, 1, b"from-the-writer\n"), Ok(Input::Accepted));
+    assert!(watcher.acks().is_empty(), "the watcher is told nothing");
+    assert_eq!(writer.acks(), vec![(1, false)]);
+    until("the writer's line comes back", || writer.live_text().contains("from-the-writer"));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!writer.live_text().contains("from-the-watcher"));
+    assert!(!watcher.live_text().contains("from-the-watcher"));
+}
+
+#[test]
+fn a_resumed_attachment_goes_on_with_its_numbers_and_its_paste_and_a_repeated_frame_is_not_applied() {
+    // Raw mode, no echo, and `cat -v` after a second: what the program got, with the escapes made visible.
+    let programs = Programs::new("stty raw -echo; sleep 1; exec cat -v");
+    let clock = ManualClock::new();
+    let host = SessionHost::start(programs.clone(), HostSettings::default(), clock.clone());
+    let lost = Rec::new();
+    let id = started(&host, &lost);
+    let first = attach(&host, 1, &lost, id, None).expect("attach");
+    assert_eq!(first.next, 1);
+    std::thread::sleep(Duration::from_millis(300)); // `stty` has run
+
+    // Seven frames are applied; the seventh begins a bracketed paste. Then the socket is lost.
+    for (seq, byte) in (1u32..=6).zip(*b"abcdef") {
+        assert_eq!(host.input_seq(1, id, first.epoch, seq, &[byte]), Ok(Input::Accepted));
+    }
+    assert_eq!(host.input_seq(1, id, first.epoch, 7, b"\x1b[200~first-half-"), Ok(Input::Accepted));
+    assert_eq!(lost.acks().len(), 7);
+    clock.set(5_000);
+    host.gone(1);
+
+    // The attachment comes back with its token on another socket: the answer says which number is next, the epoch is the same.
+    clock.set(10_000);
+    let back = Rec::new();
+    let resumed = attach_with(&host, 3, &back, id, Some(&first.resume)).expect("attach with the token");
+    assert_eq!(resumed.next, 8);
+    assert_eq!(resumed.epoch, first.epoch);
+    assert_eq!(resumed.writer, WriterState::Writing);
+
+    // Frames 6 and 7 sent again are acknowledged with 7 and not applied; 8 is applied and ends the paste.
+    assert_eq!(host.input_seq(3, id, resumed.epoch, 6, b"XX"), Ok(Input::Dropped));
+    assert_eq!(host.input_seq(3, id, resumed.epoch, 7, b"\x1b[200~YY"), Ok(Input::Dropped));
+    assert_eq!(back.acks(), vec![(7, false), (7, false)]);
+    assert_eq!(host.input_seq(3, id, resumed.epoch, 8, b"second-half\x1b[201~"), Ok(Input::Accepted));
+    assert_eq!(back.acks().last(), Some(&(8, false)));
+
+    until("the program shows the paste", || back.live_text().contains("^[[200~first-half-second-half^[[201~"));
+    let text = back.live_text();
+    assert!(text.contains("abcdef"), "frames 1 to 6 once, in order: {text:?}");
+    assert_eq!(text.matches("abcdef").count(), 1);
+    assert_eq!(text.matches("^[[200~").count(), 1, "one start marker: {text:?}");
+    assert!(!text.contains("XX") && !text.contains("YY"), "a repeated frame was not applied: {text:?}");
+}
+
+#[test]
+fn an_applied_frame_that_the_backlog_drops_is_still_acknowledged_and_the_answer_of_the_rule_is_the_same() {
+    // Raw mode, no echo, and a program that never reads: everything typed waits in the pane.
+    let programs = Programs::new("stty raw -echo; exec sleep 600");
+    let clock = ManualClock::new();
+    let host = SessionHost::start(programs.clone(), HostSettings::default(), clock.clone());
+    let writer = Rec::new();
+    let id = started(&host, &writer);
+    let attached = attach(&host, 1, &writer, id, Some(0)).expect("attach");
+    std::thread::sleep(Duration::from_millis(300)); // `stty` has run
+    let chunk = vec![b'x'; MAX_INPUT_BYTES];
+    let frames = 2 * MAX_RAW_BACKLOG / MAX_INPUT_BYTES + 8;
+    let mut answers = Vec::new();
+    for seq in 1..=frames as u32 {
+        answers.push(host.input_seq(1, id, attached.epoch, seq, &chunk));
+    }
+    // The same answers as for unnumbered input: told once while the clock stands still, the rest dropped quietly.
+    let busy = answers.iter().filter(|a| **a == Err(SesError::Busy)).count();
+    assert_eq!(busy, 1, "told once: {answers:?}");
+    let first_busy = answers.iter().position(|a| *a == Err(SesError::Busy)).expect("told");
+    assert!(answers[..first_busy].iter().all(|a| *a == Ok(Input::Accepted)), "what fits is taken first");
+    assert!(answers[first_busy + 1..].iter().all(|a| *a == Ok(Input::Dropped)), "{answers:?}");
+    // Every one of them was applied as a frame, so every one is acknowledged, in order, with no gap.
+    let acks = writer.acks();
+    assert_eq!(acks.len(), frames);
+    assert!(acks.iter().enumerate().all(|(at, ack)| *ack == (at as u32 + 1, false)), "{acks:?}");
+    // A second later the writer is told again, and the frame is acknowledged as well.
+    clock.set(DROPPED_NOTE_MS);
+    assert_eq!(host.input_seq(1, id, attached.epoch, frames as u32 + 1, &chunk), Err(SesError::Busy));
+    assert_eq!(writer.acks().last(), Some(&(frames as u32 + 1, false)));
+}
+
 // ---- the end of a program --------------------------------------------------------------------------------------------------------------
 
 #[test]
