@@ -1997,4 +1997,131 @@ mod tests {
         // The bound is longer than the beat, so an attached client that hears its beats answered is never taken for dead.
         assert!(defaults.silence > defaults.beat * 2);
     }
+
+    // ---- the buffer of typed input ---------------------------------------------------------------------------------------
+
+    /// Runs `run` and hands back the frames that were wiped meanwhile, still in memory, so that their bytes can be looked at.
+    fn observe(run: impl FnOnce()) -> Vec<Kept> {
+        WIPED.with(|list| *list.borrow_mut() = Some(Vec::new()));
+        run();
+        WIPED.with(|list| list.borrow_mut().take()).expect("the capture was set")
+    }
+
+    fn is_zeroizing(_: &Zeroizing<Vec<u8>>) {}
+
+    /// A buffer that holds three frames of known bytes that are not zero.
+    fn loaded(now: Instant) -> (Keep, Vec<usize>) {
+        let mut keep = Keep::default();
+        let typed: [&[u8]; 3] = [b"hunter2", b"correct horse battery staple", b"\x03\x1b[A\r"];
+        for (i, bytes) in typed.iter().enumerate() {
+            assert!(keep.push(i as u32 + 1, 4, now, bytes));
+        }
+        (keep, typed.iter().map(|b| b.len()).collect())
+    }
+
+    fn assert_wiped(frames: &[Kept], lengths: &[usize]) {
+        assert_eq!(frames.len(), lengths.len());
+        for (frame, len) in frames.iter().zip(lengths) {
+            assert_eq!(frame.bytes.len(), *len, "the wipe keeps the length, so that the bytes can be looked at");
+            assert!(frame.bytes.iter().all(|b| *b == 0), "a frame was freed with its bytes still in it: {frame:?}");
+        }
+    }
+
+    #[test]
+    fn a_discarded_frame_is_wiped_in_place_before_it_is_freed() {
+        let now = Instant::now();
+        // The buffer's element and the frame of the send path are both buffers that are wiped when they are dropped.
+        let (probe, _) = loaded(now);
+        is_zeroizing(&probe.frames[0].bytes);
+        let encoded = proto::encode_input_zeroizing(3, 4, 1, b"hunter2").expect("encodes");
+        is_zeroizing(&encoded);
+        assert_eq!(encoded.as_slice(), proto::encode_input(3, 4, 1, b"hunter2").expect("encodes").as_slice());
+        drop(probe);
+
+        // Confirmed by the server: the first two are wiped, the third stays.
+        let (mut keep, lengths) = loaded(now);
+        let wiped = observe(|| assert_eq!(keep.confirm_through(2), lengths[0] + lengths[1]));
+        assert_wiped(&wiped, &lengths[..2]);
+        assert_eq!(keep.frames.len(), 1);
+        assert!(keep.frames[0].bytes.iter().any(|b| *b != 0), "what was not confirmed is still held");
+
+        // Too old: every frame goes through the same function (what comes after a frame that was left out is not sent either).
+        let (mut keep, lengths) = loaded(now);
+        let wiped = observe(|| assert_eq!(keep.expire(now + KEEP_AGE, KEEP_AGE), lengths.iter().sum::<usize>()));
+        assert_wiped(&wiped, &lengths);
+        assert!(keep.is_empty());
+
+        // Not resumed (another epoch, watching, free, no try left): dropped whole.
+        let (mut keep, lengths) = loaded(now);
+        let wiped = observe(|| assert_eq!(keep.clear(), lengths.iter().sum::<usize>()));
+        assert_wiped(&wiped, &lengths);
+
+        // The subscription ends: the buffer's drop is the same function.
+        let (keep, lengths) = loaded(now);
+        let wiped = observe(|| drop(keep));
+        assert_wiped(&wiped, &lengths);
+    }
+
+    #[test]
+    fn the_buffer_holds_at_most_64_kib_none_older_than_the_bound_and_keeps_only_a_start_of_what_was_typed() {
+        let now = Instant::now();
+        let mut keep = Keep::default();
+        assert!(keep.push(1, 1, now, &vec![b'a'; KEEP_BYTES]), "exactly 64 KiB fits");
+        assert!(!keep.push(2, 1, now, b"x"), "one byte more does not");
+        assert!(!keep.push(3, 1, now, b""), "nothing is kept after a write that did not fit, even a small one");
+        assert_eq!((keep.frames.len(), keep.bytes), (1, KEEP_BYTES));
+        // Once the server confirms what is held, the buffer takes keys again.
+        keep.confirm_through(1);
+        assert!(keep.push(2, 1, now, b"x"));
+        // Older than the bound: everything goes, and a younger frame behind the old one does not survive it.
+        assert!(keep.push(3, 1, now + Duration::from_secs(20), b"y"));
+        assert_eq!(keep.expire(now + Duration::from_secs(29), KEEP_AGE), 0);
+        assert_eq!(keep.expire(now + Duration::from_secs(30), KEEP_AGE), 2);
+        assert!(keep.is_empty() && keep.bytes == 0);
+        // The epoch of what is kept is one or none.
+        assert_eq!(keep.uniform_epoch(), None);
+        assert!(keep.push(4, 2, now, b"a") && keep.push(5, 2, now, b"b"));
+        assert_eq!(keep.uniform_epoch(), Some(2));
+        assert!(keep.push(6, 3, now, b"c"));
+        assert_eq!(keep.uniform_epoch(), None);
+        assert_eq!((keep.first_seq(), keep.last_seq()), (Some(4), Some(6)));
+    }
+
+    #[test]
+    fn nothing_a_buffer_a_frame_or_a_subscription_prints_holds_a_typed_byte() {
+        let now = Instant::now();
+        let (keep, _) = loaded(now);
+        let (tx, _rx) = mpsc::channel();
+        let sub = Sub {
+            id: 1,
+            session: 3,
+            tx,
+            queued: Arc::new(AtomicUsize::new(0)),
+            tail: None,
+            phase: Phase::Live { seq: 0 },
+            writer: WriterView::Writing,
+            attached_before: true,
+            streak: 0,
+            resume: None,
+            epoch: Some(4),
+            next_seq: 4,
+            keep,
+        };
+        let printed = format!("{sub:?} {sub:#?} {:?} {:?}", sub.keep, sub.keep.frames[0]);
+        for secret in ["hunter2", "correct", "staple", "104, 117", "104,117", "0x68"] {
+            assert!(!printed.contains(secret), "{printed}");
+        }
+        assert!(printed.contains("frames: 3"), "{printed}");
+        let event = SubEvent::NotSent { bytes: 7 };
+        assert_eq!(format!("{event:?}"), "NotSent { bytes: 7 }");
+    }
+
+    #[test]
+    fn the_age_bound_of_the_options_is_clamped_to_30_seconds() {
+        assert_eq!(HubOptions::default().input_keep_age, Duration::from_secs(30));
+        let with = |age: Duration| HubOptions { input_keep_age: age, ..HubOptions::default() }.clamped().input_keep_age;
+        assert_eq!(with(Duration::ZERO), Duration::from_millis(10));
+        assert_eq!(with(Duration::from_millis(300)), Duration::from_millis(300));
+        assert_eq!(with(Duration::from_secs(3600)), Duration::from_secs(30), "a caller cannot keep typed bytes longer than 30 seconds");
+    }
 }

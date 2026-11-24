@@ -10,7 +10,10 @@
 //!   allocates nothing beyond the bounds and never makes the client panic;
 //! - a client that does not read is attached again from a fresh snapshot and its queue never passes its bound;
 //! - the beat, the reconnect with a fresh token and the final faults;
-//! - a connection that stays open and passes nothing is dropped after the silence bound, and pings alone keep it.
+//! - a connection that stays open and passes nothing is dropped after the silence bound, and pings alone keep it;
+//! - typed input is numbered, kept until the server acknowledges it and sent again once when the same writer is back: its bounds
+//!   (64 KiB, 30 seconds), the acknowledgements and the reports of a gap, and the rule that only the same epoch and a writing
+//!   view replay.
 
 #[path = "support/fake_device.rs"]
 mod fake_device;
@@ -1117,4 +1120,285 @@ fn a_chunk_is_never_more_than_the_vocabulary_allows_and_the_stats_count_what_was
     let bytes: usize = events.iter().map(|e| if let SubEvent::Snapshot(b) = e { b.len() } else { 0 }).sum();
     assert_eq!(bytes, total as usize);
     assert_eq!(hub.stats().bytes_delivered, u64::from(total));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Typed input: numbered, kept until acknowledged, replayed once when the same writer is back
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Waits until the hub holds exactly `bytes` of typed input.
+fn wait_kept(hub: &Hub, bytes: u64) {
+    let deadline = Instant::now() + PATIENCE;
+    while hub.stats().kept_input_bytes != bytes {
+        assert!(Instant::now() < deadline, "the hub holds {} bytes, not {bytes}", hub.stats().kept_input_bytes);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The typed bytes of the input frames among `got`, in order.
+fn typed(got: &[Got]) -> Vec<Vec<u8>> {
+    got.iter().filter_map(|g| if let Got::Input { bytes, .. } = g { Some(bytes.clone()) } else { None }).collect()
+}
+
+fn reconnecting_hub(device: &FakeDevice, tune: impl FnOnce(&mut HubOptions)) -> Hub {
+    hub_with(device, |o| {
+        o.reconnect = Reconnect { attempts: 20, delay: Duration::from_millis(100) };
+        tune(o);
+    })
+}
+
+/// A hub whose writer typed frames 1 to 6 without being acknowledged, and was told by the server that the first was applied: it
+/// keeps 2 to 6 ("b" to "f"), and then the connection is cut and the subscription says that it reconnects.
+fn kept_two_to_six(device: &FakeDevice, hub: &Hub) -> Subscription {
+    let (sub, mut conn) = attach_plain(device, hub, 3, b"");
+    conn.set_acks(false);
+    let handle = sub.handle();
+    for key in [b"a", b"b", b"c", b"d", b"e", b"f"] {
+        handle.input(key).unwrap();
+    }
+    assert_eq!(typed(&conn.drain(Duration::from_millis(300))).len(), 6, "all six frames reached the server, none was acknowledged");
+    wait_kept(hub, 6);
+    conn.ack(3, 1, false);
+    wait_kept(hub, 5);
+    conn.cut();
+    events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::Reconnecting { .. })));
+    sub
+}
+
+#[test]
+fn seventy_kib_typed_while_reconnecting_keeps_64_kib_and_the_rest_says_not_sent_and_is_never_sent() {
+    let device = FakeDevice::start();
+    let hub = reconnecting_hub(&device, |_| {});
+    let (sub, conn) = attach_plain(&device, &hub, 3, b"");
+    let handle = sub.handle();
+    conn.cut();
+    events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::Reconnecting { .. })));
+
+    // The hub's thread is making its next try (it blocks on the upgrade), so the test accepts it first; the keys are handled
+    // while the attach waits for its answer.
+    let seventy = 70 * 1024;
+    handle.input(&vec![b'a'; seventy]).unwrap();
+    let mut conn = device.accept();
+    let request = conn.request();
+    wait_kept(&hub, 64 * 1024);
+    let told = events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::NotSent { .. })));
+    assert!(told.contains(&SubEvent::NotSent { bytes: seventy - 64 * 1024 }), "{told:?}");
+    // The buffer is full: a later key is refused too, so that what is sent is always a start of what was typed.
+    handle.input(b"z").unwrap();
+    let told = events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::NotSent { .. })));
+    assert!(told.contains(&SubEvent::NotSent { bytes: 1 }), "{told:?}");
+    assert_eq!(hub.stats().kept_input_bytes, 64 * 1024, "the bound holds");
+    assert_eq!(hub.stats().dropped_input_bytes, (seventy - 64 * 1024 + 1) as u64);
+
+    // The same writer is back under the same epoch, and the server applied nothing: exactly the 64 KiB that fit are sent, once.
+    conn.attached_as(request.id, 3, 80, 24, WriterView::Writing, false, 0, 1, 1);
+    let got = conn.drain(Duration::from_millis(500));
+    let sizes: Vec<usize> = typed(&got).iter().map(Vec::len).collect();
+    assert_eq!(sizes, vec![64 * 1024], "{got:?}");
+}
+
+#[test]
+fn a_frame_kept_for_longer_than_the_age_bound_is_dropped_says_not_sent_and_is_never_sent() {
+    let device = FakeDevice::start();
+    // The tries are a second and a half apart, so that the connection is not back before the bound passes.
+    let hub = hub_with(&device, |o| {
+        o.reconnect = Reconnect { attempts: 5, delay: Duration::from_millis(1500) };
+        o.input_keep_age = Duration::from_millis(100);
+    });
+    let (sub, conn) = attach_plain(&device, &hub, 3, b"");
+    let handle = sub.handle();
+    conn.cut();
+    events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::Reconnecting { .. })));
+    handle.input(b"old").unwrap();
+    wait_kept(&hub, 3);
+    // The hub looks at the age at least once a second while it waits for its next try.
+    let told = events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::NotSent { .. })));
+    assert!(told.contains(&SubEvent::NotSent { bytes: 3 }), "{told:?}");
+    wait_kept(&hub, 0);
+    // The writer is back, but what was too old is not sent.
+    let mut conn = device.accept();
+    let request = conn.request();
+    conn.attached_as(request.id, 3, 80, 24, WriterView::Writing, false, 0, 1, 1);
+    assert!(typed(&conn.drain(Duration::from_millis(400))).is_empty(), "a frame past the bound is never sent");
+    // And the subscription goes on: what is typed now is numbered after what the server expects and is sent.
+    handle.input(b"new").unwrap();
+    assert_eq!(typed(&conn.drain(Duration::from_millis(400))), vec![b"new".to_vec()]);
+}
+
+#[test]
+fn acks_trim_what_is_kept_and_a_gap_report_sends_the_frames_after_it_again_once_for_each_report() {
+    let device = FakeDevice::start();
+    let hub = plain_hub(&device);
+    let (sub, mut conn) = attach_plain(&device, &hub, 3, b"");
+    let handle = sub.handle();
+
+    // The fake acknowledges what it applies: what is kept is held until it reads the frame, and goes with its acknowledgement.
+    handle.input(b"abc").unwrap();
+    wait_kept(&hub, 3);
+    assert_eq!(typed(&conn.drain(Duration::from_millis(300))), vec![b"abc".to_vec()]);
+    wait_kept(&hub, 0);
+
+    // Frames 2 to 5 ("1" to "4") reach the server, which acknowledges none of them by itself.
+    conn.set_acks(false);
+    for key in [b"1", b"2", b"3", b"4"] {
+        handle.input(key).unwrap();
+    }
+    assert_eq!(typed(&conn.drain(Duration::from_millis(300))).len(), 4);
+    wait_kept(&hub, 4);
+    // An acknowledgement of frame 3 frees frames 2 and 3 (a cumulative one), and a repeat of it frees nothing more.
+    conn.ack(3, 3, false);
+    wait_kept(&hub, 2);
+    conn.ack(3, 3, false);
+    assert_eq!(hub.stats().input_resent, 0);
+
+    // The server says that it applied up to 3 and got a later frame: what is kept after 3 (frames 4 and 5, "3" and "4") is sent
+    // again, in order, once for this report.
+    conn.ack(3, 3, true);
+    let again = typed(&conn.drain(Duration::from_millis(400)));
+    assert_eq!(again, vec![b"3".to_vec(), b"4".to_vec()], "the frames after the reported number go out again, once");
+    assert_eq!(hub.stats().input_resent, 2);
+    // A second report of the same number sends the same frames once more; nothing sends them in a loop.
+    conn.ack(3, 3, true);
+    assert_eq!(typed(&conn.drain(Duration::from_millis(400))), vec![b"3".to_vec(), b"4".to_vec()]);
+    assert_eq!(hub.stats().input_resent, 4);
+    assert!(typed(&conn.drain(Duration::from_millis(400))).is_empty(), "no report, no resend");
+    conn.ack(3, 5, false);
+    wait_kept(&hub, 0);
+    assert_eq!(device.frames().iter().filter(|f| f.2 == 5).count(), 3, "the fifth frame was sent three times in all: once, and once for each report");
+}
+
+#[test]
+fn a_resumed_answer_that_says_writing_under_the_same_epoch_sends_only_the_frames_from_its_next_number_in_order() {
+    let device = FakeDevice::start();
+    let hub = reconnecting_hub(&device, |_| {});
+    let sub = kept_two_to_six(&device, &hub);
+    let mut conn = device.accept();
+    let request = conn.request();
+    // The server applied up to 3 before the cut: its next number is 4.
+    conn.attached_as(request.id, 3, 80, 24, WriterView::Writing, false, 0, 1, 4);
+    let got = conn.drain(Duration::from_millis(500));
+    assert_eq!(typed(&got), vec![b"d".to_vec(), b"e".to_vec(), b"f".to_vec()], "frames 2 and 3 were applied, 4 to 6 are sent: {got:?}");
+    let last: Vec<u32> = device.frames().iter().rev().take(3).map(|f| f.2).collect();
+    assert_eq!(last, vec![6, 5, 4], "in order, each under the epoch of the answer");
+    assert!(device.frames().iter().rev().take(3).all(|f| f.1 == 1));
+    // The count goes on after what is kept.
+    sub.handle().input(b"g").unwrap();
+    assert_eq!(typed(&conn.drain(Duration::from_millis(300))), vec![b"g".to_vec()]);
+    assert_eq!(device.frames().last(), Some(&(3, 1, 7)));
+    assert_eq!(hub.stats().input_resent, 3);
+}
+
+#[test]
+fn an_answer_with_another_epoch_or_a_watching_view_sends_nothing_and_says_not_sent() {
+    // Another epoch: the right moved and came back to this device, which the server's own check drops anyway; the hub does not send.
+    let device = FakeDevice::start();
+    let hub = reconnecting_hub(&device, |_| {});
+    let sub = kept_two_to_six(&device, &hub);
+    let mut conn = device.accept();
+    let request = conn.request();
+    conn.attached_as(request.id, 3, 80, 24, WriterView::Writing, false, 0, 2, 4);
+    let told = events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::NotSent { .. })));
+    assert!(told.contains(&SubEvent::NotSent { bytes: 5 }), "{told:?}");
+    assert!(typed(&conn.drain(Duration::from_millis(400))).is_empty(), "nothing is sent under another epoch");
+    assert_eq!(hub.stats().kept_input_bytes, 0);
+    // The subscription writes under the new epoch from the number the answer names.
+    sub.handle().input(b"z").unwrap();
+    assert_eq!(typed(&conn.drain(Duration::from_millis(300))), vec![b"z".to_vec()]);
+    assert_eq!(device.frames().last(), Some(&(3, 2, 4)));
+
+    // Watching: the same epoch, but this client no longer writes.
+    let device = FakeDevice::start();
+    let hub = reconnecting_hub(&device, |_| {});
+    let sub = kept_two_to_six(&device, &hub);
+    let mut conn = device.accept();
+    let request = conn.request();
+    conn.attached_as(request.id, 3, 80, 24, WriterView::Watching, false, 0, 1, 4);
+    let told = events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::NotSent { .. })));
+    assert!(told.contains(&SubEvent::NotSent { bytes: 5 }), "{told:?}");
+    assert!(typed(&conn.drain(Duration::from_millis(400))).is_empty());
+    assert_eq!(hub.stats().kept_input_bytes, 0);
+}
+
+#[test]
+fn a_report_that_the_right_moved_drops_what_is_kept_and_a_first_attach_keeps_nothing() {
+    let device = FakeDevice::start();
+    let hub = plain_hub(&device);
+    let (sub, mut conn) = attach_plain(&device, &hub, 3, b"");
+    conn.set_acks(false);
+    let handle = sub.handle();
+    handle.input(b"q").unwrap();
+    wait_kept(&hub, 1);
+    // Someone else took the right: the server drops what was written under the old epoch, so the hub keeps none of it.
+    conn.event(Event::Writer { session: 3, state: WriterView::Watching, epoch: 2 });
+    let told = events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::NotSent { .. })));
+    assert!(told.contains(&SubEvent::NotSent { bytes: 1 }), "{told:?}");
+    wait_kept(&hub, 0);
+    // The same device takes it back, under a third epoch: what was typed under the first is not sent under it.
+    conn.event(Event::Writer { session: 3, state: WriterView::Writing, epoch: 3 });
+    events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::Writer(WriterView::Writing))));
+    handle.input(b"r").unwrap();
+    wait_kept(&hub, 1);
+    conn.event(Event::Writer { session: 3, state: WriterView::Writing, epoch: 4 });
+    events_until(&sub, |e| e.iter().filter(|e| matches!(e, SubEvent::NotSent { .. })).count() >= 1);
+    wait_kept(&hub, 0);
+
+    // A first attach has no earlier right to come back to: what is typed before its answer is refused at once.
+    let device = FakeDevice::start();
+    let hub = plain_hub(&device);
+    let sub = hub.attach(5, None);
+    let handle = sub.handle();
+    let mut conn = device.accept();
+    let request = conn.request();
+    handle.input(b"early").unwrap();
+    let told = events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::NotSent { .. })));
+    assert!(told.contains(&SubEvent::NotSent { bytes: 5 }), "{told:?}");
+    assert_eq!(hub.stats().kept_input_bytes, 0);
+    conn.attached(request.id, 5, 80, 24, WriterView::Writing, false, 0);
+    events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::Attached { .. })));
+    assert!(typed(&conn.drain(Duration::from_millis(300))).is_empty(), "nothing typed before the answer is sent");
+}
+
+#[test]
+fn the_hub_numbers_its_frames_from_the_next_of_the_answer_under_the_epoch_of_the_answer_and_a_gap_with_nothing_kept_moves_the_count() {
+    let device = FakeDevice::start();
+    let hub = plain_hub(&device);
+    let sub = hub.attach(3, None);
+    let mut conn = device.accept();
+    let request = conn.request();
+    conn.attached_as(request.id, 3, 80, 24, WriterView::Writing, false, 0, 7, 5);
+    events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::Attached { .. })));
+    let handle = sub.handle();
+    handle.input(b"x").unwrap();
+    handle.input(b"y").unwrap();
+    assert_eq!(typed(&conn.drain(Duration::from_millis(400))).len(), 2);
+    assert_eq!(device.frames(), vec![(3, 7, 5), (3, 7, 6)], "the count starts at the answer's next, under the answer's epoch");
+    wait_kept(&hub, 0);
+    // The server says that it is at 20 and got a frame after it; nothing is kept, so the count goes to where the server is.
+    conn.ack(3, 20, true);
+    std::thread::sleep(Duration::from_millis(100));
+    handle.input(b"z").unwrap();
+    assert_eq!(typed(&conn.drain(Duration::from_millis(400))), vec![b"z".to_vec()]);
+    assert_eq!(device.frames().last(), Some(&(3, 7, 21)));
+}
+
+#[test]
+fn no_try_left_drops_what_was_kept_and_says_not_sent_and_a_subscription_that_ends_says_it_too() {
+    let device = FakeDevice::start();
+    // The only try is 400 ms away, so the hub is idle and handles the key before it.
+    let hub = hub_with(&device, |o| o.reconnect = Reconnect { attempts: 1, delay: Duration::from_millis(400) });
+    let (sub, conn) = attach_plain(&device, &hub, 3, b"");
+    let handle = sub.handle();
+    conn.cut();
+    events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::Reconnecting { .. })));
+    handle.input(b"kept").unwrap();
+    wait_kept(&hub, 4);
+    // The only try fails.
+    device.drop_connections_for(Duration::from_millis(1200));
+    let told = events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::GaveUp)));
+    assert!(told.contains(&SubEvent::NotSent { bytes: 4 }), "{told:?}");
+    wait_kept(&hub, 0);
+    // Nothing is kept once no try is left: a key typed now is refused at once.
+    handle.input(b"more").unwrap();
+    let told = events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::NotSent { .. })));
+    assert!(told.contains(&SubEvent::NotSent { bytes: 4 }), "{told:?}");
 }

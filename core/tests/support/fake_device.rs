@@ -87,6 +87,8 @@ struct Lease {
     issued: Vec<ResumeToken>,
     /// What every attach carried, in order.
     presented: Vec<Option<ResumeToken>>,
+    /// The epoch of the lease the fake models (1 until a test says otherwise): a frame under another epoch is dropped.
+    epoch: u32,
     /// The number of the next input frame the fake expects: 1 for a new attachment, kept for a resumed one.
     next: u32,
     /// Whether the gap before `next` was told already (it is told once, until a frame is applied).
@@ -117,7 +119,7 @@ impl FakeDevice {
             signed_out: Mutex::new(false),
             refusals: AtomicU64::new(0),
         });
-        let lease = Lease { writing: true, next: 1, ..Lease::default() };
+        let lease = Lease { writing: true, epoch: 1, next: 1, ..Lease::default() };
         FakeDevice { listener, addr, endpoint, seen: Arc::new(Mutex::new(Vec::new())), lease: Arc::new(Mutex::new(lease)) }
     }
 
@@ -135,6 +137,11 @@ impl FakeDevice {
     /// Every input frame that came, in order, as (session, epoch, number): the numbers say what the client counted.
     pub fn frames(&self) -> Vec<(u32, u32, u32)> {
         self.lease.lock().unwrap().frames.clone()
+    }
+
+    /// Sets the epoch of the lease the fake models: the epoch the next answers carry and the only one whose frames are applied.
+    pub fn set_epoch(&self, epoch: u32) {
+        self.lease.lock().unwrap().epoch = epoch;
     }
 
     /// Gives the right to write to another device, or back: what a takeover does on the server.
@@ -284,7 +291,13 @@ impl Conn {
         self.acks = on;
     }
 
-    /// The server's rule for one numbered frame, as far as the fake models it: the device holds the right under the epoch 1;
+    /// An acknowledgement the test sends itself, for a client whose frames the fake does not acknowledge: every frame up to `seq`
+    /// was applied, and `gap` says that a later frame came after a missing one.
+    pub fn ack(&mut self, session: u32, seq: u32, gap: bool) {
+        self.event(Event::Ack { session, seq, gap });
+    }
+
+    /// The server's rule for one numbered frame, as far as the fake models it: the device holds the right under the lease's epoch (1 unless a test set another);
     /// a frame in order is applied and acknowledged, a repeat is answered with the last applied number, a frame after a missing
     /// one with that number marked as a gap (once), and a frame of another epoch or while the right is elsewhere with nothing.
     fn judge(&mut self, input: &Input) {
@@ -292,7 +305,7 @@ impl Conn {
             let mut lease = self.lease.lock().unwrap();
             lease.frames.push((input.session, input.epoch, input.seq));
             let next = lease.next;
-            if input.epoch != 1 || !lease.writing {
+            if input.epoch != lease.epoch || !lease.writing {
                 if input.seq == next {
                     lease.next = next + 1;
                 }
@@ -375,25 +388,43 @@ impl Conn {
 
     /// The answer to an attach of `session`.
     pub fn attached(&mut self, id: u64, session: u32, cols: u16, rows: u16, writer: WriterView, more: bool, snapshot: u32) {
-        let resume = ResumeToken::generate().expect("random bytes");
         // Every attach of this helper is a new attachment: its input is numbered from 1.
-        let next = {
+        let epoch = self.lease.lock().unwrap().epoch;
+        self.attached_as(id, session, cols, rows, writer, more, snapshot, epoch, 1);
+    }
+
+    /// The answer to an attach of `session` with the epoch and the next number the test chooses, as a server that moved the right
+    /// or kept an attachment's count would say them. The fake then expects exactly that number.
+    pub fn attached_as(
+        &mut self,
+        id: u64,
+        session: u32,
+        cols: u16,
+        rows: u16,
+        writer: WriterView,
+        more: bool,
+        snapshot: u32,
+        epoch: u32,
+        next: u32,
+    ) {
+        let resume = ResumeToken::generate().expect("random bytes");
+        {
             let mut lease = self.lease.lock().unwrap();
-            lease.next = 1;
+            lease.epoch = epoch;
+            lease.next = next;
             lease.gap_told = false;
-            1
-        };
-        self.answer(id, Answer::Attached { session, cols, rows, writer, more, snapshot, resume, epoch: 1, next });
+        }
+        self.answer(id, Answer::Attached { session, cols, rows, writer, more, snapshot, resume, epoch, next });
     }
 
     /// Answers an attach the way the server's rule does: the writer view is `Writing` only for a device that holds the right and
     /// either presents the token of the last answer or has attached nothing before (the app that made the session); a wrong or
     /// absent token on a later attach answers `Free`. Every answer carries a fresh token, which replaces the one before it, and
-    /// the epoch 1. The snapshot is not sent: the test sends it. Returns the writer view it said.
+    /// the epoch of the lease (1 unless a test set another). The snapshot is not sent: the test sends it. Returns the writer view it said.
     pub fn answer_attach(&mut self, request: &Request, cols: u16, rows: u16, snapshot: u32) -> WriterView {
         let Op::Attach { session, resume, .. } = &request.op else { panic!("an attach was expected, got {request:?}") };
         let fresh = ResumeToken::generate().expect("random bytes");
-        let (writer, next) = {
+        let (writer, next, epoch) = {
             let mut lease = self.lease.lock().unwrap();
             let good = match (resume, &lease.current) {
                 (Some(presented), Some(current)) => presented == current,
@@ -410,9 +441,9 @@ impl Conn {
                 lease.next = 1;
                 lease.gap_told = false;
             }
-            (writer, lease.next)
+            (writer, lease.next, lease.epoch)
         };
-        self.answer(request.id, Answer::Attached { session: *session, cols, rows, writer, more: false, snapshot, resume: fresh, epoch: 1, next });
+        self.answer(request.id, Answer::Attached { session: *session, cols, rows, writer, more: false, snapshot, resume: fresh, epoch, next });
         writer
     }
 

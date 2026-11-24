@@ -937,6 +937,50 @@ fn keys_kept_for_a_reconnect_are_not_sent_when_the_right_is_gone_when_the_connec
 }
 
 #[test]
+fn text_typed_while_the_link_is_silent_reaches_the_session_once_after_the_hub_notices_and_the_same_writer_is_back() {
+    let device = FakeDevice::start();
+    // The beat is answered within a fifth of a second or the link is taken for broken; the tries are quick.
+    let hub = hub_with(&device, |o| {
+        o.beat = Duration::from_millis(100);
+        o.beat_timeout = Duration::from_millis(200);
+        o.reconnect = Reconnect { attempts: 5, delay: Duration::from_millis(50) };
+    });
+    let mut session = Session::new(80, 24);
+    session.print("writer$ ");
+    let (pane, probe) = start_pane(&hub, 4, (80, 24), None);
+    let mut silent = device.accept();
+    let request = silent.request();
+    assert_eq!(session.serve_by_token(&mut silent, &request, 100), WriterView::Writing);
+    wait_text(&pane, "writer$");
+    wait_for("writing", || pane.remote_view().is_some_and(|v| v.writer == WriterView::Writing && v.state == RemoteState::None));
+
+    // From here the scripted server reads nothing and answers nothing: no ack, no answer to the beat, and the connection stays
+    // open, as a network that went silent does. What is typed meanwhile goes into the dead link and is not acknowledged.
+    pane.text("ls -l\r".into()).unwrap();
+    wait_for("the hub to hold it", || hub.stats().kept_input_bytes == 6);
+    wait_state(&pane, |s| matches!(s, ConnState::Reconnecting { .. }));
+    assert!(!not_sent(&pane), "the hub still holds it: nothing is lost yet");
+    assert_eq!(hub.stats().kept_input_bytes, 6);
+
+    // The connection is made again and the server never saw the frame: it says that it writes under the same epoch and expects
+    // number 1, so the frame is sent again, once, and the pane has nothing to say.
+    let mut conn = device.accept();
+    let request = conn.request();
+    assert_eq!(request.op, Op::Attach { session: 4, tail: None, resume: Some(device.issued()[0].clone()) });
+    assert_eq!(session.serve_by_token(&mut conn, &request, 100), WriterView::Writing);
+    // (The scripted server answers no beat, so this connection is taken for broken in a fraction of a second: the frame is read at
+    // once, and what follows is a third connection that nobody accepts.)
+    let got = conn.drain(Duration::from_millis(250));
+    assert_eq!(got.iter().filter(|g| matches!(g, Got::Input { .. })).collect::<Vec<_>>(), vec![&Got::Input { session: 4, bytes: b"ls -l\r".to_vec() }], "{got:?}");
+    assert_eq!(device.frames(), vec![(4, 1, 1)], "the server saw the number once");
+    wait_for("the ack", || hub.stats().kept_input_bytes == 0);
+    assert!(!not_sent(&pane));
+    assert_eq!(dropped(&pane), 0);
+    assert!(probe.exits().is_empty());
+    drop(silent);
+}
+
+#[test]
 fn a_remote_pane_never_answers_the_programs_queries_because_the_sessions_engine_on_the_server_does() {
     let device = FakeDevice::start();
     let hub = hub_with(&device, fast());
