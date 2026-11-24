@@ -280,8 +280,12 @@ async function chatCase(page, url) {
   await page.waitForSelector(".chat-md");
   const here = page.url();
   await clearOpened(page);
+  // Even a shell that would refuse says nothing here: the browser opens the link, the shell is never asked.
+  await page.evaluate(() => window.__MOCK__.on("open_url", () => { throw "The link could not be opened."; }));
   await page.locator('.chat-msg[data-role="assistant"] .chat-text a').click();
   assert.deepEqual(await opened(page), [["https://example.org/docs", "_blank", FEATURES]], "the reply's link opens in a new tab");
+  assert.equal(await page.locator(".chat-status").getAttribute("data-kind"), null, "no refusal is said under the transcript");
+  assert.notEqual(await page.locator(".chat-status").textContent(), "The link could not be opened.");
   assert.equal(page.url(), here, "the page's own tab did not move");
   assert.equal(await shellCalls(page), 0, "the shell's open_url is not called");
   await page.locator('.chat-msg[data-role="assistant"] .chat-text a').click({ button: "middle" });
@@ -310,8 +314,10 @@ async function sidebarCase(page, url) {
   await page.locator(".sidebar-btn").click();
   await page.waitForSelector("#sidebar:not([hidden])");
   await clearOpened(page);
+  await page.evaluate(() => window.__MOCK__.on("open_url", () => { throw "The link could not be opened."; }));
   await page.getByRole("button", { name: /Docs/ }).click();
   assert.deepEqual(await opened(page), [["https://example.org/docs", "_blank", FEATURES]], "the item opens in a new tab");
+  assert.equal(await notice(page), "", "nothing new is said in the status line");
   assert.equal(await shellCalls(page), 0, "the shell's open_url is not called");
 }
 

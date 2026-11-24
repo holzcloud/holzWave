@@ -185,6 +185,32 @@ async function linkCase(page, url) {
   // Text that is no link does nothing when it is clicked.
   await text.locator("p").click({ position: { x: 200, y: 5 } });
   assert.equal((await calls(page, "open_url")).length, 1);
+
+  // A link the system cannot open is said in the line under the transcript, in the style of a refusal, until the person types.
+  const status = page.locator(".chat-status");
+  assert.equal(await status.getAttribute("data-kind"), null, "nothing was refused before");
+  for (const [rejection, said] of [
+    ["No app on this device can open this link.", "No app on this device can open this link."],
+    [{ code: 7 }, "The link could not be opened."],
+    ["", "The link could not be opened."],
+  ]) {
+    await page.evaluate((r) => window.__MOCK__.on("open_url", () => { throw r; }), rejection);
+    await text.locator("a").click();
+    await page.waitForFunction((want) => document.querySelector(".chat-status")?.textContent === want, said);
+    assert.equal(await status.getAttribute("data-kind"), "error", "in the style of a refusal");
+    assert.equal(await status.evaluate((n) => n.children.length), 0, "the sentence is text");
+    await page.locator(".chat-input").focus();
+    await page.keyboard.type("x");
+    await page.waitForFunction(() => document.querySelector(".chat-status")?.textContent === "");
+    assert.equal(await status.getAttribute("data-kind"), null, "typing clears it");
+    await page.locator(".chat-input").fill("");
+  }
+  // A link that opens says nothing.
+  await page.evaluate(() => window.__MOCK__.on("open_url", () => null));
+  await text.locator("a").click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("open_url").length >= 5);
+  await page.waitForTimeout(150);
+  assert.equal(await status.textContent(), "", "a link that opens shows no line");
 }
 
 /** A chat that fills the screen, with two saved profiles so that the chip is a button; `size` is the window. */

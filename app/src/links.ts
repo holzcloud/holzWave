@@ -452,6 +452,15 @@ export function refusalSentence(reason: unknown): string {
   return points.length > MAX_REFUSAL ? points.slice(0, MAX_REFUSAL).join("") : reason;
 }
 
+/**
+ * Say in the notice of the status line why a link a part of the page asked the host to open could not be opened (a list widget of
+ * the sidebar): the host's sentence as text, as a link in a pane is told. The status module is loaded when it is needed.
+ */
+export function sayRefusal(reason: unknown): void {
+  const text = refusalSentence(reason);
+  void import("./status.js").then((m) => m.showNotice(text));
+}
+
 let deps: LinkDeps | null = null;
 
 /** Load what opening a link needs (the bridge and the dialog) once; `activateLink` does nothing before this has run. */

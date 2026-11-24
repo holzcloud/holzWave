@@ -73,6 +73,25 @@ export default async function ({ page, url, errors }) {
   assert.deepEqual(await page.evaluate(() => window.__MOCK__.callsOf("open_url")[0]), { url: "https://example.org/docs" });
   assert.match(await page.locator(".sb-warn").textContent(), /widgets\/bad\.json/);
 
+  // A link that cannot be opened is said in the notice of the status line, as a link in a pane is; one that opens says nothing.
+  const said = () => page.evaluate(() => document.querySelector("#status .seg.notice")?.textContent ?? "");
+  assert.equal(await said(), "", "the successful open said nothing");
+  for (const [rejection, want] of [
+    ["No app on this device can open this link.", "No app on this device can open this link."],
+    [{ code: 7 }, "The link could not be opened."],
+  ]) {
+    await page.evaluate(async () => (await import(new URL("status.js", location.href).href)).showNotice(""));
+    await page.evaluate((r) => window.__MOCK__.on("open_url", () => { throw r; }), rejection);
+    await page.getByRole("button", { name: /Docs/ }).click();
+    await page.waitForFunction((w) => document.querySelector("#status .seg.notice")?.textContent === w, want);
+    assert.equal(await page.evaluate(() => document.querySelector("#status .seg.notice").children.length), 0, "the sentence is text");
+  }
+  await page.evaluate(async () => (await import(new URL("status.js", location.href).href)).showNotice(""));
+  await page.evaluate(() => window.__MOCK__.on("open_url", () => null));
+  await page.getByRole("button", { name: /Docs/ }).click();
+  await page.waitForTimeout(200);
+  assert.equal(await said(), "", "a link that opens says nothing");
+
   // Typing in a field is the field's; the shortcut hides it again, and the choice is remembered.
   await page.locator(".sb-note").click();
   await page.keyboard.type("!");

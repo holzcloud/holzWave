@@ -584,7 +584,7 @@ hidden at first and remembers whether it was shown. Sections, each under a `.lab
   prompt of the focused pane and never runs it; `Escape` gives the keyboard back to the terminal.
 - **Widgets:** panels from data, never code. `note` (text, saved while typing), `timer` (Pomodoro: `25:00`, a bar, the word
   `working`, `break`, `paused` or `ready`, Start, Pause, Reset), `list` (labelled commands, which go to the prompt, and
-  links, which the system opens). Two exist from the start (Notes, Pomodoro); more are `widgets/<id>.json` files
+  links, which the system opens; a link that cannot be opened is said in the notice of the status line, as a link in a pane is, 6.31). Two exist from the start (Notes, Pomodoro); more are `widgets/<id>.json` files
   ([config.md](config.md)), and a file that is not valid is left out with its reason shown in the sidebar.
 
 - **Context:** the tools the person already uses on the command line, between Hosts and History (the phone has no sidebar and
@@ -699,7 +699,9 @@ status line and the composer.
   words, a hint of the page (dim, for example that sharing ended because the provider changed), and after a turn
   `reply finished`, `reply stopped` or `reply failed`. A chat that is pinned to the on-device model while it cannot answer
   says `Apple on-device is not available. Choose another provider, or see the provider settings for the reason.` as an error
-  line, like every refusal of a send (6.21). It clears when the user types.
+  line, like every refusal of a send (6.21). A link in the transcript that the system cannot open is said here as well, in the style of
+  a refusal, with the host's sentence of 6.31 (`No app on this device can open this link.`, `The link could not be opened.`).
+  It clears when the user types.
 - **Composer.** A multi-line field (1 to 8 rows, in the chat text face) and a `Send` button (solid `--hw-rose-deep` with `--hw-on-accent` text)
   that becomes `Stop` (hairline) while a turn runs. Below the field, left: the toggle `Auto` (6.14; it reads
   `● Auto · pane 1` while it is on and `○ Auto` while it is off), then `≈ 12 tokens` (UTF-8 bytes divided by 3, rounded up, the rule of

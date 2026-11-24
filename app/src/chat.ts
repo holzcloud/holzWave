@@ -42,7 +42,7 @@ import { el, loadStyles } from "./dom.js";
 import { IntentSlot } from "./inlinestate.js";
 import type { ChatIntent } from "./inlinestate.js";
 import { focusInput } from "./keyboard.js";
-import { openUrl } from "./links.js";
+import { openUrl, refusalSentence } from "./links.js";
 import { onOverlayRender, renderOverlay } from "./overlay.js";
 import { DEVICE_OFF, readDevice, withDevice } from "./ondevice.js";
 import type { DeviceView } from "./ondevice.js";
@@ -724,7 +724,10 @@ class Mounted implements ChatView {
       if (link === null) return;
       e.preventDefault();
       const url = link.classList.contains("chat-link") ? link.getAttribute("href") : null;
-      if (url !== null && linkKind(url) === "open") openUrl(url, () => void call("open_url", { url }).catch(() => {}));
+      if (url !== null && linkKind(url) === "open") {
+        // A link the system cannot open is said under the transcript with the host's sentence, never swallowed.
+        openUrl(url, () => void call("open_url", { url }).catch((reason: unknown) => this.say(refusalSentence(reason), "error")));
+      }
     });
     this.log.addEventListener("auxclick", (e) => {
       if (e.target instanceof Element && e.target.closest("a") !== null) e.preventDefault();
