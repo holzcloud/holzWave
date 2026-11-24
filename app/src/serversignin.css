@@ -22,6 +22,7 @@
                               border: 1px solid var(--hw-line); border-radius: .333rem; user-select: all; }
 .dlg.server-signin .ss-note { margin: 0 0 .5rem; color: var(--hw-ink-2); overflow-wrap: anywhere; }
 .dlg.server-signin .ss-note[data-bad="true"] { color: var(--hw-warn); text-decoration: underline; }
+.dlg.server-signin .ss-note[data-bad="true"]::before { content: "! "; font-weight: 700; text-decoration: none; }
 
 /* The state of the wait: a shape and a word. A failure has the mark `!` and an underline. */
 .dlg.server-signin .ss-state { display: flex; align-items: flex-start; gap: .5rem; margin: .5rem 0 0; color: var(--hw-ink); overflow-wrap: anywhere; }

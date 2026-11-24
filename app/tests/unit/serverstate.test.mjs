@@ -17,6 +17,7 @@ import {
   DEVICE_LABEL,
   LOCKED_LINE,
   OPENING,
+  OPEN_FAILED,
   OPEN_AGAIN,
   Pacer,
   SIGN_IN_LINK,
@@ -50,7 +51,7 @@ const CANARY = "hwd_" + "A".repeat(43);
 
 test("every word of the dialog is a word of the record", () => {
   const words = [
-    SIGN_IN_TITLE, ADDRESS_LABEL, ADDRESS_HELP, ADDRESS_REFUSED, DEVICE_LABEL, CONTINUE, CANCEL, OPENING, COMPARE, OPEN_AGAIN, START_AGAIN,
+    SIGN_IN_TITLE, ADDRESS_LABEL, ADDRESS_HELP, ADDRESS_REFUSED, DEVICE_LABEL, CONTINUE, CANCEL, OPENING, OPEN_FAILED, COMPARE, OPEN_AGAIN, START_AGAIN,
     CLOSE, ...Object.values(WAIT_WORDS).map((w) => w.word),
   ];
   for (const word of words) assert.ok(section.includes("`" + word + "`"), `the record has no word ${word}`);
@@ -63,6 +64,7 @@ test("the five sentences of the plan are exactly the record's", () => {
   assert.equal(ADDRESS_LABEL, "Server address");
   assert.equal(ADDRESS_REFUSED, "Use an address that starts with https://.");
   assert.equal(OPENING, "Opening your browser…");
+  assert.equal(OPEN_FAILED, "The link could not be opened.");
   assert.equal(COMPARE, "Enter this code only if you started this here.");
   assert.equal(WAIT_WORDS.approved.word, "Signed in");
   assert.equal(WAIT_WORDS.denied.word, "The request was denied.");

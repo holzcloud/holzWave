@@ -14,6 +14,8 @@ export default async function ({ page, url, errors }) {
     await failureCase(page, url);
     await startRefusedCase(page, url);
     await certificateCueCase(page, url);
+    await browserFailureCase(page, url);
+    await browserFailureCueCase(page, url);
     sourceCase();
   }
   assert.deepEqual(errors, [], "the page reported errors");
@@ -104,6 +106,81 @@ async function certificateCueCase(page, url) {
     await page.waitForFunction(() => document.querySelector(".ss-state")?.textContent?.includes("certificate"));
     assert.equal(await stateText(page), "!The certificate of the server was not accepted.", `${value}: the mark and the words`);
     assert.ok((await page.locator(".ss-word").evaluate((n) => getComputedStyle(n).textDecorationLine)).includes("underline"), `${value}: underlined`);
+    await dialog(page).getByRole("button", { name: "Cancel", exact: true }).click();
+    await gone(page);
+  }
+  await page.emulateMedia({ forcedColors: null, contrast: "no-preference" });
+}
+
+const NOTE = ".server-signin .ss-note:not(.ss-compare)";
+
+/** What the line that said `Opening your browser…` shows, with the cues the style of a failure gives it. */
+const noteCue = (page) =>
+  page.locator(NOTE).evaluate((n) => ({
+    text: n.textContent,
+    hidden: n.hidden,
+    bad: n.dataset.bad ?? null,
+    mark: getComputedStyle(n, "::before").content,
+    line: getComputedStyle(n).textDecorationLine,
+  }));
+
+/** Start a sign-in against a host whose `open_url` rejects with `value`, and wait for the line to change from `Opening your browser…`. */
+async function startWithOpenFailing(page, url, value) {
+  await open(page, url, { polls: [], interval: 1 });
+  await page.evaluate((v) => window.__MOCK__.on("open_url", () => { throw v; }), value);
+  await openDialog(page);
+  await page.locator("#ss-address").fill(GOOD);
+  await dialog(page).getByRole("button", { name: "Continue", exact: true }).click();
+  await page.waitForFunction(() => document.querySelector(".ss-code")?.textContent === "BCDF-GHJK");
+  await page.waitForFunction(() => window.__MOCK__.callsOf("open_url").length === 1);
+  await page.waitForFunction(() => {
+    const n = document.querySelector(".ss-note");
+    return n !== null && n.hidden === false && n.textContent !== "Opening your browser…";
+  });
+}
+
+/** A browser that cannot be opened is a failure line under the code, with the host's sentence; the code, Open again and the wait stay. */
+async function browserFailureCase(page, url) {
+  const HOST = "No app on this device can open this link.";
+  await startWithOpenFailing(page, url, HOST);
+  const cue = await noteCue(page);
+  assert.equal(cue.text, HOST, "the host's sentence in place of Opening your browser…");
+  assert.equal(cue.bad, "true");
+  assert.ok(cue.mark.includes("!"), "the mark");
+  assert.ok(cue.line.includes("underline"), "underlined");
+  assert.equal(await page.locator(".ss-code").textContent(), "BCDF-GHJK", "the code stays");
+  assert.equal(await stateText(page), "Waiting for approval…", "the wait goes on");
+  assert.deepEqual(await buttons(page), ["Open again", "Cancel"]);
+  // Open again asks the host once more and the line says the sentence again.
+  await dialog(page).getByRole("button", { name: "Open again", exact: true }).click();
+  await page.waitForFunction(() => window.__MOCK__.callsOf("open_url").length === 2);
+  await page.waitForFunction(() => document.querySelector(".ss-note")?.textContent === "No app on this device can open this link.");
+  await dialog(page).getByRole("button", { name: "Cancel", exact: true }).click();
+  await gone(page);
+
+  // A rejection that is not text, or has none, says the page's own sentence in the same style.
+  for (const value of [{ code: 7 }, "", null]) {
+    await startWithOpenFailing(page, url, value);
+    const other = await noteCue(page);
+    assert.equal(other.text, "The link could not be opened.", `a rejection of ${JSON.stringify(value)}`);
+    assert.equal(other.bad, "true");
+    assert.ok(other.mark.includes("!"));
+    assert.ok(other.line.includes("underline"));
+    await dialog(page).getByRole("button", { name: "Cancel", exact: true }).click();
+    await gone(page);
+  }
+}
+
+/** The mark and the underline of that line stay when the system draws without colour or with high contrast. */
+async function browserFailureCueCase(page, url) {
+  for (const [media, value] of [["forcedColors", "active"], ["contrast", "more"]]) {
+    await page.emulateMedia({ [media]: value });
+    await startWithOpenFailing(page, url, "No app on this device can open this link.");
+    if (media === "contrast") await page.waitForFunction(() => document.documentElement.classList.contains("contrast-high"));
+    const cue = await noteCue(page);
+    assert.equal(cue.text, "No app on this device can open this link.", value);
+    assert.ok(cue.mark.includes("!"), `${value}: the mark`);
+    assert.ok(cue.line.includes("underline"), `${value}: underlined`);
     await dialog(page).getByRole("button", { name: "Cancel", exact: true }).click();
     await gone(page);
   }

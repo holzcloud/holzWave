@@ -25,6 +25,7 @@ import {
   DEVICE_LABEL,
   LOCKED_LINE,
   OPENING,
+  OPEN_FAILED,
   OPEN_AGAIN,
   Pacer,
   SIGN_IN_TITLE,
@@ -332,7 +333,7 @@ async function run(returnTo?: HTMLElement | null): Promise<ServerView | null> {
           },
           (failure: unknown) => {
             if (mine !== generation || closed) return;
-            openNote = plain(typeof failure === "string" ? failure : "", MAX_SENTENCE) || "The browser could not be opened.";
+            openNote = plain(typeof failure === "string" ? failure : "", MAX_SENTENCE) || OPEN_FAILED;
             drawNote();
           },
         );

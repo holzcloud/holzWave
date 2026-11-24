@@ -18,6 +18,8 @@ export const DEVICE_LABEL = "Device";
 export const CONTINUE = "Continue";
 export const CANCEL = "Cancel";
 export const OPENING = "Opening your browser…";
+/** The line for a browser that could not be opened, when the host gave no text of its own (design.md 6.35, the table `Screen`). */
+export const OPEN_FAILED = "The link could not be opened.";
 export const COMPARE = "Enter this code only if you started this here.";
 export const OPEN_AGAIN = "Open again";
 export const START_AGAIN = "Start again";
