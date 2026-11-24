@@ -12,7 +12,8 @@
 # channel never lags behind stable.
 #
 # The app is signed ad hoc only (no Developer ID, no notarisation: there is no Apple developer account, see
-# docs/signing.md). The cask removes the quarantine attribute after the install and says so in its caveats.
+# docs/signing.md), under the fixed identifier `ch.holzcloud.holzwave` (wsh: `ch.holzcloud.holzwave.wsh`), by the
+# bundler and scripts/sign-macos.sh. The cask removes the quarantine attribute after the install and says so in its caveats.
 #
 # Needs a clean checkout of main at the commit to release, the gh CLI logged in for --publish, and the build
 # environment of docs/building.md (scripts/env.sh puts Rust and Zig 0.17 on the PATH).
@@ -56,6 +57,10 @@ sh "$here/wsh-sidecar.sh" aarch64-apple-darwin >/dev/null || exit 1
 sh "$here/wsh-linux.sh" all || exit 1
 npm --prefix app run tauri -- build --bundles app --config src-tauri/tauri.wsh.conf.json || exit 1
 git checkout -- app/src-tauri/Cargo.toml 2>/dev/null # the Tauri CLI rewrites feature lists there; the commit stays as it is
+
+# The bundler signs the app ad hoc from bundle.macOS.signingIdentity but names the sidecar after its file; the sign script
+# gives wsh and the app their fixed identifiers, inside out, so macOS keeps treating an update as the same app.
+sh "$here/sign-macos.sh" "$out/macos/holzWave.app" || exit 1
 
 # The package must hold the wsh that was just built, beside the app executable, with the Linux builds as resources.
 sh "$here/bundle-check-macos.sh" "$out/macos/holzWave.app" app/src-tauri/binaries/wsh-aarch64-apple-darwin || exit 1
