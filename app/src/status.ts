@@ -5,7 +5,7 @@
 // it for a few seconds and goes by itself. It is rendered from `state`; every text is put in with `textContent`.
 import { getCopyMode } from "./copymode.js";
 import { connSummary, paneConns } from "./connstate.js";
-import { el, setAttr, setText } from "./dom.js";
+import { el, setAttr, setText, stageTop } from "./dom.js";
 import { contextSegments, followLayout, showContext } from "./integratecontext.js";
 import { NOTICE_MS, paneCountText, rendererText } from "./labels.js";
 import { state } from "./state.js";
@@ -50,19 +50,33 @@ export function chipSlot(): HTMLElement {
 /** The segments of the Kubernetes context and the Azure subscription, made when the core has a value and removed when it has not. */
 const ctxSegs = new Map<string, HTMLButtonElement>();
 
+/** How a notice is drawn on a phone: `warn` is a refusal, with the mark `!` and an underline besides the colour (docs/design.md 6.6). */
+export type NoticeTone = "plain" | "warn";
+
 let notice = "";
+let noticeTone: NoticeTone = "plain";
 /** The address of the link under the pointer, or "". */
 let linkTarget = "";
 let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 
-/** Say `text` in the status line for [`NOTICE_MS`]; a newer notice replaces it and restarts the time. */
-export function showNotice(text: string): void {
+/**
+ * Say `text` in the status line for [`NOTICE_MS`]; a newer notice replaces it and restarts the time. On a phone, which draws no
+ * status line, it is a line over the top of the stage instead (docs/design.md 6.6): the tone `warn` gives it the mark and the
+ * underline, `plain` (the default) draws it as it is. The desktop, the browser and the tablet keep the segment and ignore the tone.
+ */
+export function showNotice(text: string, tone: NoticeTone = "plain"): void {
   clearTimeout(noticeTimer);
   notice = text;
-  noticeTimer = setTimeout(() => {
-    notice = "";
-    renderStatus();
-  }, NOTICE_MS);
+  noticeTone = tone;
+  noticeTimer = setTimeout(clearNotice, NOTICE_MS);
+  renderStatus();
+}
+
+/** Take the notice away, in the status line and in the phone's line alike: the timer and a tap on the line do it. */
+function clearNotice(): void {
+  clearTimeout(noticeTimer);
+  notice = "";
+  noticeTone = "plain";
   renderStatus();
 }
 
@@ -118,6 +132,51 @@ export function renderStatus(): void {
   setText(encoding, "UTF-8");
   setText(version, state.version);
   renderContext();
+  renderPhoneNotice();
+}
+
+/**
+ * The notice on a phone: one line over the top of the stage, inside the column the hand-over line shares (`stageTop`), made only
+ * while the root has `layout-phone`. The place is made once, so the status region exists before its first sentence; the line is
+ * one button, a tap on it takes the notice away, and it is never focused when it appears. Every sentence is put in as text. On
+ * any other root nothing is drawn and a place left from a phone layout is removed.
+ */
+function renderPhoneNotice(): void {
+  let place = document.getElementById("phone-notice");
+  if (!document.documentElement.classList.contains("layout-phone")) {
+    place?.remove();
+    return;
+  }
+  if (!place) {
+    const top = stageTop();
+    if (!top) return;
+    place = el("div", "", top);
+    place.id = "phone-notice";
+    place.setAttribute("role", "status");
+  }
+  let line = place.querySelector<HTMLButtonElement>(".phone-notice-line");
+  if (notice === "") {
+    line?.remove();
+    return;
+  }
+  if (!line) {
+    line = el("button", "phone-notice-line", place);
+    line.type = "button";
+    line.addEventListener("click", clearNotice);
+  }
+  line.dataset.tone = noticeTone;
+  let mark = line.querySelector<HTMLElement>(".phone-notice-mark");
+  if (noticeTone === "warn") {
+    if (!mark) {
+      mark = el("span", "phone-notice-mark");
+      mark.setAttribute("aria-hidden", "true");
+      line.prepend(mark);
+    }
+    setText(mark, "!");
+  } else mark?.remove();
+  let text = line.querySelector<HTMLElement>(".phone-notice-text");
+  if (!text) text = el("span", "phone-notice-text", line);
+  setText(text, notice);
 }
 
 /** The segments of the context, after the pane count: a button with the text, and the words `PRODUCTION` and `stale` as parts of its own. */

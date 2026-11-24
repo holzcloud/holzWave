@@ -2,7 +2,9 @@
    sheet from the bottom edge. Loaded with `loadStyles("./phone.css")` by phone.ts on the Android classes only, so a desktop
    never fetches it. Every colour is a `--hw-*` token, every size is in rem (the UI scale moves it), and the one fixed
    pixel size is the 44 px floor of a touch target. The sheet is the only floating layer here, so it alone has the shadow.
-   Everything is keyed on the root class `layout-phone`; `layout-tablet` takes nothing from this file yet. */
+   Everything is keyed on the root class `layout-phone`, with one exception: `#stage-top`, the column over the top of the stage that holds
+   the line after a file hand-over and the notice line of a phone, is also used by the tablet (the hand-over runs there too). The
+   notice line itself (`#phone-notice`) is drawn on a phone only. `layout-tablet` takes nothing else from this file yet. */
 
 :root.layout-phone {
   /* A touch target is at least 44 px (design.md section 6.6): 44 px at the base size, never less when the UI scale is below 100 %. */
@@ -145,6 +147,29 @@
 /* Motion: the sheet slides up in 160 ms, only when the person has not asked for less (the root class is the one place that decides). */
 @keyframes phone-sheet-in { from { transform: translateY(1.5rem); opacity: 0; } }
 :root:not(.motion-reduce) #phone-sheet:not([hidden]) { animation: phone-sheet-in 160ms cubic-bezier(.2, .7, .3, 1); }
+
+/* ---- transient lines over the stage ------------------------------------------------------------------------- */
+
+/* One column over the top of the stage for the lines that come and go: the line after a file hand-over first and the notice line
+   under it (docs/design.md 6.6), so neither covers the other. It is above the vault's line (z-index 6) and takes no pointer itself,
+   so the terminal under the gaps still gets its touches; a line in it takes its own. */
+#stage-top {
+  position: absolute; top: 0; left: 0; right: 0; z-index: 8; box-sizing: border-box; display: flex; flex-direction: column;
+  gap: .5rem; padding: .5rem; pointer-events: none;
+}
+#stage-top:empty { display: none; }
+/* The notice line of a phone: the shape of the line after a file hand-over. Plain, or `warn` with the mark `!` and an underline. */
+#phone-notice { display: flex; flex-direction: column; order: 2; pointer-events: none; }
+#phone-notice:empty, :root:not(.layout-phone) #phone-notice { display: none; }
+.phone-notice-line {
+  -webkit-appearance: none; appearance: none; box-sizing: border-box; display: block; width: 100%; min-height: var(--phone-target);
+  margin: 0; padding: .417rem .583rem; font: inherit; font-size: calc(14rem / 12); line-height: 1.4; text-align: left;
+  color: var(--hw-ink-2); background: var(--hw-ground-2); border: 1px solid var(--hw-line); border-radius: 8px;
+  box-shadow: 0 12px 40px rgb(0 0 0 / .5); overflow-wrap: anywhere; cursor: pointer; pointer-events: auto;
+}
+.phone-notice-line[data-tone="warn"] { color: var(--hw-warn); text-decoration: underline; text-underline-offset: .167rem; }
+.phone-notice-line:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: 2px; }
+.phone-notice-mark { margin-right: .333rem; font-weight: 700; }
 
 /* ---- forced colours --------------------------------------------------------------------------------------- */
 

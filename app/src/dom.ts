@@ -53,6 +53,22 @@ export function loadStyles(href: string): Promise<void> {
   return done;
 }
 
+/**
+ * The column at the top of the stage that holds the transient lines of Android: the line after a file hand-over first and the
+ * notice line under it, so neither covers the other (docs/design.md 6.6). It is found or made on the first call and answers null
+ * while the page has no stage. This module stays a leaf, so the status line and the hand-over can both reach the column.
+ */
+export function stageTop(): HTMLElement | null {
+  const stage = document.getElementById("stage");
+  if (!stage) return null;
+  let column = document.getElementById("stage-top");
+  if (!column) {
+    column = el("div", "", stage);
+    column.id = "stage-top";
+  }
+  return column;
+}
+
 /** Set the text of `node` (never markup) when it differs: a render that changes nothing touches nothing. */
 export function setText(node: Node, text: string): void {
   if (node.textContent !== text) node.textContent = text;

@@ -15,6 +15,7 @@ import type { PaneMirror } from "./frames.js";
 import { gridRect } from "./geometry.js";
 import { DEFAULT_LINK_SCHEMES } from "./settings-model.js";
 import { state } from "./state.js";
+import type { NoticeTone } from "./status.js";
 import { LINK_FEATURES, LINK_TARGET, webLinkModifier } from "./webstate.js";
 
 export type TargetKind = "url" | "path" | "hash";
@@ -428,8 +429,8 @@ interface LinkDeps {
   call: (cmd: string, args: Record<string, unknown>) => Promise<unknown>;
   /** The question `Open this link?`; `onOpen` is called synchronously from the click or key that confirms. Null: no question can be asked. */
   ask: ((shown: string, target: string, onOpen: () => void) => void) | null;
-  /** Say `text` in the notice segment of the status line (docs/design.md 6.31, a link that cannot be opened). */
-  say: (text: string) => void;
+  /** Say `text` in the notice segment of the status line, or on a phone in the notice line (docs/design.md 6.31, 6.6): a link that cannot be opened. */
+  say: (text: string, tone?: NoticeTone) => void;
 }
 
 /** What is said when the host refused or failed in a way the page cannot put in words. */
@@ -453,12 +454,13 @@ export function refusalSentence(reason: unknown): string {
 }
 
 /**
- * Say in the notice of the status line why a link a part of the page asked the host to open could not be opened (a list widget of
- * the sidebar): the host's sentence as text, as a link in a pane is told. The status module is loaded when it is needed.
+ * Say in the notice of the status line (on a phone, the notice line of docs/design.md 6.6) why a link a part of the page asked the
+ * host to open could not be opened (a list widget of the sidebar): the host's sentence as text, in the warn tone, as a link in a
+ * pane is told. The status module is loaded when it is needed.
  */
 export function sayRefusal(reason: unknown): void {
   const text = refusalSentence(reason);
-  void import("./status.js").then((m) => m.showNotice(text));
+  void import("./status.js").then((m) => m.showNotice(text, "warn"));
 }
 
 let deps: LinkDeps | null = null;
@@ -494,7 +496,7 @@ export function activateLink(pane: number, target: Target): void {
   const d = deps;
   if (!d) return;
   // A refusal of the host is answered in the status line; the click itself stays what it was, a call started from the gesture.
-  const refused = (reason: unknown): void => d.say(refusalSentence(reason));
+  const refused = (reason: unknown): void => d.say(refusalSentence(reason), "warn");
   if (target.source !== "osc8") {
     const action = linkAction(target, state.cwds.get(pane) ?? null, canRevealPaths());
     if (action?.command === "open_url") {
