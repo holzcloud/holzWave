@@ -13,7 +13,7 @@
 |---|---|---|
 | Linux `.deb`, `.rpm` and `.AppImage` | **Can be, by minisign; none has been yet.** There are six files in two sets, x86_64 and aarch64. A signed release carries, for each set, `<file>.minisig` for each of its three files, a list of the three (`SHA256SUMS` for x86_64, `SHA256SUMS-aarch64` for aarch64) and the signature of that list (`SHA256SUMS.minisig`, `SHA256SUMS-aarch64.minisig`) | the minisign signature, against the public key `packaging/minisign/holzwave.pub` |
 | Windows installer (`holzWave_<version>_x64-setup.exe`) | **No.** It is not signed with Authenticode or in any other way | only the `.sha256` file beside it. It says the download is whole; it is not proof of who made the file |
-| macOS app and DMG | **Ad hoc only, not notarised.** The signature is the one the build makes for itself; it names no developer and Gatekeeper does not accept it as one. The Homebrew cask removes the quarantine attribute so the app opens | nothing a user can check against a publisher |
+| macOS app and DMG | **Ad hoc only, not notarised.** The app is signed ad hoc under the fixed identifier `ch.holzcloud.holzwave`, and `wsh` inside it under `ch.holzcloud.holzwave.wsh`; the signature names no developer and Gatekeeper does not accept it as one. The Homebrew cask removes the quarantine attribute so the app opens | nothing a user can check against a publisher |
 | Flatpak | **No bundle is built, so nothing is signed.** See [flatpak.md](flatpak.md) | not applicable |
 | A package repository (apt, rpm) | **There is none** | not applicable |
 
@@ -35,6 +35,15 @@ were not looked into. The installer therefore stays unsigned, and Windows SmartS
 
 **macOS.** A Developer ID certificate and notarisation need an Apple developer account, and the author has none. The app is signed
 ad hoc, which the system needs to run it at all on Apple Silicon, and nothing more. Nothing here says that this will change.
+
+The ad hoc signature carries a fixed identifier because macOS files the Local Network permission, and other privacy answers,
+under the identifier of the signature. The signature that the linker makes by itself has a new identifier on every build
+(`holzwave_app-` and a hash) and binds no Info.plist. An installed copy with that signature had no local network access, and
+macOS did not ask; signed again under the fixed identifier, the same copy had access. It is made in two steps:
+`bundle.macOS.signingIdentity` `"-"` in `app/src-tauri/tauri.conf.json` makes the bundler sign the app ad hoc, and
+`scripts/sign-macos.sh` (run by `scripts/release-macos.sh`) gives `wsh` its own identifier and seals the app again, inside out.
+An ad hoc identifier is not proof of origin: anyone can sign a program ad hoc under the same identifier, and the designated
+requirement of the signature is the hash of the code (`cdhash`), not the identifier.
 
 ## Check a Linux package
 
@@ -126,6 +135,8 @@ can no longer be trusted by its signature alone; say so in the notes of that rel
 - **Windows signing** is not done: see the reason above.
 - **The Flatpak bundle and its signature** are not done; no bundle is built.
 - **macOS Developer ID and notarisation** are not done: see the reason above.
+- **The hardened runtime** is not switched on for the macOS app (`hardenedRuntime` is false in `tauri.conf.json`). With an ad hoc
+  signature, WebKit, the Swift bridges and the programs in the panes it has not been tried.
 - **A signed apt or rpm repository** is not done; there is no repository.
 - **An automatic release build** is not done; releases are built and signed by the owner on the owner's machines.
 
@@ -148,3 +159,8 @@ This is what has not been tried. It is listed here so that no reader assumes it 
 - No Azure Artifact Signing run was made, and no Windows certificate of any kind was tried.
 - How Windows SmartScreen treats a signed installer has not been seen, because no signed installer exists.
 - macOS notarisation has not been tried, and Gatekeeper with a Developer ID has not been seen.
+- Whether macOS keeps the Local Network answer when an update replaces the app has not been tried. The identifier stays the same,
+  but the designated requirement of an ad hoc signature is the code hash, which changes with every build, so macOS may still ask
+  again or block (row LN9 of [test-plan.md](test-plan.md)).
+- The fixed identifiers were checked with `codesign -dv` and `scripts/bundle-check-macos.sh` on one local build on 2026-11-24. No
+  release has been made with them yet, and the sign step of the release script has not run in a real release.

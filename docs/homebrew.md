@@ -39,7 +39,7 @@ holzcloud/holzwave` without an address. It is possible later and is not planned.
 
 ## What the cask does to your Mac
 
-- The app is signed ad hoc only. The signature is the one the build makes for itself; it names no developer, and Gatekeeper
+- The app is signed ad hoc only, under the fixed identifier `ch.holzcloud.holzwave`; it names no developer, and Gatekeeper
   does not accept it as one. The app is **not notarized** by Apple. See [signing.md](signing.md).
 - After the install the cask runs `xattr -dr com.apple.quarantine` on `holzWave.app`, so that macOS opens the app without the
   Gatekeeper warning. That is a bypass of a macOS protection. The cask says so in its `caveats` text, Homebrew prints it

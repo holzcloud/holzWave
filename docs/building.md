@@ -77,8 +77,10 @@ on any host with no Linux cross compiler: `wsh` has no C dependency, so the link
 already) or, where that does not link, Rust's own `rust-lld`; run `rustup target add x86_64-unknown-linux-musl
 aarch64-unknown-linux-musl` once. It checks with `file` that each is an ELF of the right machine and statically linked.
 Each release script then inspects the package it built: `scripts/bundle-check-macos.sh` (the file is beside the executable that
-`CFBundleExecutable` names, it is arm64, its signature is valid, `wsh help` runs, the Linux resources are static ELF files, nothing is
-world-writable, and the files are byte-identical to the ones built), `scripts/release-windows-cross.sh` (`7z` lists `wsh.exe`
+`CFBundleExecutable` names, it is arm64, its signature is valid and names `ch.holzcloud.holzwave.wsh`, the app's signature names
+`ch.holzcloud.holzwave` and `codesign --verify --strict --deep` passes on the whole app, `wsh help` runs, the Linux resources are
+static ELF files, nothing is world-writable, `wsh` is the code that was built, compared with both signatures removed since the
+signature in the bundle is replaced, and the Linux resources are byte-identical to the ones built), `scripts/release-windows-cross.sh` (`7z` lists `wsh.exe`
 and the resources in the installer and `wsh.exe` is identical to the built one), `scripts/linux-container-bundle.sh` (the deb and
 the rpm list `/usr/bin/wsh` and the resources, and `wsh` is identical to the built one; the AppImage is a note, as before) and
 `scripts/release-windows.ps1` (`wsh.exe` beside `holzwave-app.exe` is the built one; the Linux builds come from `-LinuxWsh`, a
@@ -86,6 +88,14 @@ folder made by `sh scripts/wsh-linux.sh` on a Mac or Linux host, and without it 
 The macOS bundle, the GNU-ABI installer and the arm64 deb, rpm and AppImage of the container script were built and inspected on a Mac
 with these checks; `scripts/release-windows.ps1` (the MSVC installer) and the amd64 Linux build were not run since `wsh` was added to
 them. The installed packages have been run by the author on Windows and Linux.
+
+**The signature on macOS.** The bundler signs the app ad hoc (`bundle.macOS.signingIdentity` `"-"`, `hardenedRuntime` false) and
+takes the identifier `ch.holzcloud.holzwave` from the bundle. It names the sidecar after its file, so `sh scripts/sign-macos.sh
+<path to holzWave.app>` signs `Contents/MacOS/wsh` as `ch.holzcloud.holzwave.wsh` and then the app again, inside out, never with
+`--deep`. `scripts/release-macos.sh` runs it after the Tauri build and before `scripts/bundle-check-macos.sh`; after a local build
+with the `tauri.wsh.conf.json` overlay run it by hand, while a plain build without the overlay is already right. Why: macOS files
+the Local Network permission under the signing identifier, and the linker's own signature changed it on every build. What has not
+been tried is listed in [signing.md](signing.md#untested).
 
 **Preview packages for Windows and Linux, built on this Mac** (owner decision of 2026-10-14; they only build and checksum,
 they never publish):
