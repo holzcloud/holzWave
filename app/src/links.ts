@@ -392,8 +392,8 @@ export function isLinkModifier(e: { metaKey?: boolean; ctrlKey?: boolean }, os: 
   return os === "macos" ? e.metaKey === true : e.ctrlKey === true;
 }
 
-/** Whether this page can show a folder: not the browser build. */
-export const canRevealPaths = (): boolean => state.os !== "web";
+/** Whether this page can show a file or a folder: neither the browser build nor Android, where the host refuses every reveal. */
+export const canRevealPaths = (): boolean => state.os !== "android" && state.os !== "web";
 
 /**
  * Open `url` the way the platform opens a link. On the desktop `desktop` is called, as before: the caller keeps its own

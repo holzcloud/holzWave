@@ -3,9 +3,9 @@
 // puts a letter on every target. The page sends only what it matched; the core re-checks it (plan 23).
 import assert from "node:assert/strict";
 import { callsOf, emit } from "./lib.mjs";
+import { open as openMarked, rowOf } from "./osclinks.test.mjs";
 
 const PAD = 6; // CSS px between a pane's edge and its grid (geometry.ts)
-const HEADER = 24; // CSS px of a pane's header strip at the base font size
 const BG = 0x14091a;
 const MODES = { alt: false, bracketed_paste: false, mouse: false };
 const COLS = 40;
@@ -39,6 +39,8 @@ async function open(page, url, { rows = ROWS, os = "macos", modes = MODES } = {}
   const cw = start.cell_w;
   const ch = start.cell_h;
   const origin = (pane) => c.left + (pane === 1 ? 0 : c.width / 2) + PAD;
+  // The header of a pane is as high as the layout makes it (the tablet layout of Android has a taller one than the desktop).
+  const HEADER = await page.evaluate(async () => (await import(new URL("state.js", location.href).href)).state.headerPx);
   await emit(page, "frame", frame(1, 1, rows, { modes }));
   await emit(page, "frame", frame(2, 1, rows, { modes }));
   return {
@@ -81,12 +83,15 @@ const spyClipboard = (page) =>
 const copied = (page) => page.evaluate(() => window.__exec.map((e) => e[2]).concat(window.__written));
 
 export default async function ({ page, url, errors, engine }) {
+  page.setDefaultTimeout(6000);
   await clickCase(page, url);
   await hoverCase(page, url);
   await ctrlCase(page, url);
   await hintCase(page, url);
   await manyHintsCase(page, url);
   await noTargetCase(page, url);
+  await androidPathCase(page, url);
+  await androidFileRefusalCase(page, url);
   assert.deepEqual(errors, [], "the page reported errors");
 }
 
@@ -306,4 +311,83 @@ async function noTargetCase(page, url) {
   await reset(page);
   await page.keyboard.press("a");
   assert.ok((await names(page, "key")).length >= 1, "a key still goes to the program");
+}
+
+/** The overlay's underline under the pointer, or null. */
+const hoverBox = (page) =>
+  page.evaluate(() => {
+    const n = document.querySelector("#overlay .linkhover");
+    if (!n) return null;
+    const r = n.getBoundingClientRect();
+    return { x: r.left, y: r.top, w: r.width, h: r.height };
+  });
+/** Run an action of the page by name: off macOS the chord comes from the core's table, which the stub does not send. */
+const runAction = (page, id) =>
+  page.evaluate(async (a) => (await import(new URL("actions.js", location.href).href)).runAction(a), id);
+const hintLabels = (page) => page.evaluate(() => [...document.querySelectorAll("#overlay [data-hint]")].map((n) => n.textContent));
+
+/**
+ * Android shows no file, so a printed path is not a target there: no underline with the gesture, no hint label, no reveal. A printed
+ * URL still is one, and on the desktop the path is one as before.
+ */
+async function androidPathCase(page, url) {
+  const g = await open(page, url, { os: "android" });
+  await reset(page);
+  await page.keyboard.down("Control");
+  await page.mouse.move(...g.pt(2, 10, 0));
+  await page.waitForFunction(() => document.querySelector("#overlay .linkhover") !== null);
+  assert.ok(await hoverBox(page), "a printed URL is underlined with the gesture on Android");
+  await page.mouse.move(...g.pt(2, 8, 1));
+  await frames(page, 3);
+  assert.equal(await hoverBox(page), null, "a printed path is not underlined on Android");
+  await page.keyboard.up("Control");
+
+  await modClick(page, "Control", g.pt(2, 10, 0));
+  assert.deepEqual(await callsOf(page, "open_url"), [{ url: URL_TEXT }], "a printed URL opens on Android");
+  await reset(page);
+  await page.waitForTimeout(450);
+  await modClick(page, "Control", g.pt(2, 8, 1));
+  await frames(page, 3);
+  assert.deepEqual((await names(page, "reveal_path", "open_url")), [], "a printed path is not revealed and not opened on Android");
+
+  // Hint mode keeps its labels (a plain letter copies what is printed), but Shift plus the path's label reveals nothing and copies nothing.
+  await spyClipboard(page);
+  await emit(page, "cwd", { pane: 2, cwd: "/home/u/proj" });
+  await runAction(page, "hints.open");
+  await page.waitForFunction(() => document.querySelectorAll("#overlay [data-hint]").length > 0);
+  assert.equal((await hintLabels(page)).length, 3, "the labels are the same on Android");
+  await reset(page);
+  await page.keyboard.press("Shift+b");
+  await frames(page, 3);
+  assert.deepEqual(await names(page, "reveal_path", "open_url"), [], "Shift plus the path's label reveals nothing on Android");
+  assert.deepEqual(await copied(page), [], "and copies nothing");
+  await runAction(page, "hints.open");
+  await page.waitForFunction(() => document.querySelectorAll("#overlay [data-hint]").length > 0);
+  await page.keyboard.press("b");
+  assert.equal((await copied(page)).length, 1, "a plain letter still copies the printed path");
+  assert.ok((await copied(page))[0].startsWith("./src/main.rs"));
+
+  // The desktop keeps the path a target: underlined with the gesture and revealed by it.
+  const d = await open(page, url, { os: "linux" });
+  await reset(page);
+  await modClick(page, "Control", d.pt(2, 8, 1));
+  assert.equal((await callsOf(page, "reveal_path")).length, 1, "a path is revealed on the desktop");
+  await page.keyboard.down("Control");
+  await page.mouse.move(...d.pt(2, 8, 1));
+  await page.waitForFunction(() => document.querySelector("#overlay .linkhover") !== null);
+  assert.ok(await hoverBox(page), "a printed path is a target on the desktop");
+  await page.keyboard.up("Control");
+}
+
+/** A file link the program marked still reaches the host on Android, and the host's refusal is said in the status line, never nothing. */
+async function androidFileRefusalCase(page, url) {
+  const FILES = "Files cannot be shown on this device.";
+  const rows = [rowOf(0, ["open ", { link: "file:///sdcard/a.txt" }, " now"], [[5, 24, "file:///sdcard/a.txt"]])];
+  const g = await openMarked(page, url, { os: "android", rows });
+  await page.evaluate((text) => window.__MOCK__.on("open_url", () => { throw text; }), FILES);
+  await page.waitForTimeout(450);
+  await modClick(page, "Control", g.pt(1, 10, 0));
+  await page.waitForFunction((want) => document.querySelector("#status .seg.notice")?.textContent === want, FILES);
+  assert.deepEqual(await callsOf(page, "open_url"), [{ url: "file:///sdcard/a.txt", pane: 1 }], "the host was asked once");
+  assert.equal(await page.evaluate(() => document.querySelector("#status .seg.notice").children.length), 0, "the sentence is text");
 }

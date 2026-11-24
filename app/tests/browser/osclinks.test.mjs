@@ -10,7 +10,6 @@ import { join } from "node:path";
 import { APP_DIR, callsOf, currentBackend, emit } from "./lib.mjs";
 
 const PAD = 6; // CSS px between a pane's edge and its grid (geometry.ts)
-const HEADER = 24; // CSS px of a pane's header strip at the base font size
 export const BG = 0x14091a;
 export const FG = 0xf6efe6;
 const LINK = 16; // the wire flag of a cell inside a marked link
@@ -82,6 +81,8 @@ export async function open(page, url, { os = "macos", rows = ROWS(), schemes = n
   const cw = start.cell_w;
   const ch = start.cell_h;
   const origin = (pane) => c.left + (pane === 1 ? 0 : c.width / 2) + PAD;
+  // The header of a pane is as high as the layout makes it (the tablet layout of Android has a taller one than the desktop).
+  const HEADER = await page.evaluate(async () => (await import(new URL("state.js", location.href).href)).state.headerPx);
   if (schemes) await setSchemes(page, schemes);
   if (remote) {
     await page.waitForFunction(() => window.__conns.size === 1);
