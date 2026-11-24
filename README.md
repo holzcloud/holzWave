@@ -154,7 +154,7 @@ Drawings of the design for the server as a sync target and for terminal sessions
 
 | Signing in to a server | Devices and the two switches | The target of the sync |
 |---|---|---|
-| ![Drawing of the design: the two steps of the sign-in in the app, the page Authorize device of the browser and the states of the sign-in, a certificate that is not accepted among them](docs/design/device-authorize.png) | ![Drawing of the design: the list of devices of a person and of an administrator, and the group Device access with the switches Sync target and Remote sessions](docs/design/device-lists.png) | ![Drawing of the design: the sync popover with the choice WebDAV or holzWave server, set up and connected](docs/design/sync-transport.png) |
+| ![Drawing of the design: the two steps of the sign-in in the app, the page Authorize device of the browser and the states of the sign-in, a certificate that is not accepted and a browser that could not be opened among them](docs/design/device-authorize.png) | ![Drawing of the design: the list of devices of a person and of an administrator, and the group Device access with the switches Sync target and Remote sessions](docs/design/device-lists.png) | ![Drawing of the design: the sync popover with the choice WebDAV or holzWave server, set up and connected](docs/design/sync-transport.png) |
 
 | Links at rest and under the pointer | The question before a link opens | Pictures in a pane |
 |---|---|---|
