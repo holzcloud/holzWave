@@ -52,7 +52,7 @@ use std::time::{Duration, Instant};
 
 use super::proto::{
     self, Answer, Chunk, ErrorWord, Event, MAX_ATTACHED, MAX_INPUT, MAX_PENDING, MAX_REPLY, MAX_SIZE, MAX_TAIL, MIN_SIZE, Op,
-    Reply, Request, SessionEntry, Stream, WriterView,
+    Reply, Request, ResumeToken, SessionEntry, Stream, WriterView,
 };
 use super::ws::{Recv, WsClient, WsError, WsLimits};
 use crate::server_link::{Fault, Origin, Token};
@@ -263,8 +263,9 @@ pub enum SubEvent {
     /// The attach was accepted. The session's grid, the writer view of this client and whether older lines exist come first;
     /// then `snapshot` bytes of [`SubEvent::Snapshot`] follow, then live bytes. `again` is false for the first attach of the
     /// subscription and true for every later one (a reconnect, a resync, older lines): the engine of the reader then holds
-    /// something older that the snapshot has to replace.
-    Attached { cols: u16, rows: u16, writer: WriterView, more: bool, snapshot: u32, again: bool },
+    /// something older that the snapshot has to replace. `epoch` is the epoch of the lease at the time of the answer (it changes
+    /// whenever the holder of the right changes); it is kept for what a pane may later do with it and nothing reads it yet.
+    Attached { cols: u16, rows: u16, writer: WriterView, more: bool, snapshot: u32, again: bool, epoch: u32 },
     /// A chunk of the screen at the time of the attach.
     Snapshot(Vec<u8>),
     /// Bytes the program wrote after it.
@@ -462,6 +463,8 @@ impl Hub {
             writer: WriterView::Watching,
             attached_before: false,
             streak: 0,
+            resume: None,
+            epoch: None,
         };
         let handle =
             SubHandle { id, session, route: Route::Hub(self.inner.cmd.clone()), wake: tx.clone(), queued: queued.clone() };
@@ -707,6 +710,25 @@ struct Sub {
     attached_before: bool,
     /// Attaches in a row that were made because the reader fell behind or the server asked.
     streak: u32,
+    /// The token of the last attach answer: the proof, sent with the next attach of this subscription, that it is the same
+    /// attachment as the one whose socket was lost. It is used once, so every answer replaces it (the old one is wiped as it is
+    /// dropped); it lives in this struct and nowhere else: it is never logged, never written to disk and never printed.
+    resume: Option<ResumeToken>,
+    /// The epoch of the lease as the last attach answer or the last writer event said it. Not used yet.
+    epoch: Option<u32>,
+}
+
+impl fmt::Debug for Sub {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The token is a bearer secret: only whether there is one is said, with the marker its own type prints.
+        f.debug_struct("Sub")
+            .field("session", &self.session)
+            .field("phase", &self.phase)
+            .field("writer", &self.writer)
+            .field("resume", &self.resume.as_ref().map(|_| "ResumeToken(..)"))
+            .field("epoch", &self.epoch)
+            .finish_non_exhaustive()
+    }
 }
 
 /// What became of an event offered to a subscription.
@@ -1063,8 +1085,12 @@ impl Core {
     fn ask_attach(&mut self, session: u32) {
         let Some(sub) = self.subs.get(&session) else { return };
         let (id, tail) = (sub.id, sub.tail);
+        // The token of the answer before this one: every attach of the subscription after the first (a reconnect, a resync, older
+        // lines) presents it, so that a writer whose socket was lost gets its right back. It stays until the answer to this
+        // request replaces it with the next one, so no attach of a subscription that was attached before goes without it.
+        let resume = sub.resume.clone();
         let deadline = Instant::now() + self.options.call_timeout;
-        match self.send(Op::Attach { session, tail, resume: None }, Pending::Attach { id, session }, deadline) {
+        match self.send(Op::Attach { session, tail, resume }, Pending::Attach { id, session }, deadline) {
             Ok(req) => {
                 if let Some(sub) = self.subs.get_mut(&session) {
                     sub.phase = Phase::Asked { req };
@@ -1412,7 +1438,7 @@ impl Core {
                 }
                 match result {
                     Err(word) => self.end_sub(session, HubError::Word(word)),
-                    Ok(Answer::Attached { session: said, cols, rows, writer, more, snapshot, .. }) => {
+                    Ok(Answer::Attached { session: said, cols, rows, writer, more, snapshot, resume, epoch }) => {
                         let sane = said == session
                             && (MIN_SIZE.0..=MAX_SIZE).contains(&cols)
                             && (MIN_SIZE.1..=MAX_SIZE).contains(&rows)
@@ -1420,7 +1446,7 @@ impl Core {
                         if !sane {
                             return self.stream_fault(session);
                         }
-                        self.attached(session, cols, rows, writer, more, snapshot);
+                        self.attached(session, cols, rows, writer, more, snapshot, resume, epoch);
                     }
                     Ok(_) => self.stream_fault(session),
                 }
@@ -1428,13 +1454,27 @@ impl Core {
         }
     }
 
-    fn attached(&mut self, session: u32, cols: u16, rows: u16, writer: WriterView, more: bool, snapshot: u32) {
+    #[allow(clippy::too_many_arguments)]
+    fn attached(
+        &mut self,
+        session: u32,
+        cols: u16,
+        rows: u16,
+        writer: WriterView,
+        more: bool,
+        snapshot: u32,
+        resume: ResumeToken,
+        epoch: u32,
+    ) {
         let Some(sub) = self.subs.get_mut(&session) else { return };
         let again = sub.attached_before;
         sub.attached_before = true;
         sub.writer = writer;
+        // The new token replaces the old one, which is wiped as it is dropped.
+        sub.resume = Some(resume);
+        sub.epoch = Some(epoch);
         sub.phase = if snapshot == 0 { Phase::Live { seq: 0 } } else { Phase::Snapshot { left: snapshot, seq: 0 } };
-        self.tell(session, SubEvent::Attached { cols, rows, writer, more, snapshot, again });
+        self.tell(session, SubEvent::Attached { cols, rows, writer, more, snapshot, again, epoch });
     }
 
     /// The server broke a rule on one stream: that subscription ends, the connection and the others go on.
@@ -1450,9 +1490,10 @@ impl Core {
         }
         let bound = self.options.sub_queue_bytes;
         match event {
-            Event::Writer { state, .. } => {
+            Event::Writer { state, epoch, .. } => {
                 if let Some(sub) = self.subs.get_mut(&session) {
                     sub.writer = state;
+                    sub.epoch = Some(epoch);
                 }
                 self.offer(session, SubEvent::Writer(state), true, bound);
             }

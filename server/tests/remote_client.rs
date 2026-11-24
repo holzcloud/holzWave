@@ -22,8 +22,10 @@ use std::time::Duration;
 
 use device_socket::{Device, env_with, revoke, writer_timeout};
 use holzwave_core::conn::{ConnState, RemoteState};
+use holzwave_core::remote::hub::{Hub, HubOptions};
 use holzwave_core::remote::proto::{Answer, Op, WriterView};
 use holzwave_core::server_link::Fault;
+use holzwave_core::ssh::Reconnect;
 use remote_env::{Remote, blocking, open_pane, screen, until_prompt, until_screen, until_view};
 use ws_env::WsOptions;
 
@@ -158,16 +160,96 @@ async fn a_cut_of_two_seconds_loses_no_line_repeats_none_and_keeps_the_order() {
     assert!(endpoint.asked() >= 2, "a token was asked for again for every connection");
     assert!(probe.exits().is_empty());
 
-    // The new socket is a new attachment: it has no right to write, because another device may have taken it while the
-    // connection was away. The pane says so, and the person takes it again.
+    // The cut was far inside the time the server keeps the right for its writer: the pane is the writer again with no
+    // takeover, and the program is stopped and the shell answers what is typed next.
     let view = pane.remote_view().unwrap();
-    assert_ne!(view.writer, WriterView::Writing, "{view:?}");
-    pane.takeover().unwrap();
-    until_view(&pane, "writing", SHELL, |v| v.writer == WriterView::Writing).await;
-    // The pane goes on afterwards: the program is stopped and the shell answers.
+    assert_eq!(view.writer, WriterView::Writing, "{view:?}");
     pane.text("\x03".to_owned()).unwrap();
     pane.text(SUM.to_owned()).unwrap();
     until_screen(&pane, "the sum", SHELL, |t| t.lines().any(|l| l.trim() == "hw-42")).await;
+    pane.close();
+    assert!(pane.join(Duration::from_secs(10)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_writer_cut_for_less_than_the_timeout_is_writing_again_with_no_takeover_and_its_next_line_runs_once() {
+    let remote = Remote::start().await;
+    let (hub, _laptop, _endpoint) = remote.hub("laptop");
+    let (session, _) = blocking({
+        let hub = hub.clone();
+        move || hub.new_session(80, 24).expect("a new session")
+    })
+    .await;
+    let (pane, probe) = open_pane(&hub, session, (80, 24));
+    until_prompt(&pane).await;
+    // The pane wrote before the cut.
+    pane.text("echo hw-$((1+1))\r".to_owned()).unwrap();
+    until_screen(&pane, "the first answer", SHELL, |t| t.lines().any(|l| l.trim() == "hw-2")).await;
+    assert_eq!(pane.remote_view().unwrap().writer, WriterView::Writing);
+
+    // A program that numbers its lines goes on while the network is away, so that the lines of the attach that follows the cut
+    // show the pane is attached again before the view is read.
+    pane.text("i=0; while :; do echo n $i; i=$((i+1)); sleep 0.05; done\r".to_owned()).unwrap();
+    until_screen(&pane, "line 20", SHELL, |t| numbered_lines(t).last().is_some_and(|n| *n >= 20)).await;
+    let before = numbered_lines(&screen(&pane)).last().copied().unwrap();
+    remote.relay.outage(Duration::from_secs(2)).await;
+    until_screen(&pane, "lines after the cut", SHELL, |t| numbered_lines(t).last().is_some_and(|n| *n >= before + 60)).await;
+    assert!(hub.stats().connects >= 2, "the hub made a second connection: {:?}", hub.stats());
+
+    // No takeover was sent: the view says the pane writes, and what it types after that reaches the shell, once.
+    let view = pane.remote_view().unwrap();
+    assert_eq!((view.writer, view.state, view.not_sent), (WriterView::Writing, RemoteState::None, false), "{view:?}");
+    pane.text("\x03".to_owned()).unwrap();
+    pane.text(SUM.to_owned()).unwrap();
+    until_screen(&pane, "the sum", SHELL, |t| t.lines().any(|l| l.trim() == "hw-42")).await;
+    // The shell has run the line once: the sum appears on one line only (the echo of the typed text is another text).
+    assert_eq!(screen(&pane).lines().filter(|l| l.trim() == "hw-42").count(), 1);
+    assert_eq!(hub.stats().dropped_input_bytes, 0, "nothing the pane typed was dropped");
+    assert!(probe.exits().is_empty());
+    pane.close();
+    assert!(pane.join(Duration::from_secs(10)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_writer_cut_for_longer_than_the_timeout_is_free_and_drops_what_it_types_until_it_takes_the_right() {
+    // The server keeps the right of a cut writer for three seconds; the hub beats fast enough that a writer that is not cut never
+    // runs out of them, so that only the cut can free the right.
+    let env = env_with(WsOptions { supervisor: Some(writer_timeout(3000)), ..WsOptions::default() }).await;
+    let remote = Remote::from(env).await;
+    let (_minted, endpoint) = remote.device("laptop");
+    let options = HubOptions {
+        beat: Duration::from_millis(300),
+        reconnect: Reconnect { attempts: 60, delay: Duration::from_millis(250) },
+        ..HubOptions::default()
+    };
+    let hub = Hub::new(endpoint.clone(), options);
+    let (session, _) = blocking({
+        let hub = hub.clone();
+        move || hub.new_session(80, 24).expect("a new session")
+    })
+    .await;
+    let (pane, _probe) = open_pane(&hub, session, (80, 24));
+    until_prompt(&pane).await;
+    pane.text("echo hw-$((1+1))\r".to_owned()).unwrap();
+    until_screen(&pane, "the answer", SHELL, |t| t.lines().any(|l| l.trim() == "hw-2")).await;
+    // Without a cut the beats keep the right for longer than the server's timeout.
+    tokio::time::sleep(Duration::from_millis(4000)).await;
+    assert_eq!(pane.remote_view().unwrap().writer, WriterView::Writing, "the beats keep the right");
+
+    // Five seconds away is longer than the three the server keeps the right: it is free when the pane is back.
+    remote.relay.outage(Duration::from_secs(5)).await;
+    until_view(&pane, "the connection again", SHELL, |v| {
+        v.state == RemoteState::None && v.writer == WriterView::Free
+    })
+    .await;
+    assert_eq!(pane.conn_state(), ConnState::Connected);
+    pane.text("echo hw-lost\r".to_owned()).unwrap();
+    until_view(&pane, "the dropped bytes", SHELL, |v| v.dropped_input >= 13 && v.not_sent).await;
+    pane.takeover().unwrap();
+    until_view(&pane, "writing", SHELL, |v| v.writer == WriterView::Writing).await;
+    pane.text(SUM.to_owned()).unwrap();
+    until_screen(&pane, "the sum", SHELL, |t| t.lines().any(|l| l.trim() == "hw-42")).await;
+    assert!(!screen(&pane).lines().any(|l| l.trim() == "hw-lost"), "the dropped line never ran");
     pane.close();
     assert!(pane.join(Duration::from_secs(10)));
 }

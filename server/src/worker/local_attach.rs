@@ -456,6 +456,7 @@ impl Tie {
                         more: attached.more,
                         snapshot: attached.snapshot_bytes,
                         again,
+                        epoch: attached.epoch,
                     },
                 );
             }
