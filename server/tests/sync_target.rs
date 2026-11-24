@@ -1131,7 +1131,7 @@ async fn the_client_works_over_plain_http_on_loopback_and_refuses_a_self_made_ce
 
     // A listener that speaks TLS with a certificate made for the test: the platform's verifier does not trust it, so the client
     // ends the connection before it says a word, and the token is never sent. The listener itself is fine: a client that is
-    // given its certificate connects.
+    // given its certificate connects. The client says the certificate was not accepted, not that the server cannot be reached.
     let server = edge_tls::start().await;
     assert!(server.try_tls(&[b"http/1.1"]).await.is_ok(), "the listener answers a client that trusts its certificate");
     let origin = format!("https://127.0.0.1:{}", server.addr.port());
@@ -1142,5 +1142,5 @@ async fn the_client_works_over_plain_http_on_loopback_and_refuses_a_self_made_ce
         holzwave_core::sync::webdav::Backend::ensure(&backend, "files").err().map(|e| e.to_string())
     })
     .await;
-    assert_eq!(fault.as_deref(), Some(holzwave_core::server_link::Fault::Unreachable.sentence()));
+    assert_eq!(fault.as_deref(), Some(holzwave_core::server_link::Fault::Certificate.sentence()), "a refused certificate is its own fault");
 }

@@ -180,7 +180,7 @@ pub fn derive_debug_findings(file: &str, source: &str) -> Vec<Finding> {
 
 /// Structs that derive `Debug` and have a field that matches the words, with the reason each is safe. An entry that matches no
 /// finding fails the test, so the list cannot go stale.
-const ALLOWED: [(&str, &str, &str); 15] = [
+const ALLOWED: [(&str, &str, &str); 16] = [
     ("accounts.rs", "Issued", "the field is a `Token`, whose Debug prints `Token(..)`"),
     ("audit.rs", "Event", "the word is `DetailKey`, the closed set of names of detail members; no value is a free string"),
     ("auth/password.rs", "Verified", "the field is a `Kek`, whose Debug prints a marker"),
@@ -194,6 +194,7 @@ const ALLOWED: [(&str, &str, &str); 15] = [
     ("store.rs", "Diagnostics", "the words are the SQLite settings `foreign_keys` and `secure_delete`"),
     ("store.rs", "Passkey", "`passkey_json` and the credential id are the public part of a credential; no private key is kept"),
     ("supervisor/launcher.rs", "LaunchRequest", "the word is `AccountKey`, the pair of an account number and a user id"),
+    ("worker/sessions.rs", "Attached", "the field is a `ResumeToken`, whose Debug prints a marker and never the bytes"),
     ("wire.rs", "SlotKey", "the field is a wire `Key`, whose Debug prints `Key(..)`"),
     ("wire.rs", "OpeningKey", "the field is a wire `Key`, whose Debug prints `Key(..)`"),
 ];

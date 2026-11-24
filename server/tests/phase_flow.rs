@@ -356,7 +356,8 @@ async fn a_second_person_sees_only_their_own_sessions_and_files(
         Op::End { session },
         Op::Detach { session },
     ] {
-        assert_eq!(socket.err(op).await, ErrorWord::NotFound, "{} of another person's session", op.name());
+        let name = op.name();
+        assert_eq!(socket.err(op).await, ErrorWord::NotFound, "{name} of another person's session");
     }
     socket.type_into(session, b"echo hw-bob-$((5+5))\r").await;
     tokio::time::sleep(Duration::from_millis(500)).await;
