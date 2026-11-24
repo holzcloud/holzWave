@@ -108,7 +108,8 @@
 //!                  u16 attached | u8 writer held: 0 or 1
 //!                2 created: u32 session
 //!                3 attached: u16 cols | u16 rows | u8 writer: 0 writing, 1 watching, 2 free | u8 older lines exist: 0 or 1 |
-//!                  u32 bytes of snapshot that follow in `Snapshot` frames
+//!                  u32 bytes of snapshot that follow in `Snapshot` frames | 16 bytes of resume token | u32 epoch of the
+//!                  lease, not 0
 //!                6 failed: u8 error: 1 not found, 2 refused, 3 busy, 4 too many, 5 bad request
 //!   17 Snapshot  2..6 socket | 6..10 session | 10..14 u32 seq | 14.. the bytes, 1 to 65536
 //!   18 Live      2..6 socket | 6..10 session | 10..14 u32 seq, which continues the count of the snapshot | 14.. the bytes,
@@ -123,6 +124,7 @@
 use std::fmt;
 use std::io::{self, Read, Write};
 
+use holzwave_core::remote::proto::{RESUME_BYTES, ResumeToken};
 use subtle::ConstantTimeEq;
 use tokio_util::codec::LengthDelimitedCodec;
 use zeroize::{ZeroizeOnDrop, Zeroizing};
@@ -192,8 +194,9 @@ pub const NOTE_EXITING: u8 = 4;
 /// The operation number of the note `CtlDone`.
 pub const NOTE_CTL_DONE: u8 = 5;
 
-/// The protocol version of the `Init` control. Version 3 added the session frames and the session limits of `Init`.
-pub const PROTOCOL_VERSION: u16 = 3;
+/// The protocol version of the `Init` control. Version 3 added the session frames and the session limits of `Init`; version 4
+/// the resume token and the epoch of the lease.
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// The socket id on which a worker answers a file control. A browser connection never has this id.
 pub const FILE_SOCKET: u32 = u32::MAX;
@@ -867,6 +870,20 @@ impl<'a> Fields<'a> {
         Ok(bytes.to_vec())
     }
 
+    /// A resume token: 16 bytes.
+    fn resume(&mut self) -> Result<ResumeToken, WireError> {
+        let bytes: [u8; RESUME_BYTES] = self.take(RESUME_BYTES)?.try_into().map_err(|_| WireError::Truncated)?;
+        Ok(ResumeToken::from_bytes(bytes))
+    }
+
+    /// An epoch of a lease that is not 0.
+    fn epoch(&mut self) -> Result<u32, WireError> {
+        match self.u32()? {
+            0 => Err(WireError::BadValue("an epoch is not 0")),
+            epoch => Ok(epoch),
+        }
+    }
+
     /// A socket id that is not 0.
     fn socket(&mut self) -> Result<u32, WireError> {
         match self.u32()? {
@@ -995,6 +1012,10 @@ fn nonzero_session(session: u32) -> Result<u32, WireError> {
     if session == 0 { Err(WireError::BadValue("a session id is not 0")) } else { Ok(session) }
 }
 
+fn nonzero_epoch(epoch: u32) -> Result<u32, WireError> {
+    if epoch == 0 { Err(WireError::BadValue("an epoch is not 0")) } else { Ok(epoch) }
+}
+
 fn nonzero_dim(dim: u16) -> Result<u16, WireError> {
     if dim == 0 { Err(WireError::BadValue("a size is not 0")) } else { Ok(dim) }
 }
@@ -1110,6 +1131,8 @@ fn encode_ses(ses: &Ses, out: &mut Vec<u8>) -> Result<(), WireError> {
                     out.push(writer_byte(attached.writer));
                     out.push(u8::from(attached.more));
                     out.extend_from_slice(&attached.snapshot_bytes.to_be_bytes());
+                    out.extend_from_slice(attached.resume.expose());
+                    out.extend_from_slice(&nonzero_epoch(attached.epoch)?.to_be_bytes());
                 }
                 SesAnswer::Done => out.push(ANSWER_DONE),
                 SesAnswer::Ended => out.push(ANSWER_ENDED),
@@ -1209,6 +1232,8 @@ fn decode_ses(fields: &mut Fields<'_>) -> Result<Ses, WireError> {
                     writer: writer_of(fields.u8()?)?,
                     more: fields.flag("the older-lines flag is not 0 or 1")?,
                     snapshot_bytes: fields.u32()?,
+                    resume: fields.resume()?,
+                    epoch: fields.epoch()?,
                 }),
                 ANSWER_DONE => SesAnswer::Done,
                 ANSWER_ENDED => SesAnswer::Ended,

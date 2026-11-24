@@ -16,6 +16,7 @@ use holzwave_server::wire::{
 };
 use holzwave_server::worker::lease::WriterState;
 use holzwave_server::worker::secretstore::SlotKind;
+use holzwave_core::remote::proto::ResumeToken;
 use holzwave_server::worker::sessions::{Attached, SesError, SessionInfo, SessionLimits};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 use tokio_util::bytes::BytesMut;
@@ -174,10 +175,10 @@ fn init_the_picture_cap_is_four_big_endian_bytes_and_the_edges_are_pinned() {
 }
 
 #[test]
-fn init_the_protocol_version_is_3() {
+fn init_the_protocol_version_is_4() {
     assert_eq!(
-        PROTOCOL_VERSION, 3,
-        "the first frame has fields that version 2 did not, and the session frames are new"
+        PROTOCOL_VERSION, 4,
+        "version 3 added the session frames and the session limits to the first frame; version 4 the resume token and the epoch"
     );
 }
 
@@ -1036,6 +1037,13 @@ const SOCKET_BYTES: [u8; 4] = [0x0A, 0x0B, 0x0C, 0x0D];
 const SOCKET: u32 = 0x0A0B_0C0D;
 const SESSION_BYTES: [u8; 4] = [0, 0, 1, 2];
 const SESSION: u32 = 0x0102;
+/// A resume token and its bytes on the wire.
+const RESUME_RAW: [u8; 16] = [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF];
+const RESUME_HEX: &str = "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf";
+
+fn resume() -> ResumeToken {
+    ResumeToken::from_bytes(RESUME_RAW)
+}
 
 /// A session frame head: kind 6, the operation, the socket and, when there is one, the request number.
 fn ses_head(op: u8, request: bool) -> Vec<u8> {
@@ -1188,8 +1196,11 @@ fn ses_answers_are_operation_16_then_the_socket_the_request_the_answer_kind_and_
         created,
     );
 
+    // The token is 16 bytes after the snapshot length, and the epoch of the lease (not 0) is a u32 after the token.
     let mut attached = ses_head(16, true);
     attached.extend_from_slice(&[3, 0, 100, 0, 30, 1, 1, 0, 0, 0x10, 0]);
+    attached.extend_from_slice(&RESUME_RAW);
+    attached.extend_from_slice(&[0, 0, 0x01, 0x02]);
     pinned(
         Frame::Ses(Ses::Answer {
             socket: SOCKET,
@@ -1200,6 +1211,8 @@ fn ses_answers_are_operation_16_then_the_socket_the_request_the_answer_kind_and_
                 writer: WriterState::Watching,
                 more: true,
                 snapshot_bytes: 4096,
+                resume: resume(),
+                epoch: 0x0102,
             }),
         }),
         attached,
@@ -1226,10 +1239,20 @@ fn ses_answers_are_operation_16_then_the_socket_the_request_the_answer_kind_and_
     for (byte, state) in [(0, WriterState::Writing), (1, WriterState::Watching), (2, WriterState::Free)] {
         let mut attached = ses_head(16, true);
         attached.extend_from_slice(&[3, 0, 1, 0, 1, byte, 0, 0, 0, 0, 0]);
+        attached.extend_from_slice(&RESUME_RAW);
+        attached.extend_from_slice(&[0, 0, 0, 1]);
         let frame = Frame::Ses(Ses::Answer {
             socket: SOCKET,
             request: ID,
-            answer: SesAnswer::Attached(Attached { cols: 1, rows: 1, writer: state, more: false, snapshot_bytes: 0 }),
+            answer: SesAnswer::Attached(Attached {
+                cols: 1,
+                rows: 1,
+                writer: state,
+                more: false,
+                snapshot_bytes: 0,
+                resume: resume(),
+                epoch: 1,
+            }),
         });
         pinned(frame, attached);
     }
@@ -1304,6 +1327,8 @@ fn ses_frames_with_a_fixed_length_are_an_error_cut_anywhere_or_with_a_byte_too_m
                 writer: WriterState::Writing,
                 more: false,
                 snapshot_bytes: 9,
+                resume: resume(),
+                epoch: u32::MAX,
             }),
         },
         Ses::Answer { socket: SOCKET, request: ID, answer: SesAnswer::Failed(SesError::Busy) },
@@ -1343,9 +1368,28 @@ fn a_session_frame_refuses_an_id_of_0_a_size_of_0_and_a_byte_it_does_not_know() 
         Ses::Event { socket: SOCKET, session: 0, event: SesEvent::Resync },
         Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Size { cols: 0, rows: 1 } },
         Ses::Answer { socket: SOCKET, request: ID, answer: SesAnswer::Created { session: 0 } },
+        // The epoch of a lease is never 0.
+        Ses::Answer {
+            socket: SOCKET,
+            request: ID,
+            answer: SesAnswer::Attached(Attached {
+                cols: 1,
+                rows: 1,
+                writer: WriterState::Free,
+                more: false,
+                snapshot_bytes: 0,
+                resume: resume(),
+                epoch: 0,
+            }),
+        },
     ] {
         assert!(Frame::Ses(bad.clone()).to_payload().is_err(), "{bad:?} encoded");
     }
+    let mut zero_epoch = ses_head(16, true);
+    zero_epoch.extend_from_slice(&[3, 0, 1, 0, 1, 2, 0, 0, 0, 0, 0]);
+    zero_epoch.extend_from_slice(&RESUME_RAW);
+    zero_epoch.extend_from_slice(&[0, 0, 0, 0]);
+    assert!(Frame::from_payload(&zero_epoch).is_err(), "an epoch of 0 is not read");
     for bytes in [
         // The socket 0 of a list, a request of 0, a session of 0, a size of 0.
         vec![0x06, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
@@ -1513,4 +1557,25 @@ fn a_garbage_stream_of_session_frames_never_panics_and_what_decodes_encodes_agai
         let _ = read_frame(&mut Cursor::new(prefixed(&bytes)));
     }
     assert!(decoded > 50, "the generator reached the decoder: {decoded} frames decoded");
+}
+
+#[test]
+fn an_attach_answer_prints_the_marker_of_the_token_and_never_its_bytes() {
+    let answer = Ses::Answer {
+        socket: SOCKET,
+        request: ID,
+        answer: SesAnswer::Attached(Attached {
+            cols: 80,
+            rows: 24,
+            writer: WriterState::Writing,
+            more: false,
+            snapshot_bytes: 9,
+            resume: resume(),
+            epoch: 7,
+        }),
+    };
+    for printed in [format!("{answer:?}"), format!("{:?}", Frame::Ses(answer.clone())), format!("{answer:#?}")] {
+        assert!(printed.contains("ResumeToken(..)"), "{printed}");
+        assert!(!printed.contains(RESUME_HEX) && !printed.contains("a0a1") && !printed.contains("160, 161"), "{printed}");
+    }
 }

@@ -389,8 +389,14 @@ numbers go on from 2147483648, and when it cannot be written a new session is re
 **One writer.** A session has one writer and any number of watchers; what a watcher types is dropped. The app that makes a
 session writes to it. The writer keeps the right while it says it is alive (an attached app does so every 10 seconds); after
 `remote.writer_timeout` (30 seconds) of silence the right is free. It never moves by itself: everyone sees `FREE` until
-somebody presses `Take over`, which moves it and tells every attached app. A writer that detaches gives it up at once. A
-session has one size, the size of the writer's pane; a watcher draws the same grid from the top-left corner.
+somebody presses `Take over`, which moves it and tells every attached app. A writer that detaches gives it up at once.
+A writer whose socket is lost does not: it keeps the right for what is left of its 30 seconds, counted from its last sign of life, and the
+others see `WATCHING` meanwhile (anyone may press `Take over`, which ends the grace at once). An app that comes back in that time attaches
+again with a token and writes again without `Take over`. The token is how the app proves that it is the same attachment: the server gives
+it a new one with every attach answer, it is random (128 bits), it can be used once, the app keeps it only in memory, and the server keeps
+it only in the memory of the person's worker and never writes it to a log, the audit files or the database. A token that is unknown,
+already used, of another session or too old is treated as no token: the app attaches as a watcher, as any other app does. After 30 seconds
+of silence the right is free as before. A session has one size, the size of the writer's pane; a watcher draws the same grid from the top-left corner.
 
 **Attach.** An attach sends the screen and a tail of the scrollback in one snapshot, then every byte the program writes. The
 tail is `remote.attach_tail_lines` (1000) unless the app asks for another; an app that scrolls to the top of what it holds asks

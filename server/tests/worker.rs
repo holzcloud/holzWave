@@ -2127,32 +2127,39 @@ fn ses_a_second_socket_watches_its_input_is_dropped_and_a_takeover_changes_who_w
 }
 
 #[test]
-fn ses_a_socket_that_ends_frees_its_right_through_a_gone_frame_and_a_detach_control_alike() {
+fn ses_a_socket_that_ends_keeps_its_right_for_the_grace_through_a_gone_frame_and_a_detach_control_alike() {
     let mut rig = Rig::start();
     rig.init();
     let session = ses_new(&mut rig, 5, 1);
     ses_attach(&mut rig, 5, 2, session, None);
     ses_attach(&mut rig, 6, 3, session, None);
 
-    // The supervisor says that socket 5 ended in one of its two ways; socket 6 is told that the right is free.
+    // The supervisor says that socket 5, the writer, ended: it is no longer attached, and it keeps the right for its time, so
+    // socket 6 is told nothing (the list is answered after every event the frame would have caused).
     rig.send(Frame::Ses(Ses::Gone { socket: 5 }));
-    wait_until(&mut rig, "the free view", |seen| {
-        seen.iter()
-            .any(|f| matches!(f, Frame::Ses(Ses::Event { socket: 6, event: SesEvent::Writer(WriterState::Free), .. })))
-    });
     rig.send(Frame::Ses(Ses::List { socket: 6, request: 4 }));
     match ses_answer(&mut rig, 6, 4) {
-        SesAnswer::Listed(list) => assert_eq!((list[0].attached, list[0].writer_held), (1, false), "{list:?}"),
+        SesAnswer::Listed(list) => assert_eq!((list[0].attached, list[0].writer_held), (1, true), "{list:?}"),
         other => panic!("{other:?}"),
     }
-    // The same through the control the supervisor sends when a page's socket ends.
+    assert!(
+        !rig.seen().iter().any(|f| matches!(f, Frame::Ses(Ses::Event { socket: 6, event: SesEvent::Writer(_), .. }))),
+        "the watcher is told nothing while the holder's time lasts"
+    );
+    // The same through the control the supervisor sends when a page's socket ends: a watcher that ends changes nothing.
     ses_attach(&mut rig, 7, 5, session, None);
     rig.send(Frame::Ctl(Ctl::Detach { socket: 7 }));
     rig.send(Frame::Ses(Ses::List { socket: 6, request: 6 }));
     match ses_answer(&mut rig, 6, 6) {
-        SesAnswer::Listed(list) => assert_eq!(list[0].attached, 1, "{list:?}"),
+        SesAnswer::Listed(list) => assert_eq!((list[0].attached, list[0].writer_held), (1, true), "{list:?}"),
         other => panic!("{other:?}"),
     }
+    // A takeover by socket 6 ends the grace of the writer whose socket ended.
+    rig.send(Frame::Ses(Ses::Takeover { socket: 6, request: 7, session }));
+    assert!(matches!(ses_answer(&mut rig, 6, 7), SesAnswer::Done));
+    wait_until(&mut rig, "the new writer is told", |seen| {
+        seen.iter().any(|f| matches!(f, Frame::Ses(Ses::Event { socket: 6, event: SesEvent::Writer(WriterState::Writing), .. })))
+    });
     rig.finish();
 }
 

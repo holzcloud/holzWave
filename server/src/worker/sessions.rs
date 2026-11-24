@@ -12,6 +12,14 @@
 //! returning `false`, and the host then ends that attachment's stream with `resync` and goes on. The host never waits for
 //! a client.
 //!
+//! A holder whose socket is lost is suspended, not removed: it keeps the right to write for what is left of the holder's own
+//! silence (the lease's timeout, counted from its last sign of life), its stream is ended, and its client number finds nothing.
+//! Every attach answer carries a new resume token for the attachment; an attach that names the token of the holder takes that
+//! attachment over (same lease identity, same paste state), whether it was suspended or the host had not yet heard that its
+//! old socket ended. A token that is unknown, used, of another session or too old is no token: an ordinary attach. A takeover
+//! by another attachment and the sweep after the timeout end a suspended holder. The token lives in memory only, is never
+//! logged, and is compared in constant time.
+//!
 //! The ids of sessions are a key in this host's own table, and a host is one person's. Another person's session id is an id
 //! this host has not made: it is `not found`, the same answer as an id that never existed.
 //!
@@ -46,8 +54,10 @@ use holzwave_core::pane::{
     TapMsg, TapReceiver,
 };
 
+use holzwave_core::remote::proto::ResumeToken;
 use rustix::fs::{Mode, OFlags};
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 
 use crate::log::Level;
 use crate::worker::dispatch::WorkerLog;
@@ -183,14 +193,19 @@ pub struct SessionInfo {
 }
 
 /// What an attach answers: the grid the client sets before it feeds the snapshot, its own view of the right to write, whether
-/// older lines exist beyond the tail that was sent, and how many bytes of snapshot follow in chunks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// older lines exist beyond the tail that was sent, how many bytes of snapshot follow in chunks, the token that proves a later
+/// attach is this attachment, and the epoch of the lease (it changes whenever the holder of the right changes).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Attached {
     pub cols: u16,
     pub rows: u16,
     pub writer: WriterState,
     pub more: bool,
     pub snapshot_bytes: u32,
+    /// The token for the next attach of this attachment; every answer gives a new one and the old one is used up.
+    pub resume: ResumeToken,
+    /// The epoch of the lease at the time of the answer: from 1, never 0.
+    pub epoch: u32,
 }
 
 // ---- the seams: attachment, clock, spawner -----------------------------------------------------------------------------------
@@ -497,6 +512,28 @@ struct Member {
     told_dropped: Option<u64>,
     /// The bracketed paste of this client that is on its way, see [`crate::worker::paste`].
     paste: PasteGate,
+    /// The token the last answer to this attachment carried; `None` until its first attach. Memory only.
+    token: Option<ResumeToken>,
+    /// The socket of this attachment ended while it held the lease: it keeps the right until the lease's timeout, its stream
+    /// is ended and its client number finds nothing, until an attach with its token takes it over or the sweep or a takeover
+    /// by another attachment removes it.
+    suspended: bool,
+}
+
+/// What a suspended attachment holds instead of the socket that ended: it takes nothing and tells nobody anything.
+struct Away;
+
+impl Attachment for Away {
+    fn snapshot_chunk(&self, _: u32, _: u32, _: &[u8]) -> bool {
+        false
+    }
+    fn live(&self, _: u32, _: u32, _: &[u8]) -> bool {
+        false
+    }
+    fn writer(&self, _: u32, _: WriterState) {}
+    fn size(&self, _: u32, _: u16, _: u16) {}
+    fn exited(&self, _: u32, _: Option<u32>) {}
+    fn resync(&self, _: u32) {}
 }
 
 struct Session {
@@ -513,6 +550,56 @@ struct Session {
     /// The time the program's end was seen.
     exited_at: Option<u64>,
     _place: Place,
+}
+
+impl Session {
+    /// The place of the member of `client` that is attached: a suspended member has no client.
+    fn position(&self, client: u64) -> Option<usize> {
+        self.members.iter().position(|m| m.client == client && !m.suspended)
+    }
+
+    /// The member that holds the lease and was given `token`, while the holder is inside its time. Every member is compared
+    /// whatever the first answer is, in constant time, so that the time says nothing of a guess.
+    fn resumable(&self, token: &ResumeToken, now: u64) -> Option<usize> {
+        let holder = self.lease.holder()?;
+        if !self.lease.deadline().is_some_and(|deadline| now < deadline) {
+            return None;
+        }
+        let mut found = None;
+        for (at, member) in self.members.iter().enumerate() {
+            let same = match &member.token {
+                Some(held) => bool::from(held.expose().ct_eq(token.expose())),
+                None => false,
+            };
+            if same && member.who == holder {
+                found = Some(at);
+            }
+        }
+        found
+    }
+
+    /// Removes the suspended members that no longer hold the lease (a takeover moved it, or the sweep freed it). Nobody is
+    /// told: a suspended member has no client. Whether any member was removed.
+    fn release_suspended(&mut self) -> bool {
+        let holder = self.lease.holder();
+        let mut released = false;
+        let mut at = 0;
+        while at < self.members.len() {
+            if self.members[at].suspended && holder != Some(self.members[at].who) {
+                let member = self.members.remove(at);
+                self.lease.detach(member.who);
+                released = true;
+            } else {
+                at += 1;
+            }
+        }
+        released
+    }
+
+    /// Whether nobody that has a client is attached.
+    fn nobody_here(&self) -> bool {
+        self.members.iter().all(|m| m.suspended)
+    }
 }
 
 #[derive(Default)]
@@ -643,7 +730,7 @@ impl SessionHost {
                 cols: s.cols,
                 rows: s.rows,
                 started: s.started,
-                attached: u16::try_from(s.members.len()).unwrap_or(u16::MAX),
+                attached: u16::try_from(s.members.iter().filter(|m| !m.suspended).count()).unwrap_or(u16::MAX),
                 writer_held: s.lease.holder().is_some(),
             });
             if out.len() >= MAX_LISTED {
@@ -672,7 +759,25 @@ impl SessionHost {
         tail: Option<u32>,
         reply: impl FnOnce(Result<Attached, SesError>),
     ) {
-        self.shared.attach(client, att, session, tail, reply);
+        self.shared.attach(client, att, session, tail, None, reply);
+    }
+
+    /// [`SessionHost::attach`] with the token of an earlier attach. When the holder of the lease of `session` was given that
+    /// token by its last answer and is inside its time, `client` takes that attachment over: the same lease identity and the
+    /// same paste state, a sign of life, the old stream ended, and the answer says `Writing`; this holds when the host heard
+    /// that the old socket ended (the holder is suspended) and when it did not. A token that is unknown, used, of another
+    /// session, of an attachment that does not hold the lease, or too old is no token: the attach is the ordinary one. Every
+    /// answer carries a new token.
+    pub fn attach_resume(
+        &self,
+        client: u64,
+        att: Arc<dyn Attachment>,
+        session: u32,
+        tail: Option<u32>,
+        resume: Option<ResumeToken>,
+        reply: impl FnOnce(Result<Attached, SesError>),
+    ) {
+        self.shared.attach(client, att, session, tail, resume, reply);
     }
 
     /// `client` leaves `session`. When it held the right to write the right is free and the others are told.
@@ -689,18 +794,20 @@ impl SessionHost {
         let found = self.shared.find(session).ok_or(SesError::NotFound)?;
         let mut guard = lock(&found);
         let s = &mut *guard;
-        let Some(member) = s.members.iter_mut().find(|m| m.client == client) else { return Ok(()) };
-        if let Some(stream) = member.stream.take() {
+        let Some(at) = s.position(client) else { return Ok(()) };
+        if let Some(stream) = s.members[at].stream.take() {
             stream.stop.set();
             s.pane.detach_tap(stream.tap);
         }
         Ok(())
     }
 
-    /// The socket of `client` ended: it leaves every session.
+    /// The socket of `client` ended. A watcher leaves every session it was attached to. A client that holds the right to write
+    /// in a session is suspended there: it keeps the right until the holder's silence of the lease's timeout has passed, so
+    /// that its app can come back with its token ([`SessionHost::attach_resume`]); a detach, not this, frees the right at once.
     pub fn gone(&self, client: u64) {
         for session in self.shared.all() {
-            self.shared.detach_member(&session, client);
+            self.shared.gone_member(&session, client);
         }
     }
 
@@ -718,13 +825,14 @@ impl SessionHost {
         let found = self.shared.find(session).ok_or(SesError::NotFound)?;
         let mut s = lock(&found);
         let now = self.shared.clock.now_ms();
-        let Some(who) = s.members.iter().find(|m| m.client == client).map(|m| m.who) else { return Ok(Input::Dropped) };
+        let Some(at) = s.position(client) else { return Ok(Input::Dropped) };
+        let who = s.members[at].who;
         if s.lease.input(who, now) == Input::Dropped || s.exited_at.is_some() {
             return Ok(Input::Dropped);
         }
         let room = MAX_RAW_BACKLOG.saturating_sub(s.pane.raw_backlog());
         let s = &mut *s;
-        let Some(member) = s.members.iter_mut().find(|m| m.client == client) else { return Ok(Input::Dropped) };
+        let member = &mut s.members[at];
         // A bracketed paste is held until its end and written whole or not at all; the rest is written as it comes.
         let fed = member.paste.feed(bytes, MAX_INPUT_BYTES, room);
         let mut dropped = fed.dropped;
@@ -751,7 +859,7 @@ impl SessionHost {
         let found = self.shared.find(session).ok_or(SesError::NotFound)?;
         let mut s = lock(&found);
         let now = self.shared.clock.now_ms();
-        let who = s.members.iter().find(|m| m.client == client).map(|m| m.who).ok_or(SesError::Refused)?;
+        let who = s.position(client).map(|at| s.members[at].who).ok_or(SesError::Refused)?;
         if !s.lease.resize_allowed(who) || s.exited_at.is_some() {
             return Err(SesError::Refused);
         }
@@ -760,7 +868,7 @@ impl SessionHost {
         s.cols = cols;
         s.rows = rows;
         s.lease.beat(who, now);
-        for member in &s.members {
+        for member in s.members.iter().filter(|m| !m.suspended) {
             member.att.size(session, cols, rows);
         }
         Ok(())
@@ -771,12 +879,14 @@ impl SessionHost {
         let found = self.shared.find(session).ok_or(SesError::NotFound)?;
         let mut s = lock(&found);
         let now = self.shared.clock.now_ms();
-        let who = s.members.iter().find(|m| m.client == client).map(|m| m.who).ok_or(SesError::Refused)?;
+        let who = s.position(client).map(|at| s.members[at].who).ok_or(SesError::Refused)?;
         let changes = match s.lease.takeover(who, now) {
             Ok(changes) => changes,
             Err(Refused::NotAttached) => return Err(SesError::Refused),
         };
         tell_writers(&s, &changes);
+        // A holder that was only waiting for its app to come back has lost the right: its token dies with it.
+        s.release_suspended();
         drop(s);
         let _ = self.shared.events.send(Event::Wake);
         Ok(())
@@ -787,7 +897,7 @@ impl SessionHost {
         let found = self.shared.find(session).ok_or(SesError::NotFound)?;
         let mut s = lock(&found);
         let now = self.shared.clock.now_ms();
-        if let Some(who) = s.members.iter().find(|m| m.client == client).map(|m| m.who) {
+        if let Some(who) = s.position(client).map(|at| s.members[at].who) {
             s.lease.beat(who, now);
         }
         Ok(())
@@ -836,7 +946,8 @@ impl Drop for SessionHost {
 /// Every attachment hears its own view of the change.
 fn tell_writers(session: &Session, changes: &Changes) {
     for (who, state) in changes {
-        if let Some(member) = session.members.iter().find(|m| m.who == *who) {
+        // A suspended member has no socket to tell.
+        if let Some(member) = session.members.iter().find(|m| m.who == *who && !m.suspended) {
             member.att.writer(session.id, *state);
         }
     }
@@ -901,7 +1012,16 @@ impl Shared {
             id,
             pane,
             lease,
-            members: vec![Member { client, who, att, stream: None, told_dropped: None, paste: PasteGate::default() }],
+            members: vec![Member {
+                client,
+                who,
+                att,
+                stream: None,
+                told_dropped: None,
+                paste: PasteGate::default(),
+                token: None,
+                suspended: false,
+            }],
             cols,
             rows,
             scrollback,
@@ -922,9 +1042,10 @@ impl Shared {
         att: Arc<dyn Attachment>,
         id: u32,
         tail: Option<u32>,
+        resume: Option<ResumeToken>,
         reply: impl FnOnce(Result<Attached, SesError>),
     ) {
-        match self.attach_inner(client, att.clone(), id, tail) {
+        match self.attach_inner(client, att.clone(), id, tail, resume.as_ref()) {
             Ok((attached, start)) => {
                 reply(Ok(attached));
                 start.run(att, id);
@@ -939,6 +1060,7 @@ impl Shared {
         att: Arc<dyn Attachment>,
         id: u32,
         tail: Option<u32>,
+        resume: Option<&ResumeToken>,
     ) -> Result<(Attached, StreamStart), SesError> {
         let found = self.find(id).ok_or(SesError::NotFound)?;
         let mut s = lock(&found);
@@ -946,15 +1068,20 @@ impl Shared {
             return Err(SesError::NotFound);
         }
         let now = self.clock.now_ms();
-        let existing = s.members.iter().position(|m| m.client == client);
-        if existing.is_none() && s.members.len() >= MAX_TAPS {
+        let existing = s.position(client);
+        // The attachment of an earlier socket that this attach takes over: only for a client that is not attached already, so
+        // that two members never share a client; anything else is an ordinary attach, and no word says why.
+        let resumed = if existing.is_none() { resume.and_then(|token| s.resumable(token, now)) } else { None };
+        let known = existing.or(resumed);
+        if known.is_none() && s.members.len() >= MAX_TAPS {
             return Err(SesError::TooMany);
         }
+        let token = ResumeToken::generate().ok_or(SesError::Refused)?;
         let wanted = tail.unwrap_or(self.limits.attach_tail_lines).min(self.limits.history_max_lines);
         let tail_rows = usize::try_from(wanted).unwrap_or(usize::MAX).min(s.scrollback);
         // The old stream of this client (a reattach) ends first, so that it cannot hand a byte to the new one's place: once
         // `set` returns, its reader pushes nothing more, so nothing of it follows the answer below.
-        if let Some(at) = existing
+        if let Some(at) = known
             && let Some(stream) = s.members[at].stream.take()
         {
             stream.stop.set();
@@ -962,12 +1089,24 @@ impl Shared {
         }
         let max_bytes = usize::try_from(self.limits.snapshot_max_bytes).unwrap_or(usize::MAX);
         let tap = s.pane.attach_tap(tail_rows, max_bytes, self.tap_queue_bytes).map_err(|e| tap_error(&e))?;
-        let who = match existing {
-            Some(at) => {
+        let who = match (existing, resumed) {
+            (Some(at), _) => {
                 s.members[at].att = att;
                 s.members[at].who
             }
-            None => {
+            (None, Some(at)) => {
+                // The same attachment on a new socket: the lease identity, the paste state and the right stay, and the
+                // takeover is a sign of life of the holder.
+                let who = s.members[at].who;
+                let member = &mut s.members[at];
+                member.client = client;
+                member.att = att;
+                member.suspended = false;
+                member.told_dropped = None;
+                s.lease.beat(who, now);
+                who
+            }
+            (None, None) => {
                 let who = {
                     let mut table = lock(&self.table);
                     let who = Who(table.next_who);
@@ -976,7 +1115,16 @@ impl Shared {
                 };
                 // The first entry of the change is the new attachment's own view, which the answer carries.
                 let changes = s.lease.attach(who, false, now);
-                s.members.push(Member { client, who, att, stream: None, told_dropped: None, paste: PasteGate::default() });
+                s.members.push(Member {
+                    client,
+                    who,
+                    att,
+                    stream: None,
+                    told_dropped: None,
+                    paste: PasteGate::default(),
+                    token: None,
+                    suspended: false,
+                });
                 let others: Changes = changes.into_iter().filter(|(w, _)| *w != who).collect();
                 tell_writers(&s, &others);
                 who
@@ -1000,12 +1148,16 @@ impl Shared {
         };
         let at = s.members.iter().position(|m| m.who == who).ok_or(SesError::NotFound)?;
         s.members[at].stream = Some(stream);
+        // The token the client was given by its last answer is used up; the new one is the only one that works.
+        s.members[at].token = Some(token.clone());
         let attached = Attached {
             cols: tap.size.0,
             rows: tap.size.1,
             writer: s.lease.view(who).unwrap_or(WriterState::Free),
             more: tap.history_rows > tail_rows,
             snapshot_bytes: u32::try_from(start.snapshot.len()).map_err(|_| SesError::Refused)?,
+            resume: token,
+            epoch: s.lease.epoch(),
         };
         Ok((attached, start))
     }
@@ -1013,7 +1165,7 @@ impl Shared {
     /// `client` leaves one session, if it is attached to it.
     fn detach_member(&self, found: &Arc<Mutex<Session>>, client: u64) {
         let mut s = lock(found);
-        let Some(at) = s.members.iter().position(|m| m.client == client) else { return };
+        let Some(at) = s.position(client) else { return };
         let member = s.members.remove(at);
         if let Some(stream) = member.stream {
             stream.stop.set();
@@ -1021,9 +1173,39 @@ impl Shared {
         }
         let changes = s.lease.detach(member.who);
         tell_writers(&s, &changes);
-        let remove = s.exited_at.is_some() && s.members.is_empty();
+        let remove = s.exited_at.is_some() && s.nobody_here();
         let id = s.id;
         drop(s);
+        if remove {
+            self.remove(&[id]);
+        }
+    }
+
+    /// The socket of `client` ended in one session. A watcher leaves as by a detach. The holder of the lease is suspended
+    /// instead: its stream ends and its client number no longer finds it, and the right stays with it until the sweep after
+    /// the lease's timeout (or a takeover by another attachment) ends it. Nobody is told: the others keep seeing `Watching`.
+    fn gone_member(&self, found: &Arc<Mutex<Session>>, client: u64) {
+        let mut guard = lock(found);
+        let s = &mut *guard;
+        let Some(at) = s.position(client) else { return };
+        let who = s.members[at].who;
+        if s.lease.holder() != Some(who) {
+            drop(guard);
+            self.detach_member(found, client);
+            return;
+        }
+        if let Some(stream) = s.members[at].stream.take() {
+            stream.stop.set();
+            s.pane.detach_tap(stream.tap);
+        }
+        let member = &mut s.members[at];
+        member.suspended = true;
+        member.att = Arc::new(Away);
+        let changes = s.lease.gone(who);
+        tell_writers(s, &changes);
+        let remove = s.exited_at.is_some() && s.nobody_here();
+        let id = s.id;
+        drop(guard);
         if remove {
             self.remove(&[id]);
         }
@@ -1038,7 +1220,7 @@ impl Shared {
         }
         s.exited_at = Some(self.clock.now_ms());
         let code = s.meta.exit().flatten();
-        for member in &s.members {
+        for member in s.members.iter().filter(|m| !m.suspended) {
             match &member.stream {
                 // The reader of a running stream tells its attachment itself, after the last byte it delivers.
                 Some(stream) if !stream.done.load(Ordering::SeqCst) => {}
@@ -1050,7 +1232,7 @@ impl Shared {
                 None => member.att.exited(id, code),
             }
         }
-        let empty = s.members.is_empty();
+        let empty = s.nobody_here();
         drop(s);
         if empty {
             self.remove(&[id]);
@@ -1079,8 +1261,10 @@ impl Shared {
             if !changes.is_empty() {
                 tell_writers(&s, &changes);
             }
+            // A holder that was waiting for its app and was freed by the silence is gone, its token with it.
+            s.release_suspended();
             if let Some(at) = s.exited_at
-                && now.saturating_sub(at) >= EXITED_GRACE_MS
+                && (now.saturating_sub(at) >= EXITED_GRACE_MS || s.nobody_here())
             {
                 gone.push(s.id);
             }

@@ -5,6 +5,16 @@
 //! watcher by itself, so the person who is typing is never surprised by a second pair of hands. An explicit
 //! [`Lease::takeover`] by any attachment of the session moves it, and every attachment is told its own view of the change.
 //!
+//! A holder whose socket is lost keeps the lease ([`Lease::gone`]): it is not freed at once, so that the app that comes back
+//! within the holder's own silence (at most [`WRITER_TIMEOUT_MS`] after its last sign of life) takes the same attachment over
+//! and writes again. The sweep after the timeout frees it as it frees any silent holder, and a takeover by another attachment
+//! moves it at once. Only a detach, the holder's explicit leaving, frees the lease at once.
+//!
+//! The lease has an epoch: a number from 1 that changes whenever the holder of the lease changes and never otherwise (a
+//! claim, a takeover by another attachment, a free by the sweep and a holder's detach change it; a beat, an input, a watcher
+//! that comes or goes and a takeover by the holder itself do not). It never becomes 0. An input frame that names an old epoch
+//! was written for a holder whose right has moved.
+//!
 //! This is plain data and functions: no thread, no clock. Every call that depends on time takes the time in milliseconds as
 //! an argument, so a test advances time by passing numbers and the worker passes a monotonic clock. A clock that goes
 //! backwards frees nothing and breaks nothing.
@@ -78,6 +88,8 @@ pub struct Lease {
     /// The time of the holder's last sign of life; meaningful while there is a holder.
     last_life: u64,
     timeout_ms: u64,
+    /// Changes with every change of the holder; from 1, never 0.
+    epoch: u32,
 }
 
 impl Default for Lease {
@@ -89,12 +101,25 @@ impl Default for Lease {
 impl Lease {
     /// An empty lease that frees after `timeout_ms` of silence of its holder.
     pub fn new(timeout_ms: u64) -> Lease {
-        Lease { told: BTreeMap::new(), holder: None, last_life: 0, timeout_ms }
+        Lease { told: BTreeMap::new(), holder: None, last_life: 0, timeout_ms, epoch: 1 }
     }
 
     /// The holder, if there is one.
     pub fn holder(&self) -> Option<Who> {
         self.holder
+    }
+
+    /// The epoch of the lease: it changes whenever the holder changes and never otherwise, and it is never 0.
+    pub fn epoch(&self) -> u32 {
+        self.epoch
+    }
+
+    /// Makes `holder` the holder and moves the epoch when that is a change.
+    fn set_holder(&mut self, holder: Option<Who>) {
+        if self.holder != holder {
+            self.holder = holder;
+            self.epoch = self.epoch.wrapping_add(1).max(1);
+        }
     }
 
     /// How many attachments there are.
@@ -156,7 +181,7 @@ impl Lease {
             return Changes::new();
         }
         if claim && self.holder.is_none() {
-            self.holder = Some(who);
+            self.set_holder(Some(who));
             self.last_life = now;
         }
         // The others first, while the new one is not among them: a session that nobody held, and that the creator claims
@@ -175,13 +200,18 @@ impl Lease {
             return Changes::new();
         }
         if self.holder == Some(who) {
-            self.holder = None;
+            self.set_holder(None);
         }
         self.settle()
     }
 
-    /// The socket of `who` ended: the same as [`Lease::detach`].
+    /// The socket of `who` ended. A watcher is removed as by [`Lease::detach`]. The holder is not: it stays the holder,
+    /// still an attachment of the session, and nobody is told anything, so that its app can take it over again; the sweep
+    /// after the timeout frees it, as it frees any silent holder, and a takeover by another attachment moves it.
     pub fn gone(&mut self, who: Who) -> Changes {
+        if self.holder == Some(who) {
+            return Changes::new();
+        }
         self.detach(who)
     }
 
@@ -214,7 +244,7 @@ impl Lease {
         if !self.told.contains_key(&who) {
             return Err(Refused::NotAttached);
         }
-        self.holder = Some(who);
+        self.set_holder(Some(who));
         self.last_life = now;
         Ok(self.settle())
     }
@@ -228,7 +258,7 @@ impl Lease {
     /// The clock has reached `now`: a holder that was silent for the whole timeout loses the lease and nobody gets it.
     pub fn sweep(&mut self, now: u64) -> Changes {
         if self.holder.is_some() && now.saturating_sub(self.last_life) >= self.timeout_ms {
-            self.holder = None;
+            self.set_holder(None);
             return self.settle();
         }
         Changes::new()
@@ -381,15 +411,90 @@ mod tests {
     }
 
     #[test]
-    fn a_holder_that_detaches_or_is_gone_frees_the_lease() {
+    fn a_holder_that_detaches_frees_the_lease_at_once() {
         let mut lease = three();
         let changes = lease.detach(A);
         assert_eq!(changes, vec![(B, Free), (C, Free)], "the leaver is not told");
         assert_eq!(lease.holder(), None);
         assert_eq!(lease.attached(), 2);
+    }
 
+    #[test]
+    fn a_holder_whose_socket_is_gone_stays_the_holder_until_the_sweep_frees_it() {
         let mut lease = three();
-        assert_eq!(lease.gone(A), vec![(B, Free), (C, Free)]);
+        assert!(lease.gone(A).is_empty(), "nobody is told: the others keep watching");
+        assert_eq!(lease.holder(), Some(A));
+        assert_eq!(lease.view(B), Some(Watching));
+        assert_eq!(lease.view(C), Some(Watching));
+        assert_eq!(lease.attached(), 3, "the holder is still an attachment of the session");
+        // The silence of the holder counts as for any holder: the lease is free at the timeout and not before.
+        assert!(lease.sweep(29_999).is_empty());
+        assert_eq!(lease.sweep(30_000), vec![(A, Free), (B, Free), (C, Free)]);
+        assert_eq!(lease.holder(), None);
+    }
+
+    #[test]
+    fn the_epoch_starts_at_one_and_changes_with_every_change_of_the_holder_and_never_otherwise() {
+        let mut lease = Lease::default();
+        assert_eq!(lease.epoch(), 1);
+        // A claim is a change of the holder.
+        lease.attach(A, true, 0);
+        assert_eq!(lease.epoch(), 2, "the claim");
+        // A watcher's attach and detach, a beat, an input, a takeover by the holder itself, a sweep before the time.
+        lease.attach(B, false, 1);
+        lease.attach(C, false, 1);
+        lease.beat(A, 2);
+        lease.input(A, 3);
+        lease.input(B, 3);
+        lease.takeover(A, 4).expect("the holder");
+        assert!(lease.sweep(5).is_empty());
+        lease.detach(C);
+        lease.gone(B);
+        assert_eq!(lease.epoch(), 2, "nothing changed the holder");
+        lease.attach(B, false, 6);
+        // A takeover by another attachment.
+        lease.takeover(B, 7).expect("takeover");
+        assert_eq!(lease.epoch(), 3, "the takeover");
+        // The holder's detach.
+        lease.detach(B);
+        assert_eq!(lease.epoch(), 4, "the holder left");
+        // A takeover of a free lease, then the sweep.
+        lease.takeover(A, 8).expect("takeover");
+        assert_eq!(lease.epoch(), 5);
+        assert!(!lease.sweep(8 + WRITER_TIMEOUT_MS).is_empty());
+        assert_eq!(lease.epoch(), 6, "the sweep freed it");
+        assert!(lease.sweep(1_000_000).is_empty());
+        assert_eq!(lease.epoch(), 6, "a free lease frees nothing more");
+        // The loss of the holder's socket keeps the holder, so the epoch.
+        lease.takeover(A, 9).expect("takeover");
+        let before = lease.epoch();
+        lease.gone(A);
+        assert_eq!(lease.epoch(), before);
+    }
+
+    #[test]
+    fn the_epoch_never_becomes_zero_when_it_wraps() {
+        let mut lease = Lease::default();
+        lease.attach(A, false, 0);
+        lease.attach(B, false, 0);
+        lease.epoch = u32::MAX - 1;
+        lease.takeover(A, 1).expect("takeover");
+        assert_eq!(lease.epoch(), u32::MAX);
+        lease.takeover(B, 2).expect("takeover");
+        assert_eq!(lease.epoch(), 1, "past the largest it goes to 1, never 0");
+        lease.takeover(A, 3).expect("takeover");
+        assert_eq!(lease.epoch(), 2);
+    }
+
+    #[test]
+    fn a_takeover_ends_the_grace_of_a_holder_whose_socket_is_gone() {
+        let mut lease = three();
+        lease.gone(A);
+        let changes = lease.takeover(B, 1_000).expect("an attached watcher may take over");
+        assert_eq!(changes, vec![(A, Watching), (B, Writing)]);
+        assert_eq!(lease.holder(), Some(B));
+        // A is only a watcher now: the owner of the sessions removes it, and nobody else is told.
+        assert!(lease.detach(A).is_empty());
     }
 
     #[test]

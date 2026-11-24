@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use holzwave_core::GhosttyEngine;
 use holzwave_core::engine::TerminalEngine;
 use holzwave_core::pane::PaneSpec;
+use holzwave_core::remote::proto::ResumeToken;
 use holzwave_core::textread::TextRegion;
 use holzwave_server::config::Remote;
 use holzwave_server::worker::lease::{Input, WriterState};
@@ -240,6 +241,21 @@ fn until(what: &str, mut condition: impl FnMut() -> bool) {
 fn attach(host: &SessionHost, client: u64, rec: &Arc<Rec>, session: u32, tail: Option<u32>) -> Result<Attached, SesError> {
     let (tx, rx) = mpsc::channel();
     host.attach(client, rec.clone(), session, tail, move |answer| {
+        let _ = tx.send(answer);
+    });
+    rx.recv_timeout(WAIT).expect("the attach is always answered")
+}
+
+/// [`attach`] that names the token of an earlier attach.
+fn attach_with(
+    host: &SessionHost,
+    client: u64,
+    rec: &Arc<Rec>,
+    session: u32,
+    resume: Option<&ResumeToken>,
+) -> Result<Attached, SesError> {
+    let (tx, rx) = mpsc::channel();
+    host.attach_resume(client, rec.clone(), session, None, resume.cloned(), move |answer| {
         let _ = tx.send(answer);
     });
     rx.recv_timeout(WAIT).expect("the attach is always answered")
@@ -612,7 +628,7 @@ fn the_housekeeping_thread_frees_the_right_by_itself_with_the_real_clock() {
 }
 
 #[test]
-fn a_writer_that_detaches_frees_the_right_and_a_watcher_that_leaves_changes_nothing() {
+fn a_writer_that_detaches_frees_the_right_at_once_and_a_watcher_that_leaves_changes_nothing() {
     let programs = Programs::new("sleep 60");
     let host = host_of(&programs);
     let writer = Rec::new();
@@ -624,11 +640,207 @@ fn a_writer_that_detaches_frees_the_right_and_a_watcher_that_leaves_changes_noth
     attach(&host, 3, &second, id, None).expect("attach");
     host.detach(3, id).expect("a watcher leaves");
     assert!(writer.writers().is_empty() && first.writers().is_empty(), "nothing changed for the others");
-    // The socket of the writer ends: the same as a detach, for every session at once.
-    host.gone(1);
-    assert_eq!(first.writers(), vec![WriterState::Free]);
+    // A watcher whose socket ends leaves too, and changes nothing for the others.
+    host.gone(2);
+    assert!(writer.writers().is_empty(), "the watcher's socket ended: nothing changed");
+    assert_eq!(host.list()[0].attached, 1);
+    // The writer detaches: the right is free at once, for the one that is left.
+    let last = Rec::new();
+    attach(&host, 4, &last, id, None).expect("attach");
+    host.detach(1, id).expect("the writer detaches");
+    assert_eq!(last.writers(), vec![WriterState::Free]);
     assert!(!host.list()[0].writer_held);
     assert_eq!(host.list()[0].attached, 1);
+}
+
+// ---- a writer whose socket is lost ------------------------------------------------------------------------------------------------
+
+#[test]
+fn a_writer_whose_socket_is_lost_keeps_the_right_until_the_timeout_and_the_others_are_told_nothing() {
+    let clock = ManualClock::new();
+    let programs = Programs::new("sleep 60");
+    let host = SessionHost::start(programs.clone(), HostSettings::default(), clock.clone());
+    let writer = Rec::new();
+    let id = started(&host, &writer);
+    attach(&host, 1, &writer, id, None).expect("attach");
+    let watcher = Rec::new();
+    attach(&host, 2, &watcher, id, None).expect("attach");
+
+    // The holder's last sign of life is at 1 000 ms; then its socket ends.
+    clock.set(1_000);
+    host.beat(1, id).expect("a beat");
+    host.gone(1);
+    assert!(watcher.writers().is_empty(), "the others keep watching: nothing is told");
+    assert!(host.list()[0].writer_held, "the right is still held");
+    assert_eq!(host.list()[0].attached, 1, "the socket that ended is not attached any more");
+    assert_eq!(host.input(1, id, b"x"), Ok(Input::Dropped), "its client number finds nothing");
+    assert_eq!(host.takeover(1, id), Err(SesError::Refused));
+    assert_eq!(host.resize(1, id, 100, 30), Err(SesError::Refused));
+
+    // Inside the time of the silence the right stays; at the time it is free, for the one that is left.
+    clock.set(30_999);
+    host.sweep();
+    assert!(watcher.writers().is_empty() && host.list()[0].writer_held, "30 s after the last sign of life not yet");
+    clock.set(31_000);
+    host.sweep();
+    assert_eq!(watcher.writers(), vec![WriterState::Free]);
+    assert!(!host.list()[0].writer_held);
+}
+
+#[test]
+fn an_attach_with_the_token_of_a_writer_whose_socket_was_lost_takes_its_place_with_its_paste_state() {
+    // Raw mode, no echo, and `cat -v` after a second: what the program got, with the escapes made visible.
+    let programs = Programs::new("stty raw -echo; sleep 1; exec cat -v");
+    let clock = ManualClock::new();
+    let host = SessionHost::start(programs.clone(), HostSettings::default(), clock.clone());
+    let lost = Rec::new();
+    let id = started(&host, &lost);
+    let first = attach(&host, 1, &lost, id, None).expect("attach");
+    assert_eq!(first.writer, WriterState::Writing);
+    let watcher = Rec::new();
+    attach(&host, 2, &watcher, id, None).expect("attach");
+    std::thread::sleep(Duration::from_millis(300)); // `stty` has run
+
+    // A bracketed paste is begun, the socket is lost with the end marker still to come.
+    assert_eq!(host.input(1, id, b"\x1b[200~first-half-"), Ok(Input::Accepted));
+    clock.set(5_000);
+    host.gone(1);
+    assert!(watcher.writers().is_empty(), "nobody is told");
+
+    // The app is back on another socket, 10 s after its last sign of life, with the token of its last answer.
+    clock.set(10_000);
+    let back = Rec::new();
+    let resumed = attach_with(&host, 3, &back, id, Some(&first.resume)).expect("attach with the token");
+    assert_eq!(resumed.writer, WriterState::Writing, "the right is still its own");
+    assert_eq!(resumed.epoch, first.epoch, "the holder did not change, so the epoch did not");
+    assert!(resumed.resume != first.resume, "the token is used up and a new one is given");
+    assert!(watcher.writers().is_empty(), "the others are told nothing new");
+    assert_eq!(host.list()[0].attached, 2);
+    assert_eq!(host.input(1, id, b"x"), Ok(Input::Dropped), "the old client number is not the writer");
+
+    // The paste goes on where it was left: the rest of it and its end marker complete it, and it is written whole.
+    assert_eq!(host.input(3, id, b"second-half\x1b[201~"), Ok(Input::Accepted));
+    until("the program shows the paste", || watcher.live_text().contains("^[[200~first-half-second-half^[[201~"));
+    assert!(back.writers().is_empty());
+    // The right is kept by signs of life from now: 29 s after the resume it is still held.
+    clock.set(10_000 + 29_999);
+    host.sweep();
+    assert!(host.list()[0].writer_held);
+}
+
+#[test]
+fn an_attach_with_the_token_takes_the_attachment_over_also_when_its_old_socket_is_not_yet_known_to_be_dead() {
+    let programs = Programs::new(TICKING);
+    let host = host_of(&programs);
+    let old = Rec::new();
+    let id = started(&host, &old);
+    let first = attach_whole(&host, 1, &old, id, None).expect("attach");
+    until("the old stream carries bytes", || !old.live_text().is_empty());
+    let watcher = Rec::new();
+    attach(&host, 2, &watcher, id, None).expect("attach");
+
+    // The old socket is silent but not closed: it was not told to leave.
+    let back = Rec::new();
+    let resumed = attach_with(&host, 3, &back, id, Some(&first.resume)).expect("attach with the token");
+    assert_eq!((resumed.writer, resumed.epoch), (WriterState::Writing, first.epoch));
+    assert!(resumed.resume != first.resume);
+    assert_eq!(host.list()[0].attached, 2, "one attachment on its new socket, not two");
+
+    // The old stream ended with the answer: nothing more reaches the old socket.
+    let seen = old.got().len();
+    until("the new stream carries bytes", || !back.live_text().is_empty());
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(old.got().len(), seen, "the old stream stopped: {:?}", old.got().iter().skip(seen).count());
+    // The old client can no longer write; the new one can; the others were told nothing.
+    assert_eq!(host.input(1, id, b"x"), Ok(Input::Dropped));
+    assert_eq!(host.input(3, id, b"x"), Ok(Input::Accepted));
+    assert!(watcher.writers().is_empty() && old.writers().is_empty());
+    // The old socket ends late: it was taken over, so its end changes nothing.
+    host.gone(1);
+    assert!(host.list()[0].writer_held && watcher.writers().is_empty());
+    assert_eq!(host.input(3, id, b"x"), Ok(Input::Accepted));
+}
+
+#[test]
+fn a_token_after_the_timeout_and_a_token_used_before_or_of_another_session_or_made_up_is_an_ordinary_attach() {
+    let programs = Programs::new("sleep 60");
+    let clock = ManualClock::new();
+    let host = SessionHost::start(programs.clone(), HostSettings::default(), clock.clone());
+    let lost = Rec::new();
+    let id = started(&host, &lost);
+    let first = attach(&host, 1, &lost, id, None).expect("attach");
+    let watcher = Rec::new();
+    attach(&host, 2, &watcher, id, None).expect("attach");
+    host.gone(1);
+
+    // Another session, with its own writer and token, to present here.
+    let other_writer = Rec::new();
+    let other = started(&host, &other_writer);
+    let theirs = attach(&host, 8, &other_writer, other, None).expect("attach").resume;
+
+    // A token of another session, made up bytes, and no token: each is an ordinary attach and watches the suspended holder.
+    for (client, token) in [(11, Some(theirs.clone())), (12, Some(ResumeToken::from_bytes([7; 16]))), (13, None)] {
+        let rec = Rec::new();
+        let answer = attach_with(&host, client, &rec, id, token.as_ref()).expect("never an error");
+        assert_eq!(answer.writer, WriterState::Watching, "client {client}");
+        assert_eq!(answer.epoch, first.epoch);
+        assert!(answer.resume != first.resume && answer.resume != theirs, "a new token for every answer");
+        host.detach(client, id).expect("leave");
+    }
+    // The token works once: the first use takes the place; the second is only a watcher.
+    clock.set(2_000);
+    let back = Rec::new();
+    let resumed = attach_with(&host, 20, &back, id, Some(&first.resume)).expect("attach");
+    assert_eq!(resumed.writer, WriterState::Writing);
+    host.gone(20);
+    let again = Rec::new();
+    let reused = attach_with(&host, 21, &again, id, Some(&first.resume)).expect("attach");
+    assert_eq!(reused.writer, WriterState::Watching, "a used token is no token");
+    // The token the resume gave works for the next one.
+    let next = attach_with(&host, 22, &Rec::new(), id, Some(&resumed.resume)).expect("attach");
+    assert_eq!(next.writer, WriterState::Writing);
+
+    // After the timeout the holder is gone with its token: the attach is a watcher of a free session.
+    host.gone(22);
+    clock.set(2_000 + 30_000);
+    host.sweep();
+    let late = Rec::new();
+    let expired = attach_with(&host, 30, &late, id, Some(&next.resume)).expect("attach");
+    assert_eq!(expired.writer, WriterState::Free, "the right was freed by the silence");
+    assert_ne!(expired.epoch, next.epoch, "the holder changed");
+    assert_eq!(host.input(30, id, b"x"), Ok(Input::Dropped));
+    assert!(watcher.writers().contains(&WriterState::Free));
+}
+
+#[test]
+fn a_takeover_by_another_attachment_ends_the_suspension_of_a_holder_and_its_token() {
+    let programs = Programs::new("sleep 60");
+    let clock = ManualClock::new();
+    let host = SessionHost::start(programs.clone(), HostSettings::default(), clock.clone());
+    let lost = Rec::new();
+    let id = started(&host, &lost);
+    let first = attach(&host, 1, &lost, id, None).expect("attach");
+    let watcher = Rec::new();
+    attach(&host, 2, &watcher, id, None).expect("attach");
+    host.gone(1);
+
+    clock.set(5_000);
+    host.takeover(2, id).expect("the watcher takes over");
+    assert_eq!(watcher.writers(), vec![WriterState::Writing]);
+    assert!(host.list()[0].writer_held);
+
+    // The suspended holder is gone at once: its token is no token and the attach only watches, with the new epoch.
+    let back = Rec::new();
+    let answer = attach_with(&host, 3, &back, id, Some(&first.resume)).expect("attach");
+    assert_eq!(answer.writer, WriterState::Watching, "the right moved");
+    assert_ne!(answer.epoch, first.epoch, "the holder changed");
+    assert_eq!(host.input(3, id, b"x"), Ok(Input::Dropped), "input never lands for a holder whose right moved");
+    assert_eq!(host.input(2, id, b"x"), Ok(Input::Accepted));
+    // Nothing of the old holder is left to be freed by the sweep: the new holder keeps the right.
+    clock.set(5_000 + 29_999);
+    host.sweep();
+    assert!(host.list()[0].writer_held);
+    assert_eq!(host.list()[0].attached, 2);
 }
 
 // ---- the end of a program --------------------------------------------------------------------------------------------------------------

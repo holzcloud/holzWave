@@ -20,6 +20,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use zeroize::Zeroizing;
 
 use crate::pane::{MAX_DIM, MIN_COLS, MIN_ROWS};
 
@@ -245,6 +246,107 @@ impl fmt::Display for ErrorWord {
 }
 
 impl std::error::Error for ErrorWord {}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The resume token
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The bytes of a resume token: 128 random bits.
+pub const RESUME_BYTES: usize = 16;
+/// The characters of a resume token on the wire: its bytes in lowercase hexadecimal.
+pub const RESUME_HEX: usize = 2 * RESUME_BYTES;
+
+/// What the `Debug` and `Display` text of a resume token print.
+const RESUME_MARKER: &str = "ResumeToken(..)";
+
+/// The proof that an attach is the same attachment as an earlier one whose socket was lost: the server gives a new one with
+/// every attach answer, it can be used once, and it lives only in memory on both ends.
+///
+/// It is a bearer secret. It prints a marker in `Debug` and `Display`, never its bytes; it is compared in constant time; its
+/// bytes are wiped when it is dropped. It is `Clone` (the same token is held by the answer and by the table it is checked
+/// against) and has no `Serialize`: the text on the wire is made by [`ResumeToken::to_hex`] and read by
+/// [`ResumeToken::parse`], which accepts exactly 32 lowercase hexadecimal characters.
+#[derive(Clone)]
+pub struct ResumeToken(Zeroizing<[u8; RESUME_BYTES]>);
+
+impl ResumeToken {
+    /// A new token of 16 bytes from the system's random source; `None` when the system has none to give.
+    pub fn generate() -> Option<ResumeToken> {
+        let mut raw = Zeroizing::new([0u8; RESUME_BYTES]);
+        getrandom::fill(&mut *raw).ok()?;
+        Some(ResumeToken(raw))
+    }
+
+    /// The token of these bytes: for the server's own frames between its processes.
+    pub fn from_bytes(bytes: [u8; RESUME_BYTES]) -> ResumeToken {
+        ResumeToken(Zeroizing::new(bytes))
+    }
+
+    /// The bytes, for the code that sends or checks the token and nothing else.
+    pub fn expose(&self) -> &[u8; RESUME_BYTES] {
+        &self.0
+    }
+
+    /// The text on the wire: 32 lowercase hexadecimal characters, wiped when dropped.
+    pub fn to_hex(&self) -> Zeroizing<String> {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let mut text = Zeroizing::new(String::with_capacity(RESUME_HEX));
+        for byte in self.0.iter() {
+            text.push(char::from(DIGITS[usize::from(byte >> 4)]));
+            text.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+        }
+        text
+    }
+
+    /// Reads the text on the wire. Exactly 32 characters of `0-9a-f` and nothing else; the refusal is [`ParseError::WrongType`]
+    /// and holds nothing of the text.
+    pub fn parse(text: &str) -> Result<ResumeToken, ParseError> {
+        let digits = text.as_bytes();
+        if digits.len() != RESUME_HEX {
+            return Err(ParseError::WrongType);
+        }
+        let mut raw = Zeroizing::new([0u8; RESUME_BYTES]);
+        for (byte, pair) in raw.iter_mut().zip(digits.chunks_exact(2)) {
+            let value = |c: u8| match c {
+                b'0'..=b'9' => Some(c - b'0'),
+                b'a'..=b'f' => Some(c - b'a' + 10),
+                _ => None,
+            };
+            let (Some(high), Some(low)) = (value(pair[0]), value(pair[1])) else { return Err(ParseError::WrongType) };
+            *byte = (high << 4) | low;
+        }
+        Ok(ResumeToken(raw))
+    }
+}
+
+impl zeroize::ZeroizeOnDrop for ResumeToken {}
+
+impl fmt::Debug for ResumeToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(RESUME_MARKER)
+    }
+}
+
+impl fmt::Display for ResumeToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(RESUME_MARKER)
+    }
+}
+
+/// Constant time: every byte is looked at whatever the first difference is, so the time of a comparison says nothing of how
+/// much of a guess was right. The server checks a token it was shown against the table with `subtle`; this is the same
+/// property for the places that only compare two tokens they hold.
+impl PartialEq for ResumeToken {
+    fn eq(&self, other: &ResumeToken) -> bool {
+        let mut difference = 0u8;
+        for (a, b) in self.0.iter().zip(other.0.iter()) {
+            difference |= a ^ b;
+        }
+        std::hint::black_box(difference) == 0
+    }
+}
+
+impl Eq for ResumeToken {}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // What a client says
@@ -1098,6 +1200,74 @@ mod tests {
         assert_eq!(Input::parse(&[0x7f, 0, 0, 0, 1, 9]), Err(ParseError::BadTag));
         assert_eq!(Input::parse(&[TAG_INPUT, 0, 0, 0, 0, 9]), Err(ParseError::BadSession));
         assert_eq!(Input::parse(&vec![TAG_INPUT; INPUT_HEAD + MAX_INPUT + 1]), Err(ParseError::TooLarge));
+    }
+
+    trait NotImplemented {
+        const YES: bool = false;
+    }
+    impl<T> NotImplemented for T {}
+
+    struct IsSerialize<T>(std::marker::PhantomData<T>);
+    impl<T: serde::Serialize> IsSerialize<T> {
+        const YES: bool = true;
+    }
+
+    fn wiped_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+
+    #[test]
+    fn a_resume_token_is_sixteen_random_bytes_in_thirty_two_lowercase_hex_characters_both_ways() {
+        let token = ResumeToken::generate().expect("the system gives random bytes");
+        assert_eq!(token.expose().len(), 16);
+        let text = token.to_hex();
+        assert_eq!(text.len(), 32);
+        assert!(text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)), "lowercase hexadecimal");
+        assert_eq!(ResumeToken::parse(&text), Ok(token.clone()));
+        // Two tokens differ (a collision of 128 random bits is not a thing that happens in a test run).
+        let other = ResumeToken::generate().expect("random");
+        assert!(token != other);
+        // The bytes and the text agree.
+        let known = ResumeToken::from_bytes([0x00, 0x01, 0x0a, 0x0f, 0x10, 0xa0, 0xff, 0x7e, 0, 0, 0, 0, 0, 0, 0xab, 0xcd]);
+        assert_eq!(&**known.to_hex(), "00010a0f10a0ff7e000000000000abcd");
+        assert_eq!(ResumeToken::parse("00010a0f10a0ff7e000000000000abcd"), Ok(known));
+    }
+
+    #[test]
+    fn a_resume_token_text_that_is_not_exactly_thirty_two_lowercase_hex_characters_is_refused_without_an_echo() {
+        let good = "00112233445566778899aabbccddeeff";
+        assert!(ResumeToken::parse(good).is_ok());
+        for bad in [
+            "",
+            &good[..31],
+            "00112233445566778899aabbccddeeff0",
+            "00112233445566778899AABBCCDDEEFF",
+            "00112233445566778899aabbccddeefg",
+            "0011223344556677 8899aabbccddeef",
+            " 0112233445566778899aabbccddeeff",
+            "0x112233445566778899aabbccddeeff",
+            "00112233445566778899aabbccddeef\u{e9}",
+            "\u{0}0112233445566778899aabbccddeeff",
+        ] {
+            assert_eq!(ResumeToken::parse(bad), Err(ParseError::WrongType), "{bad:?}");
+        }
+        assert_eq!(ParseError::WrongType.word(), "wrong type", "the refusal is a fixed word");
+    }
+
+    #[test]
+    fn a_resume_token_prints_a_marker_compares_by_content_and_is_wiped_on_drop() {
+        const { assert!(IsSerialize::<String>::YES, "the probe works") };
+        const { assert!(!IsSerialize::<ResumeToken>::YES, "a token has no serialiser: its text is made on purpose") };
+        wiped_on_drop::<ResumeToken>();
+
+        let token = ResumeToken::parse("00112233445566778899aabbccddeeff").expect("a token");
+        for printed in [format!("{token:?}"), format!("{token}"), format!("{token:#?}"), format!("{:?}", Some(&token))] {
+            assert!(printed.contains("ResumeToken(..)"), "{printed}");
+            assert!(!printed.contains("0011") && !printed.contains("eeff"), "{printed}");
+        }
+        // Equality looks at every byte, the last one included.
+        let same = ResumeToken::parse("00112233445566778899aabbccddeeff").expect("a token");
+        let first = ResumeToken::parse("10112233445566778899aabbccddeeff").expect("a token");
+        let last = ResumeToken::parse("00112233445566778899aabbccddeefe").expect("a token");
+        assert!(token == same && token != first && token != last);
     }
 
     #[test]

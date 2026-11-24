@@ -17,7 +17,7 @@ mod sweep;
 #[path = "support/ws_env.rs"]
 mod ws_env;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use device_socket::{Device, env, env_with, input_frame, mint, mint_for, refused, remote, revoke, sync, upgrade, writer_timeout};
 use holzwave_core::remote::proto::{Answer, ErrorWord, Event, MAX_ATTACHED, MAX_TEXT, Op, WriterView};
@@ -377,8 +377,9 @@ async fn a_silent_holder_frees_the_right_which_moves_to_nobody_until_a_takeover_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_holder_leaving_by_detach_or_by_closing_its_socket_frees_the_right_at_once() {
-    let env = env().await;
+async fn the_holder_leaving_by_detach_frees_the_right_at_once_and_closing_its_socket_keeps_it_until_the_writer_timeout() {
+    // A writer timeout of three seconds, so that the test waits for a short one and still tells "at once" from "later".
+    let env = env_with(WsOptions { supervisor: Some(writer_timeout(3_000)), ..WsOptions::default() }).await;
     let alice = env.person("alice");
     let mut watcher = device_of(&env, &alice, "w").await;
     let mut holder = device_of(&env, &alice, "h").await;
@@ -386,18 +387,29 @@ async fn the_holder_leaving_by_detach_or_by_closing_its_socket_frees_the_right_a
     holder.attach(session, None).await;
     watcher.attach(session, None).await;
 
+    // A detach frees the right at once.
+    let begun = Instant::now();
     holder.ok(Op::Detach { session }).await;
     assert_eq!(writer_events(&mut watcher, session, 1).await, ["free"]);
+    assert!(begun.elapsed() < Duration::from_millis(2_000), "at once, not after the timeout: {:?}", begun.elapsed());
     watcher.ok(Op::Takeover { session }).await;
     assert_eq!(writer_events(&mut watcher, session, 2).await, ["free", "writing"]);
 
-    // The same when the holder's socket is closed instead of detached.
+    // Closing the holder's socket does not: the others keep watching until the holder's silence of the writer timeout.
     let mut other = device_of(&env, &alice, "o").await;
     other.attach(session, None).await;
     assert_eq!(other.writer_words(session).len(), 0);
+    watcher.ok(Op::Beat { session: Some(session) }).await;
+    let beat = Instant::now();
     watcher.ws.send_close(1000).await;
     drop(watcher);
+    assert!(
+        !other.eventually(Duration::from_millis(1_200), |d| !d.writer_words(session).is_empty()).await,
+        "the right is kept while the holder's time lasts: {:?}",
+        other.writer_words(session)
+    );
     assert_eq!(writer_events(&mut other, session, 1).await, ["free"]);
+    assert!(beat.elapsed() >= Duration::from_millis(2_900), "not before the time: {:?}", beat.elapsed());
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
