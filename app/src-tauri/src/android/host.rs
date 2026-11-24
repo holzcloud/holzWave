@@ -27,9 +27,10 @@ use holzwave_core::secrets::SecretStore;
 use holzwave_core::vault::VaultStore;
 use holzwave_host::keystore_wire::{RecentsAnswer, recents_from_wire, recents_hidden, recents_to_wire};
 use holzwave_host::local_network::{Source, Unsupported};
-use holzwave_host::seams::{FilePicker, Host, HostLimits, Platform, PrivateDirs};
+use holzwave_host::seams::{FilePicker, Host, HostLimits, LinkOpener, Platform, PrivateDirs};
 
 use crate::android::keystore::{AndroidClock, AndroidKeystore, Bridge};
+use crate::android::opener::AndroidOpener;
 use crate::android::picker::AndroidPicker;
 
 /// The name of the shell's own folder inside the app's data directory.
@@ -232,6 +233,11 @@ impl Host for AndroidHost {
     fn file_picker(&self) -> Option<Arc<dyn FilePicker>> {
         Some(Arc::new(AndroidPicker::new(self.bridge.clone())))
     }
+
+    /// The system's way of opening a link, through the plugin: the browser for a web address, the mail app for `mailto`.
+    fn link_opener(&self) -> Option<Arc<dyn LinkOpener>> {
+        Some(Arc::new(AndroidOpener::new(self.bridge.clone())))
+    }
 }
 
 #[cfg(test)]
@@ -333,6 +339,20 @@ mod tests {
         if cfg!(target_os = "android") {
             assert_eq!(host.file_url("abc"), "http://holzfile.localhost/abc");
         }
+    }
+
+    #[test]
+    fn the_host_has_a_link_opener_that_runs_through_the_plugin() {
+        use crate::android::opener::OPEN_LINK;
+        use holzwave_host::seams::OpenError;
+        let scratch = Scratch::new("opener");
+        let (host, recorder) = host_in(&scratch);
+        let opener = host.link_opener().expect("an opener on Android");
+        recorder.answer(OPEN_LINK, Ok(json!({ "kind": "opened" })));
+        assert_eq!(opener.open("https://example.org/"), Ok(()));
+        assert_eq!(recorder.payloads(OPEN_LINK), vec![json!({ "url": "https://example.org/" })]);
+        recorder.answer(OPEN_LINK, Ok(json!({ "kind": "no_app" })));
+        assert_eq!(opener.open("https://example.org/"), Err(OpenError::NoApp));
     }
 
     #[test]

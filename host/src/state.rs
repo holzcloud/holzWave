@@ -53,7 +53,7 @@ use crate::integrate_host::{
     ConfirmAnswer, ConfirmKind, ContextAnswer, IntegrationEvent, IntegrationFault, IntegrationHost, IntegrationParts,
     LaunchAnswer, LaunchNote,
 };
-use crate::seams::{Host, NeutralHost, Platform, PrivateDirs};
+use crate::seams::{Host, NeutralHost, OpenError, Platform, PrivateDirs};
 use crate::sessions::{ServerParts, SessionFault, SessionRow};
 use crate::windows::{CursorSpot, DropKind, Drops, Hovers, Place};
 
@@ -3117,17 +3117,28 @@ impl AppCore {
     /// call, is opened (never `javascript`, `data`, `vbscript`, `blob` or `about`); the length, the characters and the
     /// shape are checked first (no control, blank or invisible character, whatever the scheme), and nothing is started for a
     /// link that fails (T-02-52). The list is the person's, the page's own checks are a convenience: this command is the
-    /// boundary that decides.
+    /// boundary that decides, on every platform.
     ///
-    /// A `file` link is not opened: with `file` in the list, in a pane that runs on this computer (`pane`, the pane that
-    /// shows the link) and with a path that [`file_link_path`] accepts, the file is shown in the file manager through
-    /// the code of [`AppCore::reveal_path`], which shows and never runs. Without a pane, for an unknown pane, for a pane
-    /// of a connection and for any other path it is refused. `pane` means nothing for any other link.
+    /// What opens it depends on the platform of the host, not on the build: macOS, Linux and Windows start one fixed program
+    /// ([`open_launch`]); Android hands the link to the system through the host's [`LinkOpener`], and only for `https`,
+    /// `http` and `mailto`; a host with no opener says so.
     ///
-    /// Starts a process, so the command is async.
+    /// On the desktops a `file` link is not opened: with `file` in the list, in a pane that runs on this computer (`pane`,
+    /// the pane that shows the link) and with a path that [`file_link_path`] accepts, the file is shown in the file manager
+    /// through the code of [`AppCore::reveal_path`], which shows and never runs. Without a pane, for an unknown pane, for a
+    /// pane of a connection and for any other path it is refused. `pane` means nothing for any other link. On Android a
+    /// file link is refused outright: nothing there shows a file.
+    ///
+    /// Starts a process or waits for the system, so the command is async.
     pub fn open_url(&self, url: &str, pane: Option<PaneId>) -> Result<(), String> {
         let schemes = lock(&self.config).settings.link_schemes.clone();
-        let os = std::env::consts::OS;
+        let platform = self.host.platform();
+        match platform {
+            Platform::Android => return self.open_url_on_android(url, &schemes),
+            Platform::Web => return Err(NO_OPENER_TEXT.into()),
+            Platform::MacOs | Platform::Windows | Platform::Linux => {}
+        }
+        let os = platform.as_str();
         if is_file_link(url) {
             check_link_text(url)?;
             if !schemes.iter().any(|listed| listed == "file") {
@@ -3148,13 +3159,39 @@ impl AppCore {
         self.launch(&launch)
     }
 
+    /// The Android half of [`AppCore::open_url`]: the same check as everywhere, then only `https`, `http` and `mailto`, then
+    /// the host's opener. The sentences are the fixed ones of the design record; nothing the system said is repeated.
+    fn open_url_on_android(&self, url: &str, schemes: &[String]) -> Result<(), String> {
+        if is_file_link(url) {
+            return Err(NO_FILES_TEXT.into());
+        }
+        check_link(url, schemes)?;
+        let scheme = url.split_once(':').map_or("", |(scheme, _)| scheme);
+        if !["https", "http", "mailto"].iter().any(|opened| scheme.eq_ignore_ascii_case(opened)) {
+            return Err(LINK_KIND_TEXT.into());
+        }
+        let opener = self.host.link_opener().ok_or(LINK_FAILED_TEXT)?;
+        opener.open(url).map_err(|error| {
+            match error {
+                OpenError::NoApp => NO_APP_TEXT,
+                OpenError::Failed => LINK_FAILED_TEXT,
+            }
+            .to_owned()
+        })
+    }
+
     /// Reveal a file or folder in the platform file manager. `path` is absolute, starts with `~/`, or is relative
     /// to `base` (the working directory of the pane); it has to exist. What is revealed is shown and never run
-    /// (T-02-52).
+    /// (T-02-52). Only the desktops have a file manager: on Android and in the page in a browser the answer is
+    /// [`NO_FILES_TEXT`].
     ///
     /// Touches the file system and starts a process, so the command is async.
     pub fn reveal_path(&self, path: &str, base: Option<&str>) -> Result<(), String> {
-        let os = std::env::consts::OS;
+        let platform = self.host.platform();
+        if !matches!(platform, Platform::MacOs | Platform::Windows | Platform::Linux) {
+            return Err(NO_FILES_TEXT.into());
+        }
+        let os = platform.as_str();
         let home = home_dir(os, &process_env, self.private_home().as_deref());
         let resolved = resolve_reveal(os, path, base, home.as_deref())?;
         let launch = reveal_launch(os, &resolved, resolved.is_dir(), &process_env)?;
@@ -4236,6 +4273,15 @@ impl Launch {
 /// The longest link that is opened, in bytes.
 const MAX_URL_BYTES: usize = 2048;
 
+/// What the host says when the system has no app for a link, when the system could not open it, when a link is of a kind the
+/// platform does not open, when there is no way to show a file and when there is no opener at all. They are fixed
+/// sentences for the person: they name no platform, no program and no part of the link, and the page shows them as they are.
+const NO_APP_TEXT: &str = "No app on this device can open this link.";
+const LINK_FAILED_TEXT: &str = "The link could not be opened.";
+const LINK_KIND_TEXT: &str = "Links of this kind cannot be opened on this device.";
+const NO_FILES_TEXT: &str = "Files cannot be shown on this device.";
+const NO_OPENER_TEXT: &str = "Links cannot be opened on this device.";
+
 /// The longest path (and base directory) that is revealed, in bytes.
 const MAX_PATH_BYTES: usize = 4096;
 
@@ -4438,7 +4484,7 @@ fn open_launch(
             let rundll32 = format!(r"{}\System32\rundll32.exe", system_root(env));
             Ok(Launch::plain(&rundll32, vec!["url.dll,FileProtocolHandler".into(), url.to_owned()]))
         }
-        other => Err(format!("opening links is not supported on {other}")),
+        _ => Err(NO_OPENER_TEXT.into()),
     }
 }
 
@@ -4627,7 +4673,7 @@ fn reveal_launch(
                 Ok(Launch { program: explorer, args: Vec::new(), raw_args: vec![format!("/select,\"{path}\"")] })
             }
         }
-        other => Err(format!("revealing files is not supported on {other}")),
+        _ => Err(NO_FILES_TEXT.into()),
     }
 }
 
@@ -8246,6 +8292,173 @@ mod tests {
         None
     }
 
+    /// What the host's link opener was handed, and what it answers next.
+    #[derive(Default)]
+    struct RecordingOpener {
+        urls: Mutex<Vec<String>>,
+        answer: Mutex<Option<crate::seams::OpenError>>,
+    }
+
+    impl crate::seams::LinkOpener for RecordingOpener {
+        fn open(&self, url: &str) -> Result<(), crate::seams::OpenError> {
+            lock(&self.urls).push(url.to_owned());
+            match *lock(&self.answer) {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        }
+    }
+
+    /// A host that is the neutral one in everything but its platform and its link opener.
+    struct OpenerHost {
+        base: NeutralHost,
+        platform: Platform,
+        opener: Option<Arc<RecordingOpener>>,
+    }
+
+    impl crate::seams::Host for OpenerHost {
+        fn platform(&self) -> Platform {
+            self.platform
+        }
+
+        fn secrets(&self) -> Arc<dyn SecretStore> {
+            self.base.secrets()
+        }
+
+        fn local_network(&self) -> Arc<dyn crate::local_network::Source> {
+            self.base.local_network()
+        }
+
+        fn text_scale(&self) -> u32 {
+            self.base.text_scale()
+        }
+
+        fn limits(&self) -> crate::seams::HostLimits {
+            self.base.limits()
+        }
+
+        fn link_opener(&self) -> Option<Arc<dyn crate::seams::LinkOpener>> {
+            self.opener.clone().map(|opener| opener as Arc<dyn crate::seams::LinkOpener>)
+        }
+    }
+
+    /// A launcher that must never run: the platform opener of a desktop is not how Android opens a link.
+    fn no_process_launch(launch: &Launch) -> Result<(), String> {
+        panic!("a process was started for {launch:?}");
+    }
+
+    /// A core on a host of `platform` whose opener records; the process launcher is the one that fails the test.
+    fn core_with_opener(platform: Platform, opener: Option<Arc<RecordingOpener>>) -> (Arc<AppCore>, Scratch) {
+        let dir = Scratch::new("opener");
+        let host = Arc::new(OpenerHost { base: NeutralHost::new(), platform, opener });
+        let core = AppCore::new_with_host(dir.0.clone(), Arc::new(Recorder::default()), ShellSpec::new("/bin/cat", &[]), None, None, host);
+        *lock(&core.launcher) = no_process_launch;
+        dir.attach(&core);
+        (core, dir)
+    }
+
+    const NO_APP_SENTENCE: &str = "No app on this device can open this link.";
+    const FAILED_SENTENCE: &str = "The link could not be opened.";
+    const KIND_SENTENCE: &str = "Links of this kind cannot be opened on this device.";
+    const FILES_SENTENCE: &str = "Files cannot be shown on this device.";
+    const NO_OPENER_SENTENCE: &str = "Links cannot be opened on this device.";
+
+    #[test]
+    fn on_android_a_link_the_list_allows_goes_to_the_hosts_opener_and_nothing_is_launched() {
+        let opener = Arc::new(RecordingOpener::default());
+        let (core, _dir) = core_with_opener(Platform::Android, Some(opener.clone()));
+
+        let device_link = "https://example.org/#device=BCDF-GHJK";
+        assert_eq!(core.open_url(device_link, None), Ok(()));
+        assert_eq!(*lock(&opener.urls), [device_link], "once, with exactly that text");
+
+        // What check_link refuses never reaches the opener and keeps the sentence it had.
+        let before = lock(&opener.urls).len();
+        for url in [
+            "javascript:alert(1)",
+            "https://exa\u{200b}mple.org/",
+            "https://exa\u{7}mple.org/",
+            "ssh://h.example/",
+            "https:///nothing",
+        ] {
+            let err = core.open_url(url, None).expect_err(url);
+            assert!(![NO_APP_SENTENCE, FAILED_SENTENCE, KIND_SENTENCE].contains(&err.as_str()), "{url:?}: {err}");
+        }
+        assert_eq!(core.open_url("javascript:alert(1)", None), Err("links of this kind are never opened".to_owned()));
+        assert_eq!(
+            core.open_url("ssh://h.example/", None),
+            Err("links of this kind are not in the list of link schemes in the settings".to_owned())
+        );
+        assert_eq!(lock(&opener.urls).len(), before, "nothing refused reached the opener");
+
+        let (https, mail) = ("http://example.org/a?b=c", "mailto:someone@example.org");
+        assert_eq!(core.open_url(https, None), Ok(()));
+        assert_eq!(core.open_url("HTTPS://example.org/upper", None), Ok(()), "the scheme is compared without case");
+        assert_eq!(core.open_url(mail, None), Ok(()));
+        assert_eq!(lock(&opener.urls).len(), before + 3);
+    }
+
+    #[test]
+    fn on_android_the_refusals_and_the_openers_answers_are_the_sentences_of_the_record() {
+        let opener = Arc::new(RecordingOpener::default());
+        let (core, _dir) = core_with_opener(Platform::Android, Some(opener.clone()));
+        set_schemes(&core, &["http", "https", "mailto", "file", "ssh", "tel"]);
+
+        // A scheme the list allows but that Android is not asked to open.
+        for url in ["ssh://h.example/", "tel:+41000000", "SSH://h.example/"] {
+            assert_eq!(core.open_url(url, None), Err(KIND_SENTENCE.to_owned()), "{url}");
+        }
+        assert!(lock(&opener.urls).is_empty(), "none of them reached the opener");
+
+        // A file link and a reveal are not offered.
+        let pane = 7;
+        assert_eq!(core.open_url("file:///data/x", Some(pane)), Err(FILES_SENTENCE.to_owned()));
+        assert_eq!(core.open_url("file:///data/x", None), Err(FILES_SENTENCE.to_owned()));
+        assert_eq!(core.reveal_path("/data/x", None), Err(FILES_SENTENCE.to_owned()));
+        assert_eq!(core.reveal_path("~/x", Some("/data")), Err(FILES_SENTENCE.to_owned()));
+        assert!(lock(&opener.urls).is_empty());
+
+        *lock(&opener.answer) = Some(crate::seams::OpenError::NoApp);
+        assert_eq!(core.open_url("https://example.org/", None), Err(NO_APP_SENTENCE.to_owned()));
+        *lock(&opener.answer) = Some(crate::seams::OpenError::Failed);
+        assert_eq!(core.open_url("https://example.org/", None), Err(FAILED_SENTENCE.to_owned()));
+        assert_eq!(lock(&opener.urls).len(), 2, "both were handed over");
+
+        // An Android host with no opener at all is the failure, never a panic or a process.
+        let (bare, _dir) = core_with_opener(Platform::Android, None);
+        assert_eq!(bare.open_url("https://example.org/", None), Err(FAILED_SENTENCE.to_owned()));
+    }
+
+    #[test]
+    fn a_platform_with_no_opener_says_so_in_a_sentence_and_the_desktops_still_launch() {
+        // The page in a browser has no opener of its own.
+        let (page, _dir) = core_with_opener(Platform::Web, None);
+        assert_eq!(page.open_url("https://example.org/", None), Err(NO_OPENER_SENTENCE.to_owned()));
+        assert_eq!(page.reveal_path("/tmp", None), Err(FILES_SENTENCE.to_owned()));
+
+        // The fallback arms of the launchers answer in the same words.
+        assert_eq!(open_launch("plan9", "https://example.org/", &web(), &no_env), Err(NO_OPENER_SENTENCE.to_owned()));
+        assert_eq!(reveal_launch("plan9", Path::new("/tmp"), true, &no_env), Err(FILES_SENTENCE.to_owned()));
+
+        // The desktop hosts launch a process as before, whatever the host's opener is.
+        for platform in [Platform::MacOs, Platform::Linux, Platform::Windows] {
+            let opener = Arc::new(RecordingOpener::default());
+            let (core, _dir) = core_with_opener(platform, Some(opener.clone()));
+            *lock(&core.launcher) = record_launch;
+            let url = format!("https://example.org/{}-desktop-launch", platform.as_str());
+            let before = launches_with(&url).len();
+            assert_eq!(core.open_url(&url, None), Ok(()), "{platform:?}");
+            assert_eq!(launches_with(&url).len(), before + 1, "{platform:?}: one process was started");
+            assert!(lock(&opener.urls).is_empty(), "{platform:?}: the host's opener is for Android only");
+        }
+
+        // No sentence of the host names the build's operating system constant.
+        for sentence in [NO_OPENER_SENTENCE, FILES_SENTENCE] {
+            assert!(!sentence.contains("support"), "{sentence}");
+            assert!(!sentence.contains(std::env::consts::OS), "{sentence}");
+        }
+    }
+
     #[test]
     fn the_opener_is_one_fixed_program_with_the_link_as_a_single_argument() {
         let url = "https://example.org/a?b=c&d=e";
@@ -8253,7 +8466,7 @@ mod tests {
         assert_eq!(open_launch("macos", url, &web(), &no_env), Ok(Launch::plain("/usr/bin/open", vec![url.to_owned()])));
         assert_eq!(open_launch("linux", url, &web(), &no_env), Ok(Launch::plain("xdg-open", vec![url.to_owned()])));
         assert!(open_launch("macos", "file:///etc/passwd", &web(), &no_env).is_err());
-        assert!(open_launch("plan9", url, &web(), &no_env).is_err(), "a platform nobody wrote an opener for");
+        assert_eq!(open_launch("plan9", url, &web(), &no_env), Err("Links cannot be opened on this device.".to_owned()), "a platform nobody wrote an opener for");
     }
 
     #[test]

@@ -2731,6 +2731,18 @@ changes the link there, the segment shows the new address, and it goes when the 
 
 **A link that cannot be opened.** A click, or a link chosen in hint mode with `Shift` held, that the host refuses or cannot carry out (a scheme taken off the list since, a `file` link whose file is gone, no program to open it) is answered in the notice segment of the status line (section 2 rule 5) for the usual time. The words are the host's own fixed sentence, which never repeats the address; any other failure is the one sentence `The link could not be opened.` There is no dialog and no mark on the text, and the `LINK` segment may stay beside the notice while the pointer stays on the link. A click that succeeds says nothing. The browser build opens a tab itself and never asks the host, so it has no such notice.
 
+**On Android.** A link opens in the system's own app for it: a web address in the browser, a `mailto` address in the mail app. Only `https`, `http` and `mailto` are handed over, so a scheme that the list allows but Android does not open is refused, and a `file` link and a reveal of a path are not offered at all (there is no file manager to show them in). The host says one of these fixed sentences, which never repeat the address and never name the system, the platform or an app:
+
+| When | The host's sentence |
+|---|---|
+| No app on the device can open the link | `No app on this device can open this link.` |
+| The system could not open it for any other reason | `The link could not be opened.` |
+| The scheme is on the list but the device does not open links of that kind | `Links of this kind cannot be opened on this device.` |
+| A `file` link, or a path to show in the file manager | `Files cannot be shown on this device.` |
+| A platform that has no way to open a link at all | `Links cannot be opened on this device.` |
+
+They are said where every refusal of a link is said (the notice segment, above). The sign-in of 6.35 says them on its second screen.
+
 **The question.** When the visible text of the link and its target differ, the click with the gesture opens a dialog of the shape of the close
 confirmation (title, body lines, two buttons, centred over a backdrop): the title `Open this link?`, a line `The text says` with the visible text in
 mono (cut at 120 characters), a line `The link goes to` with the full target in mono, wrapped and never cut, and two buttons, `Cancel` (focused
@@ -3026,6 +3038,8 @@ The states of the second screen are a dot shape and words; the failures also car
 | certificate | `!` and an underline | `The certificate of the server was not accepted.` |
 | off | `!` and an underline | `Device sign-in is off on this server.` |
 
+**When the browser cannot be opened.** The system's browser is opened by the app at the second screen. When that fails, the line that said `Opening your browser…` says the host's sentence in the style of a failure (the mark `!` and an underline) in place of it: `No app on this device can open this link.` when the device has no browser, `The link could not be opened.` for any other failure (6.31 lists the host's sentences). `Open again` stays, so the person can try again after installing or enabling a browser, and `Cancel` stays. The code and the `Server` row stay visible, so the request can still be approved from another device's browser; the polling goes on.
+
 A failure that the first screen meets (the app could not start the request) is said in place of the refusal line of the field, in the same words (`The server cannot be reached.`, `The certificate of the server was not accepted.`, `Device sign-in is off on this server.`), and the field keeps what was typed. The words of the certificate never say why the certificate was refused (an issuer the system does not know, a revocation, an expiry, another name): the system's verifier decides, and its reasons are not reliable enough to repeat, so the one sentence is all that is said. It is final, because trying again changes nothing. A refusal of the app itself that has no word in this table (for example a keychain that cannot be written) shows the app's own fixed sentence in the style of a failure, never a text that came from the server. While the saved secrets are locked on Android, the buttons that need them (`Continue`, `Open again`, `Start again`) give way to the dim line `Locked: unlock to connect`; `Cancel` stays, and the buttons return by themselves after the unlock. After a failure the second screen offers `Start again` and `Cancel`, and the polling has stopped.
 
 **The page `Authorize device`.** A dialog of the web page in the box of the sign-in page (6.28), 24 rem wide. It opens from the fragment `#device=<code>` of the address the app opens (the server's own root), after a sign-in no older than five minutes: the sign-in page keeps the fragment, and the layer `Confirm it is you` of 6.29 shows once when the sign-in is older. It also opens from the palette entry `Authorize device…`, which first asks for a typed code (browser only): the field `Code`, the buttons `Look up` and `Cancel`. The dialog has the title `Authorize device`, the rows `Device`, `Platform`, `Address` (the network address the request came from, in mono) and `Requested` (`just now`, `3 min ago`), the code in mono to compare with the app, the sentence `Approve only if you started this on your own device.` and the buttons `Deny` and `Approve`. The result is said in the status line of the dialog, and the two buttons then give way to `Close` (nothing is left to decide):
@@ -3051,6 +3065,7 @@ A failure that the first screen meets (the app could not start the request) is s
 | `Sign in to the server`, `Server address`, `Device`, `Continue`, `Cancel` | the first screen of the step |
 | `Use an address that starts with https://.` | the refusal of an address |
 | `Opening your browser…`, `Enter this code only if you started this here.`, `Open again`, `Start again`, `Close`, `Server` | the second screen |
+| `No app on this device can open this link.`, `The link could not be opened.` | the line of the second screen when the browser cannot be opened |
 | `Waiting for approval…`, `Signed in`, `The request was denied.`, `The code expired. Start again.`, `Too many devices or requests. Try again later.`, `The server cannot be reached.`, `The certificate of the server was not accepted.`, `Device sign-in is off on this server.` | the states of the second screen |
 | `Authorize device`, `Authorize device…`, `Platform`, `Address`, `Requested`, `Code`, `Look up` | the page and its palette entry |
 | `Approve only if you started this on your own device.`, `Approve`, `Deny` | the page |

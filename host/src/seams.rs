@@ -136,6 +136,27 @@ pub trait FilePicker: Send + Sync {
     fn save_out(&self, source: &Path, suggested_name: &str) -> Result<PickedOut, PickError>;
 }
 
+/// Why the system did not open a link. Carries no text from the system: an error may name an app or an address, and the
+/// host says only its own fixed sentences.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenError {
+    /// No app on the device can open a link of this kind.
+    NoApp,
+    /// Anything else.
+    Failed,
+}
+
+/// The system's own way of opening a link: the browser for a web address, the mail app for `mailto`.
+///
+/// Only the Android host has one, because an app there has no program to start that opens a link; the desktop shells start
+/// their platform's opener as a process. The host has checked the address (the length, the characters and the list of link
+/// schemes) before it asks, and the opener takes only an address of a scheme the platform opens. The call blocks until the
+/// system has taken the address, so a caller runs it off the main thread.
+pub trait LinkOpener: Send + Sync {
+    /// Hand `url` to the system.
+    fn open(&self, url: &str) -> Result<(), OpenError>;
+}
+
 /// Everything the shell decides for the core. Object safe; the core keeps an `Arc<dyn Host>`.
 pub trait Host: Send + Sync + 'static {
     /// The platform the page is told it runs on.
@@ -185,6 +206,12 @@ pub trait Host: Send + Sync + 'static {
     /// Android host answers it; everywhere else the answer is `None` and the two hand-over commands say they are not
     /// available.
     fn file_picker(&self) -> Option<Arc<dyn FilePicker>> {
+        None
+    }
+
+    /// The system's way of opening a link, where a process cannot do it. Only the Android host answers it; everywhere else
+    /// the answer is `None` and the core starts the opener of the desktop platform.
+    fn link_opener(&self) -> Option<Arc<dyn LinkOpener>> {
         None
     }
 
@@ -301,6 +328,7 @@ mod tests {
         assert_eq!(host.private_dirs(), None, "no private folders unless the Android host names them");
         assert!(host.vault().is_none(), "no vault unless the Android host has one");
         assert!(host.file_picker().is_none(), "no document dialog unless the Android host has one");
+        assert!(host.link_opener().is_none(), "no system opener unless the Android host has one");
         assert!(host.sessions().is_none(), "no sessions of its own unless the server's worker has them");
         // One store, however often it is asked for.
         host.secrets().set("ssh:a", "one").expect("set");
