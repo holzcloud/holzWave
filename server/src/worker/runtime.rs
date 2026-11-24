@@ -234,6 +234,10 @@ impl Attachment for SocketAttachment {
     fn resync(&self, session: u32) {
         self.event(session, SesEvent::Resync);
     }
+
+    fn ack(&self, session: u32, seq: u32, gap: bool) {
+        self.event(session, SesEvent::Ack { seq, gap });
+    }
 }
 
 /// The socket and the request number of a request that is answered.
@@ -285,9 +289,10 @@ pub fn handle_ses(host: &SessionHost, queue: &Arc<Outbound>, ses: Ses) {
         Ses::Detach { socket, request, session } => {
             answer(queue, socket, request, done(host.detach(u64::from(socket), session)))
         }
-        Ses::Input { socket, session, bytes } => {
-            // Input is never answered; input the program left unread is not dropped in silence: the socket is told.
-            if host.input(u64::from(socket), session, &bytes) == Err(SesError::Busy) {
+        Ses::Input { socket, session, epoch, seq, bytes } => {
+            // Input has no answer of its own: an applied, repeated or missing-numbered frame is acknowledged through the
+            // socket's attachment, and input the program left unread is not dropped in silence: the socket is told.
+            if host.input_seq(u64::from(socket), session, epoch, seq, &bytes) == Err(SesError::Busy) {
                 queue.push(Frame::Ses(Ses::Event { socket, session, event: SesEvent::Dropped }));
             }
         }

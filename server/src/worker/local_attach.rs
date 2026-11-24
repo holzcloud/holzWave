@@ -341,6 +341,7 @@ impl Attachment for Unclaimed {
     fn size(&self, _: u32, _: u16, _: u16) {}
     fn exited(&self, _: u32, _: Option<u32>) {}
     fn resync(&self, _: u32) {}
+    fn ack(&self, _: u32, _: u32, _: bool) {}
 }
 
 // ---- a pane's way to a session ------------------------------------------------------------------------------------------
@@ -593,6 +594,10 @@ impl Attachment for PaneAttachment {
         }
         // Never the host's thread's work: the service attaches the pane again once it has read what it holds.
         self.tie.shared.job(Job::Resync { tie: self.tie.clone(), generation: self.generation });
+    }
+
+    fn ack(&self, _session: u32, _seq: u32, _gap: bool) {
+        // The window's pane writes through `SessionHost::input`, which does not number its frames, so nothing is acknowledged.
     }
 }
 

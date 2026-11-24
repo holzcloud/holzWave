@@ -20,6 +20,17 @@
 //! by another attachment and the sweep after the timeout end a suspended holder. The token lives in memory only, is never
 //! logged, and is compared in constant time.
 //!
+//! Input of a device socket is numbered ([`SessionHost::input_seq`]): each frame carries the epoch of the lease its sender writes
+//! under and a number that counts up from 1 in the attachment (the attach answer says which number it expects next, and the
+//! number survives a suspension and a resume with the attachment and its paste state). A frame reaches the program only when
+//! its epoch is the lease's epoch now, its sender holds the lease and its number is the next one expected, and it is then
+//! acknowledged with the number (every frame up to it is applied). A number already applied is not applied again and is
+//! answered with the last applied number; a frame after a missing number is not applied and the last applied number is said
+//! once, marked as a gap, until the missing frame comes; a frame under another epoch, or from an attachment that does not
+//! hold the lease, never reaches the program and is not answered, so input never lands after a takeover (its number is used
+//! up when it is the next one, so the sender's count and the host's stay together while the right is elsewhere). The host keeps
+//! no input for this: a frame that is not applied is dropped, not stored.
+//!
 //! The ids of sessions are a key in this host's own table, and a host is one person's. Another person's session id is an id
 //! this host has not made: it is `not found`, the same answer as an id that never existed.
 //!
@@ -206,6 +217,9 @@ pub struct Attached {
     pub resume: ResumeToken,
     /// The epoch of the lease at the time of the answer: from 1, never 0.
     pub epoch: u32,
+    /// The number of the next input frame this attachment is expected to send: 1 for a new attachment, the kept number for
+    /// one that was resumed or attached again.
+    pub next: u32,
 }
 
 // ---- the seams: attachment, clock, spawner -----------------------------------------------------------------------------------
@@ -224,6 +238,9 @@ pub trait Attachment: Send + Sync {
     fn exited(&self, session: u32, code: Option<u32>);
     /// The stream of this attachment was lost: attach again for a fresh snapshot.
     fn resync(&self, session: u32);
+    /// Every input frame of this attachment up to `seq` is applied (0: none yet); `gap` says that a frame came after a missing
+    /// one and was not applied.
+    fn ack(&self, session: u32, seq: u32, gap: bool);
 }
 
 /// The time the lease and the grace are measured in: milliseconds from some point, never going back.
@@ -514,6 +531,10 @@ struct Member {
     paste: PasteGate,
     /// The token the last answer to this attachment carried; `None` until its first attach. Memory only.
     token: Option<ResumeToken>,
+    /// The number of the next input frame of this attachment: from 1, kept through a suspension and a resume.
+    next_seq: u32,
+    /// Whether the gap before `next_seq` was told already: it is said once, until a frame is applied or the attachment attaches.
+    gap_told: bool,
     /// The socket of this attachment ended while it held the lease: it keeps the right until the lease's timeout, its stream
     /// is ended and its client number finds nothing, until an attach with its token takes it over or the sweep or a takeover
     /// by another attachment removes it.
@@ -534,6 +555,7 @@ impl Attachment for Away {
     fn size(&self, _: u32, _: u16, _: u16) {}
     fn exited(&self, _: u32, _: Option<u32>) {}
     fn resync(&self, _: u32) {}
+    fn ack(&self, _: u32, _: u32, _: bool) {}
 }
 
 struct Session {
@@ -600,6 +622,42 @@ impl Session {
     fn nobody_here(&self) -> bool {
         self.members.iter().all(|m| m.suspended)
     }
+}
+
+/// What the write of one frame of input came to.
+enum Wrote {
+    /// The pane could not take it at all (it is ending): nothing was written.
+    Gone,
+    /// The frame was taken: the paste gate and the pane's backlog rule did what they do. `dropped` says that the backlog rule
+    /// refused some of it.
+    Done { dropped: bool },
+}
+
+/// Writes `bytes` of the member at `at` through its paste gate to the pane: the bytes of a bracketed paste are held until its
+/// end and written whole or not at all, the rest as it comes, and nothing is written while the program leaves more than
+/// [`MAX_RAW_BACKLOG`] bytes of its input unread.
+fn write_input(s: &mut Session, at: usize, bytes: &[u8]) -> Wrote {
+    let room = MAX_RAW_BACKLOG.saturating_sub(s.pane.raw_backlog());
+    let fed = s.members[at].paste.feed(bytes, MAX_INPUT_BYTES, room);
+    let mut dropped = fed.dropped;
+    for part in &fed.parts {
+        match s.pane.write_raw_whole(part.bytes()) {
+            Ok(()) => {}
+            Err(PaneError::Pty(text)) if text == RAW_BACKLOG_FULL => dropped = true,
+            Err(_) => return Wrote::Gone,
+        }
+    }
+    Wrote::Done { dropped }
+}
+
+/// The sender of input that the backlog rule dropped is told, at most once per [`DROPPED_NOTE_MS`]: `Busy` asks the caller to
+/// say so to the client, and the drops of the time in between answer `Ok(Input::Dropped)`.
+fn told_dropped(member: &mut Member, now: u64) -> Result<Input, SesError> {
+    if member.told_dropped.is_some_and(|at| now.saturating_sub(at) < DROPPED_NOTE_MS) {
+        return Ok(Input::Dropped);
+    }
+    member.told_dropped = Some(now);
+    Err(SesError::Busy)
 }
 
 #[derive(Default)]
@@ -823,35 +881,86 @@ impl SessionHost {
             return Err(SesError::BadRequest);
         }
         let found = self.shared.find(session).ok_or(SesError::NotFound)?;
-        let mut s = lock(&found);
+        let mut guard = lock(&found);
+        let s = &mut *guard;
         let now = self.shared.clock.now_ms();
         let Some(at) = s.position(client) else { return Ok(Input::Dropped) };
         let who = s.members[at].who;
         if s.lease.input(who, now) == Input::Dropped || s.exited_at.is_some() {
             return Ok(Input::Dropped);
         }
-        let room = MAX_RAW_BACKLOG.saturating_sub(s.pane.raw_backlog());
-        let s = &mut *s;
-        let member = &mut s.members[at];
-        // A bracketed paste is held until its end and written whole or not at all; the rest is written as it comes.
-        let fed = member.paste.feed(bytes, MAX_INPUT_BYTES, room);
-        let mut dropped = fed.dropped;
-        for part in &fed.parts {
-            match s.pane.write_raw_whole(part.bytes()) {
-                Ok(()) => {}
-                Err(PaneError::Pty(text)) if text == RAW_BACKLOG_FULL => dropped = true,
-                Err(_) => return Ok(Input::Dropped),
-            }
+        match write_input(s, at, bytes) {
+            Wrote::Gone => Ok(Input::Dropped),
+            Wrote::Done { dropped: false } => Ok(Input::Accepted),
+            Wrote::Done { dropped: true } => told_dropped(&mut s.members[at], now),
         }
-        if !dropped {
-            return Ok(Input::Accepted);
+    }
+
+    /// Numbered input of `client` for `session`: frame `seq` of its attachment, written under `epoch`. The rules are in the
+    /// module's description. In short: it reaches the program, with the paste and backlog rules of [`SessionHost::input`], only
+    /// when `epoch` is the lease's epoch now, `client` holds the lease and `seq` is the number the attachment expects, and it
+    /// is then acknowledged through the attachment (also when the backlog rule drops it: the answer `Err(SesError::Busy)` says
+    /// that, as for [`SessionHost::input`]). A number already applied is answered with the last applied number and not applied
+    /// again, a number after a missing one is answered once with the last applied number and the gap flag and not applied, and
+    /// a frame under another epoch or from a client that does not hold the lease is dropped without any answer. `Ok(Input::
+    /// Dropped)` is every frame that did not reach the program, whatever was said about it.
+    pub fn input_seq(
+        &self,
+        client: u64,
+        session: u32,
+        epoch: u32,
+        seq: u32,
+        bytes: &[u8],
+    ) -> Result<Input, SesError> {
+        if bytes.len() > MAX_INPUT_BYTES {
+            return Err(SesError::BadRequest);
         }
-        // The sender is told, at most once per `DROPPED_NOTE_MS`: `Busy` asks the caller to say so to the client.
-        if member.told_dropped.is_some_and(|at| now.saturating_sub(at) < DROPPED_NOTE_MS) {
+        let found = self.shared.find(session).ok_or(SesError::NotFound)?;
+        let mut guard = lock(&found);
+        let s = &mut *guard;
+        let now = self.shared.clock.now_ms();
+        let Some(at) = s.position(client) else { return Ok(Input::Dropped) };
+        if seq == 0 {
             return Ok(Input::Dropped);
         }
-        member.told_dropped = Some(now);
-        Err(SesError::Busy)
+        let who = s.members[at].who;
+        let next = s.members[at].next_seq;
+        if epoch != s.lease.epoch() || s.lease.holder() != Some(who) {
+            // The right is elsewhere or the frame was written for a right that moved: nothing reaches the program and nobody
+            // is told. The number of the frame that was next is used up, so the sender, which counts every frame it sends,
+            // stays together with this host when the right comes back.
+            if seq == next && next != u32::MAX {
+                s.members[at].next_seq = next + 1;
+            }
+            return Ok(Input::Dropped);
+        }
+        let member = &mut s.members[at];
+        if seq < next {
+            member.att.ack(session, next - 1, false);
+            return Ok(Input::Dropped);
+        }
+        if seq > next || next == u32::MAX {
+            if !member.gap_told {
+                member.gap_told = true;
+                member.att.ack(session, next - 1, true);
+            }
+            return Ok(Input::Dropped);
+        }
+        if s.lease.input(who, now) == Input::Dropped || s.exited_at.is_some() {
+            return Ok(Input::Dropped);
+        }
+        let dropped = match write_input(s, at, bytes) {
+            Wrote::Gone => return Ok(Input::Dropped),
+            Wrote::Done { dropped } => dropped,
+        };
+        let member = &mut s.members[at];
+        member.next_seq = next + 1;
+        member.gap_told = false;
+        member.att.ack(session, seq, false);
+        if dropped {
+            return told_dropped(member, now);
+        }
+        Ok(Input::Accepted)
     }
 
     /// Resizes `session` to `cols` x `rows` for `client`, which must hold the right to write; every attachment is told.
@@ -1020,6 +1129,8 @@ impl Shared {
                 told_dropped: None,
                 paste: PasteGate::default(),
                 token: None,
+                next_seq: 1,
+                gap_told: false,
                 suspended: false,
             }],
             cols,
@@ -1123,6 +1234,8 @@ impl Shared {
                     told_dropped: None,
                     paste: PasteGate::default(),
                     token: None,
+                    next_seq: 1,
+                    gap_told: false,
                     suspended: false,
                 });
                 let others: Changes = changes.into_iter().filter(|(w, _)| *w != who).collect();
@@ -1148,6 +1261,8 @@ impl Shared {
         };
         let at = s.members.iter().position(|m| m.who == who).ok_or(SesError::NotFound)?;
         s.members[at].stream = Some(stream);
+        // A gap that was told on the stream that ended is told again if it still exists: the client may have missed it.
+        s.members[at].gap_told = false;
         // The token the client was given by its last answer is used up; the new one is the only one that works.
         s.members[at].token = Some(token.clone());
         let attached = Attached {
@@ -1158,6 +1273,7 @@ impl Shared {
             snapshot_bytes: u32::try_from(start.snapshot.len()).map_err(|_| SesError::Refused)?,
             resume: token,
             epoch: s.lease.epoch(),
+            next: s.members[at].next_seq,
         };
         Ok((attached, start))
     }
@@ -1504,6 +1620,7 @@ mod tests {
         fn size(&self, _: u32, _: u16, _: u16) {}
         fn exited(&self, _: u32, _: Option<u32>) {}
         fn resync(&self, _: u32) {}
+        fn ack(&self, _: u32, _: u32, _: bool) {}
     }
 
     fn quiet() -> Arc<dyn Attachment> {

@@ -2036,6 +2036,26 @@ fn ses_attach(rig: &mut Rig, socket: u32, request: u64, session: u32, tail: Opti
     attached
 }
 
+/// The epoch of the lease as `socket` last heard of it for `session`: from its attach answer or its last writer event.
+fn epoch_of(seen: &[Frame], socket: u32) -> u32 {
+    seen.iter()
+        .rev()
+        .find_map(|f| match f {
+            Frame::Ses(Ses::Event { socket: s, event: SesEvent::Writer(_, epoch), .. }) if *s == socket => Some(*epoch),
+            Frame::Ses(Ses::Answer { socket: s, answer: SesAnswer::Attached(attached), .. }) if *s == socket => {
+                Some(attached.epoch)
+            }
+            _ => None,
+        })
+        .expect("the socket attached before it typed")
+}
+
+/// Sends `bytes` as input number `seq` of `socket`'s attachment, under the epoch the socket last heard of.
+fn ses_type(rig: &mut Rig, socket: u32, session: u32, seq: u32, bytes: &[u8]) {
+    let epoch = epoch_of(rig.seen(), socket);
+    rig.send(Frame::Ses(Ses::Input { socket, session, epoch, seq, bytes: bytes.to_vec() }));
+}
+
 #[test]
 fn tracer_ses_a_session_is_made_listed_attached_and_its_bytes_come_back_as_live_frames() {
     let mut rig = Rig::start();
@@ -2062,7 +2082,7 @@ fn tracer_ses_a_session_is_made_listed_attached_and_its_bytes_come_back_as_live_
     assert!(first_chunk.is_none_or(|at| at > answer_at), "{:?}", rig.describe());
 
     // What the socket types reaches the program (the fixed shell echoes it) and comes back as live bytes.
-    rig.send(Frame::Ses(Ses::Input { socket: 5, session, bytes: b"hello-session\r".to_vec() }));
+    ses_type(&mut rig, 5, session, 1, b"hello-session\r");
     wait_until(&mut rig, "the echo", |seen| live_of(seen, 5, session).contains("hello-session"));
     rig.finish();
 }
@@ -2102,8 +2122,8 @@ fn ses_a_second_socket_watches_its_input_is_dropped_and_a_takeover_changes_who_w
     assert_eq!(ses_attach(&mut rig, 6, 3, session, None).writer, WriterState::Watching);
 
     // The watcher's input is dropped without an answer; the writer's reaches the program, and both streams show only that.
-    rig.send(Frame::Ses(Ses::Input { socket: 6, session, bytes: b"from-the-watcher\r".to_vec() }));
-    rig.send(Frame::Ses(Ses::Input { socket: 5, session, bytes: b"from-the-writer\r".to_vec() }));
+    ses_type(&mut rig, 6, session, 1, b"from-the-watcher\r");
+    ses_type(&mut rig, 5, session, 1, b"from-the-writer\r");
     wait_until(&mut rig, "the writer's echo on both streams", |seen| {
         live_of(seen, 5, session).contains("from-the-writer") && live_of(seen, 6, session).contains("from-the-writer")
     });
@@ -2121,7 +2141,8 @@ fn ses_a_second_socket_watches_its_input_is_dropped_and_a_takeover_changes_who_w
         };
         told(5, WriterState::Watching) && told(6, WriterState::Writing)
     });
-    rig.send(Frame::Ses(Ses::Input { socket: 6, session, bytes: b"after-takeover\r".to_vec() }));
+    // The watcher's frame above used up its number 1 although it was dropped, so its next one is 2.
+    ses_type(&mut rig, 6, session, 2, b"after-takeover\r");
     wait_until(&mut rig, "the new writer's echo", |seen| live_of(seen, 5, session).contains("after-takeover"));
     rig.finish();
 }
@@ -2182,7 +2203,7 @@ fn ses_a_request_that_names_no_session_is_failed_not_found_and_a_request_before_
         assert!(matches!(ses_answer(&mut rig, 5, request), SesAnswer::Failed(SesError::NotFound)), "request {request}");
     }
     // Input for a session that is not there is dropped without an answer, and the worker is still alive.
-    rig.send(Frame::Ses(Ses::Input { socket: 5, session: 99, bytes: vec![b'x'] }));
+    rig.send(Frame::Ses(Ses::Input { socket: 5, session: 99, epoch: 1, seq: 1, bytes: vec![b'x'] }));
     let session = ses_new(&mut rig, 5, 8);
     assert_ne!(session, 0);
     rig.finish();
@@ -2269,7 +2290,7 @@ fn ses_the_end_of_the_program_is_told_to_every_attached_socket_with_an_exited_ev
     ses_attach(&mut rig, 5, 2, session, None);
     ses_attach(&mut rig, 6, 3, session, None);
     // End of input at the start of a line ends the `cat` of the fixed shell.
-    rig.send(Frame::Ses(Ses::Input { socket: 5, session, bytes: vec![0x04] }));
+    ses_type(&mut rig, 5, session, 1, &[0x04]);
     wait_until(&mut rig, "the exited event for both sockets", |seen| {
         [5, 6].iter().all(|socket| {
             seen.iter().any(|f| {
@@ -2289,7 +2310,7 @@ fn ses_a_session_and_the_panes_of_the_window_run_side_by_side_without_disturbing
     rig.wait_event("frame", |_, payload| payload["pane"] == json!(first));
     let session = ses_new(&mut rig, 5, 1);
     ses_attach(&mut rig, 5, 2, session, None);
-    rig.send(Frame::Ses(Ses::Input { socket: 5, session, bytes: b"for-the-session\r".to_vec() }));
+    ses_type(&mut rig, 5, session, 1, b"for-the-session\r");
     wait_until(&mut rig, "the echo of the session", |seen| live_of(seen, 5, session).contains("for-the-session"));
     // The window's pane still answers its commands and still draws.
     rig.ok(1, "request_full", json!({"pane": first}));

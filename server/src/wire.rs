@@ -94,7 +94,9 @@
 //!                there is one | u8 has a resume token: 0 or 1 | 16 bytes of resume token, only when there is one
 //!                                                                                  (20, 24, 36 or 40 bytes)
 //!   4 Detach     2..6 socket | 6..14 request | 14..18 session                                              (18 bytes)
-//!   5 Input      2..6 socket | 6..10 session | 10.. the bytes, 1 to 65536, to the end of the frame; never answered
+//!   5 Input      2..6 socket | 6..10 session | 10..14 u32 epoch of the lease the client writes under, not 0 | 14..18 u32
+//!                number of the frame in the socket's attachment, not 0 | 18.. the bytes, 1 to 65536, to the end of the
+//!                frame; answered by an `Ack` event only when it was applied or is a repeat or a gap, see below
 //!   6 Resize     2..6 socket | 6..14 request | 14..18 session | 18..20 u16 cols | 20..22 u16 rows, neither 0 (22 bytes)
 //!   7 Takeover   2..6 socket | 6..14 request | 14..18 session                                              (18 bytes)
 //!   8 End        2..6 socket | 6..14 request | 14..18 session                                              (18 bytes)
@@ -110,7 +112,7 @@
 //!                2 created: u32 session
 //!                3 attached: u16 cols | u16 rows | u8 writer: 0 writing, 1 watching, 2 free | u8 older lines exist: 0 or 1 |
 //!                  u32 bytes of snapshot that follow in `Snapshot` frames | 16 bytes of resume token | u32 epoch of the
-//!                  lease, not 0
+//!                  lease, not 0 | u32 number of the next input frame the attachment expects, not 0
 //!                6 failed: u8 error: 1 not found, 2 refused, 3 busy, 4 too many, 5 bad request
 //!   17 Snapshot  2..6 socket | 6..10 session | 10..14 u32 seq | 14.. the bytes, 1 to 65536
 //!   18 Live      2..6 socket | 6..10 session | 10..14 u32 seq, which continues the count of the snapshot | 14.. the bytes,
@@ -118,7 +120,8 @@
 //!   19 Event     2..6 socket | 6..10 session | 10 u8 event: 1 writer (u8 state as above, u32 epoch of the lease, not 0),
 //!                2 exited (u8 has a status: 0 or 1,
 //!                u32 status only when there is one), 3 resync, 4 size (u16 cols, u16 rows), 5 dropped (input of this socket
-//!                was dropped because the program does not read it)
+//!                was dropped because the program does not read it), 6 ack (u32 number: every frame up to it is applied,
+//!                0 for none; u8 gap: 0 or 1, a frame came after a missing one and was not applied)
 //! ```
 //!
 //! A frame that holds a key prints nothing of it in `Debug`, and the key is wiped from the frame when it is dropped. A resume
@@ -198,8 +201,9 @@ pub const NOTE_EXITING: u8 = 4;
 pub const NOTE_CTL_DONE: u8 = 5;
 
 /// The protocol version of the `Init` control. Version 3 added the session frames and the session limits of `Init`; version 4
-/// the resume token and the epoch of the lease.
-pub const PROTOCOL_VERSION: u16 = 4;
+/// the resume token and the epoch of the lease; version 5 the epoch and the number of an input frame, the `ack` event and the
+/// next number in the attach answer.
+pub const PROTOCOL_VERSION: u16 = 5;
 
 /// The socket id on which a worker answers a file control. A browser connection never has this id.
 pub const FILE_SOCKET: u32 = u32::MAX;
@@ -569,6 +573,9 @@ pub enum SesEvent {
     Size { cols: u16, rows: u16 },
     /// Input this socket sent was dropped because the program leaves too much of its input unread.
     Dropped,
+    /// Every input frame of this socket's attachment up to `seq` is applied (0: none). `gap` says that a frame came after a
+    /// missing one and was not applied.
+    Ack { seq: u32, gap: bool },
 }
 
 /// A frame about the sessions that live in a worker. The requests come from the supervisor on behalf of a device socket,
@@ -599,10 +606,14 @@ pub enum Ses {
         request: u64,
         session: u32,
     },
-    /// Input bytes; never answered, dropped unless the socket holds the right to write.
+    /// Input bytes under the epoch the socket writes under, as number `seq` of its attachment (both from 1). Dropped unless the
+    /// socket holds the right to write under that epoch and the number is the next one; answered by an ack when it is applied,
+    /// a repeat or a gap, and by nothing otherwise.
     Input {
         socket: u32,
         session: u32,
+        epoch: u32,
+        seq: u32,
         bytes: Vec<u8>,
     },
     Resize {
@@ -708,10 +719,12 @@ impl fmt::Debug for Ses {
                 .field("request", request)
                 .field("session", session)
                 .finish(),
-            Ses::Input { socket, session, bytes } => f
+            Ses::Input { socket, session, epoch, seq, bytes } => f
                 .debug_struct("Input")
                 .field("socket", socket)
                 .field("session", session)
+                .field("epoch", epoch)
+                .field("seq", seq)
                 .field("bytes", &bytes.len())
                 .finish(),
             Ses::Resize { socket, request, session, cols, rows } => f
@@ -891,6 +904,14 @@ impl<'a> Fields<'a> {
         }
     }
 
+    /// A number of input that is not 0.
+    fn number(&mut self) -> Result<u32, WireError> {
+        match self.u32()? {
+            0 => Err(WireError::BadValue("a number of input is not 0")),
+            number => Ok(number),
+        }
+    }
+
     /// A socket id that is not 0.
     fn socket(&mut self) -> Result<u32, WireError> {
         match self.u32()? {
@@ -972,6 +993,7 @@ const EVENT_EXITED: u8 = 2;
 const EVENT_RESYNC: u8 = 3;
 const EVENT_SIZE: u8 = 4;
 const EVENT_DROPPED: u8 = 5;
+const EVENT_ACK: u8 = 6;
 
 fn error_byte(error: SesError) -> u8 {
     match error {
@@ -1021,6 +1043,10 @@ fn nonzero_session(session: u32) -> Result<u32, WireError> {
 
 fn nonzero_epoch(epoch: u32) -> Result<u32, WireError> {
     if epoch == 0 { Err(WireError::BadValue("an epoch is not 0")) } else { Ok(epoch) }
+}
+
+fn nonzero_number(number: u32) -> Result<u32, WireError> {
+    if number == 0 { Err(WireError::BadValue("a number of input is not 0")) } else { Ok(number) }
 }
 
 fn nonzero_dim(dim: u16) -> Result<u16, WireError> {
@@ -1091,10 +1117,12 @@ fn encode_ses(ses: &Ses, out: &mut Vec<u8>) -> Result<(), WireError> {
             head(out, op, *socket, *request)?;
             out.extend_from_slice(&nonzero_session(*session)?.to_be_bytes());
         }
-        Ses::Input { socket, session, bytes } => {
+        Ses::Input { socket, session, epoch, seq, bytes } => {
             out.push(SES_INPUT);
             out.extend_from_slice(&nonzero(*socket)?.to_be_bytes());
             out.extend_from_slice(&nonzero_session(*session)?.to_be_bytes());
+            out.extend_from_slice(&nonzero_epoch(*epoch)?.to_be_bytes());
+            out.extend_from_slice(&nonzero_number(*seq)?.to_be_bytes());
             put_chunk(out, bytes, MAX_INPUT_BYTES, "input is 1 byte to 64 KiB")?;
         }
         Ses::Resize { socket, request, session, cols, rows } => {
@@ -1147,6 +1175,7 @@ fn encode_ses(ses: &Ses, out: &mut Vec<u8>) -> Result<(), WireError> {
                     out.extend_from_slice(&attached.snapshot_bytes.to_be_bytes());
                     out.extend_from_slice(attached.resume.expose());
                     out.extend_from_slice(&nonzero_epoch(attached.epoch)?.to_be_bytes());
+                    out.extend_from_slice(&nonzero_number(attached.next)?.to_be_bytes());
                 }
                 SesAnswer::Done => out.push(ANSWER_DONE),
                 SesAnswer::Ended => out.push(ANSWER_ENDED),
@@ -1179,6 +1208,11 @@ fn encode_ses(ses: &Ses, out: &mut Vec<u8>) -> Result<(), WireError> {
                 }
                 SesEvent::Resync => out.push(EVENT_RESYNC),
                 SesEvent::Dropped => out.push(EVENT_DROPPED),
+                SesEvent::Ack { seq, gap } => {
+                    out.push(EVENT_ACK);
+                    out.extend_from_slice(&seq.to_be_bytes());
+                    out.push(u8::from(*gap));
+                }
                 SesEvent::Size { cols, rows } => {
                     out.push(EVENT_SIZE);
                     out.extend_from_slice(&nonzero_dim(*cols)?.to_be_bytes());
@@ -1209,7 +1243,8 @@ fn decode_ses(fields: &mut Fields<'_>) -> Result<Ses, WireError> {
         SES_BEAT => Ses::Beat { socket: fields.socket()?, request: fields.id()?, session: fields.session()? },
         SES_INPUT => {
             let (socket, session) = (fields.socket()?, fields.session()?);
-            Ses::Input { socket, session, bytes: fields.chunk(MAX_INPUT_BYTES, "input is 1 byte to 64 KiB")? }
+            let (epoch, seq) = (fields.epoch()?, fields.number()?);
+            Ses::Input { socket, session, epoch, seq, bytes: fields.chunk(MAX_INPUT_BYTES, "input is 1 byte to 64 KiB")? }
         }
         SES_RESIZE => Ses::Resize {
             socket: fields.socket()?,
@@ -1252,6 +1287,7 @@ fn decode_ses(fields: &mut Fields<'_>) -> Result<Ses, WireError> {
                     snapshot_bytes: fields.u32()?,
                     resume: fields.resume()?,
                     epoch: fields.epoch()?,
+                    next: fields.number()?,
                 }),
                 ANSWER_DONE => SesAnswer::Done,
                 ANSWER_ENDED => SesAnswer::Ended,
@@ -1283,7 +1319,8 @@ fn decode_ses(fields: &mut Fields<'_>) -> Result<Ses, WireError> {
                 EVENT_RESYNC => SesEvent::Resync,
                 EVENT_SIZE => SesEvent::Size { cols: fields.dim()?, rows: fields.dim()? },
                 EVENT_DROPPED => SesEvent::Dropped,
-                _ => return Err(WireError::BadValue("a session event is not 1 to 5")),
+                EVENT_ACK => SesEvent::Ack { seq: fields.u32()?, gap: fields.flag("the gap flag is not 0 or 1")? },
+                _ => return Err(WireError::BadValue("a session event is not 1 to 6")),
             };
             Ses::Event { socket, session, event }
         }

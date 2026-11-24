@@ -87,6 +87,12 @@ struct Lease {
     issued: Vec<ResumeToken>,
     /// What every attach carried, in order.
     presented: Vec<Option<ResumeToken>>,
+    /// The number of the next input frame the fake expects: 1 for a new attachment, kept for a resumed one.
+    next: u32,
+    /// Whether the gap before `next` was told already (it is told once, until a frame is applied).
+    gap_told: bool,
+    /// Every input frame that came, in order: the session, the epoch and the number.
+    frames: Vec<(u32, u32, u32)>,
 }
 
 /// A listener that plays a server.
@@ -111,7 +117,7 @@ impl FakeDevice {
             signed_out: Mutex::new(false),
             refusals: AtomicU64::new(0),
         });
-        let lease = Lease { writing: true, ..Lease::default() };
+        let lease = Lease { writing: true, next: 1, ..Lease::default() };
         FakeDevice { listener, addr, endpoint, seen: Arc::new(Mutex::new(Vec::new())), lease: Arc::new(Mutex::new(lease)) }
     }
 
@@ -124,6 +130,11 @@ impl FakeDevice {
     /// What every attach the fake answered with [`Conn::answer_attach`] carried, in order.
     pub fn presented(&self) -> Vec<Option<ResumeToken>> {
         self.lease.lock().unwrap().presented.clone()
+    }
+
+    /// Every input frame that came, in order, as (session, epoch, number): the numbers say what the client counted.
+    pub fn frames(&self) -> Vec<(u32, u32, u32)> {
+        self.lease.lock().unwrap().frames.clone()
     }
 
     /// Gives the right to write to another device, or back: what a takeover does on the server.
@@ -169,7 +180,7 @@ impl FakeDevice {
             Ok(response)
         })
         .ok()?;
-        Some(Conn { ws, lease: self.lease.clone() })
+        Some(Conn { ws, lease: self.lease.clone(), acks: true })
     }
 
     /// Accepts the next connection and upgrades it, or fails the test.
@@ -240,6 +251,8 @@ pub enum Got {
 pub struct Conn {
     ws: WebSocket<TcpStream>,
     lease: Arc<Mutex<Lease>>,
+    /// Whether the fake acknowledges input the way the server's rule does (it does until a test says otherwise).
+    acks: bool,
 }
 
 impl Conn {
@@ -253,13 +266,55 @@ impl Conn {
                 Err(_) => Got::Strange,
             },
             Ok(Message::Binary(bytes)) => match Input::parse(&bytes) {
-                Ok(input) => Got::Input { session: input.session, bytes: input.bytes.to_vec() },
+                Ok(input) => {
+                    self.judge(&input);
+                    Got::Input { session: input.session, bytes: input.bytes.to_vec() }
+                }
                 Err(_) => Got::Strange,
             },
             Ok(Message::Close(frame)) => Got::Closed(frame.map(|f| u16::from(f.code))),
             Ok(_) => Got::Quiet,
             Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => Got::Quiet,
             Err(_) => Got::Closed(None),
+        }
+    }
+
+    /// Whether the fake acknowledges input (on by default).
+    pub fn set_acks(&mut self, on: bool) {
+        self.acks = on;
+    }
+
+    /// The server's rule for one numbered frame, as far as the fake models it: the device holds the right under the epoch 1;
+    /// a frame in order is applied and acknowledged, a repeat is answered with the last applied number, a frame after a missing
+    /// one with that number marked as a gap (once), and a frame of another epoch or while the right is elsewhere with nothing.
+    fn judge(&mut self, input: &Input) {
+        let ack = {
+            let mut lease = self.lease.lock().unwrap();
+            lease.frames.push((input.session, input.epoch, input.seq));
+            let next = lease.next;
+            if input.epoch != 1 || !lease.writing {
+                if input.seq == next {
+                    lease.next = next + 1;
+                }
+                None
+            } else if input.seq < next {
+                Some((next - 1, false))
+            } else if input.seq > next {
+                if lease.gap_told {
+                    None
+                } else {
+                    lease.gap_told = true;
+                    Some((next - 1, true))
+                }
+            } else {
+                lease.next = next + 1;
+                lease.gap_told = false;
+                Some((input.seq, false))
+            }
+        };
+        if let (Some((seq, gap)), true) = (ack, self.acks) {
+            let text = Reply::Event(Event::Ack { session: input.session, seq, gap }).encode();
+            let _ = self.ws.send(Message::text(text));
         }
     }
 
@@ -321,7 +376,14 @@ impl Conn {
     /// The answer to an attach of `session`.
     pub fn attached(&mut self, id: u64, session: u32, cols: u16, rows: u16, writer: WriterView, more: bool, snapshot: u32) {
         let resume = ResumeToken::generate().expect("random bytes");
-        self.answer(id, Answer::Attached { session, cols, rows, writer, more, snapshot, resume, epoch: 1 });
+        // Every attach of this helper is a new attachment: its input is numbered from 1.
+        let next = {
+            let mut lease = self.lease.lock().unwrap();
+            lease.next = 1;
+            lease.gap_told = false;
+            1
+        };
+        self.answer(id, Answer::Attached { session, cols, rows, writer, more, snapshot, resume, epoch: 1, next });
     }
 
     /// Answers an attach the way the server's rule does: the writer view is `Writing` only for a device that holds the right and
@@ -331,7 +393,7 @@ impl Conn {
     pub fn answer_attach(&mut self, request: &Request, cols: u16, rows: u16, snapshot: u32) -> WriterView {
         let Op::Attach { session, resume, .. } = &request.op else { panic!("an attach was expected, got {request:?}") };
         let fresh = ResumeToken::generate().expect("random bytes");
-        let writer = {
+        let (writer, next) = {
             let mut lease = self.lease.lock().unwrap();
             let good = match (resume, &lease.current) {
                 (Some(presented), Some(current)) => presented == current,
@@ -343,9 +405,14 @@ impl Conn {
             lease.presented.push(resume.clone());
             lease.current = Some(fresh.clone());
             lease.issued.push(fresh.clone());
-            writer
+            // A resumed attachment keeps its number; anything else is a new attachment, numbered from 1.
+            if !good {
+                lease.next = 1;
+                lease.gap_told = false;
+            }
+            (writer, lease.next)
         };
-        self.answer(request.id, Answer::Attached { session: *session, cols, rows, writer, more: false, snapshot, resume: fresh, epoch: 1 });
+        self.answer(request.id, Answer::Attached { session: *session, cols, rows, writer, more: false, snapshot, resume: fresh, epoch: 1, next });
         writer
     }
 

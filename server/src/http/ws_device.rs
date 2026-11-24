@@ -433,8 +433,9 @@ impl Machine<'_> {
         }
     }
 
-    /// One binary frame: input for a session. A frame of another kind, for a session this socket is not attached to, or over the
-    /// rate is dropped without an answer: input is a stream, and the worker drops what a watcher sends anyway.
+    /// One binary frame: numbered input for a session. A frame of another kind (the layout before frames were numbered
+    /// included), for a session this socket is not attached to, or over the rate is dropped without an answer: input is a
+    /// stream, and the worker drops what a watcher or an old epoch sends and acknowledges what it applied.
     fn input(&mut self, bytes: &[u8]) -> Result<(), Exit> {
         let now = Instant::now();
         if !self.rate(now)? {
@@ -444,7 +445,13 @@ impl Machine<'_> {
         if !self.attached.contains(&frame.session) {
             return Ok(());
         }
-        let ses = Ses::Input { socket: self.handle.id(), session: frame.session, bytes: frame.bytes.to_vec() };
+        let ses = Ses::Input {
+            socket: self.handle.id(),
+            session: frame.session,
+            epoch: frame.epoch,
+            seq: frame.seq,
+            bytes: frame.bytes.to_vec(),
+        };
         // A worker that is behind drops the input; a socket that is gone is closed by its queue.
         let _ = self.handle.ses(ses);
         Ok(())
@@ -487,6 +494,7 @@ impl Machine<'_> {
                                 snapshot: a.snapshot_bytes,
                                 resume: a.resume,
                                 epoch: a.epoch,
+                                next: a.next,
                             })
                         } else {
                             Err(ErrorWord::BadRequest)
@@ -513,6 +521,7 @@ impl Machine<'_> {
                     }
                     SesEvent::Size { cols, rows } => Event::Size { session, cols, rows },
                     SesEvent::Dropped => Event::Dropped { session },
+                    SesEvent::Ack { seq, gap } => Event::Ack { session, seq, gap },
                 };
                 self.text(transport, Reply::Event(event).encode()).await
             }

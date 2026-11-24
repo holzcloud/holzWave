@@ -465,6 +465,7 @@ impl Hub {
             streak: 0,
             resume: None,
             epoch: None,
+            next_seq: 1,
         };
         let handle =
             SubHandle { id, session, route: Route::Hub(self.inner.cmd.clone()), wake: tx.clone(), queued: queued.clone() };
@@ -714,8 +715,12 @@ struct Sub {
     /// attachment as the one whose socket was lost. It is used once, so every answer replaces it (the old one is wiped as it is
     /// dropped); it lives in this struct and nowhere else: it is never logged, never written to disk and never printed.
     resume: Option<ResumeToken>,
-    /// The epoch of the lease as the last attach answer or the last writer event said it. Not used yet.
+    /// The epoch of the lease as the last attach answer or the last writer event said it: the epoch every input frame is
+    /// written under.
     epoch: Option<u32>,
+    /// The number of the next input frame, from the `next` of the last attach answer. The hub keeps no frame and does not wait
+    /// for an acknowledgement: a gap that the server reports only puts the count back where the server is.
+    next_seq: u32,
 }
 
 impl fmt::Debug for Sub {
@@ -727,6 +732,7 @@ impl fmt::Debug for Sub {
             .field("writer", &self.writer)
             .field("resume", &self.resume.as_ref().map(|_| "ResumeToken(..)"))
             .field("epoch", &self.epoch)
+            .field("next_seq", &self.next_seq)
             .finish_non_exhaustive()
     }
 }
@@ -1028,11 +1034,22 @@ impl Core {
             return;
         }
         for part in bytes.chunks(MAX_INPUT) {
-            let Ok(frame) = proto::encode_input(session, part) else { continue };
+            let Some(sub) = self.subs.get_mut(&session) else { return };
+            // A subscription writes only after an attach answer, which always carries an epoch. Without one the write is not
+            // sent: no frame goes out under an epoch that was made up, and 0 is never a valid one.
+            let seq = sub.next_seq;
+            let frame = sub.epoch.and_then(|epoch| proto::encode_input(session, epoch, seq, part).ok());
+            let Some(frame) = frame else {
+                self.stats.dropped_input_bytes.fetch_add(part.len() as u64, Ordering::Relaxed);
+                continue;
+            };
             let Some(ws) = self.ws.as_mut() else { return };
-            if let Err(error) = ws.send_binary(&frame) {
-                self.broken(&error);
-                return;
+            match ws.send_binary(&frame) {
+                Ok(()) => sub.next_seq = seq.saturating_add(1),
+                Err(error) => {
+                    self.broken(&error);
+                    return;
+                }
             }
             bump(&self.stats.input_frames);
         }
@@ -1438,7 +1455,7 @@ impl Core {
                 }
                 match result {
                     Err(word) => self.end_sub(session, HubError::Word(word)),
-                    Ok(Answer::Attached { session: said, cols, rows, writer, more, snapshot, resume, epoch }) => {
+                    Ok(Answer::Attached { session: said, cols, rows, writer, more, snapshot, resume, epoch, next }) => {
                         let sane = said == session
                             && (MIN_SIZE.0..=MAX_SIZE).contains(&cols)
                             && (MIN_SIZE.1..=MAX_SIZE).contains(&rows)
@@ -1446,7 +1463,7 @@ impl Core {
                         if !sane {
                             return self.stream_fault(session);
                         }
-                        self.attached(session, cols, rows, writer, more, snapshot, resume, epoch);
+                        self.attached(session, cols, rows, writer, more, snapshot, resume, epoch, next);
                     }
                     Ok(_) => self.stream_fault(session),
                 }
@@ -1465,6 +1482,7 @@ impl Core {
         snapshot: u32,
         resume: ResumeToken,
         epoch: u32,
+        next: u32,
     ) {
         let Some(sub) = self.subs.get_mut(&session) else { return };
         let again = sub.attached_before;
@@ -1473,6 +1491,8 @@ impl Core {
         // The new token replaces the old one, which is wiped as it is dropped.
         sub.resume = Some(resume);
         sub.epoch = Some(epoch);
+        // Input is numbered from where the server says it is: every frame sent before this attach was handled before it.
+        sub.next_seq = next;
         sub.phase = if snapshot == 0 { Phase::Live { seq: 0 } } else { Phase::Snapshot { left: snapshot, seq: 0 } };
         self.tell(session, SubEvent::Attached { cols, rows, writer, more, snapshot, again, epoch });
     }
@@ -1510,6 +1530,14 @@ impl Core {
             }
             Event::Resync { .. } => self.resync(session),
             Event::Dropped { .. } => self.offer(session, SubEvent::InputDropped, true, bound),
+            Event::Ack { seq, gap, .. } => {
+                // Nothing is kept, so there is nothing to free by an acknowledgement. A gap means the server did not get a
+                // frame (the socket's rate or a worker that was behind dropped it): the count goes back to where the server
+                // is, so that what is typed next is applied instead of dropped one frame after the other.
+                if gap && let Some(sub) = self.subs.get_mut(&session) {
+                    sub.next_seq = seq.saturating_add(1);
+                }
+            }
         }
     }
 
@@ -1613,6 +1641,7 @@ mod tests {
             streak: 0,
             resume: Some(token),
             epoch: Some(2),
+            next_seq: 1,
         };
         let printed = format!("{sub:?} {:#?}", sub);
         assert!(!printed.contains(hex.as_str()), "{printed}");

@@ -345,6 +345,8 @@ struct Device {
     frames: Arc<Mutex<Vec<Frame>>>,
     reader: Option<JoinHandle<()>>,
     next: u64,
+    /// How many input frames this device has sent, by session: the next number is one more.
+    typed: Mutex<std::collections::HashMap<u32, u32>>,
 }
 
 impl Device {
@@ -359,7 +361,7 @@ impl Device {
                 }
             })
         };
-        Device { socket, queue, frames, reader: Some(reader), next: 1 }
+        Device { socket, queue, frames, reader: Some(reader), next: 1, typed: Mutex::new(std::collections::HashMap::new()) }
     }
 
     fn frames(&self) -> Vec<Frame> {
@@ -419,8 +421,29 @@ impl Device {
         }
     }
 
+    /// The epoch of the lease as this device last heard of it: from its attach answer or its last writer event.
+    fn epoch(&self) -> u32 {
+        self.frames()
+            .into_iter()
+            .rev()
+            .find_map(|frame| match frame {
+                Frame::Ses(Ses::Event { event: SesEvent::Writer(_, epoch), .. }) => Some(epoch),
+                Frame::Ses(Ses::Answer { answer: SesAnswer::Attached(attached), .. }) => Some(attached.epoch),
+                _ => None,
+            })
+            .expect("the device attached before it typed")
+    }
+
+    /// Types `text` as the next numbered frame of this device's attachment, under the epoch it last heard of.
     fn input(&self, host: &SessionHost, session: u32, text: &str) {
-        handle_ses(host, &self.queue, Ses::Input { socket: self.socket, session, bytes: text.as_bytes().to_vec() });
+        let seq = {
+            let mut typed = self.typed.lock().unwrap_or_else(PoisonError::into_inner);
+            let count = typed.entry(session).or_insert(0);
+            *count += 1;
+            *count
+        };
+        let epoch = self.epoch();
+        handle_ses(host, &self.queue, Ses::Input { socket: self.socket, session, epoch, seq, bytes: text.as_bytes().to_vec() });
     }
 
     fn takeover(&mut self, host: &SessionHost, session: u32) {

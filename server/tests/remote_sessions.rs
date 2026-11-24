@@ -40,7 +40,7 @@ const SUM: &str = "echo hw-$((6*7))\r";
 // ---------------------------------------------------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tracer_a_device_creates_a_session_attaches_it_and_types_into_it() {
+async fn tracer_numbered_input_of_a_device_reaches_the_shell_once_in_order_and_is_acknowledged() {
     let env = env().await;
     let alice = env.person("alice");
     let laptop = mint(&env, &alice, "laptop");
@@ -56,10 +56,14 @@ async fn tracer_a_device_creates_a_session_attaches_it_and_types_into_it() {
     // Leave and attach again: the answer states the grid, the writer view, whether older lines exist and how many bytes of
     // snapshot follow.
     device.ok(Op::Detach { session }).await;
-    let Answer::Attached { session: attached, cols, rows, writer, more, snapshot, .. } = device.attach(session, None).await else {
+    let Answer::Attached { session: attached, cols, rows, writer, more, snapshot, epoch, next, .. } =
+        device.attach(session, None).await
+    else {
         panic!("attached")
     };
     assert_eq!((attached, cols, rows), (session, 80, 24));
+    assert_eq!(next, 1, "a new attachment is expected to start its input at 1");
+    assert!(epoch >= 1);
     assert!(!more, "a fresh session has no older lines");
     assert_ne!(writer, WriterView::Writing, "nobody held the lease while the creator was away, so it is free for this attach");
     assert!(snapshot > 0, "the screen of a shell is more than nothing");
@@ -68,10 +72,23 @@ async fn tracer_a_device_creates_a_session_attaches_it_and_types_into_it() {
     device.until("the whole snapshot", SHELL, |d| d.snapshot.get(&session).is_some_and(|b| b.len() as u32 >= snapshot)).await;
     assert_eq!(device.snapshot[&session].len() as u32, snapshot);
 
-    // Only the writer's input reaches the program: take the right to write, then type.
+    // Only the writer's input reaches the program: take the right to write (its epoch is in the event), then type three numbered
+    // frames under that epoch.
     device.ok(Op::Takeover { session }).await;
-    device.type_into(session, SUM.as_bytes()).await;
-    device.until_live(session, "hw-42", SHELL).await;
+    let epoch = device.epoch_of(session).expect("the takeover told the epoch");
+    assert!(epoch > 1, "the right moved from nobody to this attachment, so the epoch moved");
+    for (seq, line) in [(1u32, "echo hw-$((6*7))\r"), (2, "echo hw-$((7*8))\r"), (3, "echo hw-$((8*9))\r")] {
+        device.type_numbered(session, epoch, seq, line.as_bytes()).await;
+    }
+    device.until_live(session, "hw-72", SHELL).await;
+    // Each frame ran once and in order, and each was acknowledged with its own number and no gap.
+    let live = device.live_text(session);
+    let at = |needle: &str| live.match_indices(needle).map(|(at, _)| at).collect::<Vec<_>>();
+    let (first, second, third) = (at("hw-42"), at("hw-56"), at("hw-72"));
+    assert_eq!((first.len(), second.len(), third.len()), (1, 1, 1), "{live:?}");
+    assert!(first[0] < second[0] && second[0] < third[0], "{live:?}");
+    device.until("the three acks", SHELL, |d| d.acks_of(session).len() >= 3).await;
+    assert_eq!(device.acks_of(session), vec![(1, false), (2, false), (3, false)]);
 
     // The sequence numbers of one attach count on from the snapshot into the live bytes, with no gap.
     let seqs = &device.seqs[&session];
@@ -273,7 +290,7 @@ async fn another_persons_session_answers_not_found_exactly_like_one_that_never_e
             assert_eq!((answer, unknown), (ErrorWord::NotFound, ErrorWord::NotFound), "{} of {target}", op.name());
         }
         // Input for a session he is not attached to goes nowhere.
-        b.type_into(target, b"echo hw-evil$((1+1))\r").await;
+        b.type_numbered(target, 1, 1, b"echo hw-evil$((1+1))\r").await;
     }
 
     // Nothing of Alice's changed: all three are alive, at their size, and no byte of Bob's reached any of them.
@@ -783,13 +800,21 @@ async fn a_binary_frame_of_another_kind_or_for_a_session_not_attached_is_dropped
     a.send_binary(&[0x01, 0, 0, 0, 1, b'x']).await;
     a.send_binary(&[0x10]).await;
     a.send_binary(&[]).await;
-    a.send_binary(&input_frame(session + 50, b"echo hw-lost$((1+1))\r")).await;
+    // The frame of the layout before input was numbered is a frame of a kind that does not exist.
+    let mut old_layout = vec![0x10];
+    old_layout.extend_from_slice(&session.to_be_bytes());
+    old_layout.extend_from_slice(b"echo hw-old$((3+3))\r");
+    a.send_binary(&old_layout).await;
+    let epoch = a.epoch_of(session).expect("the attach told the epoch");
+    a.send_binary(&input_frame(session + 50, epoch, 1, b"echo hw-lost$((1+1))\r")).await;
     // Nothing answers a dropped frame, and nothing it carried reaches the program.
     tokio::time::sleep(Duration::from_millis(700)).await;
     while a.pump(Duration::from_millis(50)).await {}
     assert_eq!(a.unclaimed(), 0);
     assert!(a.strange.is_empty(), "{:?}", a.strange);
+    assert!(a.acks.is_empty(), "no frame was applied, so none is acknowledged: {:?}", a.acks);
     assert!(!a.live_text(session).contains("hw-lost2"));
+    assert!(!a.live_text(session).contains("hw-old6"), "the old layout is not input any more");
     // The socket is open and still works.
     let Answer::List(listed) = a.ok(Op::List).await else { panic!("a list") };
     assert_eq!(listed.len(), 1);

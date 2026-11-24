@@ -42,6 +42,8 @@ struct Rec {
     got: Mutex<Vec<Got>>,
     /// The epochs the writer events carried, in order.
     epochs: Mutex<Vec<u32>>,
+    /// What the host acknowledged of its numbered input, in order: the number and whether it was marked as a gap.
+    acks: Mutex<Vec<(u32, bool)>>,
     hold: AtomicBool,
     accept: AtomicBool,
 }
@@ -51,6 +53,7 @@ impl Rec {
         Arc::new(Rec {
             got: Mutex::new(Vec::new()),
             epochs: Mutex::new(Vec::new()),
+            acks: Mutex::new(Vec::new()),
             hold: AtomicBool::new(false),
             accept: AtomicBool::new(true),
         })
@@ -66,6 +69,10 @@ impl Rec {
 
     fn epochs(&self) -> Vec<u32> {
         self.epochs.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    fn acks(&self) -> Vec<(u32, bool)> {
+        self.acks.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     fn writers(&self) -> Vec<WriterState> {
@@ -162,6 +169,10 @@ impl Attachment for Rec {
 
     fn resync(&self, _session: u32) {
         self.push(Got::Resync);
+    }
+
+    fn ack(&self, _session: u32, seq: u32, gap: bool) {
+        self.acks.lock().unwrap_or_else(PoisonError::into_inner).push((seq, gap));
     }
 }
 

@@ -142,6 +142,12 @@ pub struct Device {
     pub ended: bool,
     /// The messages that were not understood (there must be none).
     pub strange: Vec<String>,
+    /// Every acknowledgement of input, in the order they came, as (session, number, gap). They are kept apart from `events`.
+    pub acks: Vec<(u32, u32, bool)>,
+    /// The epoch of the lease for each session as the last attach answer or writer event said it.
+    epochs: HashMap<u32, u32>,
+    /// The number of the next input frame for each session, from the attach answer and counted up by `type_into`.
+    nexts: HashMap<u32, u32>,
 }
 
 impl Device {
@@ -165,6 +171,9 @@ impl Device {
             closed: None,
             ended: false,
             strange: Vec::new(),
+            acks: Vec::new(),
+            epochs: HashMap::new(),
+            nexts: HashMap::new(),
         }
     }
 
@@ -179,7 +188,13 @@ impl Device {
                             self.strange.push(format!("a second answer to request {id}"));
                         }
                     }
-                    Ok(Reply::Event(event)) => self.events.push(event),
+                    Ok(Reply::Event(Event::Ack { session, seq, gap })) => self.acks.push((session, seq, gap)),
+                    Ok(Reply::Event(event)) => {
+                        if let Event::Writer { session, epoch, .. } = event {
+                            self.epochs.insert(session, epoch);
+                        }
+                        self.events.push(event);
+                    }
                     Err(_) => self.strange.push(text),
                 }
                 true
@@ -251,7 +266,13 @@ impl Device {
     pub async fn answer(&mut self, id: u64) -> Result<Answer, ErrorWord> {
         self.until("an answer", PATIENCE, |d| d.answers.contains_key(&id)).await;
         match self.answers.remove(&id) {
-            Some(Reply::Answer { result, .. }) => result,
+            Some(Reply::Answer { result, .. }) => {
+                if let Ok(Answer::Attached { session, epoch, next, .. }) = &result {
+                    self.epochs.insert(*session, *epoch);
+                    self.nexts.insert(*session, *next);
+                }
+                result
+            }
             _ => unreachable!("an answer was filed"),
         }
     }
@@ -293,15 +314,34 @@ impl Device {
         self.ok(Op::Attach { session, tail, resume: None }).await
     }
 
-    /// Sends input for a session as a binary frame.
     /// An attach that names the token of an earlier attach, answered: `Answer::Attached` with a new token.
     pub async fn attach_with(&mut self, session: u32, tail: Option<u32>, resume: Option<ResumeToken>) -> Answer {
         self.ok(Op::Attach { session, tail, resume }).await
     }
 
+    /// Sends input for a session as a numbered binary frame, under the epoch this socket last heard of and the next number the
+    /// attach answer gave (counted up with every frame). The socket must have attached to the session.
     pub async fn type_into(&mut self, session: u32, bytes: &[u8]) {
-        let frame = holzwave_core::remote::proto::encode_input(session, bytes).expect("an input frame");
+        let epoch = *self.epochs.get(&session).unwrap_or_else(|| panic!("attach to session {session} before typing into it"));
+        let seq = self.nexts.get(&session).copied().unwrap_or(1);
+        self.nexts.insert(session, seq + 1);
+        self.type_numbered(session, epoch, seq, bytes).await;
+    }
+
+    /// Sends input for a session as the frame of exactly this epoch and number.
+    pub async fn type_numbered(&mut self, session: u32, epoch: u32, seq: u32, bytes: &[u8]) {
+        let frame = holzwave_core::remote::proto::encode_input(session, epoch, seq, bytes).expect("an input frame");
         self.ws.send_frame(0x80 | BINARY, &frame).await;
+    }
+
+    /// The epoch this socket last heard of for a session, from an attach answer or a writer event.
+    pub fn epoch_of(&self, session: u32) -> Option<u32> {
+        self.epochs.get(&session).copied()
+    }
+
+    /// The numbers of the acknowledgements of a session so far, in order, as (number, gap).
+    pub fn acks_of(&self, session: u32) -> Vec<(u32, bool)> {
+        self.acks.iter().filter(|(s, _, _)| *s == session).map(|(_, seq, gap)| (*seq, *gap)).collect()
     }
 
     /// Sends a binary frame as it is.
@@ -394,10 +434,12 @@ impl Device {
     }
 }
 
-/// A frame the vocabulary does not know, for tests of the drop rule.
-pub fn input_frame(session: u32, bytes: &[u8]) -> Vec<u8> {
+/// A numbered input frame of the vocabulary, for tests of the drop rule.
+pub fn input_frame(session: u32, epoch: u32, seq: u32, bytes: &[u8]) -> Vec<u8> {
     let mut out = vec![holzwave_core::remote::proto::TAG_INPUT];
     out.extend_from_slice(&session.to_be_bytes());
+    out.extend_from_slice(&epoch.to_be_bytes());
+    out.extend_from_slice(&seq.to_be_bytes());
     out.extend_from_slice(bytes);
     assert!(Input::parse(&out).is_ok());
     out

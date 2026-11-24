@@ -175,10 +175,11 @@ fn init_the_picture_cap_is_four_big_endian_bytes_and_the_edges_are_pinned() {
 }
 
 #[test]
-fn init_the_protocol_version_is_4() {
+fn init_the_protocol_version_is_5() {
     assert_eq!(
-        PROTOCOL_VERSION, 4,
-        "version 3 added the session frames and the session limits to the first frame; version 4 the resume token and the epoch"
+        PROTOCOL_VERSION, 5,
+        "version 3 added the session frames and the session limits to the first frame; version 4 the resume token and the epoch; \
+         version 5 the epoch and the number of an input frame, the ack and the next number of an attach answer"
     );
 }
 
@@ -1169,11 +1170,15 @@ fn ses_detach_takeover_end_and_beat_are_operations_4_7_8_and_9_then_the_session(
 }
 
 #[test]
-fn ses_input_is_operation_5_then_the_socket_the_session_and_the_bytes_to_the_end() {
+fn ses_input_is_operation_5_then_the_socket_the_session_the_epoch_the_number_and_the_bytes_to_the_end() {
     let mut expected = ses_head(5, false);
     expected.extend_from_slice(&SESSION_BYTES);
+    expected.extend_from_slice(&[0, 0, 0, 2, 0, 0, 0x01, 0x03]);
     expected.extend_from_slice(b"ls -la\r");
-    pinned(Frame::Ses(Ses::Input { socket: SOCKET, session: SESSION, bytes: b"ls -la\r".to_vec() }), expected);
+    pinned(
+        Frame::Ses(Ses::Input { socket: SOCKET, session: SESSION, epoch: 2, seq: 0x0103, bytes: b"ls -la\r".to_vec() }),
+        expected,
+    );
 }
 
 #[test]
@@ -1235,6 +1240,7 @@ fn ses_answers_are_operation_16_then_the_socket_the_request_the_answer_kind_and_
     attached.extend_from_slice(&[3, 0, 100, 0, 30, 1, 1, 0, 0, 0x10, 0]);
     attached.extend_from_slice(&RESUME_RAW);
     attached.extend_from_slice(&[0, 0, 0x01, 0x02]);
+    attached.extend_from_slice(&[0, 0, 0x03, 0x04]);
     pinned(
         Frame::Ses(Ses::Answer {
             socket: SOCKET,
@@ -1247,6 +1253,7 @@ fn ses_answers_are_operation_16_then_the_socket_the_request_the_answer_kind_and_
                 snapshot_bytes: 4096,
                 resume: resume(),
                 epoch: 0x0102,
+                next: 0x0304,
             }),
         }),
         attached,
@@ -1274,7 +1281,7 @@ fn ses_answers_are_operation_16_then_the_socket_the_request_the_answer_kind_and_
         let mut attached = ses_head(16, true);
         attached.extend_from_slice(&[3, 0, 1, 0, 1, byte, 0, 0, 0, 0, 0]);
         attached.extend_from_slice(&RESUME_RAW);
-        attached.extend_from_slice(&[0, 0, 0, 1]);
+        attached.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1]);
         let frame = Frame::Ses(Ses::Answer {
             socket: SOCKET,
             request: ID,
@@ -1286,6 +1293,7 @@ fn ses_answers_are_operation_16_then_the_socket_the_request_the_answer_kind_and_
                 snapshot_bytes: 0,
                 resume: resume(),
                 epoch: 1,
+                next: 1,
             }),
         });
         pinned(frame, attached);
@@ -1377,6 +1385,7 @@ fn ses_frames_with_a_fixed_length_are_an_error_cut_anywhere_or_with_a_byte_too_m
                 snapshot_bytes: 9,
                 resume: resume(),
                 epoch: u32::MAX,
+                next: u32::MAX,
             }),
         },
         Ses::Answer { socket: SOCKET, request: ID, answer: SesAnswer::Failed(SesError::Busy) },
@@ -1412,7 +1421,7 @@ fn a_session_frame_refuses_an_id_of_0_a_size_of_0_and_a_byte_it_does_not_know() 
         Ses::Gone { socket: 0 },
         Ses::Lost { socket: 0, session: SESSION },
         Ses::Lost { socket: SOCKET, session: 0 },
-        Ses::Input { socket: SOCKET, session: 0, bytes: vec![1] },
+        Ses::Input { socket: SOCKET, session: 0, epoch: 1, seq: 1, bytes: vec![1] },
         Ses::Event { socket: SOCKET, session: 0, event: SesEvent::Resync },
         Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Size { cols: 0, rows: 1 } },
         Ses::Answer { socket: SOCKET, request: ID, answer: SesAnswer::Created { session: 0 } },
@@ -1428,16 +1437,40 @@ fn a_session_frame_refuses_an_id_of_0_a_size_of_0_and_a_byte_it_does_not_know() 
                 snapshot_bytes: 0,
                 resume: resume(),
                 epoch: 0,
+                next: 1,
             }),
         },
+        // The number the next input frame has is never 0.
+        Ses::Answer {
+            socket: SOCKET,
+            request: ID,
+            answer: SesAnswer::Attached(Attached {
+                cols: 1,
+                rows: 1,
+                writer: WriterState::Free,
+                more: false,
+                snapshot_bytes: 0,
+                resume: resume(),
+                epoch: 1,
+                next: 0,
+            }),
+        },
+        // An input frame is written under an epoch that is not 0 and has a number that is not 0.
+        Ses::Input { socket: SOCKET, session: SESSION, epoch: 0, seq: 1, bytes: vec![1] },
+        Ses::Input { socket: SOCKET, session: SESSION, epoch: 1, seq: 0, bytes: vec![1] },
     ] {
         assert!(Frame::Ses(bad.clone()).to_payload().is_err(), "{bad:?} encoded");
     }
     let mut zero_epoch = ses_head(16, true);
     zero_epoch.extend_from_slice(&[3, 0, 1, 0, 1, 2, 0, 0, 0, 0, 0]);
     zero_epoch.extend_from_slice(&RESUME_RAW);
-    zero_epoch.extend_from_slice(&[0, 0, 0, 0]);
+    zero_epoch.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
     assert!(Frame::from_payload(&zero_epoch).is_err(), "an epoch of 0 is not read");
+    let mut zero_next = ses_head(16, true);
+    zero_next.extend_from_slice(&[3, 0, 1, 0, 1, 2, 0, 0, 0, 0, 0]);
+    zero_next.extend_from_slice(&RESUME_RAW);
+    zero_next.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 0]);
+    assert!(Frame::from_payload(&zero_next).is_err(), "a number of 0 is not read");
     for bytes in [
         // The socket 0 of a list, a request of 0, a session of 0, a size of 0.
         vec![0x06, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
@@ -1453,8 +1486,12 @@ fn a_session_frame_refuses_an_id_of_0_a_size_of_0_and_a_byte_it_does_not_know() 
         vec![0x06, 16, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 6, 0],
         vec![0x06, 16, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 6, 6],
         vec![0x06, 16, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 3, 0, 1, 0, 1, 3, 0, 0, 0, 0, 0],
+        // An input frame of epoch 0 and of number 0, and an ack that is not 0 or 1 about its gap.
+        vec![0x06, 5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0x41],
+        vec![0x06, 5, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0x41],
+        vec![0x06, 19, 0, 0, 0, 1, 0, 0, 0, 1, 6, 0, 0, 0, 1, 2],
         vec![0x06, 19, 0, 0, 0, 1, 0, 0, 0, 1, 0],
-        vec![0x06, 19, 0, 0, 0, 1, 0, 0, 0, 1, 6],
+        vec![0x06, 19, 0, 0, 0, 1, 0, 0, 0, 1, 7],
         vec![0x06, 19, 0, 0, 0, 1, 0, 0, 0, 1, 1, 3],
         vec![0x06, 19, 0, 0, 0, 1, 0, 0, 0, 1, 2, 2],
         vec![0x06, 19, 0, 0, 0, 1, 0, 0, 0, 1, 4, 0, 0, 0, 1],
@@ -1470,9 +1507,9 @@ fn the_bytes_of_a_session_frame_are_one_to_65536_and_nothing_else_travels() {
     let chunk = |len: usize| vec![0x41; len];
     for (empty, edge, over) in [
         (
-            Ses::Input { socket: SOCKET, session: SESSION, bytes: Vec::new() },
-            Ses::Input { socket: SOCKET, session: SESSION, bytes: chunk(65_536) },
-            Ses::Input { socket: SOCKET, session: SESSION, bytes: chunk(65_537) },
+            Ses::Input { socket: SOCKET, session: SESSION, epoch: 1, seq: 1, bytes: Vec::new() },
+            Ses::Input { socket: SOCKET, session: SESSION, epoch: 1, seq: 1, bytes: chunk(65_536) },
+            Ses::Input { socket: SOCKET, session: SESSION, epoch: 1, seq: 1, bytes: chunk(65_537) },
         ),
         (
             Ses::Snapshot { socket: SOCKET, session: SESSION, seq: 0, bytes: Vec::new() },
@@ -1549,7 +1586,7 @@ fn a_list_has_at_most_1024_sessions_and_a_title_and_a_directory_have_their_own_c
 fn only_the_requests_a_supervisor_sends_are_requests() {
     for (ses, request) in [
         (Ses::List { socket: 1, request: 1 }, true),
-        (Ses::Input { socket: 1, session: 1, bytes: vec![1] }, true),
+        (Ses::Input { socket: 1, session: 1, epoch: 1, seq: 1, bytes: vec![1] }, true),
         (Ses::Gone { socket: 1 }, true),
         (Ses::Lost { socket: 1, session: 1 }, true),
         (Ses::Answer { socket: 1, request: 1, answer: SesAnswer::Done }, false),
@@ -1565,7 +1602,7 @@ fn only_the_requests_a_supervisor_sends_are_requests() {
 fn the_debug_text_of_a_session_frame_holds_no_byte_of_a_terminal_no_title_and_no_directory() {
     let secret = "hunter2-the-secret";
     let frames = [
-        Ses::Input { socket: 1, session: 1, bytes: secret.as_bytes().to_vec() },
+        Ses::Input { socket: 1, session: 1, epoch: 1, seq: 1, bytes: secret.as_bytes().to_vec() },
         Ses::Snapshot { socket: 1, session: 1, seq: 0, bytes: secret.as_bytes().to_vec() },
         Ses::Live { socket: 1, session: 1, seq: 0, bytes: secret.as_bytes().to_vec() },
         Ses::Answer { socket: 1, request: 1, answer: SesAnswer::Listed(vec![info(1, secret, secret)]) },
@@ -1631,6 +1668,7 @@ fn an_attach_answer_prints_the_marker_of_the_token_and_never_its_bytes() {
             snapshot_bytes: 9,
             resume: resume(),
             epoch: 7,
+            next: 9,
         }),
     };
     for printed in [format!("{answer:?}"), format!("{:?}", Frame::Ses(answer.clone())), format!("{answer:#?}")] {

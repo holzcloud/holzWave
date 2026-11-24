@@ -9,8 +9,17 @@
 //!   tells things on its own as `{"event":"<name>", ...}`. An error is one of the fixed words of [`ErrorWord`]; it never echoes
 //!   anything the client sent. A request whose `id` cannot be read is answered with the id 0.
 //! * **Binary** carries terminal bytes. From the server: a tag byte ([`TAG_SNAPSHOT`] or [`TAG_LIVE`]), the session as a
-//!   big-endian `u32`, a sequence number as a big-endian `u32` and the bytes. From the client: [`TAG_INPUT`], the session and the
-//!   bytes. A snapshot chunk and a live chunk share one running sequence per attach.
+//!   big-endian `u32`, a sequence number as a big-endian `u32` and the bytes. From the client: [`TAG_INPUT`], the session, the
+//!   epoch of the lease the client writes under and a number, each a big-endian `u32`, and the bytes. A snapshot chunk and a
+//!   live chunk share one running sequence per attach. The tag of an input frame was 0x10 before the frame carried an epoch and
+//!   a number; a frame with that tag is a frame of an unknown kind and is dropped without an answer.
+//!
+//! Input is numbered per attachment. The `attached` answer says in `next` which number the server expects next (1 for a new
+//! attachment, the kept number for a resumed one); the client sends its frames under the epoch of its right and counts up. The
+//! server applies a frame only when its epoch is the lease's epoch now, its sender holds the lease and its number is the one it
+//! expects, and then tells `{"event":"ack","session":n,"seq":k}`: every frame up to `k` is applied. A number already applied is
+//! answered with the last applied number; a frame after a missing one is answered with the last applied number and `"gap":true`;
+//! a frame of another epoch, or from a client that does not hold the right, gets no answer.
 //!
 //! The resume token ([`ResumeToken`]) is how an app proves that an attach is the same attachment as an earlier one whose socket
 //! was lost. An `attach` may carry the token of the app's last `attach` answer in `resume` (32 lowercase hexadecimal
@@ -45,10 +54,13 @@ pub const MAX_INPUT: usize = 64 * 1024;
 pub const MAX_CHUNK: usize = 64 * 1024;
 /// The bytes before the payload of a frame from the server: the tag, the session and the sequence number.
 pub const CHUNK_HEAD: usize = 1 + 4 + 4;
-/// The bytes before the payload of a frame from the client: the tag and the session.
-pub const INPUT_HEAD: usize = 1 + 4;
+/// The bytes before the payload of a frame from the client: the tag, the session, the epoch and the number.
+pub const INPUT_HEAD: usize = 1 + 4 + 4 + 4;
 /// The most bytes of any binary frame, either way.
-pub const MAX_BINARY: usize = CHUNK_HEAD + MAX_CHUNK;
+pub const MAX_BINARY: usize = max(CHUNK_HEAD + MAX_CHUNK, INPUT_HEAD + MAX_INPUT);
+const fn max(a: usize, b: usize) -> usize {
+    if a > b { a } else { b }
+}
 /// The most sessions one socket is attached to at once.
 pub const MAX_ATTACHED: usize = 16;
 /// The most requests of one socket that wait for an answer.
@@ -77,8 +89,8 @@ pub const SILENCE_SECONDS: u64 = 2 * PING_SECONDS + BEAT_SECONDS;
 pub const TAG_SNAPSHOT: u8 = 0x01;
 /// A server to client binary frame: bytes the program wrote after the attach.
 pub const TAG_LIVE: u8 = 0x02;
-/// A client to server binary frame: bytes for the program.
-pub const TAG_INPUT: u8 = 0x10;
+/// A client to server binary frame: bytes for the program, with the epoch the client writes under and a number.
+pub const TAG_INPUT: u8 = 0x11;
 
 /// The token was revoked, expired or the account ended.
 pub const CLOSE_REVOKED: u16 = 4401;
@@ -602,7 +614,8 @@ pub enum Answer {
     /// The attach was accepted. The client sets its grid to `cols` by `rows`, then feeds the `snapshot` bytes that follow as
     /// binary frames, then the live bytes. `more` says that older lines exist beyond the tail that was sent. `resume` is the
     /// token for this client's next attach of the session (the one it used is spent), and `epoch` is the epoch of the lease
-    /// (1 to `u32::MAX`; it changes whenever the holder of the right changes).
+    /// (1 to `u32::MAX`; it changes whenever the holder of the right changes). `next` is the number of the next input frame the
+    /// server expects from this attachment: 1 for a new one, the kept number for a resumed one.
     Attached {
         session: u32,
         cols: u16,
@@ -612,6 +625,7 @@ pub enum Answer {
         snapshot: u32,
         resume: ResumeToken,
         epoch: u32,
+        next: u32,
     },
     /// Done: a detach, a resize, a takeover, a beat or an end.
     Done,
@@ -632,6 +646,9 @@ pub enum Event {
     /// Input this client sent was dropped because the program in the session leaves too much of its input unread. Said at
     /// most about once a second while it lasts.
     Dropped { session: u32 },
+    /// Every input frame of this client up to `seq` is applied (0: none yet). `gap` says that a frame came after a missing
+    /// one and was not applied: the client sends again from `seq + 1`.
+    Ack { session: u32, seq: u32, gap: bool },
 }
 
 impl Event {
@@ -643,6 +660,7 @@ impl Event {
             Event::Resync { .. } => "resync",
             Event::Size { .. } => "size",
             Event::Dropped { .. } => "dropped",
+            Event::Ack { .. } => "ack",
         }
     }
 
@@ -653,7 +671,8 @@ impl Event {
             | Event::Exited { session, .. }
             | Event::Resync { session }
             | Event::Size { session, .. }
-            | Event::Dropped { session } => *session,
+            | Event::Dropped { session }
+            | Event::Ack { session, .. } => *session,
         }
     }
 }
@@ -684,6 +703,7 @@ struct AttachedBody {
     snapshot: u32,
     resume: String,
     epoch: u32,
+    next: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -728,6 +748,12 @@ enum EventText {
     Resync { session: u32 },
     Size { session: u32, cols: u16, rows: u16 },
     Dropped { session: u32 },
+    Ack {
+        session: u32,
+        seq: u32,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        gap: bool,
+    },
 }
 
 impl From<Event> for EventText {
@@ -738,6 +764,7 @@ impl From<Event> for EventText {
             Event::Resync { session } => EventText::Resync { session },
             Event::Size { session, cols, rows } => EventText::Size { session, cols, rows },
             Event::Dropped { session } => EventText::Dropped { session },
+            Event::Ack { session, seq, gap } => EventText::Ack { session, seq, gap },
         }
     }
 }
@@ -750,6 +777,7 @@ impl From<EventText> for Event {
             EventText::Resync { session } => Event::Resync { session },
             EventText::Size { session, cols, rows } => Event::Size { session, cols, rows },
             EventText::Dropped { session } => Event::Dropped { session },
+            EventText::Ack { session, seq, gap } => Event::Ack { session, seq, gap },
         }
     }
 }
@@ -776,7 +804,7 @@ impl Reply {
                     Answer::Created { session, writer } => {
                         OkBody::Created(CreatedBody { session: *session, writer: *writer })
                     }
-                    Answer::Attached { session, cols, rows, writer, more, snapshot, resume, epoch } => {
+                    Answer::Attached { session, cols, rows, writer, more, snapshot, resume, epoch, next } => {
                         OkBody::Attached(AttachedBody {
                             session: *session,
                             cols: *cols,
@@ -786,6 +814,7 @@ impl Reply {
                             snapshot: *snapshot,
                             resume: (**resume.to_hex()).to_owned(),
                             epoch: *epoch,
+                            next: *next,
                         })
                     }
                     Answer::Done => OkBody::Done(DoneBody {}),
@@ -824,9 +853,9 @@ impl Reply {
                 OkBody::List(body) if body.sessions.len() <= MAX_LISTED => Answer::List(body.sessions),
                 OkBody::List(_) => return Err(ParseError::TooLarge),
                 OkBody::Attached(b) => {
-                    // The epoch of a lease is never 0, and the token is exactly its text: a server that says otherwise
-                    // broke a rule of the vocabulary.
-                    if b.epoch == 0 {
+                    // The epoch of a lease is never 0, the first number of input is 1, and the token is exactly its text: a
+                    // server that says otherwise broke a rule of the vocabulary.
+                    if b.epoch == 0 || b.next == 0 {
                         return Err(ParseError::WrongType);
                     }
                     Answer::Attached {
@@ -838,6 +867,7 @@ impl Reply {
                         snapshot: b.snapshot,
                         resume: ResumeToken::parse(&b.resume)?,
                         epoch: b.epoch,
+                        next: b.next,
                     }
                 }
                 OkBody::Created(b) => Answer::Created { session: b.session, writer: b.writer },
@@ -904,7 +934,7 @@ pub fn encode_chunk(stream: Stream, session: u32, seq: u32, bytes: &[u8]) -> Res
 impl<'a> Chunk<'a> {
     /// Reads a binary frame of the server.
     pub fn parse(frame: &'a [u8]) -> Result<Chunk<'a>, ParseError> {
-        if frame.len() > MAX_BINARY {
+        if frame.len() > CHUNK_HEAD + MAX_CHUNK {
             return Err(ParseError::TooLarge);
         }
         let stream = match frame.first() {
@@ -926,25 +956,47 @@ impl<'a> Chunk<'a> {
 }
 
 /// One binary frame of a client, read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Input<'a> {
     /// The session the bytes are for.
     pub session: u32,
+    /// The epoch of the lease the sender writes under, from 1.
+    pub epoch: u32,
+    /// The number of the frame in the sender's attachment, from 1.
+    pub seq: u32,
     /// 1 to [`MAX_INPUT`] bytes.
     pub bytes: &'a [u8],
 }
 
-/// The frame of input for a session. No bytes, or more than [`MAX_INPUT`], is refused.
-pub fn encode_input(session: u32, bytes: &[u8]) -> Result<Vec<u8>, ParseError> {
+/// What a frame of input prints: the numbers that name it and how many bytes it carries, never a byte of them.
+impl fmt::Debug for Input<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Input")
+            .field("session", &self.session)
+            .field("epoch", &self.epoch)
+            .field("seq", &self.seq)
+            .field("bytes", &self.bytes.len())
+            .finish()
+    }
+}
+
+/// The frame of input for a session, written under `epoch` as number `seq` (both from 1). No bytes, or more than [`MAX_INPUT`],
+/// is refused, and so is an epoch or a number of 0.
+pub fn encode_input(session: u32, epoch: u32, seq: u32, bytes: &[u8]) -> Result<Vec<u8>, ParseError> {
     if bytes.is_empty() {
         return Err(ParseError::BadLength);
     }
     if bytes.len() > MAX_INPUT {
         return Err(ParseError::TooLarge);
     }
+    if epoch == 0 || seq == 0 {
+        return Err(ParseError::WrongType);
+    }
     let mut out = Vec::with_capacity(INPUT_HEAD + bytes.len());
     out.push(TAG_INPUT);
     out.extend_from_slice(&session.to_be_bytes());
+    out.extend_from_slice(&epoch.to_be_bytes());
+    out.extend_from_slice(&seq.to_be_bytes());
     out.extend_from_slice(bytes);
     Ok(out)
 }
@@ -963,11 +1015,15 @@ impl<'a> Input<'a> {
         if frame.len() <= INPUT_HEAD {
             return Err(ParseError::BadLength);
         }
-        let session = u32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]);
+        let word = |at: usize| u32::from_be_bytes([frame[at], frame[at + 1], frame[at + 2], frame[at + 3]]);
+        let (session, epoch, seq) = (word(1), word(5), word(9));
         if session == 0 {
             return Err(ParseError::BadSession);
         }
-        Ok(Input { session, bytes: &frame[INPUT_HEAD..] })
+        if epoch == 0 || seq == 0 {
+            return Err(ParseError::WrongType);
+        }
+        Ok(Input { session, epoch, seq, bytes: &frame[INPUT_HEAD..] })
     }
 }
 
@@ -1146,6 +1202,7 @@ mod tests {
                     snapshot: 4_194_304,
                     resume: token(),
                     epoch: 1,
+                    next: 1,
                 }),
             },
             Reply::Answer {
@@ -1159,6 +1216,7 @@ mod tests {
                     snapshot: 0,
                     resume: ResumeToken::from_bytes([0xff; RESUME_BYTES]),
                     epoch: u32::MAX,
+                    next: 1,
                 }),
             },
             Reply::Answer { id: 5, result: Ok(Answer::Done) },
@@ -1170,6 +1228,9 @@ mod tests {
             Reply::Event(Event::Resync { session: 9 }),
             Reply::Event(Event::Size { session: 9, cols: 120, rows: 40 }),
             Reply::Event(Event::Dropped { session: 9 }),
+            Reply::Event(Event::Ack { session: 9, seq: 0, gap: true }),
+            Reply::Event(Event::Ack { session: 9, seq: 41, gap: false }),
+            Reply::Event(Event::Ack { session: 9, seq: u32::MAX, gap: true }),
         ];
         out.extend(ErrorWord::ALL.into_iter().enumerate().map(|(i, e)| Reply::Answer { id: i as u64 + 6, result: Err(e) }));
         out
@@ -1207,10 +1268,11 @@ mod tests {
                     snapshot: 5,
                     resume: token(),
                     epoch: 2,
+                    next: 1,
                 })
             }
             .encode(),
-            format!(r#"{{"id":2,"ok":{{"session":4,"cols":80,"rows":24,"writer":"writing","more":false,"snapshot":5,"resume":"{TOKEN}","epoch":2}}}}"#)
+            format!(r#"{{"id":2,"ok":{{"session":4,"cols":80,"rows":24,"writer":"writing","more":false,"snapshot":5,"resume":"{TOKEN}","epoch":2,"next":1}}}}"#)
         );
         assert_eq!(
             Reply::Event(Event::Exited { session: 4, code: None }).encode(),
@@ -1301,12 +1363,17 @@ mod tests {
                 assert_eq!(Chunk::parse(&frame), Ok(Chunk { stream, session, seq, bytes: &bytes }));
             }
         }
-        assert_eq!((TAG_SNAPSHOT, TAG_LIVE, TAG_INPUT), (0x01, 0x02, 0x10));
-        for len in [1usize, 5, MAX_INPUT] {
+        assert_eq!((TAG_SNAPSHOT, TAG_LIVE, TAG_INPUT), (0x01, 0x02, 0x11));
+        assert_eq!(INPUT_HEAD, 13);
+        for (len, epoch, seq) in [(1usize, 1u32, 1u32), (5, 7, 300), (MAX_INPUT, u32::MAX, u32::MAX)] {
             let bytes = vec![b'x'; len];
-            let frame = encode_input(12, &bytes).expect("encodes");
+            let frame = encode_input(12, epoch, seq, &bytes).expect("encodes");
             assert_eq!(frame[0], TAG_INPUT);
-            assert_eq!(Input::parse(&frame), Ok(Input { session: 12, bytes: &bytes }));
+            assert_eq!(&frame[1..5], &12u32.to_be_bytes());
+            assert_eq!(&frame[5..9], &epoch.to_be_bytes());
+            assert_eq!(&frame[9..13], &seq.to_be_bytes());
+            assert!(frame.len() <= MAX_BINARY, "the largest input frame fits the largest binary frame");
+            assert_eq!(Input::parse(&frame), Ok(Input { session: 12, epoch, seq, bytes: &bytes }));
         }
     }
 
@@ -1314,19 +1381,27 @@ mod tests {
     fn binary_frames_that_break_a_rule_are_refused_with_their_own_error() {
         assert_eq!(encode_chunk(Stream::Live, 1, 0, &[]), Err(ParseError::BadLength));
         assert_eq!(encode_chunk(Stream::Live, 1, 0, &vec![0; MAX_CHUNK + 1]), Err(ParseError::TooLarge));
-        assert_eq!(encode_input(1, &[]), Err(ParseError::BadLength));
-        assert_eq!(encode_input(1, &vec![0; MAX_INPUT + 1]), Err(ParseError::TooLarge));
+        assert_eq!(encode_input(1, 1, 1, &[]), Err(ParseError::BadLength));
+        assert_eq!(encode_input(1, 1, 1, &vec![0; MAX_INPUT + 1]), Err(ParseError::TooLarge));
+        assert_eq!(encode_input(1, 0, 1, b"x"), Err(ParseError::WrongType), "no epoch is 0");
+        assert_eq!(encode_input(1, 1, 0, b"x"), Err(ParseError::WrongType), "no number is 0");
         assert_eq!(Chunk::parse(&[]), Err(ParseError::BadLength));
         assert_eq!(Chunk::parse(&[TAG_LIVE, 0, 0, 0, 1, 0, 0, 0, 0]), Err(ParseError::BadLength));
         assert_eq!(Chunk::parse(&[0x33, 0, 0, 0, 1, 0, 0, 0, 0, 9]), Err(ParseError::BadTag));
         assert_eq!(Chunk::parse(&[TAG_INPUT, 0, 0, 0, 1, 0, 0, 0, 0, 9]), Err(ParseError::BadTag));
+        assert_eq!(Chunk::parse(&vec![TAG_LIVE; CHUNK_HEAD + MAX_CHUNK + 1]), Err(ParseError::TooLarge));
         assert_eq!(Chunk::parse(&[TAG_LIVE, 0, 0, 0, 0, 0, 0, 0, 0, 9]), Err(ParseError::BadSession));
         assert_eq!(Chunk::parse(&vec![TAG_LIVE; MAX_BINARY + 1]), Err(ParseError::TooLarge));
         assert_eq!(Input::parse(&[]), Err(ParseError::BadLength));
         assert_eq!(Input::parse(&[TAG_INPUT, 0, 0, 0, 1]), Err(ParseError::BadLength));
-        assert_eq!(Input::parse(&[TAG_LIVE, 0, 0, 0, 1, 9]), Err(ParseError::BadTag));
-        assert_eq!(Input::parse(&[0x7f, 0, 0, 0, 1, 9]), Err(ParseError::BadTag));
-        assert_eq!(Input::parse(&[TAG_INPUT, 0, 0, 0, 0, 9]), Err(ParseError::BadSession));
+        assert_eq!(Input::parse(&[TAG_INPUT, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]), Err(ParseError::BadLength), "a head with no bytes");
+        assert_eq!(Input::parse(&[TAG_INPUT, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]), Err(ParseError::BadLength), "a head cut short");
+        assert_eq!(Input::parse(&[TAG_LIVE, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 9]), Err(ParseError::BadTag));
+        assert_eq!(Input::parse(&[0x7f, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 9]), Err(ParseError::BadTag));
+        assert_eq!(Input::parse(&[0x10, 0, 0, 0, 1, 9]), Err(ParseError::BadTag), "the old layout is a frame of an unknown kind");
+        assert_eq!(Input::parse(&[TAG_INPUT, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 9]), Err(ParseError::BadSession));
+        assert_eq!(Input::parse(&[TAG_INPUT, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 9]), Err(ParseError::WrongType), "epoch 0");
+        assert_eq!(Input::parse(&[TAG_INPUT, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 9]), Err(ParseError::WrongType), "number 0");
         assert_eq!(Input::parse(&vec![TAG_INPUT; INPUT_HEAD + MAX_INPUT + 1]), Err(ParseError::TooLarge));
     }
 
@@ -1411,11 +1486,69 @@ mod tests {
                 snapshot: 0,
                 resume: token(),
                 epoch: 2,
+                next: 1,
             }),
         };
         for printed in [format!("{reply:?}"), format!("{reply:#?}")] {
             assert!(printed.contains("ResumeToken(..)"), "{printed}");
             assert!(!printed.contains("0011") && !printed.contains("eeff"), "{printed}");
+        }
+    }
+
+    #[test]
+    fn an_ack_has_its_own_text_and_a_member_that_is_not_one_of_its_own_is_refused() {
+        assert_eq!(
+            Reply::Event(Event::Ack { session: 4, seq: 12, gap: false }).encode(),
+            r#"{"event":"ack","session":4,"seq":12}"#,
+            "gap is left out when it is false"
+        );
+        assert_eq!(
+            Reply::Event(Event::Ack { session: 4, seq: 12, gap: true }).encode(),
+            r#"{"event":"ack","session":4,"seq":12,"gap":true}"#
+        );
+        assert_eq!(
+            Reply::parse(r#"{"event":"ack","session":4,"seq":12}"#),
+            Ok(Reply::Event(Event::Ack { session: 4, seq: 12, gap: false }))
+        );
+        assert_eq!(
+            Reply::parse(r#"{"event":"ack","session":4,"seq":12,"gap":true}"#),
+            Ok(Reply::Event(Event::Ack { session: 4, seq: 12, gap: true }))
+        );
+        for text in [
+            r#"{"event":"ack","session":4,"seq":12,"epoch":1}"#,
+            r#"{"event":"ack","session":4,"seq":12,"gap":"yes"}"#,
+            r#"{"event":"ack","session":4}"#,
+            r#"{"event":"ack","seq":12}"#,
+            r#"{"event":"ack","session":4,"seq":-1}"#,
+            r#"{"event":"ack","session":4,"seq":4294967296}"#,
+        ] {
+            assert!(Reply::parse(text).is_err(), "{text}");
+        }
+        assert_eq!(Reply::parse(r#"{"event":"ack","session":0,"seq":1}"#), Err(ParseError::BadSession));
+        assert_eq!(Event::Ack { session: 4, seq: 1, gap: false }.name(), "ack");
+        assert_eq!(Event::Ack { session: 4, seq: 1, gap: false }.session(), 4);
+    }
+
+    #[test]
+    fn an_attach_answer_says_which_number_comes_next_and_none_is_0() {
+        let text = format!(
+            r#"{{"id":2,"ok":{{"session":4,"cols":80,"rows":24,"writer":"writing","more":false,"snapshot":5,"resume":"{TOKEN}","epoch":2,"next":{}}}}}"#,
+            "8"
+        );
+        let Ok(Reply::Answer { result: Ok(Answer::Attached { next, .. }), .. }) = Reply::parse(&text) else {
+            panic!("an attach answer: {text}")
+        };
+        assert_eq!(next, 8);
+        assert_eq!(Reply::parse(&text.replace(r#""next":8"#, r#""next":0"#)), Err(ParseError::WrongType));
+        assert!(Reply::parse(&text.replace(r#","next":8"#, "")).is_err(), "an answer with no number is refused");
+    }
+
+    #[test]
+    fn what_is_printed_of_an_input_frame_holds_its_numbers_and_its_length_and_never_a_byte() {
+        let frame = Input { session: 3, epoch: 2, seq: 9, bytes: b"hunter2-secret" };
+        for printed in [format!("{frame:?}"), format!("{frame:#?}")] {
+            assert!(printed.contains("seq") && printed.contains("14"), "{printed}");
+            assert!(!printed.contains("hunter") && !printed.contains("104"), "{printed}");
         }
     }
 
