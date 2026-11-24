@@ -9,7 +9,7 @@ export const backends = ["tauri"];
 export const backendNote = "the design page is rendered by its own script, once; the backend does not matter to it.";
 
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
-const VIEWS = ["server-sessions", "server-pane-states", "device-authorize", "device-lists", "sync-transport", "phones-server"];
+const VIEWS = ["server-sessions", "server-pane-states", "device-authorize", "device-lists", "sync-transport", "phones-server", "phones-notice"];
 
 const render = (...args) => spawnSync(process.execPath, ["docs/design/render.cjs", ...args], { cwd: ROOT, encoding: "utf8", timeout: 25_000 });
 

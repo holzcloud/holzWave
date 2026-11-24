@@ -330,6 +330,40 @@ async function check(file) {
     if (!/underline/.test(webview.deco ?? '') || webview.mark !== '!') failures.push('the label of #phones-webview lacks the underline or the ! mark');
     if (webview.targets !== 0) failures.push('#phones-webview draws a button; the notice has none');
   }
+  // Notices on a phone (docs/design.md 6.6): three phones, each notice a line of at least 22 px at the half scale; the first refuses a link with the warn
+  // tone, an underline and the ! mark, the second is plain, the third stacks the plain hand-over line above the warn line.
+  const noticePhones = await page.$$eval('#phones-notice .ph1', (n) => n.length);
+  if (noticePhones !== 3) failures.push(`#phones-notice holds ${noticePhones} phones, not 3`);
+  const notices = await page.$$eval('#phones-notice .ph1', (phs) =>
+    phs.map((ph) => ({
+      lines: [...ph.querySelectorAll('.lk-note[data-target]')].map((n) => {
+        const r = n.getBoundingClientRect();
+        return { text: n.textContent.trim(), tone: n.dataset.tone ?? null, deco: getComputedStyle(n).textDecorationLine, mark: getComputedStyle(n, '::before').content, top: r.top, bottom: r.bottom, h: r.height, role: n.getAttribute('role') };
+      }),
+    })),
+  );
+  const refusalWords = 'No app on this device can open this link.';
+  const [warnPhone, plainPhone, stackPhone] = notices;
+  if (warnPhone && plainPhone && stackPhone) {
+    for (const l of notices.flatMap((n) => n.lines)) {
+      if (l.h < 21.5) failures.push(`#phones-notice draws a line ${Math.round(l.h)} px high, under 22 px`);
+      if (l.role !== 'status') failures.push('#phones-notice draws a line that is not a status region');
+    }
+    const one = warnPhone.lines;
+    if (one.length !== 1 || one[0].text !== refusalWords || one[0].tone !== 'warn' || !/underline/.test(one[0].deco) || !one[0].mark.includes('!')) failures.push('#phones-notice: the first phone does not draw one warn line with an underline and the ! mark saying the refusal');
+    const plain = plainPhone.lines;
+    if (plain.length !== 1 || plain[0].text !== 'That request is not waiting any more.' || plain[0].tone !== null || /underline/.test(plain[0].deco) || plain[0].mark.includes('!')) failures.push('#phones-notice: the second phone does not draw one plain line with no mark and no underline');
+    const two = stackPhone.lines;
+    if (two.length !== 2 || two[0].text !== 'Copied report.pdf (1.2 MB) out' || two[1].text !== refusalWords || two[1].tone !== 'warn') failures.push('#phones-notice: the third phone does not draw the hand-over line and then the warn line');
+    else if (two[0].bottom > two[1].top) failures.push('#phones-notice: the hand-over line and the notice under it overlap');
+  }
+  const specNotice = fs.readFileSync(path.join(__dirname, '..', 'design.md'), 'utf8').replace(/\s+/g, ' ');
+  for (const w of ['A phone draws no status line', 'the hand-over line first', 'and not again in the notice']) if (!specNotice.includes(w)) failures.push(`docs/design.md does not say: ${w}`);
+  const noticeText = (await page.$eval('#phones-notice', (n) => n.textContent)).replace(/\s+/g, ' ');
+  for (const w of [refusalWords, 'That request is not waiting any more.', 'Copied report.pdf (1.2 MB) out']) {
+    if (!specNotice.includes(w)) failures.push(`docs/design.md does not hold the words: ${w}`);
+    if (!noticeText.includes(w)) failures.push(`#phones-notice does not show: ${w}`);
+  }
   const chips = await page.$$eval('#phones-lock > div:first-child .lk-chip', (ns) =>
     ns.map((n) => ({ state: n.dataset.state, label: n.textContent.trim(), glyph: n.querySelector('svg[data-glyph]')?.dataset.glyph, shape: n.querySelector('svg')?.innerHTML, border: getComputedStyle(n).borderTopStyle })),
   );
@@ -428,7 +462,7 @@ async function check(file) {
   }
   failures.push(...problems.filter((p) => !failures.includes(p)));
   await browser.close();
-  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} + ${approvalPhones} + ${writePhones} + ${commandPhones} + ${sidePhones} + ${actionPhones} + ${wshPhones} + ${attnPhones} + ${keyPhones} + ${selectPhones} + ${lockPhones} + ${handoverPhones} + ${serverPhones} + ${stripPhones} + ${webviewPhones} phones, ${refused.length} requests refused (the web font host)`);
+  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} + ${approvalPhones} + ${writePhones} + ${commandPhones} + ${sidePhones} + ${actionPhones} + ${wshPhones} + ${attnPhones} + ${keyPhones} + ${selectPhones} + ${lockPhones} + ${handoverPhones} + ${serverPhones} + ${stripPhones} + ${webviewPhones} + ${noticePhones} phones, ${refused.length} requests refused (the web font host)`);
   if (failures.length > 0) {
     for (const f of failures) console.error(`FAIL ${f}`);
     process.exit(1);

@@ -92,7 +92,7 @@ default.
 | Divider | 1 px hairline, 8 px hit area, rose on hover, `col-resize` / `row-resize` |
 | Selection | rose at 35 % over the cell background, keeps glyph contrast |
 | Cursor | block, rose; hollow when the pane is unfocused; bar and underline per DECSCUSR |
-| Status bar | mono labels, uppercase: version, renderer, encoding and pane count, plus the copy-mode word, a notice and the target of a link under the pointer while they last; no workspace segment (the workspaces are the pills of the title bar) |
+| Status bar | mono labels, uppercase: version, renderer, encoding and pane count, plus the copy-mode word, a notice and the target of a link under the pointer while they last; no workspace segment (the workspaces are the pills of the title bar); on a phone, which draws no status line, the notice is a line over the top of the stage (6.6) |
 | Overlays | command palette, theme picker, connection manager, and the request card of `wsh ai` (6.20): 24 px radius, the only elements with a shadow; the request card has no backdrop and never takes the keyboard |
 | Empty state | the logo's plank with one line of text; no illustrations |
 | Chat pane | a pane of its own kind (6.12): header `chat`, a bar with the provider chip, a transcript, a status line and a composer; flat and hairline, the only shadow is the provider sheet on a phone |
@@ -173,7 +173,7 @@ AI chat, AI chat states, AI sidebar, attention marks, drag) and a platform switc
    Everything else is warm grey.
 5. **tmux-style status line.** A bottom strip of segments (panes, renderer, encoding, version), with the mode word,
    the notice and the target of a link under the pointer (6.31) taking a segment while they last, and the Kubernetes context and the Azure subscription when the core has
-   one (6.11). It does not repeat the workspaces: they are the pills of the title bar.
+   one (6.11). It does not repeat the workspaces: they are the pills of the title bar. On a phone, which draws no status line, a notice is a line over the top of the stage (6.6).
 6. **Numbered tabs.** Tabs carry their number (`1 shell`) so `⌘1…9` is discoverable.
 7. **Command palette first.** Actions are reachable by name with a fuzzy palette (`⌘K`); the chrome stays small.
 8. **Responsive by layout, not by style.** On a phone the same `View` shows one pane per screen, the tab strip
@@ -414,6 +414,10 @@ A chat pane on a phone is the screen, with a sheet from the bottom edge for the 
 **Notification.** The notification that Android requires while shells or connections run reads `holzWave is running` with the text `3 shells, 1 connection` (the counts, with the singular at 1; `No shells or connections` is never shown, because the service stops then) and one action `Stop all`, which ends every shell and connection and removes the notification. It is on a low-importance channel named `Running sessions`, with no sound and no badge. Android draws it, so the spec fixes the words only.
 
 ![File hand-over: the sheet with the Connections row and then its two rows, the palette with its two entries, the confirmation and refusal lines, and the notification](design/phone-handover.png)
+
+**Notices.** A phone draws no status line, so a notice that the status line would hold (section 6 rule 5; a link that cannot be opened, 6.31, among them) is a line in the notice style over the top of the stage, in the shape of the line of the file hand-over above: a 1 px `--hw-line` hairline, an 8 px radius and the one shadow of a floating layer, the sentence at 14 px in the secondary ink, and at least 44 px high because a tap takes it away. It stays for the usual time of a notice or until it is tapped, a newer notice takes its place, and showing it moves no focus, so typing still reaches the terminal. A link that cannot be opened carries the `!` mark and an underline besides the warn colour, as the refusal of the hand-over does; every other notice is plain, with no mark and no underline, because its sentence is its cue. `contrast-high` and `forced-colors` keep its border, the mark and the underline, and nothing in it moves. The tablet and the desktop keep the notice in the status line. A part that says its sentences in a line of its own on the screen (the line under the chat's transcript, 6.12; the line of the sign-in, 6.35) says them there and not again in the notice. When the line of a file hand-over shows at the same time, the two stack in one column at the top of the stage, the hand-over line first and the notice under it, 8 px apart, so neither covers the other.
+
+![Notices on a phone: a link that could not be opened, with the ! mark and an underline, a plain notice, and a notice under the line of a file hand-over](design/phone-notice.png)
 
 ### 6.7 Platforms
 
@@ -2723,7 +2727,7 @@ gesture held the link under the pointer gets a solid underline in `--hw-rose` an
 | The program already underlined the text | its own underline stays, no dotted line | found by hover and by hint mode |
 | A scheme that is not allowed | nothing: plain text | no underline, no click |
 | A `file` link in a server pane or in a browser | nothing: plain text | no underline, no click |
-| A link that cannot be opened | the notice segment of the status line holds the host's sentence for the usual time; the text is not marked | the words; the `LINK` segment may stay beside it |
+| A link that cannot be opened | the notice segment of the status line holds the host's sentence for the usual time, with no mark of its own (on a phone the notice line of 6.6); the link's own text is not marked | the words; the `LINK` segment may stay beside it; on a phone also the `!` mark and an underline (6.6) |
 
 **The target in the status line.** A segment at the left of the status line holds the label `LINK` (uppercase, tracked, `.label`) and the target in
 mono, with the scheme and the host in `--hw-ink` and the rest in `--hw-ink-2`. A target longer than the segment is cut in the middle with `…` so that
@@ -2731,7 +2735,7 @@ the scheme, the host and the last 12 characters stay. It is there while the poin
 segment of the notice. The full target is also the accessible name of the segment. It follows the cells under a pointer that does not move: when the program
 changes the link there, the segment shows the new address, and it goes when the link goes.
 
-**A link that cannot be opened.** A click, or a link chosen in hint mode with `Shift` held, that the host refuses or cannot carry out (a scheme taken off the list since, a `file` link whose file is gone, no program to open it) is answered in the notice segment of the status line (section 2 rule 5) for the usual time. The words are the host's own fixed sentence, which never repeats the address; any other failure is the one sentence `The link could not be opened.` There is no dialog and no mark on the text, and the `LINK` segment may stay beside the notice while the pointer stays on the link. A click that succeeds says nothing. The browser build opens a tab itself and never asks the host, so it has no such notice.
+**A link that cannot be opened.** A click, or a link chosen in hint mode with `Shift` held, that the host refuses or cannot carry out (a scheme taken off the list since, a `file` link whose file is gone, no program to open it) is answered in the notice segment of the status line (section 2 rule 5) for the usual time. The words are the host's own fixed sentence, which never repeats the address; any other failure is the one sentence `The link could not be opened.` There is no dialog and the link's own text gets no mark; in the status line the notice has no mark of its own. A phone draws no status line: there the notice line holds the sentence, with the `!` mark and an underline (6.6) besides the warn colour. The `LINK` segment may stay beside the notice while the pointer stays on the link. A click that succeeds says nothing. The browser build opens a tab itself and never asks the host, so it has no such notice.
 
 **On Android.** A link opens in the system's own app for it: a web address in the browser, a `mailto` address in the mail app. Only `https`, `http` and `mailto` are handed over, so a scheme that the list allows but Android does not open is refused, and a `file` link and a reveal of a path are not offered at all (there is no file manager to show them in). The host says one of these fixed sentences, which never repeat the address and never name the system, the platform or an app:
 
@@ -2743,7 +2747,7 @@ changes the link there, the segment shows the new address, and it goes when the 
 | A `file` link, or a path to show in the file manager | `Files cannot be shown on this device.` |
 | A platform that has no way to open a link at all | `Links cannot be opened on this device.` |
 
-They are said where every refusal of a link is said (the notice segment, above). The sign-in of 6.35 says them on its second screen.
+They are said where every refusal of a link is said (the notice segment, above; on a phone the notice line of 6.6). The sign-in of 6.35 says them on its second screen.
 
 **The question.** When the visible text of the link and its target differ, the click with the gesture opens a dialog of the shape of the close
 confirmation (title, body lines, two buttons, centred over a backdrop): the title `Open this link?`, a line `The text says` with the visible text in
