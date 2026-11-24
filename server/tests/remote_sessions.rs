@@ -20,7 +20,7 @@ mod ws_env;
 use std::time::{Duration, Instant};
 
 use device_socket::{Device, env, env_with, input_frame, mint, mint_for, refused, remote, revoke, sync, upgrade, writer_timeout};
-use holzwave_core::remote::proto::{Answer, ErrorWord, Event, MAX_ATTACHED, MAX_TEXT, Op, WriterView};
+use holzwave_core::remote::proto::{Answer, ErrorWord, Event, MAX_ATTACHED, MAX_TEXT, Op, ResumeToken, WriterView};
 use holzwave_server::supervisor::SupervisorSettings;
 use holzwave_server::worker::sessions::SessionLimits;
 use holzwave_server::http::ws::SocketSettings;
@@ -56,7 +56,7 @@ async fn tracer_a_device_creates_a_session_attaches_it_and_types_into_it() {
     // Leave and attach again: the answer states the grid, the writer view, whether older lines exist and how many bytes of
     // snapshot follow.
     device.ok(Op::Detach { session }).await;
-    let Answer::Attached { session: attached, cols, rows, writer, more, snapshot } = device.attach(session, None).await else {
+    let Answer::Attached { session: attached, cols, rows, writer, more, snapshot, .. } = device.attach(session, None).await else {
         panic!("attached")
     };
     assert_eq!((attached, cols, rows), (session, 80, 24));
@@ -252,17 +252,17 @@ async fn another_persons_session_answers_not_found_exactly_like_one_that_never_e
     let never = 9_999;
     for target in foreign.iter().copied().chain([never]) {
         for op in [
-            Op::Attach { session: target, tail: None },
-            Op::Attach { session: target, tail: Some(10) },
+            Op::Attach { session: target, tail: None, resume: None },
+            Op::Attach { session: target, tail: Some(10), resume: None },
             Op::Detach { session: target },
             Op::Resize { session: target, cols: 20, rows: 5 },
             Op::Takeover { session: target },
             Op::End { session: target },
             Op::Beat { session: Some(target) },
         ] {
-            let answer = b.err(op).await;
+            let answer = b.err(op.clone()).await;
             let unknown = b.err(match op {
-                Op::Attach { tail, .. } => Op::Attach { session: never, tail },
+                Op::Attach { tail, .. } => Op::Attach { session: never, tail, resume: None },
                 Op::Detach { .. } => Op::Detach { session: never },
                 Op::Resize { cols, rows, .. } => Op::Resize { session: never, cols, rows },
                 Op::Takeover { .. } => Op::Takeover { session: never },
@@ -476,6 +476,58 @@ async fn a_text_over_the_cap_closes_the_socket_and_a_request_that_is_not_valid_i
     a.send_text(&format!(r#"{{"id":1,"op":"list","pad":"{}"}}"#, "x".repeat(MAX_TEXT))).await;
     let (code, reason) = a.close_code(SHELL).await.expect("a close");
     assert_eq!((code, reason.as_str()), (1009, "size"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_attach_with_a_token_is_forwarded_and_the_answer_and_the_writer_events_carry_a_new_token_and_the_epoch() {
+    let env = env().await;
+    let alice = env.person("alice");
+    let mut a = device_of(&env, &alice, "a").await;
+    let mut b = device_of(&env, &alice, "b").await;
+    let session = a.new_session().await;
+
+    // Every attach answer carries a token of 32 lowercase hex characters and the epoch of the lease (from 1).
+    let Answer::Attached { resume: first, epoch: first_epoch, writer, .. } = a.attach_with(session, None, None).await else {
+        panic!("attached")
+    };
+    assert_eq!(writer, WriterView::Writing);
+    assert!(first_epoch >= 1);
+    assert_eq!(first.to_hex().len(), 32);
+    // The same socket attaches again with the token: the token is used up and a new one comes; the holder did not change.
+    let Answer::Attached { resume: second, epoch: second_epoch, writer, .. } =
+        a.attach_with(session, None, Some(first.clone())).await
+    else {
+        panic!("attached")
+    };
+    assert!(second != first, "a new token for every answer");
+    assert_eq!((second_epoch, writer), (first_epoch, WriterView::Writing));
+
+    // A watcher gets its own token and the same epoch; a takeover changes the epoch for both, which the events carry.
+    let Answer::Attached { resume: theirs, epoch: their_epoch, writer, .. } = b.attach_with(session, None, None).await else {
+        panic!("attached")
+    };
+    assert!(theirs != second && theirs != first);
+    assert_eq!((their_epoch, writer), (first_epoch, WriterView::Watching));
+    b.ok(Op::Takeover { session }).await;
+    let taken = writer_events(&mut b, session, 1).await;
+    assert_eq!(taken, ["writing"]);
+    writer_events(&mut a, session, 1).await;
+    let (a_epochs, b_epochs) = (a.writer_epochs(session), b.writer_epochs(session));
+    assert_eq!((a_epochs.len(), b_epochs.len()), (1, 1));
+    assert_eq!(a_epochs, b_epochs, "both are told the same epoch");
+    assert_ne!(a_epochs[0], first_epoch, "the holder changed, so the epoch did");
+
+    // A token that is not exactly 32 lowercase hex characters is a bad request and is not echoed; the socket stays open.
+    for (id, resume) in [(2001, "NOT-A-TOKEN"), (2002, "00112233445566778899AABBCCDDEEFF"), (2003, "")] {
+        a.send_text(&format!(r#"{{"id":{id},"op":"attach","session":{session},"resume":"{resume}"}}"#)).await;
+        assert_eq!(a.answer(id).await, Err(ErrorWord::BadRequest), "{resume}");
+    }
+    // A token that is used up, and one that is made up, are no token: an ordinary attach, never an error word.
+    for token in [first.clone(), ResumeToken::from_bytes([9; 16])] {
+        let Answer::Attached { resume, .. } = a.attach_with(session, None, Some(token.clone())).await else { panic!("attached") };
+        assert!(resume != token && resume != second);
+    }
+    assert!(a.strange.is_empty() && b.strange.is_empty(), "{:?} {:?}", a.strange, b.strange);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -976,14 +1028,14 @@ async fn a_server_restart_ends_every_remote_session_and_an_old_session_number_is
     // The device token is in the store, so the same device signs in to the new server.
     let mut device = Device::connect(&again, &laptop.token).await;
     assert_eq!(device.ok(Op::List).await, Answer::List(vec![]), "no session outlived the restart");
-    for op in [Op::Attach { session, tail: None }, Op::Takeover { session }, Op::End { session }] {
-        assert_eq!(device.err(op).await, ErrorWord::NotFound, "{} of the old session", op.name());
+    for op in [Op::Attach { session, tail: None, resume: None }, Op::Takeover { session }, Op::End { session }] {
+        assert_eq!(device.err(op.clone()).await, ErrorWord::NotFound, "{} of the old session", op.name());
     }
 }
 
 /// Every operation that names a session and must answer `not_found` for a number that is not a live session of the asker.
 fn named(session: u32) -> [Op; 3] {
-    [Op::Attach { session, tail: None }, Op::Takeover { session }, Op::End { session }]
+    [Op::Attach { session, tail: None, resume: None }, Op::Takeover { session }, Op::End { session }]
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1006,7 +1058,7 @@ async fn a_session_made_after_a_restart_never_takes_a_number_an_earlier_server_h
     // The old numbers name nothing, also now that a new session exists.
     for &session in &old {
         for op in named(session) {
-            assert_eq!(device.err(op).await, ErrorWord::NotFound, "{} of the old session {session}", op.name());
+            assert_eq!(device.err(op.clone()).await, ErrorWord::NotFound, "{} of the old session {session}", op.name());
         }
     }
     device.attach(fresh, None).await;
@@ -1023,7 +1075,7 @@ async fn a_session_made_after_a_restart_never_takes_a_number_an_earlier_server_h
     assert!(old.iter().all(|n| last > *n), "the number after the second restart ({last}) goes on from {old:?}");
     for &session in &old {
         for op in named(session) {
-            assert_eq!(device.err(op).await, ErrorWord::NotFound, "{} of the old session {session}", op.name());
+            assert_eq!(device.err(op.clone()).await, ErrorWord::NotFound, "{} of the old session {session}", op.name());
         }
     }
     let Answer::List(listed) = device.ok(Op::List).await else { panic!("a list") };
@@ -1058,7 +1110,7 @@ async fn after_a_restart_each_person_counts_their_own_numbers_and_reaches_only_t
     // Alice's numbers, old and new, that are not his own answer not_found to him, as before the restart.
     for target in hers_before.iter().copied().chain([hers]).filter(|n| *n != his) {
         for op in named(target) {
-            assert_eq!(b.err(op).await, ErrorWord::NotFound, "{} of Alice's {target} by Bob", op.name());
+            assert_eq!(b.err(op.clone()).await, ErrorWord::NotFound, "{} of Alice's {target} by Bob", op.name());
         }
     }
     // And his number is not a session of hers unless her own counting made it one; her list holds only her new session.
@@ -1066,7 +1118,7 @@ async fn after_a_restart_each_person_counts_their_own_numbers_and_reaches_only_t
     assert_eq!(alices.iter().map(|s| s.id).collect::<Vec<_>>(), vec![hers], "only her new session is listed");
     if his != hers {
         for op in named(his) {
-            assert_eq!(a.err(op).await, ErrorWord::NotFound, "{} of Bob's {his} by Alice", op.name());
+            assert_eq!(a.err(op.clone()).await, ErrorWord::NotFound, "{} of Bob's {his} by Alice", op.name());
         }
     }
     // Her own new session is hers to use.

@@ -350,7 +350,7 @@ async fn a_second_person_sees_only_their_own_sessions_and_files(
     let mut socket = Device::connect(env, &token).await;
     assert_eq!(socket_sessions(&mut socket).await, Vec::<u32>::new(), "nothing of the first person is listed");
     for op in [
-        Op::Attach { session, tail: None },
+        Op::Attach { session, tail: None, resume: None },
         Op::Takeover { session },
         Op::Resize { session, cols: 100, rows: 30 },
         Op::End { session },

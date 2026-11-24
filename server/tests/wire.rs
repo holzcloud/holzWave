@@ -1085,37 +1085,71 @@ fn ses_new_is_operation_2_then_the_size() {
 }
 
 #[test]
-fn ses_attach_is_operation_3_and_the_tail_is_a_flag_and_a_number_only_when_there_is_one() {
+fn ses_attach_is_operation_3_and_the_tail_and_the_resume_token_are_each_a_flag_and_a_value_only_when_there_is_one() {
     let mut without = ses_head(3, true);
     without.extend_from_slice(&SESSION_BYTES);
-    without.push(0);
-    assert_eq!(without.len(), 19);
-    pinned(Frame::Ses(Ses::Attach { socket: SOCKET, request: ID, session: SESSION, tail: None }), without);
+    without.extend_from_slice(&[0, 0]);
+    assert_eq!(without.len(), 20);
+    pinned(Frame::Ses(Ses::Attach { socket: SOCKET, request: ID, session: SESSION, tail: None, resume: None }), without);
 
     let mut with = ses_head(3, true);
     with.extend_from_slice(&SESSION_BYTES);
-    with.extend_from_slice(&[1, 0, 0, 0x03, 0xE8]);
-    assert_eq!(with.len(), 23);
-    pinned(Frame::Ses(Ses::Attach { socket: SOCKET, request: ID, session: SESSION, tail: Some(1000) }), with);
+    with.extend_from_slice(&[1, 0, 0, 0x03, 0xE8, 0]);
+    assert_eq!(with.len(), 24);
+    pinned(Frame::Ses(Ses::Attach { socket: SOCKET, request: ID, session: SESSION, tail: Some(1000), resume: None }), with);
 
     // Zero rows of tail is a value: the client asked for the screen alone.
     let mut none = ses_head(3, true);
     none.extend_from_slice(&SESSION_BYTES);
-    none.extend_from_slice(&[1, 0, 0, 0, 0]);
-    pinned(Frame::Ses(Ses::Attach { socket: SOCKET, request: ID, session: SESSION, tail: Some(0) }), none);
+    none.extend_from_slice(&[1, 0, 0, 0, 0, 0]);
+    pinned(Frame::Ses(Ses::Attach { socket: SOCKET, request: ID, session: SESSION, tail: Some(0), resume: None }), none);
 
-    // A flag that is neither 0 nor 1, and a tail that is cut off or has a byte too many.
+    // The token is 16 bytes behind its flag, with or without a tail.
+    let mut token = ses_head(3, true);
+    token.extend_from_slice(&SESSION_BYTES);
+    token.push(0);
+    token.push(1);
+    token.extend_from_slice(&RESUME_RAW);
+    assert_eq!(token.len(), 36);
+    pinned(
+        Frame::Ses(Ses::Attach { socket: SOCKET, request: ID, session: SESSION, tail: None, resume: Some(resume()) }),
+        token,
+    );
+    let mut both = ses_head(3, true);
+    both.extend_from_slice(&SESSION_BYTES);
+    both.extend_from_slice(&[1, 0, 0, 0, 7, 1]);
+    both.extend_from_slice(&RESUME_RAW);
+    assert_eq!(both.len(), 40);
+    pinned(
+        Frame::Ses(Ses::Attach { socket: SOCKET, request: ID, session: SESSION, tail: Some(7), resume: Some(resume()) }),
+        both,
+    );
+
+    // A flag that is neither 0 nor 1, and a tail or a token that is cut off or has a byte too many.
     let mut bad = ses_head(3, true);
     bad.extend_from_slice(&SESSION_BYTES);
     bad.push(2);
     assert!(matches!(Frame::from_payload(&bad), Err(WireError::BadValue(_))));
+    let mut bad_resume = ses_head(3, true);
+    bad_resume.extend_from_slice(&SESSION_BYTES);
+    bad_resume.extend_from_slice(&[0, 2]);
+    assert!(matches!(Frame::from_payload(&bad_resume), Err(WireError::BadValue(_))));
     let mut cut = ses_head(3, true);
     cut.extend_from_slice(&SESSION_BYTES);
     cut.extend_from_slice(&[1, 0, 0]);
     assert!(matches!(Frame::from_payload(&cut), Err(WireError::Truncated)));
+    let mut cut_token = ses_head(3, true);
+    cut_token.extend_from_slice(&SESSION_BYTES);
+    cut_token.extend_from_slice(&[0, 1]);
+    cut_token.extend_from_slice(&RESUME_RAW[..15]);
+    assert!(matches!(Frame::from_payload(&cut_token), Err(WireError::Truncated)));
+    let mut old_form = ses_head(3, true);
+    old_form.extend_from_slice(&SESSION_BYTES);
+    old_form.push(0);
+    assert!(matches!(Frame::from_payload(&old_form), Err(WireError::Truncated)), "the form without the resume flag is not read");
     let mut long = ses_head(3, true);
     long.extend_from_slice(&SESSION_BYTES);
-    long.extend_from_slice(&[0, 0]);
+    long.extend_from_slice(&[0, 0, 0]);
     assert!(matches!(Frame::from_payload(&long), Err(WireError::Trailing)));
 }
 
@@ -1284,12 +1318,25 @@ fn ses_events_are_operation_19_then_the_session_the_event_and_its_body() {
         bytes.extend_from_slice(body);
         bytes
     };
+    // The writer event is the state and the epoch of the lease, a u32 that is not 0.
     for (byte, state) in [(0, WriterState::Writing), (1, WriterState::Watching), (2, WriterState::Free)] {
         pinned(
-            Frame::Ses(Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Writer(state) }),
-            head(&[1, byte]),
+            Frame::Ses(Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Writer(state, 0x0102_0304) }),
+            head(&[1, byte, 1, 2, 3, 4]),
         );
     }
+    pinned(
+        Frame::Ses(Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Writer(WriterState::Free, 1) }),
+        head(&[1, 2, 0, 0, 0, 1]),
+    );
+    assert!(
+        Frame::Ses(Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Writer(WriterState::Free, 0) })
+            .to_payload()
+            .is_err(),
+        "an epoch of 0 is not written"
+    );
+    assert!(matches!(Frame::from_payload(&head(&[1, 2, 0, 0, 0, 0])), Err(WireError::BadValue(_))), "nor read");
+    assert!(matches!(Frame::from_payload(&head(&[1, 2])), Err(WireError::Truncated)), "the old form without an epoch");
     pinned(Frame::Ses(Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Exited(None) }), head(&[2, 0]));
     pinned(
         Frame::Ses(Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Exited(Some(0x0000_0102)) }),
@@ -1308,7 +1355,8 @@ fn ses_frames_with_a_fixed_length_are_an_error_cut_anywhere_or_with_a_byte_too_m
     let frames = vec![
         Ses::List { socket: SOCKET, request: ID },
         Ses::New { socket: SOCKET, request: ID, cols: 80, rows: 24 },
-        Ses::Attach { socket: SOCKET, request: ID, session: SESSION, tail: Some(5) },
+        Ses::Attach { socket: SOCKET, request: ID, session: SESSION, tail: Some(5), resume: None },
+        Ses::Attach { socket: SOCKET, request: ID, session: SESSION, tail: None, resume: Some(resume()) },
         Ses::Detach { socket: SOCKET, request: ID, session: SESSION },
         Ses::Resize { socket: SOCKET, request: ID, session: SESSION, cols: 80, rows: 24 },
         Ses::Takeover { socket: SOCKET, request: ID, session: SESSION },
@@ -1359,7 +1407,7 @@ fn a_session_frame_refuses_an_id_of_0_a_size_of_0_and_a_byte_it_does_not_know() 
         Ses::List { socket: SOCKET, request: 0 },
         Ses::New { socket: SOCKET, request: ID, cols: 0, rows: 24 },
         Ses::New { socket: SOCKET, request: ID, cols: 80, rows: 0 },
-        Ses::Attach { socket: SOCKET, request: ID, session: 0, tail: None },
+        Ses::Attach { socket: SOCKET, request: ID, session: 0, tail: None, resume: None },
         Ses::Resize { socket: SOCKET, request: ID, session: SESSION, cols: 0, rows: 1 },
         Ses::Gone { socket: 0 },
         Ses::Lost { socket: 0, session: SESSION },
@@ -1529,6 +1577,17 @@ fn the_debug_text_of_a_session_frame_holds_no_byte_of_a_terminal_no_title_and_no
     }
     let text = format!("{:?}", Ses::Live { socket: 4, session: 5, seq: 6, bytes: vec![1, 2, 3] });
     assert!(text.contains("Live") && text.contains("bytes: 3"), "{text}");
+}
+
+#[test]
+fn an_attach_that_carries_a_resume_token_prints_its_marker_and_never_its_bytes() {
+    let attach = Ses::Attach { socket: SOCKET, request: ID, session: SESSION, tail: Some(5), resume: Some(resume()) };
+    for printed in [format!("{attach:?}"), format!("{:?}", Frame::Ses(attach.clone())), format!("{attach:#?}")] {
+        assert!(printed.contains("ResumeToken(..)"), "{printed}");
+        assert!(!printed.contains(RESUME_HEX) && !printed.contains("a0a1") && !printed.contains("160, 161"), "{printed}");
+    }
+    let event = Ses::Event { socket: SOCKET, session: SESSION, event: SesEvent::Writer(WriterState::Writing, 3) };
+    assert!(format!("{event:?}").contains("Writer"), "{event:?}");
 }
 
 #[test]

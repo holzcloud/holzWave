@@ -2015,7 +2015,7 @@ fn live_of(seen: &[Frame], socket: u32, session: u32) -> String {
 
 /// Attaches `socket` to `session` and waits for the whole snapshot; returns the answer.
 fn ses_attach(rig: &mut Rig, socket: u32, request: u64, session: u32, tail: Option<u32>) -> Attached {
-    rig.send(Frame::Ses(Ses::Attach { socket, request, session, tail }));
+    rig.send(Frame::Ses(Ses::Attach { socket, request, session, tail, resume: None }));
     let attached = match ses_answer(rig, socket, request) {
         SesAnswer::Attached(attached) => attached,
         other => panic!("the attach was not accepted: {other:?}"),
@@ -2116,7 +2116,7 @@ fn ses_a_second_socket_watches_its_input_is_dropped_and_a_takeover_changes_who_w
     wait_until(&mut rig, "both views", |seen| {
         let told = |socket: u32, state: WriterState| {
             seen.iter().any(|f| {
-                matches!(f, Frame::Ses(Ses::Event { socket: s, event: SesEvent::Writer(w), .. }) if *s == socket && *w == state)
+                matches!(f, Frame::Ses(Ses::Event { socket: s, event: SesEvent::Writer(w, _), .. }) if *s == socket && *w == state)
             })
         };
         told(5, WriterState::Watching) && told(6, WriterState::Writing)
@@ -2143,7 +2143,7 @@ fn ses_a_socket_that_ends_keeps_its_right_for_the_grace_through_a_gone_frame_and
         other => panic!("{other:?}"),
     }
     assert!(
-        !rig.seen().iter().any(|f| matches!(f, Frame::Ses(Ses::Event { socket: 6, event: SesEvent::Writer(_), .. }))),
+        !rig.seen().iter().any(|f| matches!(f, Frame::Ses(Ses::Event { socket: 6, event: SesEvent::Writer(_, _), .. }))),
         "the watcher is told nothing while the holder's time lasts"
     );
     // The same through the control the supervisor sends when a page's socket ends: a watcher that ends changes nothing.
@@ -2158,7 +2158,7 @@ fn ses_a_socket_that_ends_keeps_its_right_for_the_grace_through_a_gone_frame_and
     rig.send(Frame::Ses(Ses::Takeover { socket: 6, request: 7, session }));
     assert!(matches!(ses_answer(&mut rig, 6, 7), SesAnswer::Done));
     wait_until(&mut rig, "the new writer is told", |seen| {
-        seen.iter().any(|f| matches!(f, Frame::Ses(Ses::Event { socket: 6, event: SesEvent::Writer(WriterState::Writing), .. })))
+        seen.iter().any(|f| matches!(f, Frame::Ses(Ses::Event { socket: 6, event: SesEvent::Writer(WriterState::Writing, _), .. })))
     });
     rig.finish();
 }
@@ -2171,7 +2171,7 @@ fn ses_a_request_that_names_no_session_is_failed_not_found_and_a_request_before_
     assert!(matches!(ses_answer(&mut rig, 5, 1), SesAnswer::Failed(SesError::Busy)));
     rig.init();
     for (request, frame) in [
-        (2, Ses::Attach { socket: 5, request: 2, session: 99, tail: None }),
+        (2, Ses::Attach { socket: 5, request: 2, session: 99, tail: None, resume: None }),
         (3, Ses::Detach { socket: 5, request: 3, session: 99 }),
         (4, Ses::Resize { socket: 5, request: 4, session: 99, cols: 80, rows: 24 }),
         (5, Ses::Takeover { socket: 5, request: 5, session: 99 }),

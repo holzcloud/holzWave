@@ -392,11 +392,12 @@ impl Machine<'_> {
                 }
                 self.forward(transport, id, Pending::New, Ses::New { socket, request: id, cols, rows }).await
             }
-            Op::Attach { session, tail } => {
+            Op::Attach { session, tail, resume } => {
                 if !self.attached.contains(&session) && self.counted() >= MAX_ATTACHED {
                     return self.error(transport, id, ErrorWord::TooMany).await;
                 }
-                self.forward(transport, id, Pending::Attach(session), Ses::Attach { socket, request: id, session, tail })
+                // The token goes on to the worker in this frame and is kept nowhere here.
+                self.forward(transport, id, Pending::Attach(session), Ses::Attach { socket, request: id, session, tail, resume })
                     .await
             }
             Op::Detach { session } => {
@@ -484,6 +485,8 @@ impl Machine<'_> {
                                 writer: view(a.writer),
                                 more: a.more,
                                 snapshot: a.snapshot_bytes,
+                                resume: a.resume,
+                                epoch: a.epoch,
                             })
                         } else {
                             Err(ErrorWord::BadRequest)
@@ -496,7 +499,7 @@ impl Machine<'_> {
             }
             Ses::Event { session, event, .. } => {
                 let event = match event {
-                    SesEvent::Writer(state) => Event::Writer { session, state: view(state) },
+                    SesEvent::Writer(state, epoch) => Event::Writer { session, state: view(state), epoch },
                     SesEvent::Exited(code) => {
                         // The program ended: input to the session goes nowhere, and the session no longer counts against the
                         // cap, whether or not the client detaches.

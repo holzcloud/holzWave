@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
-use holzwave_core::remote::proto::{Answer, Chunk, ErrorWord, Event, Input, Op, Reply, Request as Call, Stream};
+use holzwave_core::remote::proto::{Answer, Chunk, ErrorWord, Event, Input, Op, Reply, Request as Call, ResumeToken, Stream};
 use holzwave_server::clock::Clock as _;
 use holzwave_server::device::DeviceToken;
 use holzwave_server::http::features::Feature;
@@ -264,16 +264,18 @@ impl Device {
 
     /// Sends a request that must succeed.
     pub async fn ok(&mut self, op: Op) -> Answer {
+        let name = op.name();
         match self.ask(op).await {
             Ok(answer) => answer,
-            Err(error) => panic!("{} failed: {error}", op.name()),
+            Err(error) => panic!("{name} failed: {error}"),
         }
     }
 
     /// Sends a request that must fail, and returns the word.
     pub async fn err(&mut self, op: Op) -> ErrorWord {
+        let name = op.name();
         match self.ask(op).await {
-            Ok(answer) => panic!("{} succeeded: {answer:?}", op.name()),
+            Ok(answer) => panic!("{name} succeeded: {answer:?}"),
             Err(error) => error,
         }
     }
@@ -288,10 +290,15 @@ impl Device {
 
     /// Attaches and returns the size of the snapshot the server announced.
     pub async fn attach(&mut self, session: u32, tail: Option<u32>) -> Answer {
-        self.ok(Op::Attach { session, tail }).await
+        self.ok(Op::Attach { session, tail, resume: None }).await
     }
 
     /// Sends input for a session as a binary frame.
+    /// An attach that names the token of an earlier attach, answered: `Answer::Attached` with a new token.
+    pub async fn attach_with(&mut self, session: u32, tail: Option<u32>, resume: Option<ResumeToken>) -> Answer {
+        self.ok(Op::Attach { session, tail, resume }).await
+    }
+
     pub async fn type_into(&mut self, session: u32, bytes: &[u8]) {
         let frame = holzwave_core::remote::proto::encode_input(session, bytes).expect("an input frame");
         self.ws.send_frame(0x80 | BINARY, &frame).await;
@@ -346,7 +353,18 @@ impl Device {
         self.events
             .iter()
             .filter_map(|e| match e {
-                Event::Writer { session: s, state } if *s == session => Some(state.word()),
+                Event::Writer { session: s, state, .. } if *s == session => Some(state.word()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The epochs the writer events of a session carried so far, in order.
+    pub fn writer_epochs(&self, session: u32) -> Vec<u32> {
+        self.events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Writer { session: s, epoch, .. } if *s == session => Some(*epoch),
                 _ => None,
             })
             .collect()

@@ -40,13 +40,20 @@ enum Got {
 /// would); `accept` makes it refuse pushes.
 struct Rec {
     got: Mutex<Vec<Got>>,
+    /// The epochs the writer events carried, in order.
+    epochs: Mutex<Vec<u32>>,
     hold: AtomicBool,
     accept: AtomicBool,
 }
 
 impl Rec {
     fn new() -> Arc<Rec> {
-        Arc::new(Rec { got: Mutex::new(Vec::new()), hold: AtomicBool::new(false), accept: AtomicBool::new(true) })
+        Arc::new(Rec {
+            got: Mutex::new(Vec::new()),
+            epochs: Mutex::new(Vec::new()),
+            hold: AtomicBool::new(false),
+            accept: AtomicBool::new(true),
+        })
     }
 
     fn got(&self) -> Vec<Got> {
@@ -55,6 +62,10 @@ impl Rec {
 
     fn push(&self, got: Got) {
         self.got.lock().unwrap_or_else(PoisonError::into_inner).push(got);
+    }
+
+    fn epochs(&self) -> Vec<u32> {
+        self.epochs.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     fn writers(&self) -> Vec<WriterState> {
@@ -136,7 +147,8 @@ impl Attachment for Rec {
         true
     }
 
-    fn writer(&self, _session: u32, state: WriterState) {
+    fn writer(&self, _session: u32, state: WriterState, epoch: u32) {
+        self.epochs.lock().unwrap_or_else(PoisonError::into_inner).push(epoch);
         self.push(Got::Writer(state));
     }
 
@@ -810,6 +822,39 @@ fn a_token_after_the_timeout_and_a_token_used_before_or_of_another_session_or_ma
     assert_ne!(expired.epoch, next.epoch, "the holder changed");
     assert_eq!(host.input(30, id, b"x"), Ok(Input::Dropped));
     assert!(watcher.writers().contains(&WriterState::Free));
+}
+
+#[test]
+fn every_writer_event_carries_the_epoch_after_the_change_and_the_answers_carry_the_epoch_of_the_moment() {
+    let clock = ManualClock::new();
+    let programs = Programs::new("sleep 60");
+    let host = SessionHost::start(programs.clone(), HostSettings::default(), clock.clone());
+    let first = Rec::new();
+    let id = started(&host, &first);
+    let one = attach(&host, 1, &first, id, None).expect("attach");
+    let second = Rec::new();
+    let two = attach(&host, 2, &second, id, None).expect("attach");
+    assert_eq!(one.epoch, two.epoch, "one holder, one epoch");
+    assert!(one.epoch >= 1);
+
+    // A takeover is a change of the holder: both are told, and both are told the new epoch.
+    host.takeover(2, id).expect("takeover");
+    let moved = one.epoch + 1;
+    assert_eq!((first.epochs(), second.epochs()), (vec![moved], vec![moved]));
+    // The holder's own takeover, a beat and an input are not.
+    host.takeover(2, id).expect("takeover by the holder");
+    host.beat(2, id).expect("beat");
+    assert_eq!(first.epochs(), vec![moved]);
+    // The silence frees the right: another change.
+    clock.set(30_000);
+    host.sweep();
+    assert_eq!((first.epochs(), second.epochs()), (vec![moved, moved + 1], vec![moved, moved + 1]));
+    // An attach now says the epoch of the moment, and the holder's detach is another change.
+    let late = Rec::new();
+    assert_eq!(attach(&host, 3, &late, id, None).expect("attach").epoch, moved + 1);
+    host.takeover(3, id).expect("takeover");
+    host.detach(3, id).expect("the holder detaches");
+    assert_eq!(second.epochs().last(), Some(&(moved + 3)));
 }
 
 #[test]

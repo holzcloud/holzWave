@@ -219,8 +219,8 @@ impl Attachment for SocketAttachment {
         self.queue.push_stream(frame) == Pushed::Queued
     }
 
-    fn writer(&self, session: u32, state: WriterState) {
-        self.event(session, SesEvent::Writer(state));
+    fn writer(&self, session: u32, state: WriterState, epoch: u32) {
+        self.event(session, SesEvent::Writer(state, epoch));
     }
 
     fn size(&self, session: u32, cols: u16, rows: u16) {
@@ -275,10 +275,10 @@ pub fn handle_ses(host: &SessionHost, queue: &Arc<Outbound>, ses: Ses) {
                 made.map_or_else(SesAnswer::Failed, |session| SesAnswer::Created { session }),
             );
         }
-        Ses::Attach { socket, request, session, tail } => {
+        Ses::Attach { socket, request, session, tail, resume } => {
             // The answer goes out first and the snapshot after it, which the host guarantees by calling this before it
-            // starts the stream.
-            host.attach(u64::from(socket), attachment(socket), session, tail, |result| {
+            // starts the stream. The token, when there is one, is only compared by the host and then dropped.
+            host.attach_resume(u64::from(socket), attachment(socket), session, tail, resume, |result| {
                 answer(queue, socket, request, result.map_or_else(SesAnswer::Failed, SesAnswer::Attached));
             });
         }

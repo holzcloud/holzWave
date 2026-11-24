@@ -164,7 +164,7 @@ impl Session {
     /// Answers an attach the way the server does: the grid, the writer view, whether older lines exist, and the snapshot of the
     /// tail that was asked for (`default_tail` when it was not) in chunks.
     fn serve(&mut self, conn: &mut Conn, request: &Request, writer: WriterView, default_tail: u32) -> u32 {
-        let Op::Attach { session, tail } = request.op else { panic!("an attach was expected, got {request:?}") };
+        let Op::Attach { session, tail, .. } = request.op else { panic!("an attach was expected, got {request:?}") };
         let wanted = tail.unwrap_or(default_tail) as usize;
         let history = self.engine.scrollback_rows();
         let rows = wanted.min(history);
@@ -529,7 +529,7 @@ fn after_a_resync_a_reconnect_and_older_lines_the_pane_holds_what_a_new_pane_wou
     // 1. A resync: the server says the pane was too slow. The answer is delayed so that the state can be read.
     conn.event(Event::Resync { session: 4 });
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(100) }, "the tail the pane last used");
+    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(100), resume: None }, "the tail the pane last used");
     wait_for("the resyncing state", || pane.remote_view().is_some_and(|v| v.state == RemoteState::Resyncing));
     wait_text(&pane, NOTICE_RESYNCING);
     session.serve(&mut conn, &request, WriterView::Writing, 100);
@@ -551,7 +551,7 @@ fn after_a_resync_a_reconnect_and_older_lines_the_pane_holds_what_a_new_pane_wou
     let before = pane_snapshot(&pane, 1000).2;
     pane.load_older().unwrap();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(200) }, "the tail doubles");
+    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(200), resume: None }, "the tail doubles");
     session.serve(&mut conn, &request, WriterView::Writing, 100);
     wait_for("older lines", || pane_snapshot(&pane, 1000).2 > before);
     wait_for("the state to end", || pane.remote_view().is_some_and(|v| v.state == RemoteState::None));
@@ -625,9 +625,9 @@ fn the_view_is_none_for_a_local_pane_and_follows_the_events_of_the_server_in_ord
     wait_for("the attach", || pane.remote_view().is_some_and(|v| v.state == RemoteState::None));
     let view = pane.remote_view().unwrap();
     assert_eq!((view.writer, view.cols, view.rows, view.more), (WriterView::Watching, 100, 30, true));
-    conn.event(Event::Writer { session: 4, state: WriterView::Free });
+    conn.event(Event::Writer { session: 4, state: WriterView::Free, epoch: 1 });
     wait_for("free", || pane.remote_view().is_some_and(|v| v.writer == WriterView::Free));
-    conn.event(Event::Writer { session: 4, state: WriterView::Writing });
+    conn.event(Event::Writer { session: 4, state: WriterView::Writing, epoch: 1 });
     wait_for("writing", || pane.remote_view().is_some_and(|v| v.writer == WriterView::Writing));
 }
 
@@ -670,7 +670,7 @@ fn a_watcher_drops_what_is_typed_before_it_is_sent_and_counts_it_and_a_writer_se
     assert!(conn.drain(Duration::from_millis(300)).is_empty(), "nothing was sent");
     assert_eq!(hub.stats().input_frames, 0);
 
-    conn.event(Event::Writer { session: 4, state: WriterView::Writing });
+    conn.event(Event::Writer { session: 4, state: WriterView::Writing, epoch: 1 });
     wait_for("writing", || pane.remote_view().is_some_and(|v| v.writer == WriterView::Writing));
     assert!(not_sent(&pane), "becoming the writer sends nothing: the state stays until a key is sent");
     pane.text("ls\r".into()).unwrap();
@@ -743,7 +743,7 @@ fn a_remote_pane_never_answers_the_programs_queries_because_the_sessions_engine_
     assert_eq!(conn.drain(Duration::from_millis(500)), vec![Got::Input { session: 4, bytes: b"ls\r".to_vec() }]);
 
     // A pane that watches does not count the answers it never sends as dropped typing.
-    conn.event(Event::Writer { session: 4, state: WriterView::Watching });
+    conn.event(Event::Writer { session: 4, state: WriterView::Watching, epoch: 1 });
     wait_for("watching", || pane.remote_view().is_some_and(|v| v.writer == WriterView::Watching));
     session.live(&mut conn, 4, "\x1b[6n\x1b[c watched$ ");
     wait_text(&pane, "watched$");
@@ -783,7 +783,7 @@ fn the_writers_size_is_the_sessions_a_watcher_follows_and_taking_over_sends_the_
     let request = conn.request();
     assert_eq!(request.op, Op::Takeover { session: 4 });
     conn.answer(request.id, holzwave_core::remote::proto::Answer::Done);
-    conn.event(Event::Writer { session: 4, state: WriterView::Writing });
+    conn.event(Event::Writer { session: 4, state: WriterView::Writing, epoch: 1 });
     let request = conn.request();
     assert_eq!(request.op, Op::Resize { session: 4, cols: 60, rows: 12 }, "the recorded tile, once");
     conn.answer(request.id, holzwave_core::remote::proto::Answer::Done);
@@ -857,7 +857,7 @@ fn older_lines_double_the_tail_keep_the_viewport_where_it_was_and_stop_when_the_
     // A second call while the request is on its way does nothing.
     pane.load_older().unwrap();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(200) });
+    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(200), resume: None });
     wait_for("the loading state", || pane.remote_view().is_some_and(|v| v.state == RemoteState::LoadingOlder));
     wait_text(&pane, NOTICE_LOADING_OLDER);
     session.serve(&mut conn, &request, WriterView::Watching, 100);
@@ -873,7 +873,7 @@ fn older_lines_double_the_tail_keep_the_viewport_where_it_was_and_stop_when_the_
         pane.load_older().unwrap();
         let request = conn.request();
         tail *= 2;
-        assert_eq!(request.op, Op::Attach { session: 4, tail: Some(tail) });
+        assert_eq!(request.op, Op::Attach { session: 4, tail: Some(tail), resume: None });
         session.serve(&mut conn, &request, WriterView::Watching, 100);
         wait_for("the state to end", || pane.remote_view().is_some_and(|v| v.state == RemoteState::None));
     }
@@ -890,7 +890,7 @@ fn older_lines_that_a_lost_connection_cut_off_are_not_said_to_load_and_can_be_as
     let (pane, _probe, mut conn) = attached_pane(&device, &hub, 4, &mut session, WriterView::Writing, Some(100), "marker-end");
     pane.load_older().unwrap();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(200) });
+    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(200), resume: None });
     wait_for("loading older", || pane.remote_view().is_some_and(|v| v.state == RemoteState::LoadingOlder));
     // The connection goes before the answer.
     conn.cut();
@@ -899,13 +899,13 @@ fn older_lines_that_a_lost_connection_cut_off_are_not_said_to_load_and_can_be_as
     // The reconnect attaches with the longer tail; afterwards older lines can be asked for again.
     let mut conn = device.accept();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(200) });
+    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(200), resume: None });
     session.serve(&mut conn, &request, WriterView::Writing, 100);
     wait_state(&pane, |s| *s == ConnState::Connected);
     wait_for("the state to end", || pane.remote_view().is_some_and(|v| v.state == RemoteState::None));
     pane.load_older().unwrap();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(400) });
+    assert_eq!(request.op, Op::Attach { session: 4, tail: Some(400), resume: None });
 }
 
 #[test]

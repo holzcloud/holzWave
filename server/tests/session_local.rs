@@ -386,7 +386,7 @@ impl Device {
     }
 
     fn attach(&mut self, host: &SessionHost, session: u32, tail: Option<u32>) -> Attached {
-        match self.ask(host, |socket, request| Ses::Attach { socket, request, session, tail }) {
+        match self.ask(host, |socket, request| Ses::Attach { socket, request, session, tail, resume: None }) {
             SesAnswer::Attached(attached) => attached,
             other => panic!("not attached: {other:?}"),
         }
@@ -428,7 +428,7 @@ impl Device {
     }
 
     fn writers(&self) -> Vec<WriterState> {
-        self.events().into_iter().filter_map(|e| if let SesEvent::Writer(w) = e { Some(w) } else { None }).collect()
+        self.events().into_iter().filter_map(|e| if let SesEvent::Writer(w, _) = e { Some(w) } else { None }).collect()
     }
 
     fn sizes(&self) -> Vec<(u16, u16)> {

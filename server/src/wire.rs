@@ -90,8 +90,9 @@
 //!   supervisor -> worker (a request is answered by exactly one `Answer` with its number, except `Input` and `Gone`):
 //!   1 List       2..6 socket | 6..14 request                                                              (14 bytes)
 //!   2 New        2..6 socket | 6..14 request | 14..16 u16 cols, not 0 | 16..18 u16 rows, not 0            (18 bytes)
-//!   3 Attach     2..6 socket | 6..14 request | 14..18 session | 18 u8 has a tail: 0 or 1 | 19..23 u32 rows of tail,
-//!                only when there is one                                                              (19 or 23 bytes)
+//!   3 Attach     2..6 socket | 6..14 request | 14..18 session | 18 u8 has a tail: 0 or 1 | u32 rows of tail, only when
+//!                there is one | u8 has a resume token: 0 or 1 | 16 bytes of resume token, only when there is one
+//!                                                                                  (20, 24, 36 or 40 bytes)
 //!   4 Detach     2..6 socket | 6..14 request | 14..18 session                                              (18 bytes)
 //!   5 Input      2..6 socket | 6..10 session | 10.. the bytes, 1 to 65536, to the end of the frame; never answered
 //!   6 Resize     2..6 socket | 6..14 request | 14..18 session | 18..20 u16 cols | 20..22 u16 rows, neither 0 (22 bytes)
@@ -114,12 +115,14 @@
 //!   17 Snapshot  2..6 socket | 6..10 session | 10..14 u32 seq | 14.. the bytes, 1 to 65536
 //!   18 Live      2..6 socket | 6..10 session | 10..14 u32 seq, which continues the count of the snapshot | 14.. the bytes,
 //!                1 to 65536
-//!   19 Event     2..6 socket | 6..10 session | 10 u8 event: 1 writer (u8 state as above), 2 exited (u8 has a status: 0 or 1,
+//!   19 Event     2..6 socket | 6..10 session | 10 u8 event: 1 writer (u8 state as above, u32 epoch of the lease, not 0),
+//!                2 exited (u8 has a status: 0 or 1,
 //!                u32 status only when there is one), 3 resync, 4 size (u16 cols, u16 rows), 5 dropped (input of this socket
 //!                was dropped because the program does not read it)
 //! ```
 //!
-//! A frame that holds a key prints nothing of it in `Debug`, and the key is wiped from the frame when it is dropped.
+//! A frame that holds a key prints nothing of it in `Debug`, and the key is wiped from the frame when it is dropped. A resume
+//! token (in `Attach` and in the answer to it) prints the marker of its type in `Debug`, never its bytes.
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -556,8 +559,8 @@ pub enum SesAnswer {
 /// What a worker tells a device socket about a session on its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SesEvent {
-    /// This socket's own view of the right to write changed.
-    Writer(WriterState),
+    /// This socket's own view of the right to write changed, and the epoch of the lease after the change.
+    Writer(WriterState, u32),
     /// The program ended, with its status when it could be read.
     Exited(Option<u32>),
     /// The stream of this socket was lost; attach again.
@@ -587,6 +590,9 @@ pub enum Ses {
         request: u64,
         session: u32,
         tail: Option<u32>,
+        /// The token of the socket's last attach of the session, when it presents one: a token is a secret, and prints as
+        /// its marker.
+        resume: Option<ResumeToken>,
     },
     Detach {
         socket: u32,
@@ -688,12 +694,13 @@ impl fmt::Debug for Ses {
                 .field("request", request)
                 .field("size", &(cols, rows))
                 .finish(),
-            Ses::Attach { socket, request, session, tail } => f
+            Ses::Attach { socket, request, session, tail, resume } => f
                 .debug_struct("Attach")
                 .field("socket", socket)
                 .field("request", request)
                 .field("session", session)
                 .field("tail", tail)
+                .field("resume", resume)
                 .finish(),
             Ses::Detach { socket, request, session } => f
                 .debug_struct("Detach")
@@ -1053,7 +1060,7 @@ fn encode_ses(ses: &Ses, out: &mut Vec<u8>) -> Result<(), WireError> {
             out.extend_from_slice(&nonzero_dim(*cols)?.to_be_bytes());
             out.extend_from_slice(&nonzero_dim(*rows)?.to_be_bytes());
         }
-        Ses::Attach { socket, request, session, tail } => {
+        Ses::Attach { socket, request, session, tail, resume } => {
             head(out, SES_ATTACH, *socket, *request)?;
             out.extend_from_slice(&nonzero_session(*session)?.to_be_bytes());
             match tail {
@@ -1061,6 +1068,13 @@ fn encode_ses(ses: &Ses, out: &mut Vec<u8>) -> Result<(), WireError> {
                 Some(rows) => {
                     out.push(1);
                     out.extend_from_slice(&rows.to_be_bytes());
+                }
+            }
+            match resume {
+                None => out.push(0),
+                Some(token) => {
+                    out.push(1);
+                    out.extend_from_slice(token.expose());
                 }
             }
         }
@@ -1154,7 +1168,10 @@ fn encode_ses(ses: &Ses, out: &mut Vec<u8>) -> Result<(), WireError> {
             out.extend_from_slice(&nonzero(*socket)?.to_be_bytes());
             out.extend_from_slice(&nonzero_session(*session)?.to_be_bytes());
             match event {
-                SesEvent::Writer(state) => out.extend_from_slice(&[EVENT_WRITER, writer_byte(*state)]),
+                SesEvent::Writer(state, epoch) => {
+                    out.extend_from_slice(&[EVENT_WRITER, writer_byte(*state)]);
+                    out.extend_from_slice(&nonzero_epoch(*epoch)?.to_be_bytes());
+                }
                 SesEvent::Exited(None) => out.extend_from_slice(&[EVENT_EXITED, 0]),
                 SesEvent::Exited(Some(code)) => {
                     out.extend_from_slice(&[EVENT_EXITED, 1]);
@@ -1183,7 +1200,8 @@ fn decode_ses(fields: &mut Fields<'_>) -> Result<Ses, WireError> {
         SES_ATTACH => {
             let (socket, request, session) = (fields.socket()?, fields.id()?, fields.session()?);
             let tail = if fields.flag("the tail flag is not 0 or 1")? { Some(fields.u32()?) } else { None };
-            Ses::Attach { socket, request, session, tail }
+            let resume = if fields.flag("the resume flag is not 0 or 1")? { Some(fields.resume()?) } else { None };
+            Ses::Attach { socket, request, session, tail, resume }
         }
         SES_DETACH => Ses::Detach { socket: fields.socket()?, request: fields.id()?, session: fields.session()? },
         SES_TAKEOVER => Ses::Takeover { socket: fields.socket()?, request: fields.id()?, session: fields.session()? },
@@ -1254,7 +1272,7 @@ fn decode_ses(fields: &mut Fields<'_>) -> Result<Ses, WireError> {
         SES_EVENT => {
             let (socket, session) = (fields.socket()?, fields.session()?);
             let event = match fields.u8()? {
-                EVENT_WRITER => SesEvent::Writer(writer_of(fields.u8()?)?),
+                EVENT_WRITER => SesEvent::Writer(writer_of(fields.u8()?)?, fields.epoch()?),
                 EVENT_EXITED => {
                     if fields.flag("the status flag is not 0 or 1")? {
                         SesEvent::Exited(Some(fields.u32()?))

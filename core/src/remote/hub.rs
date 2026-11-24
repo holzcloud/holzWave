@@ -1064,7 +1064,7 @@ impl Core {
         let Some(sub) = self.subs.get(&session) else { return };
         let (id, tail) = (sub.id, sub.tail);
         let deadline = Instant::now() + self.options.call_timeout;
-        match self.send(Op::Attach { session, tail }, Pending::Attach { id, session }, deadline) {
+        match self.send(Op::Attach { session, tail, resume: None }, Pending::Attach { id, session }, deadline) {
             Ok(req) => {
                 if let Some(sub) = self.subs.get_mut(&session) {
                     sub.phase = Phase::Asked { req };
@@ -1412,7 +1412,7 @@ impl Core {
                 }
                 match result {
                     Err(word) => self.end_sub(session, HubError::Word(word)),
-                    Ok(Answer::Attached { session: said, cols, rows, writer, more, snapshot }) => {
+                    Ok(Answer::Attached { session: said, cols, rows, writer, more, snapshot, .. }) => {
                         let sane = said == session
                             && (MIN_SIZE.0..=MAX_SIZE).contains(&cols)
                             && (MIN_SIZE.1..=MAX_SIZE).contains(&rows)

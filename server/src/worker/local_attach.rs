@@ -337,7 +337,7 @@ impl Attachment for Unclaimed {
     fn live(&self, _: u32, _: u32, _: &[u8]) -> bool {
         true
     }
-    fn writer(&self, _: u32, _: WriterState) {}
+    fn writer(&self, _: u32, _: WriterState, _: u32) {}
     fn size(&self, _: u32, _: u16, _: u16) {}
     fn exited(&self, _: u32, _: Option<u32>) {}
     fn resync(&self, _: u32) {}
@@ -573,7 +573,8 @@ impl Attachment for PaneAttachment {
         taken
     }
 
-    fn writer(&self, _session: u32, state: WriterState) {
+    fn writer(&self, _session: u32, state: WriterState, _epoch: u32) {
+        // The window's pane has no use for the epoch: it never presents a token and its input is not numbered.
         self.tie.pass(self.generation, SubEvent::Writer(view(state)));
     }
 

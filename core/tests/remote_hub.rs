@@ -67,7 +67,7 @@ fn attach_plain(device: &FakeDevice, hub: &Hub, session: u32, snapshot: &[u8]) -
     let sub = hub.attach(session, None);
     let mut conn = device.accept();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session, tail: None });
+    assert_eq!(request.op, Op::Attach { session, tail: None, resume: None });
     conn.attached(request.id, session, 80, 24, WriterView::Writing, false, snapshot.len() as u32);
     if !snapshot.is_empty() {
         conn.snapshot(session, 0, snapshot);
@@ -251,7 +251,7 @@ fn an_upgrade_a_proxy_answers_502_503_504_or_429_is_unreachable_and_tried_again(
         sub.handle().retry().unwrap();
         let mut conn = device.accept();
         let request = conn.request();
-        assert_eq!(request.op, Op::Attach { session: 3, tail: None });
+        assert_eq!(request.op, Op::Attach { session: 3, tail: None, resume: None });
         conn.attached(request.id, 3, 80, 24, WriterView::Writing, false, 0);
         let events = events_until(&sub, |e| !e.is_empty());
         assert!(matches!(events[0], SubEvent::Attached { again: true, .. }), "{status}: {events:?}");
@@ -269,7 +269,7 @@ fn an_attach_delivers_the_grid_then_the_snapshot_chunks_in_order_then_the_live_c
     let sub = hub.attach(7, Some(300));
     let mut conn = device.accept();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 7, tail: Some(300) });
+    assert_eq!(request.op, Op::Attach { session: 7, tail: Some(300), resume: None });
     // Chunks that arrive before the answer belong to an older stream: they are dropped.
     conn.snapshot(7, 0, b"stale");
     conn.attached(request.id, 7, 100, 30, WriterView::Watching, true, 9);
@@ -413,7 +413,7 @@ fn a_reader_that_does_not_keep_up_is_attached_again_and_its_queue_never_passes_i
     }
     // The hub asks for a fresh attach instead of buffering.
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 3, tail: None });
+    assert_eq!(request.op, Op::Attach { session: 3, tail: None, resume: None });
     let stats = hub.stats();
     assert!(stats.overflows >= 1, "{stats:?}");
     assert!(stats.queue_high_water <= bound as u64, "the queue passed its bound: {stats:?}");
@@ -485,14 +485,14 @@ fn input_is_sent_while_this_client_writes_and_dropped_before_it_is_sent_when_it_
     let got = conn.drain(Duration::from_millis(300));
     assert_eq!(got, vec![Got::Input { session: 3, bytes: b"ls\r".to_vec() }]);
     // Another client takes the right: the hub's view follows the server's event, and the next input is dropped unsent.
-    conn.event(Event::Writer { session: 3, state: WriterView::Watching });
+    conn.event(Event::Writer { session: 3, state: WriterView::Watching, epoch: 1 });
     let events = events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::Writer(_))));
     assert_eq!(events, vec![SubEvent::Writer(WriterView::Watching)]);
     handle.input(b"rm -rf\r").unwrap();
     assert!(conn.drain(Duration::from_millis(300)).is_empty(), "nothing was sent");
     assert_eq!(hub.stats().dropped_input_bytes, 7);
     // Input over the frame limit is split into frames of at most the limit.
-    conn.event(Event::Writer { session: 3, state: WriterView::Writing });
+    conn.event(Event::Writer { session: 3, state: WriterView::Writing, epoch: 1 });
     events_until(&sub, |e| e.iter().any(|e| matches!(e, SubEvent::Writer(WriterView::Writing))));
     let big = vec![b'a'; proto::MAX_INPUT * 2 + 5];
     handle.input(&big).unwrap();
@@ -582,7 +582,7 @@ fn a_lost_connection_is_made_again_with_a_fresh_token_and_every_subscription_is_
     assert_eq!(events, vec![SubEvent::Reconnecting { attempt: 1, of: 5, in_secs: 0 }]);
     let mut conn = device.accept();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 3, tail: Some(200) }, "the tail the last attach used");
+    assert_eq!(request.op, Op::Attach { session: 3, tail: Some(200), resume: None }, "the tail the last attach used");
     conn.attached(request.id, 3, 90, 25, WriterView::Free, false, 0);
     let events = events_until(&sub, |e| !e.is_empty());
     assert_eq!(events, vec![SubEvent::Attached { cols: 90, rows: 25, writer: WriterView::Free, more: false, snapshot: 0, again: true }]);
@@ -629,7 +629,7 @@ fn the_state_says_five_tries_three_seconds_apart_and_then_gives_up_and_waits_for
     sub.handle().retry().unwrap();
     let mut conn = device.accept();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 3, tail: None });
+    assert_eq!(request.op, Op::Attach { session: 3, tail: None, resume: None });
     conn.attached(request.id, 3, 80, 24, WriterView::Writing, false, 0);
     let events = events_until(&sub, |e| !e.is_empty());
     assert!(matches!(events[0], SubEvent::Attached { again: true, .. }), "{events:?}");
@@ -663,7 +663,7 @@ fn after_the_tries_are_used_a_call_tries_once_and_on_success_the_waiting_pane_is
     let call = std::thread::spawn(move || h.list());
     let mut conn = device.accept();
     let attach = conn.request();
-    assert_eq!(attach.op, Op::Attach { session: 3, tail: None });
+    assert_eq!(attach.op, Op::Attach { session: 3, tail: None, resume: None });
     let list = conn.request();
     assert_eq!(list.op, Op::List);
     conn.attached(attach.id, 3, 80, 24, WriterView::Writing, false, 0);
@@ -742,7 +742,7 @@ fn a_close_code_of_a_revoked_token_is_final_and_is_not_tried_again_but_a_busy_se
     assert!(matches!(events[0], SubEvent::Reconnecting { attempt: 1, .. }), "{events:?}");
     let mut conn = device.accept();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 3, tail: None });
+    assert_eq!(request.op, Op::Attach { session: 3, tail: None, resume: None });
 }
 
 /// The silence bound of the tests below, and how much later than the bound the hub may notice it.
@@ -776,7 +776,7 @@ fn a_connection_that_stays_open_and_passes_nothing_is_dropped_after_the_silence_
     // The next try finds the server, and the stream is attached again from a fresh snapshot.
     let mut conn = device.accept();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 3, tail: None });
+    assert_eq!(request.op, Op::Attach { session: 3, tail: None, resume: None });
     conn.attached(request.id, 3, 80, 24, WriterView::Writing, false, 0);
     let events = events_until(&sub, |e| !e.is_empty());
     assert!(matches!(events[0], SubEvent::Attached { again: true, .. }), "{events:?}");
@@ -843,7 +843,7 @@ fn a_beat_the_server_never_answers_ends_the_link_within_the_beat_and_its_timeout
     drop(conn);
     let mut conn = device.accept();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 3, tail: None });
+    assert_eq!(request.op, Op::Attach { session: 3, tail: None, resume: None });
     conn.attached(request.id, 3, 80, 24, WriterView::Writing, false, 0);
     let events = events_until(&sub, |e| !e.is_empty());
     assert!(matches!(events[0], SubEvent::Attached { again: true, .. }), "{events:?}");
@@ -922,7 +922,7 @@ fn disconnect_ends_every_subscription_as_signed_out_and_a_new_attach_connects_ag
     let again = hub.attach(3, None);
     let mut conn = device.accept();
     let request = conn.request();
-    assert_eq!(request.op, Op::Attach { session: 3, tail: None });
+    assert_eq!(request.op, Op::Attach { session: 3, tail: None, resume: None });
     conn.attached(request.id, 3, 80, 24, WriterView::Writing, false, 0);
     let events = events_until(&again, |e| !e.is_empty());
     assert!(matches!(events[0], SubEvent::Attached { again: false, .. }));

@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use holzwave_core::remote::hub::Endpoint;
-use holzwave_core::remote::proto::{self, Answer, ErrorWord, Event, Input, Op, Reply, Request, Stream, WriterView};
+use holzwave_core::remote::proto::{self, Answer, ErrorWord, Event, Input, Op, Reply, Request, ResumeToken, Stream, WriterView};
 use holzwave_core::server_link::{Fault, Origin, Token};
 use tungstenite::handshake::server::{ErrorResponse, Request as HttpRequest, Response};
 use tungstenite::{Message, WebSocket, http};
@@ -287,7 +287,8 @@ impl Conn {
 
     /// The answer to an attach of `session`.
     pub fn attached(&mut self, id: u64, session: u32, cols: u16, rows: u16, writer: WriterView, more: bool, snapshot: u32) {
-        self.answer(id, Answer::Attached { session, cols, rows, writer, more, snapshot });
+        let resume = ResumeToken::generate().expect("random bytes");
+        self.answer(id, Answer::Attached { session, cols, rows, writer, more, snapshot, resume, epoch: 1 });
     }
 
     pub fn event(&mut self, event: Event) {

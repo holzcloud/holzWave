@@ -12,6 +12,12 @@
 //!   big-endian `u32`, a sequence number as a big-endian `u32` and the bytes. From the client: [`TAG_INPUT`], the session and the
 //!   bytes. A snapshot chunk and a live chunk share one running sequence per attach.
 //!
+//! The resume token ([`ResumeToken`]) is how an app proves that an attach is the same attachment as an earlier one whose socket
+//! was lost. An `attach` may carry the token of the app's last `attach` answer in `resume` (32 lowercase hexadecimal
+//! characters); the `attached` answer carries a new one in `resume` and the epoch of the writer lease in `epoch` (from 1: it
+//! changes whenever the holder of the right changes), and a `writer` event carries the epoch too. The token is a bearer
+//! secret: it is single use, kept in memory only, and never printed.
+//!
 //! Every size and count has a name here. Parsing is strict: an unknown operation, an unknown or missing member, a value of the
 //! wrong type or range, and a message over its size are refused with their own [`ParseError`], and nothing here panics on any
 //! input. Nothing in this module does any input or output.
@@ -353,14 +359,17 @@ impl Eq for ResumeToken {}
 // ---------------------------------------------------------------------------------------------------------------------
 
 /// One operation of a client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
     /// The sessions of the person.
     List,
     /// A new session of this size; the client is its writer.
     New { cols: u16, rows: u16 },
-    /// Attach to a session: the screen and `tail` rows of scrollback (the server's default when `None`), then live bytes.
-    Attach { session: u32, tail: Option<u32> },
+    /// Attach to a session: the screen and `tail` rows of scrollback (the server's default when `None`), then live bytes. With
+    /// `resume`, the token of this client's last attach answer for the session, the server takes that attachment over when it
+    /// can (the same right to write, the same paste in progress); a token it cannot use is no token and the attach is an
+    /// ordinary one.
+    Attach { session: u32, tail: Option<u32>, resume: Option<ResumeToken> },
     /// Leave a session.
     Detach { session: u32 },
     /// Resize a session; only the writer may.
@@ -390,7 +399,7 @@ impl Op {
 }
 
 /// A request of a client: a number and an operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
     /// The number the answer carries, from 1 to [`MAX_ID`].
     pub id: u64,
@@ -414,6 +423,16 @@ impl Members {
                 Some(n) if n <= max => Ok(Some(n)),
                 _ => Err(ParseError::WrongType),
             },
+        }
+    }
+
+    /// An optional resume token: exactly 32 lowercase hexadecimal characters. Anything else is a wrong type, and nothing of the
+    /// value is kept in the error.
+    fn resume(&mut self) -> Result<Option<ResumeToken>, ParseError> {
+        match self.take("resume") {
+            None => Ok(None),
+            Some(Value::String(text)) => ResumeToken::parse(&text).map(Some),
+            Some(_) => Err(ParseError::WrongType),
         }
     }
 
@@ -469,7 +488,8 @@ impl Request {
                     Some(n) => u32::try_from(n).ok(),
                     None => None,
                 };
-                Op::Attach { session, tail }
+                let resume = members.resume().map_err(fail)?;
+                Op::Attach { session, tail, resume }
             }
             "detach" => Op::Detach { session: members.session(true).map_err(fail)?.unwrap_or(0) },
             "takeover" => Op::Takeover { session: members.session(true).map_err(fail)?.unwrap_or(0) },
@@ -495,25 +515,28 @@ impl Request {
         let mut map = Map::new();
         map.insert("id".into(), self.id.into());
         map.insert("op".into(), self.op.name().into());
-        match self.op {
+        match &self.op {
             Op::List | Op::Beat { session: None } => {}
             Op::New { cols, rows } => {
-                map.insert("cols".into(), cols.into());
-                map.insert("rows".into(), rows.into());
+                map.insert("cols".into(), (*cols).into());
+                map.insert("rows".into(), (*rows).into());
             }
-            Op::Attach { session, tail } => {
-                map.insert("session".into(), session.into());
+            Op::Attach { session, tail, resume } => {
+                map.insert("session".into(), (*session).into());
                 if let Some(tail) = tail {
-                    map.insert("tail".into(), tail.into());
+                    map.insert("tail".into(), (*tail).into());
+                }
+                if let Some(resume) = resume {
+                    map.insert("resume".into(), Value::String((**resume.to_hex()).to_owned()));
                 }
             }
             Op::Detach { session } | Op::Takeover { session } | Op::End { session } | Op::Beat { session: Some(session) } => {
-                map.insert("session".into(), session.into());
+                map.insert("session".into(), (*session).into());
             }
             Op::Resize { session, cols, rows } => {
-                map.insert("session".into(), session.into());
-                map.insert("cols".into(), cols.into());
-                map.insert("rows".into(), rows.into());
+                map.insert("session".into(), (*session).into());
+                map.insert("cols".into(), (*cols).into());
+                map.insert("rows".into(), (*rows).into());
             }
         }
         Value::Object(map).to_string()
@@ -577,8 +600,19 @@ pub enum Answer {
     /// A session was made and the asker is its writer.
     Created { session: u32, writer: WriterView },
     /// The attach was accepted. The client sets its grid to `cols` by `rows`, then feeds the `snapshot` bytes that follow as
-    /// binary frames, then the live bytes. `more` says that older lines exist beyond the tail that was sent.
-    Attached { session: u32, cols: u16, rows: u16, writer: WriterView, more: bool, snapshot: u32 },
+    /// binary frames, then the live bytes. `more` says that older lines exist beyond the tail that was sent. `resume` is the
+    /// token for this client's next attach of the session (the one it used is spent), and `epoch` is the epoch of the lease
+    /// (1 to `u32::MAX`; it changes whenever the holder of the right changes).
+    Attached {
+        session: u32,
+        cols: u16,
+        rows: u16,
+        writer: WriterView,
+        more: bool,
+        snapshot: u32,
+        resume: ResumeToken,
+        epoch: u32,
+    },
     /// Done: a detach, a resize, a takeover, a beat or an end.
     Done,
 }
@@ -586,8 +620,9 @@ pub enum Answer {
 /// Something the server tells on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
-    /// This client's own view of the right to write changed.
-    Writer { session: u32, state: WriterView },
+    /// This client's own view of the right to write changed. `epoch` is the lease's epoch after the change: it differs from
+    /// the one before whenever the holder of the right changed.
+    Writer { session: u32, state: WriterView, epoch: u32 },
     /// The program ended, with its status when it could be read.
     Exited { session: u32, code: Option<u32> },
     /// The stream of this client for the session was lost: attach again.
@@ -647,6 +682,8 @@ struct AttachedBody {
     writer: WriterView,
     more: bool,
     snapshot: u32,
+    resume: String,
+    epoch: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -686,7 +723,7 @@ struct ErrText {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "lowercase", deny_unknown_fields)]
 enum EventText {
-    Writer { session: u32, state: WriterView },
+    Writer { session: u32, state: WriterView, epoch: u32 },
     Exited { session: u32, code: Option<u32> },
     Resync { session: u32 },
     Size { session: u32, cols: u16, rows: u16 },
@@ -696,7 +733,7 @@ enum EventText {
 impl From<Event> for EventText {
     fn from(event: Event) -> EventText {
         match event {
-            Event::Writer { session, state } => EventText::Writer { session, state },
+            Event::Writer { session, state, epoch } => EventText::Writer { session, state, epoch },
             Event::Exited { session, code } => EventText::Exited { session, code },
             Event::Resync { session } => EventText::Resync { session },
             Event::Size { session, cols, rows } => EventText::Size { session, cols, rows },
@@ -708,7 +745,7 @@ impl From<Event> for EventText {
 impl From<EventText> for Event {
     fn from(event: EventText) -> Event {
         match event {
-            EventText::Writer { session, state } => Event::Writer { session, state },
+            EventText::Writer { session, state, epoch } => Event::Writer { session, state, epoch },
             EventText::Exited { session, code } => Event::Exited { session, code },
             EventText::Resync { session } => Event::Resync { session },
             EventText::Size { session, cols, rows } => Event::Size { session, cols, rows },
@@ -739,14 +776,18 @@ impl Reply {
                     Answer::Created { session, writer } => {
                         OkBody::Created(CreatedBody { session: *session, writer: *writer })
                     }
-                    Answer::Attached { session, cols, rows, writer, more, snapshot } => OkBody::Attached(AttachedBody {
-                        session: *session,
-                        cols: *cols,
-                        rows: *rows,
-                        writer: *writer,
-                        more: *more,
-                        snapshot: *snapshot,
-                    }),
+                    Answer::Attached { session, cols, rows, writer, more, snapshot, resume, epoch } => {
+                        OkBody::Attached(AttachedBody {
+                            session: *session,
+                            cols: *cols,
+                            rows: *rows,
+                            writer: *writer,
+                            more: *more,
+                            snapshot: *snapshot,
+                            resume: (**resume.to_hex()).to_owned(),
+                            epoch: *epoch,
+                        })
+                    }
                     Answer::Done => OkBody::Done(DoneBody {}),
                 };
                 serde_json::to_string(&OkText { id: *id, ok })
@@ -782,14 +823,23 @@ impl Reply {
             let answer = match ok.ok {
                 OkBody::List(body) if body.sessions.len() <= MAX_LISTED => Answer::List(body.sessions),
                 OkBody::List(_) => return Err(ParseError::TooLarge),
-                OkBody::Attached(b) => Answer::Attached {
-                    session: b.session,
-                    cols: b.cols,
-                    rows: b.rows,
-                    writer: b.writer,
-                    more: b.more,
-                    snapshot: b.snapshot,
-                },
+                OkBody::Attached(b) => {
+                    // The epoch of a lease is never 0, and the token is exactly its text: a server that says otherwise
+                    // broke a rule of the vocabulary.
+                    if b.epoch == 0 {
+                        return Err(ParseError::WrongType);
+                    }
+                    Answer::Attached {
+                        session: b.session,
+                        cols: b.cols,
+                        rows: b.rows,
+                        writer: b.writer,
+                        more: b.more,
+                        snapshot: b.snapshot,
+                        resume: ResumeToken::parse(&b.resume)?,
+                        epoch: b.epoch,
+                    }
+                }
                 OkBody::Created(b) => Answer::Created { session: b.session, writer: b.writer },
                 OkBody::Done(_) => Answer::Done,
             };
@@ -925,13 +975,21 @@ impl<'a> Input<'a> {
 mod tests {
     use super::*;
 
+    const TOKEN: &str = "00112233445566778899aabbccddeeff";
+
+    fn token() -> ResumeToken {
+        ResumeToken::parse(TOKEN).expect("a token")
+    }
+
     fn requests() -> Vec<Request> {
         let ops = [
             Op::List,
             Op::New { cols: 80, rows: 24 },
-            Op::Attach { session: 3, tail: None },
-            Op::Attach { session: 3, tail: Some(200) },
-            Op::Attach { session: u32::MAX, tail: Some(MAX_TAIL) },
+            Op::Attach { session: 3, tail: None, resume: None },
+            Op::Attach { session: 3, tail: Some(200), resume: None },
+            Op::Attach { session: u32::MAX, tail: Some(MAX_TAIL), resume: None },
+            Op::Attach { session: 3, tail: None, resume: Some(token()) },
+            Op::Attach { session: 3, tail: Some(0), resume: Some(token()) },
             Op::Detach { session: 3 },
             Op::Resize { session: 3, cols: MIN_COLS, rows: MAX_DIM },
             Op::Takeover { session: 3 },
@@ -950,6 +1008,23 @@ mod tests {
         }
         let largest = Request { id: MAX_ID, op: Op::List };
         assert_eq!(Request::parse(&largest.encode()), Ok(largest));
+    }
+
+    #[test]
+    fn an_attach_parses_with_and_without_a_resume_token_and_the_text_carries_it_in_hex() {
+        let without = Request::parse(r#"{"id":4,"op":"attach","session":3}"#).expect("without");
+        assert_eq!(without.op, Op::Attach { session: 3, tail: None, resume: None });
+        let with = Request::parse(&format!(r#"{{"id":4,"op":"attach","session":3,"tail":9,"resume":"{TOKEN}"}}"#)).expect("with");
+        assert_eq!(with.op, Op::Attach { session: 3, tail: Some(9), resume: Some(token()) });
+        let text = with.encode();
+        assert!(text.contains(&format!(r#""resume":"{TOKEN}""#)), "{text}");
+        // The token's text makes the largest request a few bytes longer and no more: the bound holds.
+        let largest = Request { id: MAX_ID, op: Op::Attach { session: u32::MAX, tail: Some(MAX_TAIL), resume: Some(token()) } };
+        assert!(largest.encode().len() < MAX_TEXT / 8, "{}", largest.encode().len());
+        assert_eq!(Request::parse(&largest.encode()), Ok(largest));
+        // What is printed of a request holds the marker and not the token.
+        let printed = format!("{with:?}");
+        assert!(printed.contains("ResumeToken(..)") && !printed.contains("0011") && !printed.contains("eeff"), "{printed}");
     }
 
     #[test]
@@ -994,6 +1069,16 @@ mod tests {
             (r#"{"id":1,"op":"new","cols":70000,"rows":24}"#, ParseError::WrongType, 1),
             (r#"{"id":1,"op":"attach","session":3,"tail":1000001}"#, ParseError::TailTooLarge, 1),
             (r#"{"id":1,"op":"beat","session":0}"#, ParseError::BadSession, 1),
+            // A resume token is exactly 32 lowercase hexadecimal characters, and the refusal says nothing of the value.
+            (r#"{"id":1,"op":"attach","session":3,"resume":"00112233445566778899AABBCCDDEEFF"}"#, ParseError::WrongType, 1),
+            (r#"{"id":1,"op":"attach","session":3,"resume":"00112233445566778899aabbccddeef"}"#, ParseError::WrongType, 1),
+            (r#"{"id":1,"op":"attach","session":3,"resume":"00112233445566778899aabbccddeeff0"}"#, ParseError::WrongType, 1),
+            (r#"{"id":1,"op":"attach","session":3,"resume":"00112233445566778899aabbccddeefg"}"#, ParseError::WrongType, 1),
+            (r#"{"id":1,"op":"attach","session":3,"resume":""}"#, ParseError::WrongType, 1),
+            (r#"{"id":1,"op":"attach","session":3,"resume":null}"#, ParseError::WrongType, 1),
+            (r#"{"id":1,"op":"attach","session":3,"resume":7}"#, ParseError::WrongType, 1),
+            (r#"{"id":1,"op":"attach","session":3,"resume":["00112233445566778899aabbccddeeff"]}"#, ParseError::WrongType, 1),
+            (r#"{"id":1,"op":"detach","session":3,"resume":"00112233445566778899aabbccddeeff"}"#, ParseError::UnknownMember, 1),
         ];
         for (text, error, id) in cases {
             assert_eq!(refused(text), Rejected { id, error }, "{text}");
@@ -1059,12 +1144,27 @@ mod tests {
                     writer: WriterView::Watching,
                     more: true,
                     snapshot: 4_194_304,
+                    resume: token(),
+                    epoch: 1,
+                }),
+            },
+            Reply::Answer {
+                id: 4,
+                result: Ok(Answer::Attached {
+                    session: u32::MAX,
+                    cols: MIN_COLS,
+                    rows: MAX_DIM,
+                    writer: WriterView::Writing,
+                    more: false,
+                    snapshot: 0,
+                    resume: ResumeToken::from_bytes([0xff; RESUME_BYTES]),
+                    epoch: u32::MAX,
                 }),
             },
             Reply::Answer { id: 5, result: Ok(Answer::Done) },
-            Reply::Event(Event::Writer { session: 9, state: WriterView::Free }),
-            Reply::Event(Event::Writer { session: 9, state: WriterView::Writing }),
-            Reply::Event(Event::Writer { session: 9, state: WriterView::Watching }),
+            Reply::Event(Event::Writer { session: 9, state: WriterView::Free, epoch: 1 }),
+            Reply::Event(Event::Writer { session: 9, state: WriterView::Writing, epoch: 7 }),
+            Reply::Event(Event::Writer { session: 9, state: WriterView::Watching, epoch: u32::MAX }),
             Reply::Event(Event::Exited { session: 9, code: Some(0) }),
             Reply::Event(Event::Exited { session: 9, code: None }),
             Reply::Event(Event::Resync { session: 9 }),
@@ -1092,8 +1192,25 @@ mod tests {
             r#"{"id":5,"err":"not_found"}"#
         );
         assert_eq!(
-            Reply::Event(Event::Writer { session: 4, state: WriterView::Free }).encode(),
-            r#"{"event":"writer","session":4,"state":"free"}"#
+            Reply::Event(Event::Writer { session: 4, state: WriterView::Free, epoch: 3 }).encode(),
+            r#"{"event":"writer","session":4,"state":"free","epoch":3}"#
+        );
+        assert_eq!(
+            Reply::Answer {
+                id: 2,
+                result: Ok(Answer::Attached {
+                    session: 4,
+                    cols: 80,
+                    rows: 24,
+                    writer: WriterView::Writing,
+                    more: false,
+                    snapshot: 5,
+                    resume: token(),
+                    epoch: 2,
+                })
+            }
+            .encode(),
+            format!(r#"{{"id":2,"ok":{{"session":4,"cols":80,"rows":24,"writer":"writing","more":false,"snapshot":5,"resume":"{TOKEN}","epoch":2}}}}"#)
         );
         assert_eq!(
             Reply::Event(Event::Exited { session: 4, code: None }).encode(),
@@ -1127,6 +1244,17 @@ mod tests {
             (r#"{"event":"resync","session":0}"#, ParseError::BadSession),
             (r#"{"event":"resync","session":1,"x":1}"#, ParseError::WrongType),
             (r#"{"event":"writer","session":1,"state":"typing"}"#, ParseError::WrongType),
+            // The writer event and the attach answer have their new members, and no other form.
+            (r#"{"event":"writer","session":1,"state":"free"}"#, ParseError::WrongType),
+            (r#"{"event":"writer","session":1,"state":"free","epoch":-1}"#, ParseError::WrongType),
+            (r#"{"event":"writer","session":1,"state":"free","epoch":4294967296}"#, ParseError::WrongType),
+            (r#"{"id":1,"ok":{"session":4,"cols":80,"rows":24,"writer":"writing","more":false,"snapshot":5}}"#, ParseError::WrongType),
+            (r#"{"id":1,"ok":{"session":4,"cols":80,"rows":24,"writer":"writing","more":false,"snapshot":5,"epoch":1}}"#, ParseError::WrongType),
+            (r#"{"id":1,"ok":{"session":4,"cols":80,"rows":24,"writer":"writing","more":false,"snapshot":5,"resume":"00112233445566778899aabbccddeeff"}}"#, ParseError::WrongType),
+            (r#"{"id":1,"ok":{"session":4,"cols":80,"rows":24,"writer":"writing","more":false,"snapshot":5,"resume":"00112233445566778899aabbccddeeff","epoch":0}}"#, ParseError::WrongType),
+            (r#"{"id":1,"ok":{"session":4,"cols":80,"rows":24,"writer":"writing","more":false,"snapshot":5,"resume":"00112233445566778899AABBCCDDEEFF","epoch":1}}"#, ParseError::WrongType),
+            (r#"{"id":1,"ok":{"session":4,"cols":80,"rows":24,"writer":"writing","more":false,"snapshot":5,"resume":null,"epoch":1}}"#, ParseError::WrongType),
+            (r#"{"id":1,"ok":{"session":4,"cols":80,"rows":24,"writer":"writing","more":false,"snapshot":5,"resume":"00112233445566778899aabbccddeeff","epoch":1,"x":1}}"#, ParseError::WrongType),
             (r#"{"id":1}"#, ParseError::MissingOp),
             ("[]", ParseError::NotObject),
             ("nope", ParseError::NotJson),
@@ -1268,6 +1396,27 @@ mod tests {
         let first = ResumeToken::parse("10112233445566778899aabbccddeeff").expect("a token");
         let last = ResumeToken::parse("00112233445566778899aabbccddeefe").expect("a token");
         assert!(token == same && token != first && token != last);
+    }
+
+    #[test]
+    fn what_is_printed_of_an_attach_answer_holds_the_marker_of_the_token_and_never_its_text() {
+        let reply = Reply::Answer {
+            id: 4,
+            result: Ok(Answer::Attached {
+                session: 9,
+                cols: 80,
+                rows: 24,
+                writer: WriterView::Writing,
+                more: false,
+                snapshot: 0,
+                resume: token(),
+                epoch: 2,
+            }),
+        };
+        for printed in [format!("{reply:?}"), format!("{reply:#?}")] {
+            assert!(printed.contains("ResumeToken(..)"), "{printed}");
+            assert!(!printed.contains("0011") && !printed.contains("eeff"), "{printed}");
+        }
     }
 
     #[test]

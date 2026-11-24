@@ -216,8 +216,8 @@ pub trait Attachment: Send + Sync {
     fn snapshot_chunk(&self, session: u32, seq: u32, bytes: &[u8]) -> bool;
     /// The next bytes the program wrote, `seq` continuing the count of the snapshot. `false` when they cannot be taken.
     fn live(&self, session: u32, seq: u32, bytes: &[u8]) -> bool;
-    /// This attachment's own view of the right to write changed.
-    fn writer(&self, session: u32, state: WriterState);
+    /// This attachment's own view of the right to write changed; `epoch` is the lease's epoch after the change.
+    fn writer(&self, session: u32, state: WriterState, epoch: u32);
     /// The grid of the session changed.
     fn size(&self, session: u32, cols: u16, rows: u16);
     /// The program ended, with its exit status when it could be read.
@@ -530,7 +530,7 @@ impl Attachment for Away {
     fn live(&self, _: u32, _: u32, _: &[u8]) -> bool {
         false
     }
-    fn writer(&self, _: u32, _: WriterState) {}
+    fn writer(&self, _: u32, _: WriterState, _: u32) {}
     fn size(&self, _: u32, _: u16, _: u16) {}
     fn exited(&self, _: u32, _: Option<u32>) {}
     fn resync(&self, _: u32) {}
@@ -948,7 +948,7 @@ fn tell_writers(session: &Session, changes: &Changes) {
     for (who, state) in changes {
         // A suspended member has no socket to tell.
         if let Some(member) = session.members.iter().find(|m| m.who == *who && !m.suspended) {
-            member.att.writer(session.id, *state);
+            member.att.writer(session.id, *state, session.lease.epoch());
         }
     }
 }
@@ -1500,7 +1500,7 @@ mod tests {
         fn live(&self, _: u32, _: u32, _: &[u8]) -> bool {
             true
         }
-        fn writer(&self, _: u32, _: WriterState) {}
+        fn writer(&self, _: u32, _: WriterState, _: u32) {}
         fn size(&self, _: u32, _: u16, _: u16) {}
         fn exited(&self, _: u32, _: Option<u32>) {}
         fn resync(&self, _: u32) {}
