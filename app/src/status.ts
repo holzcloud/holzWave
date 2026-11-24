@@ -179,6 +179,9 @@ function renderPhoneNotice(): void {
   setText(text, notice);
 }
 
+// A change of the layout class shows the notice line or takes it away at once (a phone has the line, every other class the segment).
+document.addEventListener("hw:layout", renderStatus);
+
 /** The segments of the context, after the pane count: a button with the text, and the words `PRODUCTION` and `stale` as parts of its own. */
 function renderContext(): void {
   const want = contextSegments();

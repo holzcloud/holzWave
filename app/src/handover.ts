@@ -11,7 +11,7 @@ import { ACTION_IN, ACTION_OUT, STRINGS, WARN_MARK, messageFor, parseOutcome } f
 import type { Direction, Line } from "./handoverstate.js";
 import { registerAction } from "./actions.js";
 import { call } from "./bridge.js";
-import { el, loadStyles, setText } from "./dom.js";
+import { el, loadStyles, setText, stageTop } from "./dom.js";
 import { focusInput } from "./keyboard.js";
 import { pushKeyHandler } from "./keystack.js";
 import { NOTICE_MS } from "./labels.js";
@@ -30,13 +30,13 @@ let busy = false;
 let line: HTMLElement | null = null;
 let lineTimer: ReturnType<typeof setTimeout> | undefined;
 
-/** The place of the line: over the top of the stage, where the notice of the vault is, so nothing reflows. */
+/** The place of the line: the first member of the column over the top of the stage (`stageTop`), where the notice line of a phone comes under it. */
 function place(): HTMLElement | null {
-  const stage = document.getElementById("stage");
-  if (!stage) return null;
+  const top = stageTop();
+  if (!top) return null;
   let node = document.getElementById("handover-top");
   if (!node) {
-    node = el("div", "", stage);
+    node = el("div", "", top);
     node.id = "handover-top";
   }
   return node;

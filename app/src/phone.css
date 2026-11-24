@@ -181,4 +181,8 @@
   :root #phone-sheet .phone-pill { border-color: CanvasText; }
   :root #phone-sheet .phone-pill.active { outline: 2px solid Highlight; outline-offset: -2px; }
   :root #phone-sheet .phone-sheet-close { border-top-color: Highlight; }
+  /* The notice line: a border and text in system colours; a refusal has the 2 px border of the system's highlight, and its mark and
+     underline stay. */
+  :root .phone-notice-line { border-color: CanvasText; color: CanvasText; }
+  :root .phone-notice-line[data-tone="warn"] { border-width: 2px; border-color: Highlight; }
 }
