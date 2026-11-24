@@ -412,7 +412,17 @@ failure, and binary frames with the bytes. An `attach` may carry `resume`, the t
 (exactly 32 lowercase hexadecimal characters; anything else is `bad_request`); the answer to every `attach` carries a new `resume`
 and the `epoch` of the session's write lease (a number from 1 that changes whenever the holder of the right changes), and every
 `writer` event carries the `epoch` after the change. The token is single use and memory-only on both ends, and a token the server
-cannot use is not an error: the attach is an ordinary one. It is bounded: 4 KiB for a request, 64 KiB of bytes in a frame, 32 requests waiting
+cannot use is not an error: the attach is an ordinary one. An input frame carries the session, the `epoch` of the write lease the app
+writes under, a number and the bytes. The number counts up from 1 in an attachment; the answer to every `attach` says in `next` which
+number the server expects (1 for a new attachment, the kept number for one that came back on its token). The server applies a frame only
+when its epoch is the lease's epoch now, its sender holds the right and its number is the one it expects, and then answers
+`{"event":"ack","session":n,"seq":k}`: every frame up to `k` reached the program. A number it already applied is not applied again and is
+answered with the last number it applied; a frame that comes after a missing one is not applied, and the last applied number is said once
+with `"gap":true` until the missing frame comes. A frame of another epoch, or from a pane that only watches, is dropped without an answer,
+so input written before a takeover never reaches the program after it. The frame the app sent before the numbers existed (tag 0x10) is a
+frame of an unknown kind and is dropped without an answer; a browser pane in the worker's own window does not number its input. The server
+keeps no input for this: a frame that is not applied is dropped, not stored. The app numbers its frames and goes on from the number the
+server names after a gap; it does not yet keep what it sent, so bytes a network swallowed are not sent again. It is bounded: 4 KiB for a request, 64 KiB of bytes in a frame, 32 requests waiting
 for an answer and 16 sessions attached at once, with the rate, silence and violation limits of the `limits` section that the
 page's socket has. A person reaches only their own sessions: another person's session answers `not_found` exactly as one that
 never existed. The close codes: 4401 the token was revoked or ran out or the account ended (at once when it is announced, and
