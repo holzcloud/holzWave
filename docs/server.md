@@ -408,7 +408,11 @@ behind a full-screen program. An app that cannot keep up loses its stream and ge
 **The device socket.** An app reaches its sessions over `GET /ws/device` with its device token in the `Authorization` header of
 the upgrade; a cookie is never accepted there and a device token never opens the page's socket. The socket carries text
 requests (`list`, `new`, `attach`, `detach`, `resize`, `takeover`, `end`, `beat`), answered with an id and one fixed word on
-failure, and binary frames with the bytes. It is bounded: 4 KiB for a request, 64 KiB of bytes in a frame, 32 requests waiting
+failure, and binary frames with the bytes. An `attach` may carry `resume`, the token of the app's last `attach` of that session
+(exactly 32 lowercase hexadecimal characters; anything else is `bad_request`); the answer to every `attach` carries a new `resume`
+and the `epoch` of the session's write lease (a number from 1 that changes whenever the holder of the right changes), and every
+`writer` event carries the `epoch` after the change. The token is single use and memory-only on both ends, and a token the server
+cannot use is not an error: the attach is an ordinary one. It is bounded: 4 KiB for a request, 64 KiB of bytes in a frame, 32 requests waiting
 for an answer and 16 sessions attached at once, with the rate, silence and violation limits of the `limits` section that the
 page's socket has. A person reaches only their own sessions: another person's session answers `not_found` exactly as one that
 never existed. The close codes: 4401 the token was revoked or ran out or the account ended (at once when it is announced, and
@@ -449,7 +453,8 @@ The worker renders a browser pane of a session with an engine of its own beside 
 engines in the worker; that cost was not measured.
 
 Tested against the real server in one process, with real shells on real pseudo terminals: the device socket and its bounds,
-the writer rules, revocation, the switch and the shared socket cap (`server/tests/remote_sessions.rs`), an app's pane against a
+the writer rules (a writer whose socket was cut included: it writes again on its token inside its 30 seconds, and finds the right
+free after them), revocation, the switch and the shared socket cap (`server/tests/remote_sessions.rs`), an app's pane against a
 real session including a cut of the network (`server/tests/remote_client.rs`, `server/tests/remote_host.rs`), the browser's
 panes (`server/tests/session_local.rs`, `server/tests/session_web.rs`) and a real browser against the real server
 (`app/tests/web/sessions.test.mjs`). The silence rule and the proxy's answers are tested against a scripted server
@@ -499,6 +504,11 @@ Build the new image from the new source, back up as above, then `docker compose 
 stops the old server before it starts the new one, and a restart ends every pane and every remote session. Read the release
 notes first; the guide for
 a version states what changed in the files and the keys.
+
+**An app and a server must be of the same release.** The device socket has no version negotiation and its messages are parsed
+strictly (an unknown member is refused, a missing one too), so an app and a server of different releases may not understand each
+other: for example the attach answer of this release carries a `resume` token and an `epoch` that an older app refuses, and an older
+server does not send them. Update the server and the apps together.
 
 ## Compression
 

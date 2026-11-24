@@ -413,6 +413,131 @@ async fn the_holder_leaving_by_detach_frees_the_right_at_once_and_closing_its_so
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// A writer whose socket is cut comes back with its token
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// What a device that was cut left behind: its credentials, the session, and what its last attach answer said.
+struct Cut {
+    token: String,
+    session: u32,
+    resume: ResumeToken,
+    epoch: u32,
+}
+
+/// A writer (a device that makes a session, attaches to it and writes) and a watcher of the same person; the writer's socket
+/// is then closed without a detach. Returns the watcher, what the writer left behind, and the person's environment pieces.
+async fn cut_writer(env: &WsEnv, alice: &Person) -> (Device, Cut) {
+    let minted = mint(env, alice, "writer");
+    let mut writer = Device::connect(env, &minted.token).await;
+    let mut watcher = device_of(env, alice, "watcher").await;
+    let session = writer.new_session().await;
+    let Answer::Attached { resume, epoch, writer: view, .. } = writer.attach_with(session, None, None).await else {
+        panic!("attached")
+    };
+    assert_eq!(view, WriterView::Writing);
+    watcher.attach(session, None).await;
+    writer.type_into(session, SUM.as_bytes()).await;
+    writer.until_live(session, "hw-42", SHELL).await;
+    // The socket is closed with no `detach`: a network that went away.
+    writer.ws.send_close(1000).await;
+    drop(writer);
+    (watcher, Cut { token: minted.token, session, resume, epoch })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_writer_whose_socket_was_cut_attaches_again_inside_the_time_with_its_token_and_writes_without_a_takeover() {
+    // Four seconds of grace, long enough to come back inside it and short enough to wait for it in the next tests.
+    let env = env_with(WsOptions { supervisor: Some(writer_timeout(4_000)), ..WsOptions::default() }).await;
+    let alice = env.person("alice");
+    let (mut watcher, cut) = cut_writer(&env, &alice).await;
+
+    // The watcher is told nothing while the writer is away.
+    assert!(
+        !watcher.eventually(Duration::from_millis(700), |d| !d.writer_words(cut.session).is_empty()).await,
+        "no change of view while the holder's time lasts: {:?}",
+        watcher.writer_words(cut.session)
+    );
+
+    // A new socket of the same device attaches with the token of the last answer.
+    let mut back = Device::connect(&env, &cut.token).await;
+    let Answer::Attached { resume, epoch, writer, .. } =
+        back.attach_with(cut.session, None, Some(cut.resume.clone())).await
+    else {
+        panic!("attached")
+    };
+    assert_eq!(writer, WriterView::Writing, "the right is still its own");
+    assert_eq!(epoch, cut.epoch, "the holder did not change");
+    assert!(resume != cut.resume, "the token is used up and a new one is given");
+
+    // Typed input reaches the shell, and the watcher never saw the right go.
+    back.type_into(cut.session, b"echo hw-back$((20+1))\r").await;
+    back.until_live(cut.session, "hw-back21", SHELL).await;
+    watcher.until_live(cut.session, "hw-back21", SHELL).await;
+    assert!(watcher.writer_words(cut.session).is_empty(), "never told free: {:?}", watcher.writer_words(cut.session));
+    // The token that was used is no token any more: the same attach again is only a watcher of someone else's right.
+    let mut again = device_of(&env, &alice, "again").await;
+    let Answer::Attached { writer, .. } = again.attach_with(cut.session, None, Some(cut.resume.clone())).await else {
+        panic!("attached")
+    };
+    assert_eq!(writer, WriterView::Watching);
+    assert!(back.strange.is_empty() && watcher.strange.is_empty() && again.strange.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_writer_whose_socket_was_cut_and_comes_back_after_the_time_finds_the_right_free_and_the_watcher_was_told() {
+    let env = env_with(WsOptions { supervisor: Some(writer_timeout(1_500)), ..WsOptions::default() }).await;
+    let alice = env.person("alice");
+    let (mut watcher, cut) = cut_writer(&env, &alice).await;
+
+    // The silence of the cut socket frees the right, and the watcher is told; it does not move to the watcher.
+    assert_eq!(writer_events(&mut watcher, cut.session, 1).await, ["free"]);
+    let freed = watcher.writer_epochs(cut.session);
+    assert_ne!(freed[0], cut.epoch, "the holder changed");
+
+    let mut back = Device::connect(&env, &cut.token).await;
+    let Answer::Attached { writer, epoch, resume, .. } = back.attach_with(cut.session, None, Some(cut.resume.clone())).await else {
+        panic!("attached")
+    };
+    assert_eq!(writer, WriterView::Free, "the old token buys nothing after the time");
+    assert_eq!(epoch, freed[0], "the epoch of the moment, the one the watcher was told");
+    assert!(resume != cut.resume);
+    // Typing is dropped until a takeover.
+    back.type_into(cut.session, b"echo hw-lost$((30+1))\r").await;
+    assert!(
+        !back.eventually(Duration::from_millis(1_000), |d| d.live_text(cut.session).contains("hw-lost31")).await,
+        "free means nobody types"
+    );
+    back.ok(Op::Takeover { session: cut.session }).await;
+    back.type_into(cut.session, b"echo hw-took$((30+2))\r").await;
+    back.until_live(cut.session, "hw-took32", SHELL).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_takeover_while_the_writer_is_away_ends_its_grace_and_its_resume_only_watches_with_the_new_epoch() {
+    let env = env_with(WsOptions { supervisor: Some(writer_timeout(10_000)), ..WsOptions::default() }).await;
+    let alice = env.person("alice");
+    let (mut watcher, cut) = cut_writer(&env, &alice).await;
+
+    watcher.ok(Op::Takeover { session: cut.session }).await;
+    assert_eq!(writer_events(&mut watcher, cut.session, 1).await, ["writing"]);
+    let new_epoch = watcher.writer_epochs(cut.session)[0];
+    assert_ne!(new_epoch, cut.epoch, "the holder changed");
+
+    let mut back = Device::connect(&env, &cut.token).await;
+    let Answer::Attached { writer, epoch, .. } = back.attach_with(cut.session, None, Some(cut.resume.clone())).await else {
+        panic!("attached")
+    };
+    assert_eq!(writer, WriterView::Watching, "the right moved to the taker");
+    assert_eq!(epoch, new_epoch);
+    // Input of the one that came back never lands; the taker's does.
+    back.type_into(cut.session, b"echo hw-no$((40+1))\r").await;
+    watcher.type_into(cut.session, b"echo hw-yes$((40+2))\r").await;
+    watcher.until_live(cut.session, "hw-yes42", SHELL).await;
+    assert!(!watcher.live_text(cut.session).contains("hw-no41"), "input never lands for a holder whose right moved");
+    assert!(back.strange.is_empty() && watcher.strange.is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The end of a session
 // ---------------------------------------------------------------------------------------------------------------------
 
