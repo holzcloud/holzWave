@@ -1,7 +1,8 @@
 // Touch gestures on the phone and tablet layouts (docs/design.md section 6.6). A touch pointer is not a mouse there: one finger
 // scrolls the history of a pane (the same `wheel` command the desktop wheel sends, with a short fling after the finger lifts), a long
 // press of half a second selects the word under the finger through the core's word selection and shows two handles and a menu with
-// `Copy` and `Paste`, and two fingers pinching change the UI scale of this device, with a label for as long as they move and 800 ms
+// `Copy` and `Paste` (on an `https`, `http` or `mailto` link it selects the whole link and the menu has `Open` first, which goes through
+// the same opener as hint mode, docs/design.md 6.6 and 6.31; a tap never opens a link), and two fingers pinching change the UI scale of this device, with a label for as long as they move and 800 ms
 // after. A drag never selects text; the selection is made by a long press and moved by its handles.
 //
 // This module takes every `touch` pointer event first (pointer.ts hands it a place at the top of its handler stack while the page is a
@@ -19,6 +20,8 @@ import { el, loadStyles } from "./dom.js";
 import { visibleSpans } from "./frames.js";
 import { gridRect } from "./geometry.js";
 import { focusInput } from "./keyboard.js";
+import { activateLink, pagePolicy, touchLinkAt } from "./links.js";
+import type { Target } from "./links.js";
 import { layoutNow } from "./phone.js";
 import { refreshScale, scaleInForce, storeDeviceScale } from "./settings.js";
 import { onOverlayRender } from "./overlay.js";
@@ -275,10 +278,35 @@ function longPress(p: Press): void {
   window.clearTimeout(p.timer);
   if (p.mode !== "pending" || p.pane === null || p.cell === null || !host) return;
   p.mode = "long";
-  active = { pane: p.pane, seen: false };
+  const link = linkUnder(p, p.pane, p.cell);
+  active = { pane: p.pane, seen: false, link };
   coreAnchor = null;
   signature = "";
+  if (link) {
+    // The selection shows exactly what Open would open: the link's own cells, not the core's word (which splits an address at `:`).
+    void host.select(p.pane, { kind: "begin", x: link.target.startCol, y: link.row, mode: "cell" });
+    void host.select(p.pane, { kind: "extend", x: link.target.endCol, y: link.row });
+    return;
+  }
   void host.select(p.pane, { kind: "begin", x: p.cell[0], y: p.cell[1], mode: "word" });
+}
+
+/**
+ * The link a long press at the press point may offer to open, when the point lies inside the cells of its pane's grid (not the header or
+ * the padding) and the cell holds an `https`, `http` or `mailto` link (docs/design.md 6.6); null otherwise.
+ */
+function linkUnder(p: Press, pane: number, cell: Cell): { target: Target; row: number } | null {
+  const unit = unitOf(pane);
+  const mirror = state.frames.get(pane);
+  const rect = document.getElementById("term")?.getBoundingClientRect();
+  if (!unit || !mirror || !rect) return null;
+  const m = state.metrics;
+  const g = gridRect(m, unit, state.headerPx);
+  const x = p.x0 - rect.left - g.x;
+  const y = p.y0 - rect.top - g.y;
+  if (x < 0 || y < 0 || x >= mirror.cols * m.cellW || y >= mirror.rows * m.cellH) return null;
+  const target = touchLinkAt(mirror, cell[1], cell[0], pagePolicy(pane));
+  return target ? { target, row: cell[1] } : null;
 }
 
 // ---- scrolling and the fling -----------------------------------------------------------------------------
@@ -438,7 +466,7 @@ function dropLabel(): void {
  * A long press started a selection in `pane`. `seen` is set once a frame has shown its spans: the selection is over when they are gone
  * again (cleared, scrolled out of the viewport, or ended by the program), and the handles and the menu go with it.
  */
-let active: { pane: number; seen: boolean } | null = null;
+let active: { pane: number; seen: boolean; link: { target: Target; row: number } | null } | null = null;
 
 /**
  * The cell the core holds as the anchor of the selection, when this module knows it: the start of the word after a long press, the fixed
@@ -453,6 +481,8 @@ interface Ui {
   menu: HTMLElement;
   copy: HTMLButtonElement;
   paste: HTMLButtonElement;
+  /** `Open`, first in the menu while the selection is a link; absent (not hidden) otherwise, so a plain selection has two buttons. */
+  open: HTMLButtonElement | null;
 }
 
 let ui: Ui | null = null;
@@ -492,8 +522,24 @@ function build(): Ui | null {
   menu.addEventListener("pointerdown", (e) => e.preventDefault());
   copy.addEventListener("click", onCopy);
   paste.addEventListener("click", onPaste);
-  ui = { layer, start, end, menu, copy, paste };
+  ui = { layer, start, end, menu, copy, paste, open: null };
   return ui;
+}
+
+/** Give the menu its `Open` button while the selection is a link and take it away when it is not; the menu is placed after this. */
+function syncOpen(parts: Ui): void {
+  const want = active?.link != null;
+  if (want && !parts.open) {
+    const open = el("button", "touch-button");
+    open.type = "button";
+    open.textContent = MENU_WORDS.open;
+    open.addEventListener("click", onOpen);
+    parts.menu.insertBefore(open, parts.copy);
+    parts.open = open;
+  } else if (!want && parts.open) {
+    parts.open.remove();
+    parts.open = null;
+  }
 }
 
 function dropSelectionUi(): void {
@@ -530,6 +576,27 @@ function onCopy(): void {
   clearSelection(null);
   focusInput();
 }
+
+/**
+ * Open: the link is looked up again in the current frame at the selection's ends, and only the same address at the same columns on the same
+ * row is opened, through the opener that hint mode uses (its question and its refusal included). The selection is cleared either way, and
+ * the focus stays where it is: the system's app or the question takes over.
+ */
+function onOpen(): void {
+  const a = active;
+  const kept = a?.link ?? null;
+  const ends = a ? endsOf(a.pane) : null;
+  const mirror = a ? state.frames.get(a.pane) : undefined;
+  let found: Target | null = null;
+  if (a && kept && ends && mirror && ends[0][1] === kept.row && ends[1][1] === kept.row && ends[0][0] === kept.target.startCol && ends[1][0] === kept.target.endCol) {
+    const now = touchLinkAt(mirror, kept.row, ends[0][0], pagePolicy(a.pane));
+    if (now && sameLink(now, kept.target)) found = now;
+  }
+  clearSelection(null);
+  if (a && found) activateLink(a.pane, found);
+}
+
+const sameLink = (a: Target, b: Target): boolean => a.text === b.text && a.startCol === b.startCol && a.endCol === b.endCol;
 
 function onPaste(): void {
   runAction("edit.paste"); // the desktop's paste, with its confirmation, size limit and bracketed paste
@@ -571,11 +638,12 @@ function refreshSelection(): void {
   const stage = { w: m.width, h: m.height };
   // While a handle is dragged the one under the finger takes the role its cell has against the fixed end.
   const draggedIsEnd = drag && drag.moved ? !isBefore(drag.extent, drag.anchor) : null;
-  const sig = `${ends[0]}|${ends[1]}|${geo.originX},${geo.originY},${geo.cellW},${geo.cellH}|${stage.w},${stage.h}|${draggedIsEnd}`;
+  const sig = `${ends[0]}|${ends[1]}|${geo.originX},${geo.originY},${geo.cellW},${geo.cellH}|${stage.w},${stage.h}|${draggedIsEnd}|${active.link !== null}`;
   if (sig === signature) return;
   const parts = build();
   if (!parts) return;
   signature = sig;
+  syncOpen(parts); // before the menu is placed, so its width counts
   const boxes = handleBoxes(ends[0], ends[1], geo, stage);
   placed = { start: boxes.start, end: boxes.end, cells: ends, geo };
   let startNode = parts.start;

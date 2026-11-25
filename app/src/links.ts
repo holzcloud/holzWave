@@ -385,6 +385,25 @@ export function linkAction(target: Target, base: string | null, canReveal = true
 }
 
 /**
+ * The one link that a long press on a touch layout may offer to open at cell (`x`, `y`) of a mirror (docs/design.md 6.6 and
+ * 6.31): a link the program marked first, when the policy allows its address and its scheme is `https`, `http` or `mailto`;
+ * otherwise a printed address that a click would open. Android opens no other kind, so a `file` link, a link of another scheme,
+ * a path and a hash are never answered. A cell given by a number that is not an integer is none.
+ */
+export function touchLinkAt(mirror: PaneMirror, y: number, x: number, policy: LinkPolicy): Target | null {
+  if (!Number.isInteger(x) || !Number.isInteger(y)) return null;
+  const web = (uri: string): boolean => {
+    const m = SCHEME_OF.exec(uri);
+    return m !== null && WEB_SCHEMES.has((m[1] as string).toLowerCase()) && linkAllowed(uri, policy);
+  };
+  const marked = targetAt(osc8Targets(mirror, y, web), x);
+  if (marked) return marked;
+  if (!mirror.rows_[y]) return null;
+  const printed = targetAt(findTargets(rowCells(mirror, y)), x);
+  return printed && printed.kind === "url" && linkAction(printed, null, false)?.command === "open_url" ? printed : null;
+}
+
+/**
  * Whether the modifier of a link click is held: Cmd on macOS, Ctrl elsewhere (Ctrl+click is the menu on macOS). In the
  * browser build (`web`) either of the two.
  */

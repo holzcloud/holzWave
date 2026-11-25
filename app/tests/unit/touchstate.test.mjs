@@ -198,8 +198,9 @@ test("the menu sits 8 px above the selection, below when there is no room, and i
 });
 
 test("the words and the label are the design record's", () => {
-  assert.deepEqual({ ...MENU_WORDS }, { copy: "Copy", paste: "Paste" });
+  assert.deepEqual({ ...MENU_WORDS }, { copy: "Copy", paste: "Paste", open: "Open" });
   assert.ok(spec.includes("`Copy` and `Paste`"), "the spec names the two buttons");
+  assert.ok(spec.includes("a third 44 px button before the two, `Open`"), "the spec names the third button of a link");
   assert.ok(spec.includes("`UI scale 125 %`"), "the spec names the label");
   assert.equal(scaleLabel(125), "UI scale 125 %");
   assert.equal(scaleLabel(75), "UI scale 75 %");

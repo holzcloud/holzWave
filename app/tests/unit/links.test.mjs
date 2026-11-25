@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { applyFrame } from "../../dist/frames.js";
 import {
   cellInk, cutMiddle, cutShown, findTargets, isLinkModifier, linkAction, linkAllowed, linkTextDiffers, mergeTargets, osc8Targets,
-  targetAt,
+  targetAt, touchLinkAt,
 } from "../../dist/links.js";
 import { LINK_REFUSED, refusalSentence } from "../../dist/links.js";
 
@@ -404,4 +404,53 @@ test("linkTextDiffers: a text without a scheme is compared after the target's sc
     ["example.org", "http://Example.org/"],
   ];
   for (const [shown, target] of same) assert.equal(linkTextDiffers(shown, target), false, `${shown} over ${target} does not ask`);
+});
+
+// ---- the link a long press offers to open on a touch layout ----------------------------------------------------
+
+test("touchLinkAt: a printed https or mailto address is found inside it and nothing outside it", () => {
+  const text = "see https://example.com/a now";
+  const mirror = mirrorOf(text, []);
+  const start = text.indexOf("https");
+  const end = start + "https://example.com/a".length - 1;
+  for (const x of [start, start + 7, end]) {
+    const t = touchLinkAt(mirror, 1, x, POLICY);
+    assert.deepEqual(t && [t.kind, t.text, t.startCol, t.endCol, t.source], ["url", "https://example.com/a", start, end, undefined], `column ${x}`);
+  }
+  for (const x of [0, start - 1, end + 1, end + 3]) assert.equal(touchLinkAt(mirror, 1, x, POLICY), null, `column ${x} is outside`);
+  const mail = mirrorOf("mail mailto:me@example.org", []);
+  assert.equal(touchLinkAt(mail, 1, 8, POLICY)?.text, "mailto:me@example.org");
+});
+
+test("touchLinkAt: a printed path, a hash and another scheme are never offered", () => {
+  for (const [text, x] of [["cat /etc/hosts", 6], ["open ~/a.txt", 7], ["at deadbeef12", 5], ["get ftp://example.com/x", 8]]) {
+    assert.equal(touchLinkAt(mirrorOf(text, []), 1, x, POLICY), null, `${text} at ${x}`);
+  }
+});
+
+test("touchLinkAt: a marked web link is found with its shown text and wins over a printed address under it", () => {
+  const docs = mirrorOf("read the docs now", [[9, 12, "https://example.org/docs"]]);
+  const t = touchLinkAt(docs, 1, 10, POLICY);
+  assert.deepEqual(t && [t.source, t.text, t.shown, t.startCol, t.endCol], ["osc8", "https://example.org/docs", "docs", 9, 12]);
+  const text = "https://example.com/printed";
+  const over = mirrorOf(text, [[0, text.length - 1, "https://example.org/marked"]]);
+  assert.equal(touchLinkAt(over, 1, 3, POLICY)?.text, "https://example.org/marked", "the marked link is the one");
+});
+
+test("touchLinkAt: a marked file link, a marked link of another listed scheme, javascript and an overlong address are not offered", () => {
+  const at = (uri, policy = POLICY) => touchLinkAt(mirrorOf("click here please", [[6, 9, uri]]), 1, 7, policy);
+  assert.equal(at("file:///etc/hosts"), null, "file is on the default list but Android opens no file");
+  assert.equal(at("ssh://host/x", { ...POLICY, schemes: [...POLICY.schemes, "ssh"] }), null, "a listed scheme that is not a web one");
+  assert.equal(at("javascript:alert(1)", { ...POLICY, schemes: [...POLICY.schemes, "javascript"] }), null);
+  assert.equal(at(`https://example.org/${"a".repeat(2048)}`), null, "longer than the longest address the core opens");
+  assert.equal(at("https://example.org/ok")?.text, "https://example.org/ok", "the same row with a web link is offered");
+});
+
+test("touchLinkAt: a column or row that is not an integer, and a row nobody sent, give null", () => {
+  const mirror = mirrorOf("https://example.com/a", []);
+  assert.equal(touchLinkAt(mirror, 1, 2.5, POLICY), null);
+  assert.equal(touchLinkAt(mirror, 1.5, 2, POLICY), null);
+  assert.equal(touchLinkAt(mirror, 1, Number.NaN, POLICY), null);
+  assert.equal(touchLinkAt(mirror, 2, 2, POLICY), null, "a row without text");
+  assert.equal(touchLinkAt(mirror, 9, 2, POLICY), null, "a row outside the grid");
 });

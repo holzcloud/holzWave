@@ -35,8 +35,11 @@ export const STEM_REACH_PX = 2;
 /** How long the pinch label stays after the last finger lifted. */
 export const LABEL_HOLD_MS = 800;
 
-/** The words of the menu and of the label, exactly the spec's (a unit test holds them to docs/design.md). */
-export const MENU_WORDS = { copy: "Copy", paste: "Paste" } as const;
+/**
+ * The words of the menu and of the label, exactly the spec's (a unit test holds them to docs/design.md): `Copy` and `Paste`, and the
+ * third word `Open`, first in the menu while the selection is a link.
+ */
+export const MENU_WORDS = { copy: "Copy", paste: "Paste", open: "Open" } as const;
 export const scaleLabel = (percent: number): string => `UI scale ${percent} %`;
 
 // ---- tap, long press, drag, pinch -----------------------------------------------------------------
