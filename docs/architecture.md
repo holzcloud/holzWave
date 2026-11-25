@@ -1084,9 +1084,10 @@ All of it runs locally; GitHub builds only on request.
 1. ~~Tauri 3 stability for Android, to be checked when phase 9 starts.~~ Answered on alpha.5: the app built and ran on three arm64
    emulator images (never on a phone), and the two Android bugs that were open upstream (an event emitted on the event-loop thread
    deadlocks the window thread, and reading a web view's address freezes it for ten seconds) were still open on 2026-11-06 and were not
-   triggered by any run; the app never reads that address and calls its own plugin from worker threads. alpha.6 exists since
-   2026-11-06 and was not taken: no Android file differs between the two, and it breaks window event handling that the desktop depends
-   on. What the first build needed, each one a workaround and not a fix upstream: `tauri android init` with `--skip-targets-install`
+   triggered by any run; the app never reads that address and calls its own plugin from worker threads. alpha.6 was taken on
+   2026-11-25 for its security fixes (the command line's zip, zstd and webpki updates): it moves the window and web view listeners
+   into tauri itself, the app's `Builder::on_window_event` still compiles and its tests pass, but window restore and closing and
+   reopening a window under the same label were not yet checked by hand on the new version. What the first build needed, each one a workaround and not a fix upstream: `tauri android init` with `--skip-targets-install`
    (without it the command line adds three more Rust targets); the four ABIs of the generated project cut to arm64-v8a in the
    project's own build plugin; the window restore code (it calls `maximize`, which Android does not have) and the `keyring` crate
    feature compiled out of the Android build; the Gradle flavour that the command line builds is called `universal` and holds the one
