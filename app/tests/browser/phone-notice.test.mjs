@@ -67,8 +67,9 @@ const statusShown = (page) => page.evaluate(() => getComputedStyle(document.getE
 const rowWith = (y, text, cols = 50) => ({ y, runs: [[text.padEnd(cols), cols, 0xf6efe6, 0x14091a, 0]] });
 
 /**
- * A printed address in the one pane of a phone, and `open_url` answering with `sentence` as a refusal. The address is opened by hint
- * mode and Shift plus its label (a phone with a hardware keyboard); a touch gesture for a link is not built.
+ * A printed address in the one pane of a phone, and `open_url` answering with `sentence` as a refusal. The address is opened through
+ * hint mode and Shift plus its label, the route of a phone with a hardware keyboard; the touch route (a long press and `Open`) is
+ * tested in `touch-link.test.mjs`.
  */
 async function terminalLinkCase(page, url) {
   await open(page, url);

@@ -1,5 +1,5 @@
-/* Touch gestures on the phone and tablet layouts (docs/design.md section 6.6): the selection handles, the menu with Copy and Paste, and the label
-   of a pinch. Loaded with `loadStyles("./touch.css")` by touch.ts on the Android classes only, so a desktop never fetches it. Every colour is a
+/* Touch gestures on the phone and tablet layouts (docs/design.md section 6.6): the selection handles, the menu with Copy and Paste (and Open
+   first on a link), the label of a pinch, and the buttons of the question before a link opens as 44 px targets (6.31). Loaded with `loadStyles("./touch.css")` by touch.ts on the Android classes only, so a desktop never fetches it. Every colour is a
    `--hw-*` token, every size is in rem (the UI scale moves it) except what makes up a 44 px touch target. Nothing here moves, so there is no
    motion to reduce; the menu is the one floating layer, so it alone has the shadow. */
 
@@ -41,6 +41,16 @@
 .touch-button + .touch-button { border-left: 1px solid var(--hw-line); }
 .touch-button:active { background: var(--hw-rose-wash); }
 .touch-button:focus-visible { outline: 2px solid var(--hw-ink); outline-offset: -2px; }
+
+/* ---- the question of a link that is opened by touch (docs/design.md 6.31) ------------------------------------ */
+
+/* A finger presses the question's Cancel and Open on these layouts, so each is a 44 px target. `.dlg button` unsets every property, so the
+   button gets a display that takes a minimum size; nothing else of the dialog changes. */
+:root.layout-phone .dlg-link button,
+:root.layout-tablet .dlg-link button {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: max(44px, calc(44rem / 12)); min-height: max(44px, calc(44rem / 12));
+}
 
 /* ---- the pinch label ------------------------------------------------------------------------------- */
 

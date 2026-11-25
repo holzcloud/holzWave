@@ -25,6 +25,7 @@ import type { Target } from "./links.js";
 import { layoutNow } from "./phone.js";
 import { refreshScale, scaleInForce, storeDeviceScale } from "./settings.js";
 import { onOverlayRender } from "./overlay.js";
+import { onPaneFrame } from "./scene.js";
 import { state } from "./state.js";
 import type { UnitRect, View } from "./types.js";
 import {
@@ -67,6 +68,7 @@ let host: TouchHost | null = null;
 let running = false;
 let removeHandler: (() => void) | null = null;
 let removeHook: (() => void) | null = null;
+let removeFrameHook: (() => void) | null = null;
 
 /**
  * Start following the layout class: on a phone or a tablet the touch handler is on the stack, on a desktop nothing is registered,
@@ -93,6 +95,7 @@ function start(): void {
   void loadStyles("./touch.css").catch(() => {});
   removeHandler = host.push(onPointer);
   removeHook = onOverlayRender(refreshSelection);
+  removeFrameHook = onPaneFrame(onLinkFrame);
   document.getElementById("term")?.addEventListener("contextmenu", noMenu);
 }
 
@@ -102,6 +105,8 @@ function stop(): void {
   removeHandler = null;
   removeHook?.();
   removeHook = null;
+  removeFrameHook?.();
+  removeFrameHook = null;
   document.getElementById("term")?.removeEventListener("contextmenu", noMenu);
   cancelAll();
   dropSelectionUi();
@@ -280,6 +285,7 @@ function longPress(p: Press): void {
   p.mode = "long";
   const link = linkUnder(p, p.pane, p.cell);
   active = { pane: p.pane, seen: false, link };
+  linkChecked = null;
   coreAnchor = null;
   signature = "";
   if (link) {
@@ -295,7 +301,7 @@ function longPress(p: Press): void {
  * The link a long press at the press point may offer to open, when the point lies inside the cells of its pane's grid (not the header or
  * the padding) and the cell holds an `https`, `http` or `mailto` link (docs/design.md 6.6); null otherwise.
  */
-function linkUnder(p: Press, pane: number, cell: Cell): { target: Target; row: number } | null {
+function linkUnder(p: Press, pane: number, cell: Cell): PressedLink | null {
   const unit = unitOf(pane);
   const mirror = state.frames.get(pane);
   const rect = document.getElementById("term")?.getBoundingClientRect();
@@ -306,7 +312,7 @@ function linkUnder(p: Press, pane: number, cell: Cell): { target: Target; row: n
   const y = p.y0 - rect.top - g.y;
   if (x < 0 || y < 0 || x >= mirror.cols * m.cellW || y >= mirror.rows * m.cellH) return null;
   const target = touchLinkAt(mirror, cell[1], cell[0], pagePolicy(pane));
-  return target ? { target, row: cell[1] } : null;
+  return target ? { target, row: cell[1], matched: false } : null;
 }
 
 // ---- scrolling and the fling -----------------------------------------------------------------------------
@@ -466,7 +472,20 @@ function dropLabel(): void {
  * A long press started a selection in `pane`. `seen` is set once a frame has shown its spans: the selection is over when they are gone
  * again (cleared, scrolled out of the viewport, or ended by the program), and the handles and the menu go with it.
  */
-let active: { pane: number; seen: boolean; link: { target: Target; row: number } | null } | null = null;
+let active: { pane: number; seen: boolean; link: PressedLink | null } | null = null;
+
+/**
+ * The link a long press selected (docs/design.md 6.6): its target and its row. `matched` is set once a frame has shown the selection covering
+ * exactly the link; only then is `Open` in the menu, and when the selection stops covering it the link is dropped and `Open` does not come back.
+ */
+interface PressedLink {
+  target: Target;
+  row: number;
+  matched: boolean;
+}
+
+/** The selection's ends and the row object that the link was last checked against: a frame replaces a row it touches and never changes one. */
+let linkChecked: { ends: string; row: unknown } | null = null;
 
 /**
  * The cell the core holds as the anchor of the selection, when this module knows it: the start of the word after a long press, the fixed
@@ -528,7 +547,7 @@ function build(): Ui | null {
 
 /** Give the menu its `Open` button while the selection is a link and take it away when it is not; the menu is placed after this. */
 function syncOpen(parts: Ui): void {
-  const want = active?.link != null;
+  const want = active?.link?.matched === true;
   if (want && !parts.open) {
     const open = el("button", "touch-button");
     open.type = "button";
@@ -544,6 +563,7 @@ function syncOpen(parts: Ui): void {
 
 function dropSelectionUi(): void {
   active = null;
+  linkChecked = null;
   coreAnchor = null;
   drag = null;
   signature = "";
@@ -588,7 +608,7 @@ function onOpen(): void {
   const ends = a ? endsOf(a.pane) : null;
   const mirror = a ? state.frames.get(a.pane) : undefined;
   let found: Target | null = null;
-  if (a && kept && ends && mirror && ends[0][1] === kept.row && ends[1][1] === kept.row && ends[0][0] === kept.target.startCol && ends[1][0] === kept.target.endCol) {
+  if (a && kept && kept.matched && ends && mirror && ends[0][1] === kept.row && ends[1][1] === kept.row && ends[0][0] === kept.target.startCol && ends[1][0] === kept.target.endCol) {
     const now = touchLinkAt(mirror, kept.row, ends[0][0], pagePolicy(a.pane));
     if (now && sameLink(now, kept.target)) found = now;
   }
@@ -632,13 +652,14 @@ function refreshSelection(): void {
   }
   if (!active.seen) coreAnchor = ends[0]; // the word's own start: the core's anchor after the long press
   active.seen = true;
+  checkLink(active.pane, ends);
   const m = state.metrics;
   const g = gridRect(m, unit, state.headerPx);
   const geo: CellGeometry = { originX: g.x, originY: g.y, cellW: m.cellW, cellH: m.cellH };
   const stage = { w: m.width, h: m.height };
   // While a handle is dragged the one under the finger takes the role its cell has against the fixed end.
   const draggedIsEnd = drag && drag.moved ? !isBefore(drag.extent, drag.anchor) : null;
-  const sig = `${ends[0]}|${ends[1]}|${geo.originX},${geo.originY},${geo.cellW},${geo.cellH}|${stage.w},${stage.h}|${draggedIsEnd}|${active.link !== null}`;
+  const sig = `${ends[0]}|${ends[1]}|${geo.originX},${geo.originY},${geo.cellW},${geo.cellH}|${stage.w},${stage.h}|${draggedIsEnd}|${active.link?.matched === true}`;
   if (sig === signature) return;
   const parts = build();
   if (!parts) return;
@@ -668,6 +689,44 @@ function refreshSelection(): void {
   const spot = menuPlacement(selection, { x: 0, y: 0, w: stage.w, h: stage.h }, { w: parts.menu.offsetWidth, h: parts.menu.offsetHeight });
   parts.menu.style.left = `${spot.x}px`;
   parts.menu.style.top = `${spot.y}px`;
+}
+
+/**
+ * Whether the selection still covers exactly the link of the long press: its ends on the link's row from its first to its last column, and the
+ * link found there again with the same address. The first time it does, `Open` joins the menu; when it no longer does (a handle moved the
+ * selection off the link, or the program changed the text under it), the link is dropped and the menu has `Copy` and `Paste` only. Runs only
+ * when the ends or the row object under them changed, never on every frame.
+ */
+function checkLink(pane: number, ends: [Cell, Cell]): void {
+  const link = active?.link;
+  if (!active || !link) return;
+  const mirror = state.frames.get(pane);
+  const row = mirror?.rows_[link.row];
+  const key = `${ends[0]}|${ends[1]}`;
+  if (linkChecked && linkChecked.ends === key && linkChecked.row === row) return;
+  linkChecked = { ends: key, row };
+  const covers = ends[0][1] === link.row && ends[1][1] === link.row && ends[0][0] === link.target.startCol && ends[1][0] === link.target.endCol;
+  const now = covers && mirror ? touchLinkAt(mirror, link.row, link.target.startCol, pagePolicy(pane)) : null;
+  if (now && sameLink(now, link.target)) link.matched = true;
+  else if (link.matched) active.link = null; // it was the link and is not any more: Open goes and does not come back
+}
+
+/**
+ * A frame of a pane: the overlay is only drawn again when the selection's spans change, so a program that rewrites the text under a selected
+ * link is seen here. Nothing is done unless a long press selected a link in this pane and the row object under it is another one.
+ */
+function onLinkFrame(pane: number): void {
+  const link = active?.link;
+  if (!active || !link || pane !== active.pane) return;
+  if (linkChecked && state.frames.get(pane)?.rows_[link.row] === linkChecked.row) return;
+  const ends = endsOf(pane);
+  if (!ends) return;
+  const before = link.matched;
+  checkLink(pane, ends);
+  if (active?.link?.matched !== before) {
+    signature = "";
+    refreshSelection();
+  }
 }
 
 /** Place a handle (the layer is the stage's size) and say which end of the selection it marks now: the drop's shape follows the role. */
