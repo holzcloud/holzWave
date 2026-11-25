@@ -364,6 +364,46 @@ async function check(file) {
     if (!specNotice.includes(w)) failures.push(`docs/design.md does not hold the words: ${w}`);
     if (!noticeText.includes(w)) failures.push(`#phones-notice does not show: ${w}`);
   }
+  // Opening a link on a phone (docs/design.md 6.6 and 6.31): three phones. The first selects a printed address and its menu reads Open, Copy, Paste, each a
+  // target of at least 22 px at the half scale; the second asks first, with Cancel and the solid Open of at least 22 px; the third says the refusal in the warn line.
+  const linkPhones = await page.$$eval('#phones-link .ph1', (n) => n.length);
+  if (linkPhones !== 3) failures.push(`#phones-link holds ${linkPhones} phones, not 3`);
+  const linkRow = await page.$$eval('#phones-link .ph1', (phs) =>
+    phs.map((ph) => {
+      const size = (n) => {
+        const r = n.getBoundingClientRect();
+        return { text: n.textContent.trim(), w: r.width, h: r.height, primary: n.classList.contains('p') };
+      };
+      const dialog = ph.querySelector('[role="alertdialog"]');
+      return {
+        menus: [...ph.querySelectorAll('.sm-menu')].map((m) => [...m.querySelectorAll('span')].map(size)),
+        handles: ph.querySelectorAll('.sm-h').length,
+        sel: [...ph.querySelectorAll('.sel')].map((n) => n.textContent),
+        dialogs: ph.querySelectorAll('[role="alertdialog"]').length,
+        dialogText: dialog ? dialog.textContent.replace(/\s+/g, ' ') : '',
+        buttons: dialog ? [...dialog.querySelectorAll('[data-target]')].map(size) : [],
+        notes: [...ph.querySelectorAll('.lk-note[data-target]')].map((n) => ({ ...size(n), tone: n.dataset.tone ?? null, deco: getComputedStyle(n).textDecorationLine, mark: getComputedStyle(n, '::before').content })),
+      };
+    }),
+  );
+  const [selPhone, askPhone, refusedPhone] = linkRow;
+  if (selPhone && askPhone && refusedPhone) {
+    const menu = selPhone.menus[0] ?? [];
+    if (selPhone.menus.length !== 1 || menu.map((b) => b.text).join(' ') !== 'Open Copy Paste') failures.push('#phones-link: the first phone does not draw one menu reading Open, Copy, Paste in that order');
+    for (const b of menu) if (b.w < 21.5 || b.h < 21.5) failures.push(`#phones-link: the menu button ${b.text} is ${Math.round(b.w)} by ${Math.round(b.h)} px, under 22 px`);
+    if (selPhone.handles !== 2) failures.push(`#phones-link: the first phone draws ${selPhone.handles} selection handles, not 2`);
+    if (selPhone.sel.length !== 1 || selPhone.sel[0] !== 'https://example.com/a') failures.push('#phones-link: the first phone does not select exactly the address https://example.com/a');
+    if (askPhone.dialogs !== 1) failures.push(`#phones-link: the second phone draws ${askPhone.dialogs} questions, not 1`);
+    for (const w of ['Open this link?', 'The text says', 'The link goes to', 'https://example.org/docs']) if (!askPhone.dialogText.includes(w)) failures.push(`#phones-link: the question does not show: ${w}`);
+    if (askPhone.buttons.map((b) => b.text).join(' ') !== 'Cancel Open') failures.push('#phones-link: the question does not draw the two buttons Cancel and Open');
+    else if (askPhone.buttons[0].primary || !askPhone.buttons[1].primary) failures.push('#phones-link: the question does not draw Cancel plain and Open solid');
+    for (const b of askPhone.buttons) if (b.w < 21.5 || b.h < 21.5) failures.push(`#phones-link: the question's button ${b.text} is ${Math.round(b.w)} by ${Math.round(b.h)} px, under 22 px`);
+    const refusal = refusedPhone.notes;
+    if (refusal.length !== 1 || refusal[0].text !== refusalWords || refusal[0].tone !== 'warn' || !/underline/.test(refusal[0].deco) || !refusal[0].mark.includes('!')) failures.push('#phones-link: the third phone does not draw one warn line with an underline and the ! mark saying the refusal');
+    else if (refusal[0].h < 21.5) failures.push(`#phones-link: the refusal line is ${Math.round(refusal[0].h)} px high, under 22 px`);
+    if (refusedPhone.menus.length !== 0) failures.push('#phones-link: the third phone still draws a menu');
+  }
+  for (const w of ['a third 44 px button before the two', '**By touch.**', 'its two buttons are at least 44 px', 'never opens a link']) if (!specNotice.includes(w)) failures.push(`docs/design.md does not say: ${w}`);
   const chips = await page.$$eval('#phones-lock > div:first-child .lk-chip', (ns) =>
     ns.map((n) => ({ state: n.dataset.state, label: n.textContent.trim(), glyph: n.querySelector('svg[data-glyph]')?.dataset.glyph, shape: n.querySelector('svg')?.innerHTML, border: getComputedStyle(n).borderTopStyle })),
   );
@@ -462,7 +502,7 @@ async function check(file) {
   }
   failures.push(...problems.filter((p) => !failures.includes(p)));
   await browser.close();
-  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} + ${approvalPhones} + ${writePhones} + ${commandPhones} + ${sidePhones} + ${actionPhones} + ${wshPhones} + ${attnPhones} + ${keyPhones} + ${selectPhones} + ${lockPhones} + ${handoverPhones} + ${serverPhones} + ${stripPhones} + ${webviewPhones} + ${noticePhones} phones, ${refused.length} requests refused (the web font host)`);
+  console.log(`${views.length} views, ${phones} + ${chatPhones} + ${providerPhones} + ${consentPhones} + ${approvalPhones} + ${writePhones} + ${commandPhones} + ${sidePhones} + ${actionPhones} + ${wshPhones} + ${attnPhones} + ${keyPhones} + ${selectPhones} + ${lockPhones} + ${handoverPhones} + ${serverPhones} + ${stripPhones} + ${webviewPhones} + ${noticePhones} + ${linkPhones} phones, ${refused.length} requests refused (the web font host)`);
   if (failures.length > 0) {
     for (const f of failures) console.error(`FAIL ${f}`);
     process.exit(1);

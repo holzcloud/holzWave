@@ -712,6 +712,12 @@ p.lead{margin:6px 0 0;color:var(--ink2);max-width:70ch}
 /* Notices on a phone (docs/design.md 6.6): the line over the top of the stage, the shape of the line after a file hand-over, in a column that stacks lines 4 px apart (8 px at the scale of the app). */
 .pn-col{position:absolute;z-index:8;left:4px;right:4px;top:28px;display:flex;flex-direction:column;gap:4px}
 #phones-notice .lk-note{min-height:22px;margin:0;box-sizing:border-box}
+/* Opening a link on a phone (docs/design.md 6.6): a long press on a link selects the link, and the menu has Open before Copy and Paste in their plain style;
+   the question of a link has two 44 px buttons on a phone (22 px at the half scale). Scoped to this row, so the other rows stay as they are. */
+#phones-link .sm-menu span{min-width:22px;min-height:22px;box-sizing:border-box;justify-content:center}
+#phones-link .lk-btn{min-height:22px;min-width:22px}
+#phones-link .lk-v{font-size:8px;line-height:1.4;padding:3px 5px;margin:0 0 5px}
+#phones-link .lk-note{min-height:22px;margin:0;box-sizing:border-box}
 /* Web view too old (docs/design.md 6.6): the notice of the boot script in place of the app, a flat hairline box; the label in the warn tone with the ! mark and an underline. */
 .wv-box{border:1px solid var(--edge);border-radius:8px;padding:8px 9px;font-size:8px;line-height:1.4;color:var(--ink2);background:var(--ground)}
 .wv-box .wv-lbl{color:var(--warn);text-decoration:underline;font-size:7.5px;margin:0 0 6px}.wv-box .wv-mk{font-weight:700;margin-right:5px}.wv-box p{margin:0 0 4px}.wv-box p:last-child{margin:0}
@@ -969,6 +975,10 @@ td:first-child{color:var(--ink);font-weight:600;white-space:nowrap}
   <h2>Notices on a phone</h2>
   <p class="lead">The phone draws no status line, so a notice is a line over the top of the stage, in the shape of the line after a file hand-over: a hairline, a radius and the shadow of a floating layer, at least 44 px high (22 px at the scale of the mock) because a tap takes it away; otherwise it goes after the usual time of a notice. A sentence that a part says in its own line (the chat's line under the transcript, the line of the sign-in) is not said again here. Left, a link that could not be opened, with the ! mark and an underline besides the warn colour. In the middle, any other notice, plain. Right, a notice under the line of a file hand-over: the two stack in one column, the hand-over line first. Shown at the scale of the mock (about half). A drawing of the design: nothing of it was run on a phone.</p>
   <div class="phones" id="phones-notice"></div>
+
+  <h2>Opening a link on a phone</h2>
+  <p class="lead">A tap never opens a link, because a tap is the click of a program that tracks the mouse and clears a selection. A long press on a link selects the whole link instead of the word, and the menu offers Open before Copy and Paste, each a 44 px target (22 px at the scale of the mock), Open in the same plain style because its word is its cue. Only https, http and mailto links get Open. Left, a long press on a printed address. In the middle, the question when the text of a marked link names another place, with 44 px buttons. Right, a link that could not be opened, told in the notice line. Shown at the scale of the mock (about half). A drawing of the design: nothing of it was run on a phone.</p>
+  <div class="phones" id="phones-link"></div>
 
   <h2>Features and where they live</h2>
   <div class="tblwrap"><table id="cov"></table></div>
@@ -2168,6 +2178,21 @@ $('#phones-notice').innerHTML=
  phc('A link that could not be opened',lkTop('open'),KEYTXT,BN,pnOver(pnLine('No app on this device can open this link.','warn')))
 +phc('Any other notice',lkTop('open'),KEYTXT,BN,pnOver(pnLine('That request is not waiting any more.')))
 +phc('Under a hand-over line',lkTop('open'),KEYTXT,BN,pnOver(pnLine('Copied report.pdf (1.2 MB) out'),pnLine('No app on this device can open this link.','warn')));
+
+/* Opening a link on a phone (docs/design.md 6.6 and 6.31): the first phone selects a printed address with a long press and shows Open, Copy and Paste;
+   the second asks first because the text of a marked link names another place; the third says that the link could not be opened. */
+const LKTXT=(addr)=>`<span class="ro">❯</span> cargo doc
+<span class="dim">Documenting holzwave</span>
+see ${addr} for
+the docs
+<span class="ro">❯</span> <span class="cur"></span>`;
+const LKMARK=`<span class="ro">❯</span> holz help
+Read the <span class="ol">docs</span> first.
+<span class="ro">❯</span> <span class="cur"></span>`;
+$('#phones-link').innerHTML=
+ phc('A long press on an address',lkTop('open'),LKTXT('<span class="sel">https://example.com/a</span>'),BN,{over:`<div class="sm-menu float" style="left:40px;top:42px"><span>Open</span><span>Copy</span><span>Paste</span></div><div class="sm-h s" style="left:23px;top:84px"></div><div class="sm-h e" style="left:149px;top:84px"></div>`})
++phc('The text names another place',lkTop('open'),LKMARK,BN,{over:`<div class="scrim" style="border-radius:22px"></div>${lkDlg(110,`<b>Open this link?</b><span class="lk-quiet" style="margin:0 0 2px">The text says</span><div class="lk-v">docs</div><span class="lk-quiet" style="margin:0 0 2px">The link goes to</span><div class="lk-v">https://example.org/docs</div><div class="lk-acts" style="justify-content:flex-end">${lkBtn('Cancel')}${lkBtn('Open','p')}</div>`)}`})
++phc('The link could not be opened',lkTop('open'),LKTXT('https://example.com/a'),BN,pnOver(pnLine('No app on this device can open this link.','warn')));
 
 /* Feature list */
 const B='<span class="ph-tag built">built</span>',pl=n=>`<span class="ph-tag">Phase ${n}</span>`;
