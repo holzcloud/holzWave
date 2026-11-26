@@ -34,7 +34,7 @@ nucleo-matcher = "0.3"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 russh = { version = "0.65.4", default-features = false, features = ["flate2", "ring", "rsa"] }
 quick-xml = "0.42"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 russh-sftp = "3"
 sysinfo = { version = "0.39", default-features = false, features = ["system", "network"] }
 serde = { version = "1", features = ["derive"] }

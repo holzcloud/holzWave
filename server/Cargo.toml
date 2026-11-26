@@ -66,7 +66,7 @@ zeroize = "1"
 getrandom = "0.4"
 subtle = "=2.6.1"
 base64 = "=0.23.1"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 time = { version = "=0.3.55", default-features = false, features = ["formatting", "std"] }
 rustix = { version = "=1.1.6", features = ["fs", "process", "thread", "net", "event", "system"] }
 
