@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, IoSliceMut};
 use std::mem::MaybeUninit;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -23,7 +23,8 @@ use std::time::Duration;
 use holzwave_spawn_helper::protocol::{MAX_MESSAGE, Mode, Refusal, Signal};
 use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendFlags};
 use serde::Deserialize;
-use tokio::io::unix::AsyncFd;
+use tokio::io::Interest;
+use tokio::net::UnixDatagram;
 use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
@@ -214,7 +215,7 @@ struct State {
 }
 
 struct Inner {
-    socket: AsyncFd<OwnedFd>,
+    socket: UnixDatagram,
     timeouts: HelperTimeouts,
     next_id: AtomicU64,
     dropped: AtomicU64,
@@ -286,7 +287,7 @@ impl Inner {
     }
 
     /// Receives one datagram with the descriptors that came with it.
-    fn receive(fd: &OwnedFd) -> io::Result<Option<Datagram>> {
+    fn receive(fd: BorrowedFd<'_>) -> io::Result<Option<Datagram>> {
         let mut buffer = [0u8; MAX_MESSAGE + 1];
         let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
         let mut ancillary = RecvAncillaryBuffer::new(&mut space);
@@ -318,23 +319,25 @@ impl Inner {
 
     async fn receive_one(&self) -> io::Result<Option<Datagram>> {
         loop {
-            let mut ready = self.socket.readable().await?;
-            match ready.try_io(|socket| Inner::receive(socket.get_ref())) {
-                Ok(Err(e)) if e.kind() == io::ErrorKind::Interrupted => {}
-                Ok(result) => return result,
-                Err(_would_block) => {}
+            self.socket.readable().await?;
+            // `try_io` clears the readiness when the call would block, so the next `readable` waits for new data.
+            match self.socket.try_io(Interest::READABLE, || Inner::receive(self.socket.as_fd())) {
+                Err(e) if matches!(e.kind(), io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock) => {}
+                result => return result,
             }
         }
     }
 
     async fn send(&self, bytes: &[u8]) -> io::Result<()> {
         loop {
-            let mut ready = self.socket.writable().await?;
-            match ready.try_io(|socket| rustix::net::send(socket.get_ref(), bytes, SendFlags::empty()).map_err(io::Error::from)) {
-                Ok(Err(e)) if e.kind() == io::ErrorKind::Interrupted => {}
-                Ok(Ok(_)) => return Ok(()),
-                Ok(Err(e)) => return Err(e),
-                Err(_would_block) => {}
+            self.socket.writable().await?;
+            let sent = self.socket.try_io(Interest::WRITABLE, || {
+                rustix::net::send(self.socket.as_fd(), bytes, SendFlags::empty()).map_err(io::Error::from)
+            });
+            match sent {
+                Err(e) if matches!(e.kind(), io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock) => {}
+                Ok(_) => return Ok(()),
+                Err(e) => return Err(e),
             }
         }
     }
@@ -464,7 +467,9 @@ impl HelperClient {
         rustix::io::fcntl_setfd(&socket, rustix::io::FdFlags::CLOEXEC).map_err(io::Error::from)?;
         let cancel = CancellationToken::new();
         let inner = Arc::new(Inner {
-            socket: AsyncFd::new(socket)?,
+            // A tokio datagram socket over the descriptor, without `unsafe`: `AsyncFd::new` is deprecated as unsound
+            // (tokio #8587) and its replacement `AsyncFd::register` is `unsafe`, which this crate forbids.
+            socket: UnixDatagram::from_std(std::os::unix::net::UnixDatagram::from(socket))?,
             timeouts,
             next_id: AtomicU64::new(1),
             dropped: AtomicU64::new(0),

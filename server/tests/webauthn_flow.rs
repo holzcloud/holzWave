@@ -187,13 +187,13 @@ impl Site {
         &mut self,
         id: &str,
         body: &str,
-        keys: &[DiscoverableKey],
+        key: &DiscoverableKey,
     ) -> Result<AuthenticationResult, FinishError> {
         let state = self.discoverables.take(id).ok_or(FinishError::NoState)?;
         let credential: PublicKeyCredential =
             serde_json::from_str(body).map_err(FinishError::Malformed)?;
         self.webauthn
-            .finish_discoverable_authentication(&credential, state, keys)
+            .finish_discoverable_authentication_v2(&credential, state, key)
             .map_err(FinishError::Refused)
     }
 
@@ -546,7 +546,7 @@ fn a_discoverable_authentication_identifies_the_account_handle() {
         .get(&identified)
         .expect("the handle names an account");
     let result = site
-        .finish_discoverable(&id, &response, &[DiscoverableKey::from(account_key)])
+        .finish_discoverable(&id, &response, &DiscoverableKey::from(account_key))
         .expect("the discoverable authentication verifies");
     assert_eq!(result.cred_id(), passkey.cred_id());
     assert!(result.user_verified());
@@ -580,7 +580,7 @@ fn a_discoverable_authentication_identifies_the_account_handle() {
         .to_string();
     let error = refused(
         "credential of another account",
-        site.finish_discoverable(&id, &response, &[DiscoverableKey::from(&stranger_key)]),
+        site.finish_discoverable(&id, &response, &DiscoverableKey::from(&stranger_key)),
     );
     assert!(
         matches!(error, WebauthnError::CredentialNotFound),
@@ -811,7 +811,7 @@ fn the_options_can_carry_a_prf_salt() {
         .expect("a handle is present");
     assert_eq!(identified, handle);
     let result = site
-        .finish_discoverable(&id, &response, &[DiscoverableKey::from(&passkey)])
+        .finish_discoverable(&id, &response, &DiscoverableKey::from(&passkey))
         .expect("the response verifies against the original state");
     assert_eq!(result.cred_id(), passkey.cred_id());
 }

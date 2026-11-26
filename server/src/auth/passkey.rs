@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use webauthn_rs::prelude::{
-    DiscoverableAuthentication, DiscoverableKey, Passkey, PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential,
+    DiscoverableAuthentication, Passkey, PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential,
     RegisterPublicKeyCredential, Url, Uuid, Webauthn, WebauthnBuilder,
 };
 use zeroize::Zeroizing;
@@ -841,8 +841,8 @@ impl Passkeys {
             if stored.passkey.cred_id().as_slice() != row.credential_id.as_slice() {
                 return Ok(Err(PasskeyError::Invalid));
             }
-            let keys = [DiscoverableKey::from(&stored.passkey)];
-            let Ok(result) = self.webauthn.finish_discoverable_authentication(&credential, state, &keys) else {
+            // The v2 call checks that the response names this credential's id before it verifies the signature.
+            let Ok(result) = self.webauthn.finish_discoverable_authentication_v2(&credential, state, &stored.passkey) else {
                 return Ok(Err(PasskeyError::Invalid));
             };
             if stored.passkey.update_credential(&result).is_none() {
