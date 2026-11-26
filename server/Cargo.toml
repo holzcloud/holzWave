@@ -38,7 +38,7 @@ hyper-util = { version = "=0.1.21", default-features = false, features = ["tokio
 http = "=1.5.0"
 http-body-util = "=0.1.5"
 tower = { version = "=0.5.3", default-features = false, features = ["util"] }
-cookie = { version = "=0.18.2", default-features = false }
+cookie = { version = "=0.18.3", default-features = false }
 rust-embed = "=8.13.0"
 
 # TLS: rustls with the ring provider only, as in the core. The default features of tokio-rustls, instant-acme and rcgen
@@ -68,7 +68,7 @@ subtle = "=2.6.1"
 base64 = "=0.23.1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 time = { version = "=0.3.55", default-features = false, features = ["formatting", "std"] }
-rustix = { version = "=1.1.5", features = ["fs", "process", "thread", "net", "event", "system"] }
+rustix = { version = "=1.1.6", features = ["fs", "process", "thread", "net", "event", "system"] }
 
 [dev-dependencies]
 webauthn-authenticator-rs = { version = "=0.6.1-dev", default-features = false, features = ["softpasskey"] }
