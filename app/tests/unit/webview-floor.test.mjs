@@ -142,8 +142,8 @@ const FEATURES = [
 /**
  * The vendored libraries, by what their builds target. The editor bundle (scripts/vendor-editor.mjs) is built for `es2022` and
  * `safari16`, so it may hold any syntax of ES2022; the newest of it in the WebView column is a class static initialization block
- * (94). PDF.js 6.4.299 ships the legacy build, which its FAQ states supports Chrome 125 and later (pdf.js wiki "Frequently Asked
- * Questions", section "Which browsers/environments are supported?", and `ENV_TARGETS` in gulpfile.mjs of v6.4.299).
+ * (94). PDF.js 6.5.438 ships the legacy build, which its FAQ states supports Chrome 125 and later (pdf.js wiki "Frequently Asked
+ * Questions", section "Which browsers/environments are supported?", and `ENV_TARGETS` in gulpfile.mjs of v6.5.438).
  */
 const VENDORED = [
   {
@@ -153,11 +153,11 @@ const VENDORED = [
     pinnedWhat: 'scripts/vendor-editor.mjs builds for target ["es2022", "safari16"]', check: VERSION,
   },
   {
-    name: "PDF.js 6.4.299, legacy build (Chrome 125 and later)", webview: 125,
+    name: "PDF.js 6.5.438, legacy build (Chrome 125 and later)", webview: 125,
     mdn: "https://github.com/mozilla/pdf.js/wiki/Frequently-Asked-Questions#faq-support",
     path: "vendor/pdfjs/pdf.min.mjs",
-    pinned: () => JSON.parse(readFileSync(join(APP, "package.json"), "utf8")).devDependencies["pdfjs-dist"] === "6.4.299",
-    pinnedWhat: "app/package.json pins pdfjs-dist 6.4.299", check: VERSION,
+    pinned: () => JSON.parse(readFileSync(join(APP, "package.json"), "utf8")).devDependencies["pdfjs-dist"] === "6.5.438",
+    pinnedWhat: "app/package.json pins pdfjs-dist 6.5.438", check: VERSION,
   },
 ];
 
