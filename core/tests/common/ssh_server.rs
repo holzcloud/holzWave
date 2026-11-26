@@ -645,8 +645,9 @@ impl server::Handler for Handler {
     }
 
     // Called after the signature was verified: the client really holds the private key.
-    async fn auth_publickey(&mut self, user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
-        let accepted = user == self.options.user && self.options.authorized.iter().any(|known| known == key);
+    async fn auth_publickey(&mut self, user: &str, key: server::VerifiedPublicKey<'_>) -> Result<Auth, Self::Error> {
+        let accepted =
+            user == self.options.user && self.options.authorized.iter().any(|known| known == key.public_key);
         Ok(self.judge(accepted))
     }
 
